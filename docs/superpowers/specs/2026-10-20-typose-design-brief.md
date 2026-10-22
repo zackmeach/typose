@@ -1,10 +1,20 @@
 # Typose — Design Brief (look, feel, experience)
 
-- **Date:** 2026-10-20 · **Revision:** 3.
+- **Date:** 2026-10-20 · **Revision:** 5 (2026-10-21).
+  - Revision 5 records Zack's Phase 0 decisions Z30–Z37 (§0.4). They cover giant-Markdown behavior, grid record numbers, screen-reader navigation and testing, the memory-budget behavior, the YAML Tree ceiling and the Raw first-screen definition.
   - Revision 2 applied the fixes from the adversarial review (verdict: FIX-FIRST).
   - Revision 3 applies the validated layout critique (`docs/design/critique-2026-10-20.md`): no-wrap splits, sidebar auto-collapse, breadcrumb shrink order, a yellow tint instead of orange, the scrim/shadow tokens, the two density scales and inset focus rings.
-- **Status:** All decisions resolved (§0.2). Ready for the Claude Design pass.
-- **Feeds:** the Claude Design pass (screens in §10). The stack and implementation get their own spec later.
+  - Revision 4 applies changes D1–D17 from the technical design (`docs/superpowers/specs/2026-10-20-typose-tech-design.md` §14), accepted by Zack on 2026-10-20. They cover:
+    - performance budgets defined over fixtures and ready lenses, with the cold start split into two budgets;
+    - an aggregate memory budget;
+    - navigable virtualized content, with logical scrolling beyond the engine cap;
+    - content-verified change detection;
+    - Mermaid in sandbox mode, and "Typose issues no requests";
+    - bounded print, a YAML Tree size ceiling and Linux best effort;
+    - oversized-item rules;
+    - encoding detection before the binary check.
+- **Status:** All decisions resolved (§0.2, §0.4). The stack decisions (Z24–Z29) and the Phase 0 sequence (Z38) are logged in the technical design.
+- **Feeds:** the Claude Design pass (screens in §10, done) and the technical design (`docs/superpowers/specs/2026-10-20-typose-tech-design.md`).
 - **Who decided what:** Zack's decisions from the grill session are marked **[Z#]** (log in §0.1). **Everything without a [Z#] tag is proposed by the assistant** and open to veto. Items marked 🔒 are safety or correctness requirements: their wording can change, but the requirement can't be dropped.
 
 ---
@@ -51,6 +61,18 @@
 - **The JSON Table toggle on a selected node.** Table is offered only when the *root* is an array of objects.
 - **YAML alias jump links.** Replaced by alias nodes that expand on demand.
 
+### 0.4 Phase 0 decisions (Zack, 2026-10-21)
+| # | Decision |
+|---|---|
+| Z30 | **Giant Markdown files** open immediately in Raw while Rendered indexes in the background. Roughly 20 seconds for a 1GB file is acceptable, but it isn't a guaranteed deadline. Progress and cancellation remain required (§8.2). |
+| Z31 | **Grid row numbers are source record numbers**, starting at **1 for the first data record**, and preserved when sorted. Physical source lines remain available through Raw (§5.3). |
+| Z32 | **Screen readers count the row-number column as column 1**, so the first data column is announced as "column 2" together with its name (§9). |
+| Z33 | **Wide reading windows apply to Rendered and Transcript.** Grid and Rows use keyboard navigation that loads its target before moving focus. Every data cell must be reachable, but continuous "read all" across Grid and Rows isn't a v1 requirement (§9). |
+| Z34 | **Memory budget 🔒:** document data across all open files stays within 25% of physical RAM, including indexes, caches and temporary parsing allocations. When the limit is reached, Typose stops building Rendered, explains why it's unavailable, and keeps Raw. 32 bytes per Markdown block is an optimization target, not the safety limit (§8.3). |
+| Z35 | **Screen-reader testing:**<br>• Phase 0 runs the full 2,000-block forward and backward test on NVDA, Narrator and VoiceOver.<br>• Routine milestones run a shorter test: at least four window recenters each way, plus heading jumps and focus restoration.<br>• The full test runs again whenever virtualization or screen-reader behavior changes (§9). |
+| Z36 | **YAML Tree ceiling: 8MB in v1**, with Raw above it. Smaller files must still respect memory and structural limits (§5.5). |
+| Z37 | **Raw's first screen** is the first bounded piece, visible and usable, with continuation available while scanning proceeds. The first-screen target applies to that view. Full-line scan completion is measured separately (§8.1). |
+
 ---
 
 ## 1. What Typose is
@@ -78,14 +100,14 @@ Typose is an open-source desktop viewer for the formats the AI era runs on: **Ma
 |---|---|
 | Formats | `.md` `.markdown` · `.json` `.jsonc` · `.jsonl` `.ndjson` · `.csv` `.tsv` · `.yaml` `.yml` |
 | Mode | **Read-only [Z1]** |
-| Platforms | **Windows, macOS, Linux [Z7]** |
+| Platforms | **Windows, macOS, Linux [Z7]**. Linux ships as **best effort** in v1: it's built and smoke-tested, but the accessibility and 60fps gates apply to Windows and macOS (Z28). |
 | Opening | Drag-and-drop, CLI (`typose <path>…`), OS "Open with", Ctrl+O, and the menu's Open file… / Open folder… **[Z3]** |
 | Workspace | Each folder becomes a sidebar **root**, with several allowed. Files from anywhere open as tabs. **[Z3]** |
 | Session | Roots, cards, tabs, the lens for each tab and scroll positions are restored on launch **[Z3]** |
 | File changes | **Static [Z6].** Ctrl+R reloads. The on-access change check (§7.9) is not watching. |
 | Search | **In-file find only [Z19]** (§7.5) |
 | Shape-aware lens | **Transcript only [Z4]** (§5.4) |
-| Window | Single instance, single window. Further CLI or "Open with" calls go to the running window. |
+| Window | Single instance per user session, single window. Further CLI or "Open with" calls go to the running window. A launch from a different user or an elevated context can't reach it; this is a documented edge case. |
 
 ### Expansion list (designed for, not built)
 1. **Live reload with sticky change markers [Z6].** Gutter markers stay until you've seen them, background tabs get an unseen dot, and appended JSONL auto-tails.
@@ -126,7 +148,7 @@ Remote or URL files; PDFs and images as standalone documents; collaboration and 
 (`[Rnd|Raw]` = the Rendered | Raw lens switch, abbreviated to fit the diagram.)
 The primary reference is [`02-frame-card-pane-header.png`](../../design/refs/02-frame-card-pane-header.png). Read it with the **Ignore** notes in §11.
 
-### 3.1 Title bar (40px)
+### 3.1 Title bar (40 logical px; the native metrics apply in the native-frame fallback)
 - **Windows:**
   - Left: the app glyph, **☰ menu** and **»** (shown only while the sidebar is collapsed).
   - Center: the window title, **`<focused file> — Typose`**.
@@ -295,7 +317,7 @@ Every opened file is untrusted, including files written by your own agents.
 - Anything not on the list renders as **literal text**.
 
 **Mermaid and KaTeX:**
-- **Mermaid** runs at strict security level: no click handlers, no HTML labels.
+- **Mermaid** runs at `sandbox` security level: the diagram renders inside a sandboxed iframe, with no click handlers and no HTML labels. Strict mode still renders in the app's own DOM, and a read-only viewer loses nothing in sandbox mode.
 - **KaTeX** runs with `trust: false` and `maxExpand`/`maxSize` limits.
 - A render error shows the source, with a problem marker.
 
@@ -347,6 +369,7 @@ Every opened file is untrusted, including files written by your own agents.
   Callouts never use `warn`, which is reserved for Typose's own problem reporting.
 - **Math [Z16]:** KaTeX, `$inline$` and `$$block$$`, under the hardening in §4.6.
 - **Images and HTML:** §4.6 rules apply.
+- **Oversized blocks:** a block over 64KiB (a giant code fence, table, list or paragraph) renders in bounded pieces: code by lines, lists by items, tables by rows, paragraphs at word boundaries. A block that can't be split sensibly shows its source in a bounded Raw view, with a note. Nothing renders as one giant block.
 - **Outline [Z20]:**
   - A floating **"Outline" pill** in the card's bottom-right corner, shown only when the doc has 3 or more headings. Pattern: [Obvious](https://mobbin.com/screens/cf1f91e1-dfc8-425f-a5c7-5c3305bff52a).
   - Clicking it expands a rail inside the card listing H1–H3, with the current section highlighted.
@@ -355,11 +378,11 @@ Every opened file is untrusted, including files written by your own agents.
 
 ### 5.3 CSV/TSV: Grid
 - **Layout:** a **sticky header row** and a **row-number column**.
-  - The row number is **always the source row number**, even when the grid is sorted.
+  - The row number is **always the source record number**, even when the grid is sorted. It starts at 1 for the first data record, and a record with quoted newlines is one row. Physical source lines are in Raw [Z31].
 - **Column header:** an icon for the inferred type (text · number · date · boolean · url) plus the column name.
   - Clicking the header sorts ascending → descending → unsorted, as a view only.
   - Type inference drives **alignment, icons and sort order only. It never reformats values** (§7.7).
-- **Width:** columns auto-fit from the first 1,000 rows, capped at 360px. Overflowing cells end in an ellipsis, and the full value appears in a tooltip on hover *and* when the cell is selected.
+- **Width:** columns auto-fit from the first 1,000 rows, capped at 360px. The first screen uses estimates from the rows in view, and widths **refine** as the background scan completes, keeping the reading position. Overflowing cells end in an ellipsis, and the full value appears in a tooltip on hover *and* when the cell is selected.
 - **Numbers:** right-aligned, in tabular figures.
 - **Value pills:**
   - **Which columns:** decided from the first 1,000 rows (or all rows, if fewer). A string column with **≤ 6 distinct values** and **≥ 12 rows** renders its values as tinted pills. The decision is never revoked.
@@ -368,6 +391,7 @@ Every opened file is untrusted, including files written by your own agents.
   - Empty cells and `—` render as plain `text.secondary`.
 - **Encoding:**
   - UTF-8, with a BOM sniff for UTF-16. The fallback is **Windows-1252**.
+  - Encoding is detected **before** the binary check (§7.9). A UTF-16 BOM skips the NUL test, because UTF-16 text is full of NUL bytes. BOM-less UTF-16 shows as binary, and ⓘ's encoding override is the way out.
   - Undecodable bytes show as � and are counted as a problem.
 - **Delimiter:** comma, tab, semicolon or pipe, auto-detected.
 - **Header row:** auto-detected.
@@ -381,6 +405,7 @@ Every opened file is untrusted, including files written by your own agents.
 - **Expanding** shows the row's Tree inline.
 - **Blank lines** are ignored and counted in ⓘ.
 - **A line that fails to parse** is a row with an amber `!` and its raw text. It is never skipped.
+- **A record over 1MB** shows its first 1MB, then "+N MB more · Copy record", like Raw's long-line rule (§5.1).
 
 **Table**
 - Columns are the union of top-level keys over the first 1,000 lines. They **grow as indexing finds new keys**.
@@ -449,6 +474,7 @@ Every opened file is untrusted, including files written by your own agents.
   - **Unknown tags** (`!Ref`, `!Sub`) show as a small tag badge before the value.
   - **Aliases** show as `*name` nodes that **expand on demand** to the anchor's value. They are never pre-materialized, and expansion is depth-limited, which makes alias bombs safe.
   - **Multi-document files** (`---`) show each document as a top-level node.
+  - **Size ceiling:** YAML Tree is available up to **8MB** (`yaml.treeMaxBytes`) [Z36]. Above it, Tree is locked with a reason that states the ceiling, and Raw remains. No YAML parser is incremental or file-backed. Smaller files still respect memory and structural limits.
 
 ---
 
@@ -616,14 +642,14 @@ See §7.10.
 | State | What shows |
 |---|---|
 | Empty file (0 bytes, or only whitespace) | Card body: "Empty file" in `text.secondary`. Not a problem. |
-| Binary or misnamed file (NUL bytes in the first 8KB) | "Binary file · not shown", plus the §4.6 hand-off ("Open with default app", or only "Show in folder" for executables) |
+| Binary or misnamed file (NUL bytes in the first 8KB, checked only after the BOM sniff, so UTF-16 files with a BOM never count; §5.3) | "Binary file · not shown", plus the §4.6 hand-off ("Open with default app", or only "Show in folder" for executables) |
 | Missing file (restored session, or Ctrl+R) | "File not found at <path>", with **Locate…** and **Close** |
 | Permission denied | "Can't read <path> · permission denied", with **Retry** and **Close** |
 | Slow open (no first screen after 300ms, e.g. a network share) | A thin progress line under the header plus "Opening…". Input is never blocked, and the file can be closed. |
-| Changed on disk, found on access | Before each lazy read (a file over 100MB, or scrolling a file-backed region), Typose checks the file's size and modified time. If either has changed, the card **freezes at its current content** and shows the banner "Changed on disk · Reload (Ctrl+R)". This is not watching [Z6]. |
+| Changed on disk, found on access | Before and after each lazy read (a file over 100MB, or scrolling a file-backed region), Typose checks the file's size, modified time and identity. It also verifies each re-read 1MiB chunk against the hash taken the first time that chunk was read, which catches in-place writes that metadata misses. On any difference, the card **freezes at its current content** and shows the banner "Changed on disk · Reload (Ctrl+R)". Copy is refused until Reload. Everything Typose displays or copies matches the version it first read. This is not watching [Z6]. |
 | Unresolvable link | A dashed underline; hovering shows "Not found: <path>" |
 
-**Typose never locks a file it's viewing.** On Windows, files are opened with read, write and delete sharing, so agents and editors can save, rename and replace them freely.
+**Typose never locks a file it's viewing.** On Windows, files are opened with read, write and delete sharing, so agents and editors can save, rename and replace them freely. Files are read with positional reads and **never memory-mapped**. A mapping blocks delete and replace on Windows, and can crash the reader when another process truncates the file elsewhere.
 
 ### 7.10 Settings [Z5]
 - **Where it opens:** as a **tab** in the focused card, with a gear icon and a breadcrumb like `Settings / Appearance`.
@@ -650,11 +676,14 @@ See §7.10.
 - **Not customizable through CSS.**
 
 ### 7.11 Print (Ctrl+P)
-- **Prints the current lens's full content, using the Light tokens** regardless of the active theme.
-- **Grid:** prints every row, repeating the header on each page.
+- **Prints the current lens's content for the chosen range (all of it when it fits), using the Light tokens** regardless of the active theme.
+- **Grid:** prints every row in the range, repeating the header on each page.
 - **Tree and Transcript:** print in their current expansion state.
 - **Mermaid and KaTeX:** print as rendered.
-- **Long jobs:** over 50 pages, Typose confirms first and shows the page count.
+- **The range comes first:** before any print document is built, Typose's print sheet shows the page estimate and the range: All, the pages around the current view, or a custom range.
+  - A job is capped (proposed: **1,000 pages**). "All" is offered only when the whole file fits.
+  - Over 50 pages, this sheet is the confirmation.
+  - Only the chosen range is built, in batches, before the OS dialog opens.
 - **Files still indexing:** print is disabled until indexing finishes.
 - **PDF:** saving to PDF goes through the OS print dialog.
 
@@ -665,11 +694,11 @@ See §7.10.
 ### 8.1 Budgets
 | Budget | Target |
 |---|---|
-| **First screen, files ≤ 100MB** | **< 100ms in every lens [Z17].** "First screen" means the top of the file is rendered and scrollable. Whole-file work (fold counts, sort, the Outline, value pills past row 1,000, full validation) completes **progressively in the background** and never blocks input. Until it's done, counts show `…`. |
-| Scrolling | 60fps with no dropped frames, in any lens and at any file size (virtualized everywhere) |
-| Lens switch | < 50ms + the 90ms cross-fade |
-| Cold start to the restored session visible | Proposed: **< 400ms** on a mid-range 2024 laptop (to be confirmed in the stack spec) |
-| Memory | Files over 100MB are file-backed and indexed, never fully parsed into memory |
+| **First screen, files ≤ 100MB** | **< 100ms in every *ready* lens [Z17]**, measured on a **named fixture set** (normal records up to 100MB per format).<br>"First screen" means the top of the file is rendered and scrollable. In Raw, it's the first bounded piece, visible and usable, with continuation available while scanning proceeds. A huge first line doesn't make Raw wait for the line's end [Z37]. Whole-file work (fold counts, sort, the Outline, value pills past row 1,000, full validation) completes **progressively in the background** and never blocks input. Until it's done, counts show `…`.<br>Markdown may render **provisionally** from the start of the file, then reconcile in place (a reference definition can sit at the end), keeping the reading position.<br>There is one file-backed architecture for every size. The 100MB line only decides which background work runs and which lenses unlock later. |
+| Scrolling | 60fps with no dropped frames, in any lens and at any file size (virtualized everywhere).<br>Beyond the engine's height cap, scrolling is **logical**: wheel, trackpad and keys move 1:1, and the scrollbar gives coarse positioning. |
+| Lens switch | < 50ms + the 90ms cross-fade, **to a ready lens**. Switching to a lens that isn't ready yet shows the progress line at once. |
+| Cold start | **Shell visible < 400ms**, and **first restored lens content < 1s**.<br>Gated at half those values on Zack's PC, and at the full values on an Apple-silicon Mac (Z29). |
+| Memory | Files over 100MB are file-backed and indexed, never fully parsed into memory. |
 
 ### 8.2 Files over 100MB [Z17]
 | Format | Available immediately | Unlocks after indexing |
@@ -678,17 +707,20 @@ See §7.10.
 | csv / tsv | Raw, **Grid unsorted** (the scrollbar grows as indexing proceeds) | sort, final row count |
 | json | Raw | Tree, Table |
 | jsonl | **Rows** (scrollbar grows), Raw | Table, Transcript |
-| yaml | Raw | Tree |
+| yaml | Raw | Tree, up to the YAML size ceiling (§5.5); above it Tree stays locked |
 
 - **Indexing indicator:** a thin progress line under the card header plus "Indexing 1.2M lines…".
 - **Locked lenses** are disabled in the lens switch, with the tooltip "Available after indexing".
 - **When indexing finishes**, locked lenses unlock and the indicator disappears.
 - **Restored sessions:** a tab whose remembered lens isn't available yet opens in the immediate lens, then **switches automatically** once indexing finishes, unless you've changed lenses in the meantime.
 - **Input:** nothing blocks input, and the file can be closed mid-index.
+- **Giant Markdown** [Z30]: Raw is immediate, and Rendered indexes in the background with the indicator and cancellation. About 20 seconds for 1GB is acceptable, but it isn't a deadline.
 
 ### 8.3 Multi-GB [Z23]
 - Files of several GB open under the same rules [Z17].
-- If indexing a heavy lens would exceed the memory budget (proposed: 25% of physical RAM), that lens stays disabled. The reason appears in its tooltip and in ⓘ.
+- If indexing a heavy lens would exceed the memory budget, that lens stays disabled. The reason appears in its tooltip and in ⓘ.
+- **The budget is aggregate:** 25% of physical RAM across **all open documents** and every resident structure (indexes, caches, sort orders, temporary parsing allocations). It is not 25% per tab [Z34].
+- **When the limit is reached while building,** Typose stops building Rendered, explains why it's unavailable, and keeps Raw [Z34].
 
 ---
 
@@ -704,6 +736,17 @@ See §7.10.
 - **Screen readers:**
   - Roles: tablist (pills, lens switch), tree (Tree), grid (Grid), and **document semantics in Rendered and Transcript** (headings, lists, landmarks).
   - Heading navigation must work even though rendering is virtualized.
+  - **"Document semantics for virtualized content" means full navigability,** not every node being in the DOM at once:
+    - with a screen reader active, Rendered and Transcript render a wide window that follows the reader [Z33];
+    - the Outline is always present in the accessibility tree;
+    - keyboard focus loads its target before moving.
+  - **Grid and Rows:**
+    - Every data cell is reachable by keyboard. Continuous "read all" across them isn't a v1 requirement [Z33].
+    - The row-number column is column 1, so the first data column is announced as "column 2" with its name [Z32].
+  - **Testing** [Z35]:
+    - Phase 0 runs the full 2,000-block forward and backward reading test on NVDA, Narrator and VoiceOver.
+    - Routine milestones run a shorter test: four recenters each way, plus heading jumps and focus restoration.
+    - The full test runs again when virtualization or screen-reader behavior changes.
 - **Layout limits:** `prefers-reduced-motion` is honored. Zoom to 200% (§6.5) doesn't break the layout. The minimum window is 720×480.
 
 ---
@@ -767,7 +810,7 @@ See §7.10.
 - **Rendering:** Mermaid and KaTeX (§5.2) are web-native libraries. A native UI needs an embedded web surface for them, or native equivalents with the same hardening (§4.6). Print (§7.11) needs paginated rendering for every lens.
 - **Files:** large files need file-backed indexing with non-locking handles (§7.9), on-access change checks, a streaming parser for every format so first screens meet the §8.1 budget, and a background indexer.
 - **Distribution:** single instance on all three OSes; registration as an "Open with" handler; per-OS title bars and menus (§3.1–3.2), including the Linux decoration fallback.
-- **No network by default:** rendering never touches the network except for the user-initiated remote-image load (§4.6).
+- **Typose issues no requests** unless the user clicks to load remote images (§4.6). A CI check enforces this: the app's network log may show no outside request, DNS lookup or socket connection. OS-level actors (certificate checks, network printers, the OS opening user-clicked URLs) are outside Typose's control.
 
 ## 13. Open questions (not blocking Claude Design)
-1. The cold-start budget (§8.1): is 400ms right, and on what reference hardware?
+1. ~~The cold-start budget (§8.1): is 400ms right, and on what reference hardware?~~ Resolved in revision 4: shell visible in < 400ms and first restored content in < 1s, on the reference machines in Z29.
