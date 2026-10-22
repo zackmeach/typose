@@ -2953,15 +2953,15 @@ git commit -m "spike(a): logical scrolling virtualizer with Raw/Rows lenses and 
   - The main environment switches from Task 8.
 - **Produces:** `spikes/results/spike-a-<hostname>.json`, keyed by gate:
   - Timing keys hold `{ n, p50, p95, max, samples }`.
-  - `indexDoneAtFirstScreen:<file>:<lens>` counts the samples where indexing had already finished when the first screen painted: the `indexDone` perf mark (Task 9's `main.ts`) is no later than the `firstScreen` mark. The spec's "without scanning to end of file" needs 0 for the 1 and 10 GiB files. Under Z37, `one-line.jsonl` needs 0 too: its 1 GiB line takes about 250 ms to scan on the PC, so a lens that waits for the line's end can't pass. `huge-first.jsonl` is judged only on a machine whose `fullLineScan` p50 exceeds its first-screen budget; otherwise the scan can finish inside the paint.
-  - For the files whose first line is huge (`huge-first.jsonl`, and `one-line.jsonl`, 1 GiB on a single line), `fullLineScan:<file>:<lens>` and `indexDone:<file>:<lens>` time the full-line scan (the `fullLineScan` mark) and the whole index from `openStart`, apart from the first screen (Z37). On the one-line file they're the same event.
-  - `hugeFirstRecord:<lens>` holds `{ row0Chars, beforeLineEnd, next, nextWhileScanning, mounted, maxText, lineMs }`: line 0's row at the first screen, whether the first screen was marked before `fullLineScan`, the next piece fetched through `piece` and whether the scan was still inside line 0 when it arrived, then the mounted rows once the small records have appeared, and the full-line scan time from `openStart`. `beforeLineEnd` is asserted only when `lineMs` exceeds the first-screen budget (PC 50 ms, Mac 100 ms): below that, a lens that waits for the record's end can't be told apart.
+  - `indexDoneAtFirstScreen:<file>:<lens>` counts the samples where indexing had already finished when the first screen painted: the `indexDone` perf mark (Task 9's `main.ts`) is no later than the `firstScreen` mark. The spec's "without scanning to end of file" needs 0 for the 1 and 10 GiB files. Under Z37, `one-line.jsonl` needs 0 too: its 1 GiB line takes about 250 ms to scan on the PC, so a lens that waits for the line's end can't pass. `huge-first.jsonl` is judged only on a machine whose measured `fullLineScan` p50 exceeds its first-screen budget; otherwise the scan can finish inside the paint.
+  - For the files whose first line is huge (`huge-first.jsonl`, and `one-line.jsonl`, 1 GiB on a single line), `fullLineScan:<file>:<lens>` and `indexDone:<file>:<lens>` time the full-line scan (the `fullLineScan` mark) and the whole index from `openStart`, apart from the first screen (Z37). On the one-line file they're the same event. A sample whose scan marks are missing, non-finite or out of order (it needs `0 < fullLineScan − openStart ≤ indexDone − openStart`) fails the test, so these keys never hold NaN and `indexDoneAtFirstScreen` never reads a missing mark as "not done".
+  - `hugeFirstRecord:<lens>` holds `{ row0Chars, beforeLineEnd, next, nextWhileScanning, mounted, maxText, lineMs }`: line 0's row at the first screen, whether the first screen was marked before `fullLineScan`, the next piece fetched through `piece` and whether the scan was still inside line 0 when it arrived, then the mounted rows once the small records have appeared, and the full-line scan time from `openStart`. `beforeLineEnd`, `nextWhileScanning` and `lineMs` come from the marks once the small records have appeared. If `openStart`, `firstScreen`, `fullLineScan` or `indexDone` is missing or non-finite, if `firstScreen` or `fullLineScan` isn't after `openStart`, or if `fullLineScan` is after `indexDone`, the test fails before saving: a missing mark never passes and is never "not judged". `beforeLineEnd` is asserted whenever the measured `lineMs` exceeds the first-screen budget (PC 50 ms, Mac 100 ms). Only a measured scan inside the budget is exempt, because there a lens that waits for the record's end can't be told apart.
   - Memory keys hold the working set and private bytes, each summed over all processes. Private bytes are Windows-only, so they're `null` on the Mac.
 - **Environment knobs for the runner:**
   - `RUNS`: samples per first-screen test. Default 30, or 1 when cold.
   - `COLD=1`: one cold sample per reboot, appended under `cold:<key>`, for `1g.jsonl` Raw and `10g.jsonl` Rows only. `indexDoneAtFirstScreen:cold:*` accumulates across reboots.
   - `KEY_SUFFIX`: appended to every key (Task 12 uses `:parallel`), so a re-measurement doesn't overwrite the first.
-  - The runner never inherits `TYPOSE_*` variables from the shell. It throws on a zero, negative or missing duration rather than saving it. It records input latency as `insufficient` under 30 samples.
+  - The runner never inherits `TYPOSE_*` variables from the shell. It throws on a zero, negative or missing duration rather than saving it, including a missing or invalid scan mark on a huge first line. It records input latency as `insufficient` under 30 samples.
   - **Smoke-only:**
     - `DEEP_ROW` (default 40,000,000) lets a smaller stand-in replace the 10 GiB file.
     - `IDLE_MS` (default 300,000) shortens the NetLog idle.
@@ -3044,6 +3044,11 @@ async function firstScreenMs(file: string, lens: 'raw' | 'rows'): Promise<{ ms: 
     return { ms: m.firstScreen - m.openStart, indexDone: (m.indexDone ?? Infinity) <= m.firstScreen, lineMs: m.fullLineScan - m.openStart, doneMs: m.indexDone - m.openStart }
   })
   await app.close()
+  // On a huge first line the ordering checks need the scan marks: a missing, non-finite or misordered one fails the
+  // sample, so it can never record NaN or read as "index not done at first screen".
+  const { lineMs, doneMs } = sample
+  if (LONG_FIRST_LINE.includes(file) && !(lineMs > 0 && lineMs <= doneMs && Number.isFinite(doneMs)))
+    throw new Error(`${file} ${lens}: invalid scan marks (lineMs ${lineMs}, doneMs ${doneMs})`)
   return sample
 }
 
@@ -3081,12 +3086,10 @@ for (const lens of ['raw', 'rows'] as const) {
       const row0 = [...document.querySelectorAll('.vl-row')].find((r) => r.querySelector('.gutter')?.textContent === '1')
       // Usable: its next piece is fetched on demand (spec §3.4's continuation).
       const next = await s.core.call('piece', { doc: s.doc, line: 0, offset: 65_536 })
-      const m = s.perf.marks
       return {
         row0Chars: row0?.textContent?.length ?? 0,
-        beforeLineEnd: !(m.fullLineScan <= m.firstScreen), // marks, not the state at read time
         next: { offset: next.offset, chars: next.text.length, more: next.more },
-        nextWhileScanning: s.perf.marks.fullLineScan === undefined // read after the fetch returned
+        nextAt: performance.now()
       }
     })
     await win.waitForFunction(
@@ -3094,14 +3097,30 @@ for (const lens of ['raw', 'rows'] as const) {
       null,
       { timeout: 60_000 }
     )
+    // A scan mark after indexDone is misordered, so the check needs indexDone too.
+    await win.waitForFunction(() => (window as any).__spike.indexDone, null, { timeout: 60_000 })
+    // The small records follow the scan past the record, so every mark the ordering check needs is set by now.
     const after = await win.evaluate(() => {
-      const m = (window as any).__spike.perf.marks
       const rows = [...document.querySelectorAll('.vl-row')] as HTMLElement[]
-      return { mounted: rows.length, maxText: Math.max(...rows.map((r) => r.textContent?.length ?? 0)), lineMs: m.fullLineScan - m.openStart }
+      return { mounted: rows.length, maxText: Math.max(...rows.map((r) => r.textContent?.length ?? 0)), marks: (window as any).__spike.perf.marks }
     })
-    save(`hugeFirstRecord:${lens}`, { ...first, ...after })
-    // Waiting for the record's end is only observable when the scan outlasts the first-screen budget (PC 50 ms, Mac 100 ms).
-    if (after.lineMs > (process.platform === 'darwin' ? 100 : 50)) expect(first.beforeLineEnd).toBe(true)
+    // A missing, non-finite or misordered mark fails here, before anything is saved: never a pass, never "not judged".
+    const { openStart, firstScreen, fullLineScan, indexDone } = after.marks
+    const valid = [openStart, firstScreen, fullLineScan, indexDone].every(Number.isFinite) && firstScreen > openStart && fullLineScan > openStart && fullLineScan <= indexDone
+    expect(valid, `marks: openStart ${openStart}, firstScreen ${firstScreen}, fullLineScan ${fullLineScan}, indexDone ${indexDone}`).toBe(true)
+    const lineMs = fullLineScan - openStart
+    const beforeLineEnd = fullLineScan > firstScreen // marks, not the state at read time
+    save(`hugeFirstRecord:${lens}`, {
+      row0Chars: first.row0Chars,
+      beforeLineEnd,
+      next: first.next,
+      nextWhileScanning: first.nextAt < fullLineScan,
+      mounted: after.mounted,
+      maxText: after.maxText,
+      lineMs
+    })
+    // Waiting for the record's end is only observable when the measured scan outlasts the first-screen budget (PC 50 ms, Mac 100 ms).
+    if (lineMs > (process.platform === 'darwin' ? 100 : 50)) expect(beforeLineEnd).toBe(true)
     expect(first.row0Chars).toBeGreaterThan(lens === 'raw' ? 65_536 : 200) // the piece (Raw) or its 200-char preview (Rows)
     expect(first.next).toEqual({ offset: 65_536, chars: 65_536, more: true })
     expect(after.maxText).toBeLessThanOrEqual(65_536 + 16) // the 64 KiB piece plus gutter and " …"
@@ -3310,7 +3329,7 @@ Expected: `9 passed`. `spikes/results/spike-a-<hostname>.json` contains:
 Run: `node perf/shell-visible.mjs --runs 2 --key smokeShellVisible`
 Expected: it prints `smokeShellVisible { n: 2, ... }`.
 
-Delete the `smokeShellVisible` key from the results file.
+Delete the results file (`spikes/results/spike-a-<hostname>.json`): it holds smoke values only, and a Task 11 test that fails must leave its keys missing rather than holding these.
 
 - [ ] **Step 3: Read your own work (rule 8), then commit**
 
@@ -3431,10 +3450,10 @@ Frame threshold: a long frame is an rAF interval > 20 ms. At <Hz> that means a f
 | Shell visible, cold (dev layout / packaged) | < 200 / < 400 ms | | | |
 | Shell visible, warm (informational) | — | | | |
 | First screen 1/10 GiB Raw/Rows, warm | < 50 / < 100 ms | | | |
-| … without scanning to end of file (`indexDoneAtFirstScreen`, 1/10 GiB and one-line; huge-first where its `fullLineScan` p50 exceeds the first-screen budget, otherwise not judged) | 0 of n | | | |
+| … without scanning to end of file (`indexDoneAtFirstScreen`, 1/10 GiB and one-line; huge-first where its measured `fullLineScan` p50 exceeds the first-screen budget, not judged where it's measured inside it; a missing `fullLineScan` key is a failed run) | 0 of n | | | |
 | First screen on a huge first line [Z37]: line 0's first piece visible and usable (huge-first Raw/Rows, one-line 1 GiB Raw), warm | < 50 / < 100 ms | | | |
 | First screen 1 GiB Raw + 10 GiB Rows, cold (2 of the 4 combinations) | < 150 ms (PC) | | n/a | |
-| Oversized first record [Z37]: first screen marked before the scan passes the record (`hugeFirstRecord.beforeLineEnd`); next piece fetched (`next`); small records shown once the scan passes it | true where `lineMs` exceeds the first-screen budget, else not judged; 64 KiB with `more`; shown | | | |
+| Oversized first record [Z37]: first screen marked before the scan passes the record (`hugeFirstRecord.beforeLineEnd`); next piece fetched (`next`); small records shown once the scan passes it | true where the measured `lineMs` exceeds the first-screen budget, not judged where it's measured inside it, fail where it's missing; 64 KiB with `more`; shown | | | |
 | Full-line scan completion [Z37], measured apart (`fullLineScan`: huge-first Raw/Rows, one-line Raw), and index done (`indexDone`) | informational | | | |
 | Oversized first record: no mounted item > 64 KiB | maxText ≤ 65,552 | | | |
 | Deep reading: 10 notches at line 40M vs line 0; painted top row = model row | ±1 line; equal | | | |
