@@ -3621,6 +3621,7 @@ git commit -m "spike(a): parallel block scanning (throughput gate failed sequent
 - **Cold first screen covers 2 of the 4 file × lens combinations** (1 GiB Raw, 10 GiB Rows), to keep five reboots practical.
 - **`store::testutil::temp_file` never deletes its files.** A full Spike C replay leaves about 500 MB in `%TEMP%`, so clear the `spike-core-*` test files between runs. M1's test helpers clean up on drop.
 - **The thumb-drag gate in `setRowCount` trusts `pointerup`.** If a release is lost (there's no `pointercancel` or `blur` handler), the thumb stops tracking the growing total until the next click. The view still shows the right rows. Also, no unit test pins `build_parallel`'s one-block first batch: only the `:parallel` first-screen keys guard that latency.
+- **Dependencies drift in a fresh replay.** This plan's manifests use semver ranges, so a replay resolves whatever is current. On 2026-10-22 a fresh resolve took `napi` 3.15.0 and three companion napi crates one patch up, where the validated build has 3.14.2. Qualification runs use the preserved revisions and lockfiles: branch `spike/a`, tag `phase0-snap1/spike-a` (spec Z41, Z50). A replay restores `spikes/core/Cargo.lock`, `spikes/app/package-lock.json` and `spikes/core/spike-node/package-lock.json` from that tag before building.
 - **No typecheck:** the spike's TypeScript is only transpiled by Vite/esbuild. M1 adds `tsc --noEmit` to the gate.
 - **Interface names are consistent across tasks:**
   - `ByteStore::{open, open_with, chunk, read, len, hashes}`;
