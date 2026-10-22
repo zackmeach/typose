@@ -4,6 +4,8 @@
 
 **Follow-through pending:** carry the decisions into the spec's §0.3 as Z39 onward and the affected brief/plan sections. This edit fills this packet only. Preservation, commits, plan fixes and qualification runs have not been performed by filling it out. PC and Mac sessions remain unbooked.
 
+**Recorded 2026-10-22:** spec Draft 4 §0.4 (Z39–Z50) and brief revision 6 §0.5. On approving the follow-through, Zack also parked all screen-reader work until after launch ("park the reader work for an expansion opportunity, no voice work until after launch"). That is Z39, and it supersedes Q1's answer below and Z35.
+
 **Baseline before these decisions (reported by the packet's author).**
 - **Plan A** (base + Spike A) is closed. It passed 3 review rounds, then the Z37 amendment passed 2 more.
 - **Plan B** (Spike B) passed its round-2 review: APPROVE-WITH-FIXES. Every round-1 finding is closed. Its fix round waits on Q1 and Q2.
@@ -57,6 +59,8 @@
 - [ ] B
 - [ ] C
 - [x] Other: Paced reading with every block transition checked, not just every hundredth block.
+
+**Superseded by Z39 (2026-10-22):** reader work is parked until after launch. The protocol below is kept for that expansion.
 
 **Notes:**
 

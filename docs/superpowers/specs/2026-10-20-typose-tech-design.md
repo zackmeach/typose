@@ -1,9 +1,10 @@
 # Typose — Technical Design (stack, architecture, delivery)
 
-- **Date:** 2026-10-20 · **Status:** Draft 3 (2026-10-21).
+- **Date:** 2026-10-20 · **Status:** Draft 4 (2026-10-22).
   - Draft 2 folded in the external review of Draft 1 (Astra, 2026-10-20); each finding and its resolution is in §16.
   - Draft 3 records Zack's Phase 0 decisions Z30–Z38 (§0.3) and updates the affected sections.
-- **Implements:** the design brief `docs/superpowers/specs/2026-10-20-typose-design-brief.md` (revision 5). §14 lists the changes this spec asked of the brief; revision 4 applied them. Revision 5 records Z30–Z37. Nothing in the brief is overridden silently.
+  - Draft 4 records Zack's decisions Z39–Z50 (§0.4), from the Phase 0 decision packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`), and updates the affected sections. Z39 parks screen-reader validation until after launch and supersedes Z35.
+- **Implements:** the design brief `docs/superpowers/specs/2026-10-20-typose-design-brief.md` (revision 6). §14 lists the changes this spec asked of the brief; revision 4 applied them. Revision 5 records Z30–Z37. Revision 6 records the product-facing parts of Z39–Z50. Nothing in the brief is overridden silently.
 - **Inputs:**
   - Two independent research reports, `astra-research.md` and `fable-research.md` (repo root, local only, not committed).
   - Fable's evidence notes in `docs/research/research_notes/` (also local only).
@@ -36,10 +37,28 @@ Z1–Z23 stand as written in the brief's §0.
 | Z32 | **Screen-reader column numbering:** the row-number column counts as column 1, so the first CSV data column is announced as "column 2" together with its name (§6.1). |
 | Z33 | **Screen-reader navigation:** wide reading windows apply to **Rendered and Transcript**. Grid and Rows use keyboard navigation that loads its target before moving focus. Every data cell must be reachable, but continuous "read all" across Grid and Rows isn't a v1 requirement (§5.3, §6.2). |
 | Z34 | **Memory budget 🔒:** document data across all open files stays within **25% of physical RAM**. That includes indexes, caches and temporary parsing allocations. When the limit is reached, Typose stops building Rendered, explains why it's unavailable, and keeps Raw. 32 bytes per Markdown block is an optimization target, not the safety limit (§3.5, §3.6). |
-| Z35 | **Screen-reader testing:**<br>• Phase 0 runs the full 2,000-block forward and backward test on NVDA, Narrator and VoiceOver.<br>• Routine milestones run a shorter test: at least four window recenters each way, plus heading jumps and focus restoration.<br>• The full test runs again whenever virtualization or screen-reader behavior changes (§6.3). |
+| Z35 | **Screen-reader testing:**<br>• Phase 0 runs the full 2,000-block forward and backward test on NVDA, Narrator and VoiceOver.<br>• Routine milestones run a shorter test: at least four window recenters each way, plus heading jumps and focus restoration.<br>• The full test runs again whenever virtualization or screen-reader behavior changes (§6.3).<br>**Superseded by Z39** (2026-10-22): parked until after launch. |
 | Z36 | **YAML Tree ceiling: 8MiB in v1**, with Raw above it. Smaller files must still respect memory and structural limits (§4.5). |
 | Z37 | **Raw first screen** means the first bounded piece is visible and usable, with continuation available while scanning proceeds. The 50ms PC target applies to that view. Full-line scan completion is measured separately (§10.2, §13.1). |
-| Z38 | **Phase 0 sequence:**<br>1. Record these decisions in the specs.<br>2. Finish folding and reviewing the Spike B and C plans against them.<br>3. Preserve the validated spike code, and run the missing real screen-reader and full-size performance gates.<br>4. Hold the Phase 0 checkpoint before M1 (§13.1). |
+| Z38 | **Phase 0 sequence:**<br>1. Record these decisions in the specs.<br>2. Finish folding and reviewing the Spike B and C plans against them.<br>3. Preserve the validated spike code, and run the missing real screen-reader and full-size performance gates.<br>4. Hold the Phase 0 checkpoint before M1 (§13.1).<br>**Step 3 amended by Z39** (2026-10-22): no real screen-reader gates before launch. The full-size performance gates remain. |
+
+### 0.4 Decisions from the Phase 0 decision packet (Zack, 2026-10-22)
+The packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`) holds each question's context and the full notes. These rows are the binding summary.
+
+| # | Decision |
+|---|---|
+| Z39 | **Screen-reader validation is parked until after launch, as an expansion opportunity.** It supersedes Z35 and the packet's Q1 answer.<br>• Before launch: no manual screen-reader runs (NVDA, Narrator, VoiceOver), no speech capture, no listening protocols and no speech-log gates.<br>• Automated accessibility stays required: ARIA semantics, axe, accessibility-tree reads (UIA/CDP), keyboard and focus gates, and performance with accessibility mode on.<br>• The design for screen readers (§6.2, Z32, Z33) stands. Until the parked validation runs, Typose claims only what the automated gates show, not verified screen-reader support (§6.3, §13.1). |
+| Z40 | **Grid keys.** When Grid navigation owns focus:<br>• **Shift+Space selects the row and Ctrl+Space the column**; Page Up/Down page; Space doesn't page-scroll.<br>• Space still activates a focused button, checkbox or menu item, and the grid never swallows child-control input or IME composition.<br>• Keyboard-reachable row and column selection commands are the fallback where the OS or an input method owns a shortcut (WAI-ARIA grid pattern).<br>Selection is a Grid-milestone acceptance test; the spikes don't implement it (§6.1). |
+| Z41 | **Spike code is preserved** as local, unmerged `spike/a`, `spike/b` and `spike/c` branches, with an immutable tag for each captured state, refreshed after each closing review.<br>• The tested lockfiles travel with the branches; they're never regenerated in transfer.<br>• Reports, logs, checker scripts and untracked results go to a revision-labelled evidence directory with hashes, which records unrun gates.<br>• A results template is never relabelled as a completed run (§13.1). |
+| Z42 | **UTF-16 CSV/TSV opens in Raw only in v1.** The Grid lock reads "Grid is unavailable for UTF-16 CSV/TSV. Open in Raw, or convert a copy to UTF-8."<br>• Covers UTF-16LE and BE, BOM detection and the manual encoding override.<br>• An encoding override never reinterprets UTF-16 as a single-byte format to unlock the Grid.<br>• Transcoding with original-byte maps is deferred beyond v1 (§4.2). |
+| Z43 | **Inline `data:` images** are allowed in Rendered, base64 only, for `image/png`, `image/jpeg`, `image/gif` and `image/webp`.<br>• Caps per image: **8MiB** of decoded file bytes, **16,777,216 pixels**, and **64MiB** of decoded pixel buffers (animation frames included). Z34's remaining budget can lower them.<br>• SVG, other types, malformed payloads and decodes whose limits can't be enforced are refused. Alt text and the reason stay visible.<br>• The payload is delivered through a bounded resource path with an opaque reference, never inline in HTML fragments or viewport messages. Local `data:` images don't need the remote-image bar.<br>• **UNC, `smb:` and ambiguous network-path images** (`//host/…` and slash/backslash variants) **stay blocked, even after "Load remote images"**: a fetch can send NTLM credentials to the host. Only explicit HTTP(S) URLs use the remote-image fetch path, and a redirect never becomes a file or SMB load. `mailto:` is never an image target.<br>This is a v1 Rendered requirement; the spikes drop `data:` images and haven't validated it (§4.6, §7.3). |
+| Z44 | **Markdown front matter** is recognized only at the start of the file (after an optional BOM), and only when it closes within the first **64KiB**.<br>• Anywhere else, or over the limit, it reads as ordinary Markdown: never silently discarded.<br>• The same bytes give the same block boundaries whatever the parser's window size (§4.6). |
+| Z45 | **TSV uses one deterministic CSV-style quoting dialect** (double quotes, which may enclose tabs and newlines). This isn't strict IANA TSV, and quoting is never inferred from a sample (§4.2). |
+| Z46 | **CSV record-index throughput:** PC **≥ 0.9 GB/s**, Mac **≥ 0.45 GB/s**, warm, in decimal source bytes per second.<br>• Judged on the p50 of 30 warm release-build runs on each of the 100MiB and 1GiB mixed/quoted CSV fixtures, also reporting the sample count, p95 elapsed time and slowest throughput.<br>• Measures the whole record-index path (hashing and checkpoints included), never the in-memory tokenizer.<br>• A miss is recorded and investigated, not rounded into a pass (§10.2). |
+| Z47 | **Z34's aggregate accounting and enforcement are an M1 exit requirement.**<br>• Phase 0 shows only the bounded stop and the Raw fallback, and reports aggregate enforcement as not implemented.<br>• M1 reserves and accounts across documents and concurrent builds, releases on close, cancellation and failure, and keeps enough capacity for Raw to stay usable. It closes with a deterministic multi-document budget-exhaustion test.<br>• Until then, gate runs use explicit conservative caps (§3.6, §13.2). |
+| Z48 | **CSV header detection** stays the bounded sniffer in v1.<br>• ⓘ's "First row is header" override is a Grid-milestone acceptance criterion. It's visible and reversible, recovers the first data record when detection is wrong, never edits source bytes, and recomputes record numbering consistently (§4.2). |
+| Z49 | **Gate-run protocol** for qualification timing (§10.3):<br>• Quiet machine: no other heavy work or agent lanes; the CPU under 10% for a minute before each timing run, with load recorded during it; Defender on.<br>• Automated warm runs, the operator-controlled cold-restart batch and manual checks run as separate batches.<br>• Every failed or invalid run is kept with its reason, never replaced by a clean rerun in the report. |
+| Z50 | **Mac gates are required to close Phase 0** (performance and trackpad), on the friend's Apple-silicon Mac [Z29], using the same preserved revisions, lockfiles and fixture definitions.<br>• If access or restart permission is unavailable, the affected gates stay pending and go to the checkpoint. Phase 0 never closes Windows-only silently, and warm samples never count as cold.<br>• Repeatable Mac access for later milestones is decided before M1 (§13.1). |
 
 ---
 
@@ -200,6 +219,7 @@ SourceRef  { gen: u32, primary: SourceSpan, contributing: SourceSpan[] }
 - Before building a heavy lens's structures, the core **estimates** their size. If the estimate would exceed the remaining budget, the lens stays locked, with the reason in its tooltip and in ⓘ (brief §8.3).
 - **If the limit is reached while building** (an estimate can be wrong, and a Markdown index grows with its block count), building stops. Rendered shows why it's unavailable, and Raw stays [Z34]. Per-format caps such as JSON's `max_containers` and Markdown's `max_blocks` are how the core enforces this.
 - Closing a document frees its structures immediately.
+- **When it's built** [Z47]: the aggregate accounting and enforcement are an M1 exit requirement. Phase 0 demonstrates only the bounded stop and the Raw fallback, through `max_blocks`, which alone is not the 25% budget. Until M1, gate runs pass explicit conservative caps.
 
 ---
 
@@ -220,7 +240,9 @@ The library picks are proposals. Spike C confirms or replaces each one.
 
 ### 4.2 CSV/TSV
 - **Parsing:** `csv-core` for record boundaries and fields.
-- **Sniffing:** delimiter (`,` `\t` `;` `|`) and header detection over the first 64KiB. ⓘ can override both (brief §5.3).
+- **Sniffing:** delimiter (`,` `\t` `;` `|`) and header detection over the first 64KiB. ⓘ can override both (brief §5.3). Header detection stays this bounded sniffer in v1. The "First row is header" override is a Grid-milestone acceptance criterion [Z48].
+- **TSV quoting:** the same deterministic CSV-style dialect as CSV. Double quotes may enclose tabs and newlines. It isn't strict IANA TSV, and quoting is never inferred from a sample [Z45].
+- **UTF-16 CSV/TSV opens in Raw only in v1** [Z42]. `csv-core` tokenizes bytes, and UTF-16 has no single-byte delimiters, quotes or line ends. The Grid lock reads "Grid is unavailable for UTF-16 CSV/TSV. Open in Raw, or convert a copy to UTF-8." An encoding override never reinterprets UTF-16 as a single-byte format to unlock it.
 - **Pages:** each row carries its record span. Per-field spans are computed on demand by re-tokenizing that one record.
 - **Background work:** type inference (alignment, icon and sort order only, never reformatting), the value-pill decision, and column widths, all computed from the **first 1,000 rows**.
   - The first screen uses estimates from the rows in view; widths refine as the scan completes, keeping the reading anchor in place (§14, D14).
@@ -269,6 +291,11 @@ The library picks are proposals. Spike C confirms or replaces each one.
 - **Parser:** `pulldown-cmark` in the core, using `into_offset_iter` byte ranges (including inlines).
   - **Extensions:** GFM tables, task lists, strikethrough, footnotes, GitHub alerts, math, YAML frontmatter and wikilinks.
   - **Typose adds:** Obsidian callouts beyond the five GitHub kinds, Mermaid and math fence routing, wikilink resolution (brief §4.4) and heading slugs (GitHub algorithm).
+  - **Front matter** [Z44]: recognized only at the start of the file (after an optional BOM), and only when it closes within the first 64KiB. Anywhere else, or over the limit, it reads as ordinary Markdown, never silently discarded. The same bytes give the same block boundaries whatever the window size.
+- **Images** [Z43]:
+  - Local `data:` images: base64 PNG, JPEG, GIF and WebP within the per-image caps (8MiB decoded file bytes, 16,777,216 pixels, 64MiB decoded pixel buffers). They're delivered through a bounded resource path with an opaque reference, never inline in a block's HTML fragment.
+  - SVG and other types are refused, keeping the alt text and the reason.
+  - UNC, `smb:` and ambiguous network-path images stay blocked, even after "Load remote images" (§7.3).
 - **Output:** the core emits **one sanitized HTML fragment per top-level block**, plus the block's `SourceRef`, its heading entries and its plain text (for find).
   - Rendering stays in the core, so the renderer never parses Markdown and never sees unsanitized HTML.
   - Raw HTML is sanitized by **`ammonia`** against the brief's allowlist (brief §4.6). `svg` and `math` are never enabled; the 2025 mXSS advisory concerned exactly those.
@@ -366,7 +393,7 @@ interface Lens {
 |---|---|
 | Pills, lens switch | React Aria `Tabs` (tablist) |
 | Sidebar | React Aria `Tree` |
-| Grid | `role=grid` with `aria-rowcount`/`aria-colcount` (the true totals, or `-1` while indexing) and `aria-rowindex`/`aria-colindex` on every rendered row and cell. Roving focus, with the **focused row kept mounted** even when it scrolls out of view.<br>• The row-number column is column 1, so the first data column is announced as "column 2" with its name [Z32].<br>• Row-number cells show the source record number (1 = the first data record) [Z31].<br>• `aria-rowindex` stays positional, with the header row as row 1. |
+| Grid | `role=grid` with `aria-rowcount`/`aria-colcount` (the true totals, or `-1` while indexing) and `aria-rowindex`/`aria-colindex` on every rendered row and cell. Roving focus, with the **focused row kept mounted** even when it scrolls out of view.<br>• The row-number column is column 1, so the first data column is announced as "column 2" with its name [Z32].<br>• Row-number cells show the source record number (1 = the first data record) [Z31].<br>• `aria-rowindex` stays positional, with the header row as row 1.<br>• Keys [Z40]: Shift+Space selects the row and Ctrl+Space the column; Page Up/Down page; Space doesn't page-scroll; a focused child control keeps Space, and IME composition passes through. |
 | Tree | `role=tree` with `aria-level`, `aria-setsize` and `aria-posinset` taken from the core's counts |
 | Rows | `role=treegrid` (expandable rows) |
 | Rendered | Document semantics: real `h1–h6`, lists, tables and `main`. Heading navigation across the virtualized body uses §6.2. |
@@ -383,12 +410,10 @@ Nothing can expose DOM that doesn't exist (§14, D5). The design:
 - **Totals are announced** through the `aria-*count` attributes, never as a partial count presented as final (unknown totals use `-1`).
 
 ### 6.3 Testing
-- **Automated:** `axe-core` checks on the chrome in Playwright.
-- **Manual:** a fixed 20-task screen-reader script, run on **NVDA (IA2) and Narrator (UIA)** on Zack's PC at every milestone, and on **VoiceOver** in batched Mac sessions. Orca isn't gated in v1 [Z28].
-  - **Cadence** [Z35]:
-    - Phase 0 runs the full 2,000-block forward and backward reading test on all three readers.
-    - Routine milestones run a shorter version: at least four window recenters each way, plus heading jumps and focus restoration.
-    - The full test runs again whenever virtualization or screen-reader behavior changes.
+- **Automated:** `axe-core` checks on the chrome in Playwright, plus accessibility-tree reads (UIA/CDP), keyboard and focus gates, and performance with accessibility mode on. These are the accessibility gates before launch [Z39].
+- **Manual (parked until after launch [Z39]):** a fixed 20-task screen-reader script, on **NVDA (IA2) and Narrator (UIA)** on Zack's PC, and on **VoiceOver** in batched Mac sessions. Orca isn't gated in v1 [Z28].
+  - Spike B's script is kept as the starting point for the expansion. Its cadence, Z35's, is superseded.
+  - Until it runs, Typose claims only what the automated gates show, not verified screen-reader support.
 
 ---
 
@@ -421,6 +446,7 @@ Nothing can expose DOM that doesn't exist (§14, D5). The design:
   - there is no `autoUpdater`;
   - `crashReporter` collects minidumps **locally only**.
 - **Remote images** load only after the user clicks the per-file bar. Even then they're fetched by **main**, through a dedicated Electron session that is separate from the app's blocked one, with limits on redirects, response size and image type. The renderer never fetches them directly.
+  - Only explicit HTTP(S) URLs take this path, and a redirect never becomes a file or SMB load. UNC, `smb:` and ambiguous network-path images are never fetched, even after the click, because a fetch can send the user's NTLM credentials to the host [Z43].
 - **CI check (the NetLog assertion):** CI launches the app with `--log-net-log`, opens the hostile fixtures, and parses the log (§11.1).
   - It **fails on any URL request with a scheme other than `typose:`, `data:` or `blob:`, any DNS resolution, or any socket connection**.
   - "The log is empty" isn't the test, because a NetLog always holds metadata and non-request events.
@@ -509,6 +535,7 @@ Nothing can expose DOM that doesn't exist (§14, D5). The design:
 | Scrolling, any lens, during indexing | ≥ 99% of frames < 16.7ms, no stall > 50ms | same |
 | Viewport page fetch, 64KiB, round trip | p95 < 3ms | p95 < 3ms |
 | Index throughput, JSONL line index | ≥ 1 GB/s warm | ≥ 0.5 GB/s |
+| Index throughput, CSV record index (whole path; p50 of 30 warm release runs on the 100MiB and 1GiB CSV fixtures) [Z46] | ≥ 0.9 GB/s warm | ≥ 0.45 GB/s |
 | Rendered on a 1GiB Markdown file (background index; Raw is immediate) | ~20s, informational [Z30] | informational |
 
 - **"First screen" in Raw** is the first bounded piece visible and usable, with continuation available while scanning proceeds [Z37]. On a file whose first line is huge, it doesn't wait for the line's end. Full-line scan completion is measured and reported separately.
@@ -520,6 +547,10 @@ Nothing can expose DOM that doesn't exist (§14, D5). The design:
 - **Performance marks** in the renderer and core (`open`, `firstPage`, `firstPaint`), collected by the Playwright perf harness in `e2e/perf`.
 - **Frame timing:** from Chromium tracing during scripted scrolls.
 - **Regression gate:** the harness runs on Zack's PC before each milestone closes. CI only runs a smoke version, because CI machines are too noisy to gate on.
+- **Qualification runs** [Z49]:
+  - Run on a quiet machine: no other heavy work or agent lanes, the CPU under 10% for a minute before each timing run, load recorded during it, and Defender on.
+  - Automated warm runs, the cold-restart batch and manual checks are separate batches.
+  - Every failed or invalid run is kept with its reason, never replaced by a clean rerun in the report.
 
 ---
 
@@ -576,10 +607,10 @@ Nothing can expose DOM that doesn't exist (§14, D5). The design:
 ### 13.1 Phase 0: spikes (throwaway, on `spike/*` branches, never merged)
 Each spike answers one risk with numeric gates. A failed gate changes this spec before any product code is written. Thresholds are on Zack's PC (half budgets) unless marked **Mac**.
 
-Sequence [Z38]:
+Sequence [Z38, amended by Z39]:
 1. Record the Phase 0 decisions in the specs.
 2. Finish folding and reviewing the Spike B and C plans against them.
-3. Preserve the validated spike code, and run the missing real screen-reader and full-size performance gates.
+3. Preserve the validated spike code [Z41], and run the missing full-size performance gates under the qualification protocol [Z49]. That includes the Mac gates [Z50]. The real screen-reader gates are parked until after launch [Z39].
 4. Hold the Phase 0 checkpoint before M1.
 
 **Spike A: cold start, indexing, IPC, memory, Windows chrome**
@@ -621,13 +652,14 @@ Sequence [Z38]:
   - React Aria tabs and a peek.
 
   Both document fixtures are at least 10× the 500-item accessibility window, so reading has to cross unmounted content.
-- **Gates** (NVDA + Narrator on the PC; VoiceOver on the **Mac**):
-  - 100% completion of the 20-task script, with the full 2,000-block reading test on all three readers [Z35];
-  - row and column position announced with totals;
+- **Gates:**
+  - **Before launch, these are automated: the accessibility tree, axe, keyboard, focus and accessibility mode, with no screen reader running [Z39].** The real-reader items below (the 20-task script, announcements, and heading jumps through a reader's own heading key) are parked until after launch. They stay listed as the expansion's gate.
+  - *Parked [Z39]:* 100% completion of the 20-task script, with the full 2,000-block reading test on NVDA, Narrator and VoiceOver [Z35, superseded];
+  - row and column position announced with totals (*announcement parked*; the `aria-*` totals are gated automatically);
   - Ctrl+End reaches the true last row;
   - zero skipped or duplicated positions across 1,000 rows × 100 columns;
-  - 2,000 consecutive blocks or turns read **forward and backward**, crossing at least 4 window recenters each way, with the element under the cursor never unmounted and no position lost;
-  - heading jumps, both through the Outline and through the screen reader's heading key, land on headings **outside** the mounted window;
+  - 2,000 consecutive blocks or turns read **forward and backward**, crossing at least 4 window recenters each way, with the element under the cursor never unmounted and no position lost (*gated by a simulated reading cursor; a real reader's reading is parked [Z39]*);
+  - heading jumps, both through the Outline and through the screen reader's heading key, land on headings **outside** the mounted window (*a real reader's heading key is parked [Z39]; the Outline and a simulated heading key are gated automatically*);
   - 100 peek open/close cycles with zero focus loss;
   - nothing unreachable at 200% zoom;
   - with accessibility on, ≤ 1% long frames during 10s of auto-scroll.
@@ -653,13 +685,13 @@ Sequence [Z38]:
 ### 13.2 Milestones (each one is a sequence of PRs; the implementation plan details M1 first)
 | # | Milestone | Exit criterion |
 |---|---|---|
-| M1 | **Walking skeleton.** Repo, CI, security baseline (§7), core host + protocol, byte store and generations, the Raw lens on the virtualizer, title bars on Windows and macOS, single instance and CLI. | Open a 10GiB file into Raw within the §10.2 budgets, on an unsigned dev build (signing starts at M7, §15) |
+| M1 | **Walking skeleton.** Repo, CI, security baseline (§7), core host + protocol, byte store and generations, the Raw lens on the virtualizer, title bars on Windows and macOS, single instance and CLI. | Open a 10GiB file into Raw within the §10.2 budgets, on an unsigned dev build (signing starts at M7, §15). Z34's aggregate accounting and enforcement, with a deterministic multi-document budget-exhaustion test [Z47] |
 | M2 | **Workspace.** Sidebar roots, pills, cards and splits, session restore, quick open, the command palette and command table, settings + `config.toml` + themes, the empty state. | Brief §3, §4.1–4.3, §7.8 and §7.10, verified against the canvas boards |
-| M3 | **Data lenses.** Grid, Rows, Table, JSON and YAML Tree, ⓘ and problems. | Brief §5.3–5.5 and §7.6–7.7; the Spike C gates as regression tests |
-| M4 | **Markdown and links.** Rendered, callouts, Mermaid, KaTeX and Shiki, link resolution, the peek, hand-off. | Brief §4.4–4.6 and §5.2; the hostile-fixture network check |
+| M3 | **Data lenses.** Grid, Rows, Table, JSON and YAML Tree, ⓘ and problems. | Brief §5.3–5.5 and §7.6–7.7; the Spike C gates as regression tests; the Grid's Shift+Space/Ctrl+Space selection [Z40] and the "First row is header" override [Z48] |
+| M4 | **Markdown and links.** Rendered, callouts, Mermaid, KaTeX and Shiki, link resolution, the peek, hand-off. | Brief §4.4–4.6 and §5.2; the hostile-fixture network check; `data:` images within their caps, with refusals and zero network effects [Z43] |
 | M5 | **Transcript.** Both adapters, sidechains and branches. | Brief §5.4 against real Claude Code sessions |
 | M6 | **Find, go to, copy, print.** | Brief §7.4, §7.5 and §7.11 |
-| M7 | **Release.** Large-file UX polish, the full accessibility gate, packaging and signing, winget/Flathub submissions. | Every §10.2 and §6.3 gate green on Windows and the Mac; Linux smoke-tested [Z28] |
+| M7 | **Release.** Large-file UX polish, the full accessibility gate, packaging and signing, winget/Flathub submissions. | Every §10.2 gate and §6.3's automated accessibility gates green on Windows and the Mac; Linux smoke-tested [Z28]. Screen-reader validation is parked until after launch [Z39] |
 
 ---
 

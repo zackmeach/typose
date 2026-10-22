@@ -1,6 +1,7 @@
 # Typose — Design Brief (look, feel, experience)
 
-- **Date:** 2026-10-20 · **Revision:** 5 (2026-10-21).
+- **Date:** 2026-10-20 · **Revision:** 6 (2026-10-22).
+  - Revision 6 records the product-facing parts of Zack's decisions Z39–Z50 (§0.5). Screen-reader validation is parked until after launch, and supersedes Z35. It also covers the Grid keys, UTF-16 CSV/TSV, inline and network-path images, front matter, TSV quoting and header detection. The technical design logs the rest (Z41, Z46, Z47, Z49, Z50).
   - Revision 5 records Zack's Phase 0 decisions Z30–Z37 (§0.4). They cover giant-Markdown behavior, grid record numbers, screen-reader navigation and testing, the memory-budget behavior, the YAML Tree ceiling and the Raw first-screen definition.
   - Revision 2 applied the fixes from the adversarial review (verdict: FIX-FIRST).
   - Revision 3 applies the validated layout critique (`docs/design/critique-2026-10-20.md`): no-wrap splits, sidebar auto-collapse, breadcrumb shrink order, a yellow tint instead of orange, the scrim/shadow tokens, the two density scales and inset focus rings.
@@ -13,7 +14,7 @@
     - bounded print, a YAML Tree size ceiling and Linux best effort;
     - oversized-item rules;
     - encoding detection before the binary check.
-- **Status:** All decisions resolved (§0.2, §0.4). The stack decisions (Z24–Z29) and the Phase 0 sequence (Z38) are logged in the technical design.
+- **Status:** All decisions resolved (§0.2, §0.4, §0.5). The stack decisions (Z24–Z29) and the Phase 0 sequence (Z38) are logged in the technical design.
 - **Feeds:** the Claude Design pass (screens in §10, done) and the technical design (`docs/superpowers/specs/2026-10-20-typose-tech-design.md`).
 - **Who decided what:** Zack's decisions from the grill session are marked **[Z#]** (log in §0.1). **Everything without a [Z#] tag is proposed by the assistant** and open to veto. Items marked 🔒 are safety or correctness requirements: their wording can change, but the requirement can't be dropped.
 
@@ -69,9 +70,22 @@
 | Z32 | **Screen readers count the row-number column as column 1**, so the first data column is announced as "column 2" together with its name (§9). |
 | Z33 | **Wide reading windows apply to Rendered and Transcript.** Grid and Rows use keyboard navigation that loads its target before moving focus. Every data cell must be reachable, but continuous "read all" across Grid and Rows isn't a v1 requirement (§9). |
 | Z34 | **Memory budget 🔒:** document data across all open files stays within 25% of physical RAM, including indexes, caches and temporary parsing allocations. When the limit is reached, Typose stops building Rendered, explains why it's unavailable, and keeps Raw. 32 bytes per Markdown block is an optimization target, not the safety limit (§8.3). |
-| Z35 | **Screen-reader testing:**<br>• Phase 0 runs the full 2,000-block forward and backward test on NVDA, Narrator and VoiceOver.<br>• Routine milestones run a shorter test: at least four window recenters each way, plus heading jumps and focus restoration.<br>• The full test runs again whenever virtualization or screen-reader behavior changes (§9). |
+| Z35 | **Screen-reader testing:**<br>• Phase 0 runs the full 2,000-block forward and backward test on NVDA, Narrator and VoiceOver.<br>• Routine milestones run a shorter test: at least four window recenters each way, plus heading jumps and focus restoration.<br>• The full test runs again whenever virtualization or screen-reader behavior changes (§9).<br>**Superseded by Z39** (2026-10-22): parked until after launch. |
 | Z36 | **YAML Tree ceiling: 8MB in v1**, with Raw above it. Smaller files must still respect memory and structural limits (§5.5). |
 | Z37 | **Raw's first screen** is the first bounded piece, visible and usable, with continuation available while scanning proceeds. The first-screen target applies to that view. Full-line scan completion is measured separately (§8.1). |
+
+### 0.5 Decisions from the Phase 0 decision packet (Zack, 2026-10-22)
+The product-facing ones. The technical design's §0.4 holds all of Z39–Z50, and the packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`) holds the context.
+
+| # | Decision |
+|---|---|
+| Z39 | **Screen-reader validation is parked until after launch**, as an expansion opportunity (§2). It supersedes Z35.<br>• No manual screen-reader runs, speech capture or listening tests before launch.<br>• Automated accessibility stays required: semantics, axe, accessibility-tree reads, keyboard and focus.<br>• The screen-reader design in §9 stands, but until the parked validation runs, Typose doesn't claim verified screen-reader support. |
+| Z40 | **Grid keys:** Shift+Space selects the row and Ctrl+Space the column; Page Up/Down page; Space doesn't page-scroll (§7.4). |
+| Z42 | **UTF-16 CSV/TSV opens in Raw only in v1.** The Grid lock says "Grid is unavailable for UTF-16 CSV/TSV. Open in Raw, or convert a copy to UTF-8." (§5.3) |
+| Z43 | **Inline `data:` images** (PNG, JPEG, GIF, WebP; not SVG) render in Rendered within per-image caps. **UNC and `smb` images never load, even after "Load remote images"** (§4.6). |
+| Z44 | **Front matter** is recognized only at the start of a Markdown file, and only when it closes within the first 64KB. Anywhere else, or longer, it reads as ordinary Markdown. |
+| Z45 | **TSV honors double quotes** like CSV (not strict IANA TSV) (§5.3). |
+| Z48 | **Header detection** stays automatic in v1, and ⓘ's "First row is header" override is required at the Grid milestone: visible, reversible, and recovering the first record when detection is wrong (§5.3). |
 
 ---
 
@@ -119,6 +133,7 @@ Typose is an open-source desktop viewer for the formats the AI era runs on: **Ma
 7. **Links from JSON/YAML string values.** These need the UNC rules in §4.6.
 8. **Grid Columns popover** (show and hide columns).
 9. **Link-trail spine** (ref 05).
+10. **Screen-reader validation [Z39].** Real-reader testing on NVDA, Narrator and VoiceOver, starting from Spike B's 20-task script, before Typose claims verified screen-reader support.
 
 ### 2.1 Design-for-later constraints (binding on v1)
 - **Rendered output maps back to the source.** Every rendered block, grid row, tree node and transcript block knows its source byte range. Editing, change markers, diffs, copy (§7.4) and lens-switch scroll mapping all depend on this.
@@ -309,7 +324,9 @@ Every opened file is untrusted, including files written by your own agents.
 
 **Images:**
 - Images from local regular files render inline.
-- Remote, UNC and `smb` images sit behind a once-per-file **"Load remote images"** bar. Rendering never makes network requests until that's clicked.
+- Inline `data:` images (PNG, JPEG, GIF, WebP; not SVG) render within per-image size caps. An over-cap or refused image keeps its alt text and shows why [Z43].
+- Remote `http`/`https` images sit behind a once-per-file **"Load remote images"** bar. Rendering never makes network requests until that's clicked.
+- **UNC and `smb` images never load, even after that click** [Z43]: on Windows, fetching one can send your credentials to the remote host.
 
 **Raw HTML in markdown:**
 - An **allowlist**: `b i em strong code kbd sub sup br hr details summary a[href] img[src alt] table thead tbody tr th td`.
@@ -392,10 +409,11 @@ Every opened file is untrusted, including files written by your own agents.
 - **Encoding:**
   - UTF-8, with a BOM sniff for UTF-16. The fallback is **Windows-1252**.
   - Encoding is detected **before** the binary check (§7.9). A UTF-16 BOM skips the NUL test, because UTF-16 text is full of NUL bytes. BOM-less UTF-16 shows as binary, and ⓘ's encoding override is the way out.
+  - **UTF-16 CSV/TSV opens in Raw only in v1.** The Grid lock says "Grid is unavailable for UTF-16 CSV/TSV. Open in Raw, or convert a copy to UTF-8." [Z42]
   - Undecodable bytes show as � and are counted as a problem.
-- **Delimiter:** comma, tab, semicolon or pipe, auto-detected.
+- **Delimiter:** comma, tab, semicolon or pipe, auto-detected. TSV honors double quotes like CSV, so a quoted field can hold tabs and newlines [Z45].
 - **Header row:** auto-detected.
-- Encoding, delimiter and "First row is header" can all be overridden in ⓘ.
+- Encoding, delimiter and "First row is header" can all be overridden in ⓘ. The header override is visible and reversible, and it recovers the first data record when detection is wrong [Z48].
 - **Ragged rows:** missing cells render empty; extra cells go into a trailing **"+N"** cell whose tooltip shows the values. Each ragged row is a problem (§7.7).
 - **Wide files:** the header and row-number column stay sticky, and horizontal scrolling is virtualized, so 5,000 columns is fine.
 
@@ -598,6 +616,7 @@ See §7.10.
   - A copy larger than **10MB asks for confirmation**, showing its size.
 - **Grid:**
   - Click a cell to select it. Shift+click or drag selects a range. Click a row number to select the row; select a column from the header's context menu.
+  - From the keyboard: **Shift+Space selects the row and Ctrl+Space the column**. Page Up/Down page, and Space doesn't scroll the grid. Row and column selection are also available as keyboard-reachable commands, for when the OS or an input method takes those shortcuts [Z40].
   - **Ctrl+C copies TSV**, including the header row when whole columns are selected.
 - **Tree and Rows:**
   - Click a node or row to select it.
@@ -743,10 +762,9 @@ See §7.10.
   - **Grid and Rows:**
     - Every data cell is reachable by keyboard. Continuous "read all" across them isn't a v1 requirement [Z33].
     - The row-number column is column 1, so the first data column is announced as "column 2" with its name [Z32].
-  - **Testing** [Z35]:
-    - Phase 0 runs the full 2,000-block forward and backward reading test on NVDA, Narrator and VoiceOver.
-    - Routine milestones run a shorter test: four recenters each way, plus heading jumps and focus restoration.
-    - The full test runs again when virtualization or screen-reader behavior changes.
+  - **Testing** [Z39, superseding Z35]:
+    - Before launch, accessibility is verified by automated checks: semantics, axe, accessibility-tree reads, keyboard and focus.
+    - Testing with real screen readers (NVDA, Narrator, VoiceOver) is **parked until after launch** as an expansion (§2). Until it runs, Typose doesn't claim verified screen-reader support.
 - **Layout limits:** `prefers-reduced-motion` is honored. Zoom to 200% (§6.5) doesn't break the layout. The minimum window is 720×480.
 
 ---
