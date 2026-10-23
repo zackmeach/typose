@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["typose-core", "typose-node", "fixtures-gen"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.dev.package.memchr]
+opt-level = 3
+
+[profile.dev.package.xxhash-rust]
+opt-level = 3

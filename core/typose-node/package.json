@@ -1,0 +1,14 @@
+{
+  "name": "typose-node",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT OR Apache-2.0",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": { "binaryName": "typose-node" },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform"
+  },
+  "devDependencies": { "@napi-rs/cli": "3.10.8" }
+}
