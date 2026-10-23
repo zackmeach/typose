@@ -55,7 +55,7 @@
 **Settled or verified:**
 - **Remote:** `git remote -v` shows `origin`. `gh repo view zackmeach/typose` reports `PRIVATE` with default branch `main`. The `gh` token has the `gist`, `read:org`, `repo` and `workflow` scopes, and no `user` scope (PR 2).
 - **Toolchain:** `node v24.15.0`, `npm 11.12.1` and `rustc 1.96.0` are installed. The pins are listed in PR 1.
-  - Whether Electron 44 is within one major of current stable (§7.1) is UNVERIFIED today. PR 1 checks it.
+  - Electron 44 is within one major of current stable (§7.1): on 2026-10-22, npm's `latest` for `electron` is 45.0.0 (published 2026-10-21), and PR 1 pins 44.9.2.
 - **Port sources, frozen at the checkpoint (`eb48e28`).** Plans B and C are frozen, not closed, at `docs/superpowers/plans/2026-10-20-typose-phase0-spike-{b,c}.md`. The local branches peel to their tags `phase0-snap2/*` (`.evidence/phase0/snap2/MANIFEST.md:24-28`):
   - `spike/a` = `ce114fc`;
   - `spike/b` = `d83508b`, whose `spikes/app/perf/spike-b1.e2e.ts` is the G4 diagnostics harness (sha256 `e255bee1…`);
@@ -192,7 +192,7 @@ The spike trusted the caller's offset and clamped negatives to 0 (`spike/a spike
 
 **Fix:**
 - Dispatch on own properties only.
-- Protocol types are generated from Rust (§3.4; proposal: `ts-rs`). `ts-rs` emits types, not ranges, so a small generator emits the `[min, max]` table both sides use. CI fails if it's stale (`git diff --exit-code`).
+- Protocol types are generated from Rust (§3.4) by napi-rs's own typegen: the addon's `index.d.ts`, which the core host and the renderer typecheck against. The `[min, max]` table is defined once in Rust (`limits::RANGES`) and reaches the core host at runtime through the addon (`limits()`), so there's no generated copy to go stale. *(Amended in PR 1, plan §7.)*
 - napi signatures take `f64` for every caller-controlled number, never `u32` or `i64`. napi-rs's `i64` goes through `napi_get_value_int64`, which maps NaN and ±Infinity to 0, truncates fractions and saturates 1e20 (`m1rev` P1). Rust re-checks `x.is_finite() && x.fract() == 0.0 && (min..=max).contains(&x)` before any cast.
 
 **Acceptance:**
@@ -338,8 +338,8 @@ Each PR's tests land in that PR, and every PR extends C4's table to what it adds
   - PR 2 hardens both.
 - **Build dependencies:**
   - **The napi build:** the addon is a separate npm package built by `@napi-rs/cli` 3.10.8 (`spike/a spike-node/package.json:9-12`). It generates the `index.d.ts`/`index.js` that `tsc --noEmit` on the core host needs, so `npm run check` runs after the napi build, locally and in CI.
-  - **Builds:** a release addon and a `test-hooks` addon (m8).
-  - **The range generator** for C4, with its staleness check.
+  - **Builds:** a release addon. The `test-hooks` addon (m8) arrives with the first behaviour-changing hook, in PR 5. *(Amended in PR 1, plan §7.)*
+  - **C4's range table**, defined in Rust and read from the addon at runtime. *(Amended in PR 1: no generator, so no staleness check.)*
   - **electron-vite:** explicit entries for the §2.2 layout, and `?modulePath` for the core host. The spike's config is empty and assumes `src/{main,preload,renderer}` (`spike/a electron.vite.config.ts:3-7`).
   - **Dev mode** loads a watch-built renderer over `typose://`. Vite's dev server on `http://localhost` is blocked by the network guard (`main/index.ts:25,48-50`).
   - **npm pins:** the spike's tested set (`spike/a package.json:15-21`), plus React 19.3.1 and react-aria-components 1.22.1 (`spike/b package.json:14-17`), `@vitejs/plugin-react` 6.1.2, and `@axe-core/playwright` and `axe-core` 4.14.0 (`:21-24`).
@@ -374,7 +374,7 @@ Each PR's tests land in that PR, and every PR extends C4's table to what it adds
   - Files over 2^53−1 bytes are refused too (`spike/c spike-node/src/lib.rs:145,159`).
 - `virtual-list.ts` resets the drag gate on `pointercancel` and `blur` (plan A:3623).
 - CSP becomes a `typose://` response header instead of a meta tag (`spike/a index.html:5`).
-- The `TYPOSE_*` env hooks (`main/index.ts:10,20,80-90`) are split. Read-only measurement hooks ship, validated (plan §5); behaviour-changing ones live only in the `test-hooks` build (m8).
+- The `TYPOSE_*` env hooks (`main/index.ts:10,20,80-90`) are split. Read-only measurement hooks ship, validated (plan §5); behaviour-changing ones live only in the `test-hooks` build (m8). *(Amended in PR 1: PR 1 ports none. The NetLog and the profile use Chromium's own `--log-net-log` and `--user-data-dir` switches, and the file to open comes from argv. The measurement hooks arrive with PR 3's instruments, so C4's env table is empty until then.)*
 - React 19 renders the title-bar region and the card frame, so startup measures the real chrome cost (packet:524).
 - Raw's semantics, which neither §6.1 nor the brief defines: a labelled, focusable region with an `aria-hidden` gutter (proposal, plan §7).
 
@@ -384,7 +384,7 @@ Each PR's tests land in that PR, and every PR extends C4's table to what it adds
 - **`npm run check`** is green (C10).
 - **e2e:**
   - UTF-8, Windows-1252 and UTF-16LE/BE fixtures display text equal to the reference decode;
-  - End reaches the last line of a 1 GiB file;
+  - Ctrl+End reaches the last line of a 1 GiB file (End is horizontal, per PR 1's scope; amended in PR 1);
   - the wheel moves 1:1 in logical mode;
   - on a line wider than the viewport, horizontal scrolling brings text beyond the viewport's width into view (its bounding box lies inside the viewport);
   - the NetLog assertion is clean.
@@ -399,7 +399,7 @@ Each PR's tests land in that PR, and every PR extends C4's table to what it adds
   - Caches for cargo, npm and the Electron binary.
   - `paths-ignore` for docs-only changes (`docs/**`, `*.md`).
   - `concurrency` with `cancel-in-progress: true` per ref.
-  - Platform-independent steps (fmt, lint and the range staleness check) run on Linux only.
+  - Platform-independent steps (fmt and lint) run on Linux only. (PR 1 dropped the range staleness check: there's no generated table.)
   - **If the quota runs out,** the $0 limit pauses CI, and gated merges wait until it resets or Zack changes the policy. There's no automatic downgrade of the macOS job.
 - **Artifacts and storage [Z61]:**
   - GitHub Free includes 500 MB of artifact storage plus a separate cache allowance (`reply3.md:61`, citing GitHub's docs; not re-fetched here).
@@ -415,7 +415,6 @@ Each PR's tests land in that PR, and every PR extends C4's table to what it adds
 - **Additions to the steps:**
   - `cargo fmt --check` and `clippy -D warnings`;
   - lint on Linux, with a linter that doesn't need the TS compiler API (proposal: oxlint). TS 7.0.2 ships no `createSourceFile` (`m1rev` P4); typescript-eslint is used only if it's first verified on TS 7;
-  - the range staleness check;
   - failure-artifact upload.
 - Toolchain pins. `LICENSE-MIT` and `LICENSE-APACHE` [Z27].
 
@@ -680,6 +679,13 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 **Amendment rule:**
 - Contracts are acceptance targets for the PRs that own them. When implementation shows a mechanism or test detail is wrong or over-built, the owning PR amends the plan, states why, and its review checks the amendment.
 - Z-decisions, 🔒 requirements and qualification gates can't be weakened by an implementer amendment.
+
+**PR 1's amendments (mechanisms only; no Z-decision, 🔒 requirement or gate changes):**
+- **C4's types and range table.** `ts-rs` plus a generated `[min, max]` file and a `git diff --exit-code` check became napi-rs's typegen plus a table read from the addon at runtime. *Why:* the napi objects *are* what crosses the wire, so the addon's `index.d.ts` already is the Rust-defined protocol type (§3.4's requirement: defined in Rust, exported to TypeScript, unable to drift). A second typegen would describe the same structs, and a runtime table has no copy to go stale.
+- **The `test-hooks` addon** moves to PR 5. *Why:* PR 1 has no behaviour-changing hook, so it would be an identical second build.
+- **No `TYPOSE_*` hooks in PR 1.** *Why:* Chromium's `--log-net-log` and `--user-data-dir` switches and argv cover what the e2e needs; the measurement hooks belong to PR 3's instruments.
+- **"End reaches the last line" became Ctrl+End.** *Why:* PR 1's scope gives Home/End to horizontal scrolling, and §6 ships Ctrl+Home/End. The gate (the last line of 1 GiB is reachable) is unchanged.
+- **`electron-builder` (PR 3) and `axe-core`/`@axe-core/playwright` (PR 7)** are installed, at the listed pins, by the PRs that use them. *Why:* PR 1 neither packages nor runs axe.
 
 **Implementer proposals Zack may veto (one place):**
 1. **Memory-refused open state** (C1), shown in the card: "Can't open `<file>` · Typose's memory budget is full. Close a file, then Retry." Brief §7.9 has no such state yet.

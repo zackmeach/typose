@@ -1,0 +1,70 @@
+//! Plan C4: a caller-controlled number crosses every boundary as a JS number (`f64` in napi, never `u32` or
+//! `i64`, which wrap, truncate or turn NaN into 0) and is checked to be a finite integer within its declared
+//! range before any conversion. It's never clamped or wrapped.
+use crate::doc::MAX_SAFE;
+use crate::pages::MAX_ITEMS;
+
+/// Every numeric protocol field and its inclusive range. The core host checks requests against this same table,
+/// which it reads through the addon, so the two sides can't drift.
+pub const RANGES: [(&str, u64, u64); 5] = [
+    ("id", 1, MAX_SAFE),       // a request id
+    ("protocol", 0, MAX_SAFE), // the handshake's protocol version
+    ("doc", 1, MAX_SAFE),      // a document id
+    ("start", 0, MAX_SAFE),    // a line number
+    ("count", 1, MAX_ITEMS as u64),
+];
+
+/// `field`'s inclusive range. Panics on a field missing from `RANGES`, which is a bug, not input.
+pub fn range(field: &str) -> (u64, u64) {
+    let (_, min, max) = RANGES.iter().find(|r| r.0 == field).unwrap_or_else(|| panic!("no range for {field}"));
+    (*min, *max)
+}
+
+/// `x` as an integer, if it's a finite whole number within `field`'s range. The error names the field.
+pub fn int(field: &str, x: f64) -> Result<u64, String> {
+    let (min, max) = range(field);
+    // Both bounds are at most 2^53 − 1, so they're exact as f64 and the cast below is exact too.
+    if x.is_finite() && x.fract() == 0.0 && x >= min as f64 && x <= max as f64 {
+        Ok(x as u64)
+    } else {
+        Err(format!("{field} must be an integer in [{min}, {max}], not {x}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// C4's table: each field against the hostile values, plus min, max and max + 1.
+    #[test]
+    fn every_field_takes_only_integers_in_its_range() {
+        let two32 = 4_294_967_296f64;
+        for (field, min, max) in RANGES {
+            let (min, max) = (min as f64, max as f64);
+            let cases = [
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                -1.0,
+                0.5,
+                two32,
+                two32 + 1.0,
+                2f64.powi(53),
+                1e12,
+                min,
+                max,
+                max + 1.0,
+            ];
+            for x in cases {
+                let valid = x.is_finite() && x.fract() == 0.0 && (min..=max).contains(&x);
+                match int(field, x) {
+                    Ok(n) => assert!(valid && n as f64 == x, "{field} accepted {x}"),
+                    Err(e) => assert!(!valid && e.starts_with(field), "{field} refused {x}: {e}"),
+                }
+            }
+            assert!(int(field, min).is_ok() && int(field, max).is_ok() && int(field, max + 1.0).is_err());
+        }
+        assert_eq!(int("count", 1e12), Err("count must be an integer in [1, 1024], not 1000000000000".into()));
+        assert!(int("start", 2f64.powi(53)).is_err()); // past MAX_SAFE: not exact in JavaScript
+    }
+}

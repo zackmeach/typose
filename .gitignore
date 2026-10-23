@@ -1,0 +1,18 @@
+# Build outputs
+node_modules/
+app/out/
+core/target/
+core/typose-node/*.node
+core/typose-node/index.js
+core/typose-node/index.d.ts
+test-results/
+playwright-report/
+
+# Generated fixtures and logs
+.fixtures/
+*.netlog.json
+
+# Research inputs: local only, never committed (spec header)
+astra-research.md
+fable-research.md
+docs/research/

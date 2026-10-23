@@ -1,0 +1,43 @@
+# Windows and Linux on every non-draft PR (Z60). Drafts never run: hosted CI waits until Zack has verified that
+# the $0 spending limit stops billing (Z61, plan PR 1). PR 2 adds caches, fmt/clippy/lint and failure artifacts.
+name: pr
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    if: github.event.pull_request.draft == false
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Rust 1.96.0
+        run: rustup toolchain install 1.96.0 --profile minimal && rustup default 1.96.0
+      - run: npm ci
+      - name: napi build (before the typecheck, which reads the addon's generated types)
+        run: npm run build:addon
+      - name: cargo test
+        run: cargo test --locked
+        working-directory: core
+      - run: npm run check
+      - run: npm run build
+      - name: e2e and the NetLog assertion (Linux, under xvfb, with the sandbox on)
+        if: runner.os == 'Linux'
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          xvfb-run -a npm run e2e
+      - name: e2e and the NetLog assertion (Windows)
+        if: runner.os == 'Windows'
+        run: npm run e2e

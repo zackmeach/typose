@@ -1,0 +1,30 @@
+# macOS on merges to main only, while the repo is private (Z60). A red run is fixed in the next PR.
+name: main-macos
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Rust 1.96.0
+        run: rustup toolchain install 1.96.0 --profile minimal && rustup default 1.96.0
+      - run: npm ci
+      - name: napi build (before the typecheck, which reads the addon's generated types)
+        run: npm run build:addon
+      - name: cargo test
+        run: cargo test --locked
+        working-directory: core
+      - run: npm run check
+      - run: npm run build
+      - name: e2e and the NetLog assertion
+        run: npm run e2e

@@ -1,0 +1,18 @@
+{
+  "name": "typose",
+  "productName": "Typose",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT OR Apache-2.0",
+  "main": "out/main/index.js",
+  "scripts": {
+    "build": "electron-vite build",
+    "start": "electron-vite preview"
+  },
+  "dependencies": {
+    "react": "19.3.1",
+    "react-aria-components": "1.22.1",
+    "react-dom": "19.3.1",
+    "typose-node": "0.0.0"
+  }
+}
