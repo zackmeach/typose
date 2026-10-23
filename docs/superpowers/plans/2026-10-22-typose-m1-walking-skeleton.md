@@ -397,9 +397,9 @@ Each PR's tests land in that PR, and every PR extends C4's table to what it adds
 - **Triggers [Z60]:** unchanged from PR 1. A macOS-only break surfaces after merge. PR 3's macOS package and the macOS checks in PRs 7 and 8 run in that job, and a red macOS run is fixed in the next PR.
 - **Minutes [Z61]:** GitHub Free's included minutes, with the $0 spending limit. Windows minutes count 2× and macOS 10×.
   - Caches for cargo, npm and the Electron binary.
-  - `paths-ignore` for docs-only changes (`docs/**`, `*.md`).
+  - `paths-ignore` for docs-only changes (`docs/**`, `*.md`). *(Amended in PR 2: `*.md` is root-level, and a PR is judged on its whole diff; plan §7.)*
   - `concurrency` with `cancel-in-progress: true` per ref.
-  - Platform-independent steps (fmt and lint) run on Linux only. (PR 1 dropped the range staleness check: there's no generated table.)
+  - Platform-independent steps (fmt and lint) run on Linux only. (PR 1 dropped the range staleness check: there's no generated table.) *(PR 2 adds clippy for the Windows target there, plan §7.)*
   - **If the quota runs out,** the $0 limit pauses CI, and gated merges wait until it resets or Zack changes the policy. There's no automatic downgrade of the macOS job.
 - **Artifacts and storage [Z61]:**
   - GitHub Free includes 500 MB of artifact storage plus a separate cache allowance (`reply3.md:61`, citing GitHub's docs; not re-fetched here).
@@ -421,7 +421,7 @@ Each PR's tests land in that PR, and every PR extends C4's table to what it adds
 **Acceptance:**
 - The Windows and Linux jobs are green on the PR, and the macOS job is green on the merge.
 - A planted fmt error, a clippy warning, a type error and a test-only external request (caught by NetLog) each fail their job.
-- A docs-only change triggers no run, and a second push cancels the first push's run.
+- A docs-only change triggers no run, and a second push cancels the first push's run. *(A docs-only PR, or a docs-only push to `main`; amended in PR 2, plan §7.)*
 - A failing run uploads its evidence with the retention set.
 
 ### PR 3 · Packaged build, fuses and the minimal instruments (large, high: security and instrument validity)
@@ -690,6 +690,15 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 **Amendments from the first macOS run (main-macos run 39977019396, on PR 1's merge):**
 - **C9's `forcefullyCrashRenderer()` case** expects `crashed` on Windows and Linux and `killed` on macOS. *Why:* Electron reports the forced crash as `killed` on macOS. The gate is unchanged: the four controlled failures stay told apart by the log and exit status alone.
 - **`main-macos.yml` also takes `workflow_dispatch`.** *Why:* a macOS fix can be run on its branch before merge. The automatic triggers stay Z60's.
+
+**PR 2's amendments (mechanisms only; no Z-decision, 🔒 requirement or gate changes):**
+- **"A docs-only change triggers no run" means a docs-only PR, or a docs-only push to `main`.** GitHub applies a `pull_request` path filter to the PR's whole diff against its base, so a docs-only push to a PR that changes code still runs, as it should: the head moved. *Why:* that's GitHub's rule, not a choice. PR 2 shows the push case on `main-macos.yml`'s filter (a reverted probe commit, its job skipped); the first docs-only PR after PR 2 shows the PR case.
+- **`*.md` matches root-level Markdown only** (GitHub's `*` doesn't cross `/`); `docs/**` covers the docs tree. *Why:* Typose's own tests will carry Markdown inputs under `app/`, `core/` and `e2e/`, and `**/*.md` would let a fixture-only PR skip CI.
+- **Clippy also checks `x86_64-pc-windows-msvc`, from Linux.** *Why:* clippy runs on Linux only, so `cfg(windows)` code, such as §3.3's pipe and device refusals in `store.rs`, would never be linted. The cross-check lints it at Linux's rate.
+- **Within a job, a step runs when what it needs succeeded,** not only when every earlier step did; the job still fails. *Why:* one run reports every failure (fmt, both clippies and oxlint; `cargo test`, `check` and the e2e) instead of one per push.
+- **Every job is time-boxed** (`timeout-minutes`: lint 15, test 25, macOS 20, and 15 for the e2e step). *Why:* GitHub's default is 360 minutes, so one hung macOS job would bill 3,600 of the 2,000 included minutes.
+- **Rust is pinned in a root `rust-toolchain.toml`** (1.96.0, minimal profile, with rustfmt and clippy), which rustup reads locally and in CI. *Why:* one place; at the root it also covers `npm run fixtures`, which runs cargo from the root.
+- **The Electron binary is fetched in its own step** (`npx --no install-electron`), from a cache keyed per lockfile and OS. *Why:* Electron 44 installs no binary at `npm ci`; the first `require('electron')` downloads it, which would otherwise land inside the e2e step.
 
 **Implementer proposals Zack may veto (one place):**
 1. **Memory-refused open state** (C1), shown in the card: "Can't open `<file>` · Typose's memory budget is full. Close a file, then Retry." Brief §7.9 has no such state yet.
