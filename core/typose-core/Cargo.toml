@@ -21,4 +21,4 @@ windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Stor
 proptest = "=1.12.0"
 
 [target.'cfg(windows)'.dev-dependencies]
-windows-sys = { version = "=0.61.2", features = ["Win32_System_IO", "Win32_System_Ioctl"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Security", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Pipes"] }

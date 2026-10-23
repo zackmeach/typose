@@ -14,6 +14,25 @@ test('the NetLog shows no network activity', async () => {
   await l.win.locator('.vl-scroller').focus()
   for (const key of ['PageDown', 'PageDown', 'Control+End', 'Control+Home', 'End']) await l.win.keyboard.press(key)
   expect(await l.app.evaluate(({ crashReporter }) => crashReporter.getUploadToServer())).toBe(false)
+  expect(await l.app.evaluate(({ session }) => session.defaultSession.isSpellCheckerEnabled())).toBe(false)
+  // Hunspell (Linux for every language, Windows for those it lacks, such as `sh`; never macOS) fetches dictionaries
+  // through a loader the network guard doesn't see. Ask for one: nothing may serve it, and the NetLog judges where it went.
+  if (process.platform !== 'darwin') {
+    const fetched = await l.app.evaluate(
+      ({ session }) =>
+        new Promise<string>((done) => {
+          // Linux's startup en-US load may still be settling; wait for sh's own outcome.
+          session.defaultSession.on('spellcheck-dictionary-download-success', (_e, lang) => {
+            if (lang === 'sh') done('success')
+          })
+          session.defaultSession.on('spellcheck-dictionary-download-failure', (_e, lang) => {
+            if (lang === 'sh') done('failure')
+          })
+          session.defaultSession.setSpellCheckerLanguages(['sh'])
+        })
+    )
+    expect(fetched).toBe('failure')
+  }
   await finish(l)
   const second = await launch({ file: files[1], netlog: logs[1] })
   await waitIndexed(second.win)

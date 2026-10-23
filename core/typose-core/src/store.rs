@@ -46,33 +46,104 @@ impl std::fmt::Display for StoreError {
     }
 }
 
-/// Spec §3.3: device and special files are refused before anything opens them. Opening `\\.\pipe\…` connects
-/// to the pipe's server, and opening a FIFO blocks. `Ok(Some(why))` is a refusal; `Err` is the path's own error
-/// (missing, permission denied).
+/// Spec §3.3 🔒: device and special files are refused before anything opens them. Opening a named pipe, or on
+/// Windows even stat-ing one, connects to its server, and opening a FIFO blocks. `Ok(Some(why))` is a refusal;
+/// `Err` is the path's own error (missing, permission denied).
 pub fn refusal(path: &Path) -> io::Result<Option<&'static str>> {
     #[cfg(windows)]
-    if windows_device_path(path) {
-        return Ok(Some("a device path"));
+    if let Some(why) = windows::refusal(path)? {
+        return Ok(Some(why));
     }
-    // A stat. On Unix it opens nothing; on Windows it opens a query handle, which can reach a device now only
-    // through a link, and `open_regular` checks the handle it reads through.
+    // A stat. On Unix it opens nothing. On Windows it opens a query handle, once `windows::refusal` has followed
+    // every link in the path to a location that isn't a device.
     Ok((!std::fs::metadata(path)?.is_file()).then_some("not a regular file"))
 }
 
-/// `\\.\`, `\\?\` and `\??\` paths (either slash), and the reserved device names in any directory.
 #[cfg(windows)]
-fn windows_device_path(path: &Path) -> bool {
-    let full = path.as_os_str().to_string_lossy().replace('/', "\\");
-    if [r"\\.\", r"\\?\", r"\??\"].iter().any(|p| full.starts_with(p)) {
-        return true;
+mod windows {
+    use std::io;
+    use std::path::{Component, Path, PathBuf, Prefix};
+
+    /// Links followed before giving up (Windows itself stops at 63).
+    const MAX_LINKS: usize = 32;
+
+    /// First by path form, then through every link in the path, following none of them:
+    /// - the form: `\\.\`, `\\?\` and `\??\` paths (either slash), UNC shares that reach pipes and mailslots, and
+    ///   reserved device names;
+    /// - the links: each component in turn, through `symlink_metadata`, which opens a link itself and never its
+    ///   target. A junction's or symlink's target gets the same form check before anything past the link is
+    ///   touched, so a link into `\??\pipe\` is refused.
+    pub fn refusal(path: &Path) -> io::Result<Option<&'static str>> {
+        // The raw form first: `absolute` would read `\??\C:\x` as a rooted path on the current drive.
+        if let Some(why) = form(path) {
+            return Ok(Some(why));
+        }
+        let mut path = std::path::absolute(path)?; // GetFullPathNameW: string work, no file access
+        for _ in 0..MAX_LINKS {
+            if let Some(why) = form(&path) {
+                return Ok(Some(why));
+            }
+            match first_link(&path)? {
+                Some(resolved) => path = std::path::absolute(resolved)?,
+                None => return Ok(None),
+            }
+        }
+        Ok(Some("too many links"))
     }
-    let Some(name) = path.file_name() else { return false };
-    let name = name.to_string_lossy();
-    let stem = name.split('.').next().unwrap_or_default().trim_end_matches(' ').to_ascii_uppercase();
-    let numbered = stem.strip_prefix("COM").or_else(|| stem.strip_prefix("LPT"));
-    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" | "CLOCK$")
-        || numbered
-            .is_some_and(|n| matches!(n, "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"))
+
+    fn form(path: &Path) -> Option<&'static str> {
+        let full = path.as_os_str().to_string_lossy().replace('/', "\\");
+        if [r"\\.\", r"\\?\", r"\??\"].iter().any(|p| full.starts_with(p)) {
+            return Some("a device path");
+        }
+        if let Some(Component::Prefix(prefix)) = path.components().next()
+            && let Prefix::UNC(_, share) = prefix.kind()
+            && pipe_share(&share.to_string_lossy())
+        {
+            return Some("a pipe or mailslot share");
+        }
+        reserved(path).then_some("a device name")
+    }
+
+    /// `\\host\pipe\…` and `\\host\mailslot\…` reach pipes and mailslots on any host, this one included, and
+    /// `IPC$` is the share they travel over. Windows drops a component's trailing dots and spaces.
+    fn pipe_share(share: &str) -> bool {
+        let share = share.trim_end_matches(['.', ' ']);
+        ["pipe", "mailslot", "IPC$"].iter().any(|s| share.eq_ignore_ascii_case(s))
+    }
+
+    /// The reserved device names, in any directory, whatever follows them: `NUL`, `nul.txt`, `NUL:`, `con :x`.
+    fn reserved(path: &Path) -> bool {
+        let Some(name) = path.file_name() else { return false };
+        let name = name.to_string_lossy();
+        let stem = name.split(['.', ':']).next().unwrap_or_default().trim_end_matches(' ').to_ascii_uppercase();
+        let numbered = stem.strip_prefix("COM").or_else(|| stem.strip_prefix("LPT"));
+        matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" | "CLOCK$")
+            || numbered.is_some_and(|n| {
+                matches!(n, "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³")
+            })
+    }
+
+    /// `path` with its first link replaced by the link's target, or `None` when no component is a link. A
+    /// component past a link is never touched: it's checked again under the target.
+    fn first_link(path: &Path) -> io::Result<Option<PathBuf>> {
+        let mut walked = PathBuf::new();
+        let mut components = path.components();
+        while let Some(component) = components.next() {
+            walked.push(component);
+            if matches!(component, Component::Prefix(_) | Component::RootDir) {
+                continue;
+            }
+            // `is_symlink` is true for symlinks and junctions (name surrogates), not for placeholders like OneDrive's.
+            if std::fs::symlink_metadata(&walked)?.file_type().is_symlink() {
+                let target = std::fs::read_link(&walked)?;
+                // A relative target is relative to the link's directory; an absolute one replaces the whole path.
+                let base = walked.parent().unwrap_or(&walked);
+                return Ok(Some(base.join(target).join(components.as_path())));
+            }
+        }
+        Ok(None)
+    }
 }
 
 /// Marks an open refused because the handle isn't a regular file (`refusal` passed, then the path changed).
