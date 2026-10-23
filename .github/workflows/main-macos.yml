@@ -1,11 +1,18 @@
 # macOS on merges to main only, while the repo is private (Z60). A red run is fixed in the next PR.
 # `workflow_dispatch` lets a macOS fix be checked on its branch before merge (`gh workflow run main-macos.yml --ref <branch>`).
+# Hardened as pr.yml is (plan PR 2): macOS minutes bill 10x, so caches, a docs-only skip, a newer merge cancelling the
+# older run (its own run covers both), a time box, and bounded evidence only on failure.
 name: main-macos
 
 on:
   push:
     branches: [main]
+    paths-ignore: ['docs/**', '*.md'] # as pr.yml; for a push, GitHub judges only the pushed commits
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -13,20 +20,60 @@ permissions:
 jobs:
   test:
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Rust (the toolchain rust-toolchain.toml pins)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: core
+          cache-bin: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-      - name: Rust 1.96.0
-        run: rustup toolchain install 1.96.0 --profile minimal && rustup default 1.96.0
+          cache: npm
+      - name: Cache the Electron binary
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/electron
+          key: electron-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
       - run: npm ci
-      - name: napi build (before the typecheck, which reads the addon's generated types)
+      # Electron 44 installs no binary at `npm ci`; the first require('electron') fetches it. Fetch it here, from the
+      # cache when warm, so the e2e step times only the e2e.
+      - id: setup
+        name: Electron binary
+        run: npx --no install-electron
+      # From here each step needs only what it names, so a failure doesn't hide the steps after it.
+      - id: napi
+        name: napi build (before the typecheck, which reads the addon's generated types)
         run: npm run build:addon
       - name: cargo test
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: cargo test --locked
         working-directory: core
-      - run: npm run check
-      - run: npm run build
+      - name: npm run check
+        if: ${{ !cancelled() && steps.napi.outcome == 'success' }}
+        run: npm run check
+      - id: build
+        name: npm run build
+        if: ${{ !cancelled() && steps.napi.outcome == 'success' }}
+        run: npm run build
       - name: e2e and the NetLog assertion
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 15
         run: npm run e2e
+      # Failure evidence (plan C9): kept 5 days, for the orchestrator to copy into .evidence/m1/ci/ before it expires.
+      - name: Collect the failure evidence (bounded)
+        if: failure()
+        run: node .github/scripts/collect-evidence.mjs "${{ runner.temp }}/evidence"
+      - name: Upload the failure evidence
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: evidence-${{ runner.os }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/evidence
+          retention-days: 5
+          compression-level: 9
+          include-hidden-files: true
+          if-no-files-found: ignore
