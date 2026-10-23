@@ -363,7 +363,7 @@ Each PR's tests land in that PR, and every PR extends C4's table to what it adds
 - `netlog-assert.mjs`, `e2e/shell.e2e.ts` and `open.e2e.ts`.
 
 **Reworks:**
-- **Identity checks:** Raw reads go through `Document`, with one identity check (`FileId::of`) before and one after each `page()` or `piece()` call, not per line or chunk. *(Amended in PR 4: each check walks the path first, with its cost; plan §7.)*
+- **Identity checks:** Raw reads go through `Document`, with one identity check (`FileId::of`) before and one after each `page()` or `piece()` call, not per line or chunk. *(Amended in PR 4: one check, after the reads, which walks the path first; the cost is in plan §7.)*
   - Every chunk read still verifies its hash (§3.1).
   - Per-line checks would cost about 14.5 ms per 64 KiB page, against a < 3 ms fetch gate (`m1rev` P3, at about 24 µs per stat).
   - `spike/c`'s napi `Doc::open` used a bare `ByteStore` (`spike-node/src/lib.rs:72-75`), and only Markdown copy used `Document` (`:147-189`).
@@ -692,16 +692,20 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 - **C9's `forcefullyCrashRenderer()` case** expects `crashed` on Windows and Linux and `killed` on macOS. *Why:* Electron reports the forced crash as `killed` on macOS. The gate is unchanged: the four controlled failures stay told apart by the log and exit status alone.
 - **`main-macos.yml` also takes `workflow_dispatch`.** *Why:* a macOS fix can be run on its branch before merge. The automatic triggers stay Z60's.
 
-**PR 4's amendments (mechanisms only; no Z-decision, 🔒 requirement or gate changes):**
-- **Each identity check walks the path first.** Before `FileId::of` opens the path, the check before and the check after each `page()` or `piece()` run the open's route walk: the path form, the drive letter's target and every link in the path. Each component is read with `GetFileAttributesW`, which doesn't follow a link. *Why:* after the open, the path, a link in it or its drive letter can be swapped to reach a pipe, and on Windows the stat opens the path (PR 1's known limit 1). Change detection still stats the path (§3.3 🔒).
-  - *Cost,* at the napi layer: 3,000 random 64 KiB pages (328 lines of 200 B each) on an indexed 256 MiB file, at an 11-component path, in three interleaved runs before and after. p50 went from 1.85–1.92 to 2.49–2.58 ms, and p95 from 2.27–2.38 to 2.97–3.57 ms. The walk alone takes 113 µs p50 on a 6-component path.
-  - That puts §10.2's 64 KiB fetch gate (p95 < 3 ms, round trip) at risk. Measuring it on the fused build is PR 10+'s. The first candidate there is the page path's own cost, which is larger: each line copies a 64 KiB read window, about 21 MB for such a page.
+**PR 4's amendments (mechanisms only; no Z-decision or gate change. One departs from a 🔒 text's wording, flagged below):**
+- **One identity check per `page()` or `piece()`, after the reads, and it walks the path first.** PR 1 checked before and after.
+  - The check runs the open's route walk (the path form, the drive letter's target and every link in the path) before `FileId::of` opens the path. Each component is read with `GetFileAttributesW`, which doesn't follow a link.
+  - *Why the walk:* after the open, the path, a link in it or its drive letter can be swapped to reach a pipe, and on Windows the stat opens the path (PR 1's known limit 1). Change detection still stats the path (§3.3 🔒). The stat's open asks for identification-level impersonation only, so a swap that wins the race between the walk and the stat can't let a pipe server impersonate Typose.
+  - *Why after only:* the reads go through the open handle, never the path. The check compares the path with the identity taken at open, not with the previous check, so any change before or during the reads fails it, and nothing those reads returned is shown. A check before the reads would catch nothing more, at twice the cost.
+  - *For Zack's attention:* spec §3.1 and brief §7.9 say "before and after every lazy read". What's shown and copied is unchanged (every byte still passes a check against the open-time identity and its chunk hash), but the wording differs from the 🔒 text.
+  - *Cost,* at the napi layer: 3,000 random 64 KiB pages (328 lines of 200 B each) on an indexed 256 MiB file, at an 11-component path, in three interleaved runs. Main's addon (no walk, a stat before and after): p50 1.80–1.86 ms, p95 2.20–2.32 ms. A walk and stat before and after: p50 2.38–2.40, p95 2.91–3.03. After only: p50 2.09, p95 2.52–2.55.
+  - The first PR 10+ candidate for §10.2's 64 KiB fetch gate (p95 < 3 ms, round trip) is the page path's own cost, which is larger: for every line, `pages::cut` copies a 64 KiB read window (`pages.rs:103`), about 21 MB for a page of 200-byte lines.
 - **The index reads through a handle reopened from the document's** (`ReOpenFile` on Windows, `dup` on Unix), not through the path. *Why:* the same swap would otherwise connect the index's own open, and the reopened handle indexes the file the document actually has open.
 - **Stopping an index:** `index::build`'s progress callback returns whether to go on, once per block. The freeze half stops through it: when a page finds a change, or Reload supersedes the generation, the job ends at its next block. *For PR 5:* C6's cancel flag can return through the same callback, with no new parameter.
 
 **Implementer calls in PR 4 (brief gaps):**
 - Brief §5.1's "1MB" per line is 1 MiB: 16 pieces of 64 KiB, in C2's source bytes. A continuation is issued only while at least 4 bytes (the longest element) are left before the line's first MiB ends, so no piece is ever empty.
-- "Further pieces mount on demand": the first piece ends in a "↪ more" button. Activating it gives the line one row per piece, each fetched when it comes into view. Expanding every long line on its own would shift every row below whenever a page revealed one.
+- "Further pieces mount on demand": the first piece ends in a "↪ more" button. Activating it gives the line one row per piece, each fetched when it comes into view. Expanding every long line on its own would shift every row below whenever a page revealed one. Until it's expanded, a long line shows its first 64 KiB, where brief §5.1 says lines over 1MB "show their first 1MB" (Zack may veto).
 - "Empty file (0 bytes, or only whitespace)" is judged on the first chunk, so only for files up to 1 MiB. A bigger whitespace-only file shows its blank lines, since telling would take a full scan.
 - Every freeze shows brief §7.9's "Changed on disk · Reload (Ctrl+R)" banner, with the reason in its tooltip. That includes an I/O error, which C6 freezes on too.
 
