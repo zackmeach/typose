@@ -1,6 +1,7 @@
 // Plan C8's frame instrument and its controls, on the packaged build over CDP, with accessibility on and off: a
-// 30 ms busy-wait during a scroll is long frames and no stall, 60 ms is a stall (during a scroll, and in the first
-// frame after a scrollbar jump), a control run is neither, and a jump whose target never renders fails.
+// 30 ms busy-wait during a scroll is a long frame covering it and no stall; 60 ms is a stall covering it, during a
+// scroll and in the first frame after a scrollbar jump; a control scroll has no stall and passes the frame rule; and
+// a jump whose target never renders fails.  Run: npm run package, then `npm run perf -- -g accessibility`.
 import { type CDPSession, type Page, expect } from '@playwright/test'
 import { writeFileSync } from 'node:fs'
 import { fixture, test, waitIndexed, waitOpen } from '../app'
@@ -23,7 +24,7 @@ async function traced(l: PackagedLaunch, drive: (page: Page, cdp: CDPSession) =>
   const page = l.page!
   const cdp = await page.context().newCDPSession(page)
   const from = cpuTimes()
-  await l.browser!.startTracing(page, { categories: [...CATEGORIES, ...(process.env.TRACE_EXTRA?.split(',') ?? [])] })
+  await l.browser!.startTracing(page, { categories: CATEGORIES })
   await drive(page, cdp)
   await page.waitForTimeout(500) // let the last input settle inside the trace
   const trace = await l.browser!.stopTracing()
@@ -80,39 +81,47 @@ async function jump(page: Page): Promise<void> {
   await page.mouse.up()
 }
 
-const covers = (stall: Span, busy: Span) => stall.from <= busy.from && stall.to >= busy.to
-
 for (const a11y of ['on', 'off'] as const) {
   test.describe(`accessibility ${a11y}`, () => {
     let l: PackagedLaunch
+    let hz: number
+    /**
+     * The span covers the injection: it runs past the injection's end, and the frame that opens it began before the
+     * injection did. A frame already in the pipeline when the main thread blocks still presents during the block (seen
+     * 3–12 ms in), and nothing begun after the block starts can present until it ends.
+     */
+    const covers = (span: Span & { began: number }, busy: Span) => span.to >= busy.to && span.began <= busy.from
+
     test.beforeEach(async () => {
       l = await launchPackaged({ cdp: true, file, args: [a11y === 'on' ? '--force-renderer-accessibility' : '--disable-renderer-accessibility'] })
       await waitOpen(l.page!)
       await waitIndexed(l.page!)
       await l.page!.locator('.vl-scroller').focus()
       await installBusy(l.page!)
+      hz = (await waitMarks(l, ['show'])).show.hz as number
     })
     test.afterEach(async () => {
-      const hz = (await waitMarks(l, ['show'])).show.hz
       await closePackaged(l)
-      test.info().annotations.push({ type: 'hz', description: String(hz) })
     })
     const keep = (name: string, r: { analysis: Analysis; busy: Span[]; load: number }) => {
       const { inputToPaint, ...a } = r.analysis
-      record(`frames:${name}:a11y-${a11y}`, { ...a, inputToPaintMaxMs: Math.max(0, ...inputToPaint.map((p) => p.ms)), busy: r.busy, load: r.load })
-      console.log(name, `a11y ${a11y}`, JSON.stringify({ frames: a.frames, long: a.long, stalls: a.stalls, never: a.neverPainted.length, busy: r.busy, raf: a.raf, load: r.load }))
+      record(`frames:${name}:a11y-${a11y}`, { ...a, hz, inputToPaintMaxMs: Math.max(0, ...inputToPaint.map((p) => p.ms)), busy: r.busy, load: r.load })
+      console.log(name, `a11y ${a11y}`, JSON.stringify({ hz, frames: a.frames, long: a.long, stalls: a.stalls, never: a.neverPainted.length, busy: r.busy, raf: a.raf, load: r.load }))
     }
 
-    test('control: a scroll with no injection has no long frame and no stall', async () => {
+    test('control: a scroll with no injection has no stall and passes the frame rule', async () => {
       const r = await traced(l, (_page, cdp) => scroll(cdp))
       keep('control', r)
-      expect(r.analysis.frames).toBeGreaterThan(50)
-      expect(r.analysis.longFrames).toBe(0)
+      expect(r.analysis.frames).toBeGreaterThan(250) // the 2 s gesture is judged as one demanded interval
       expect(r.analysis.stalls).toEqual([])
       expect(r.analysis.neverPainted).toEqual([])
+      // Plan C8 as amended: a loaded rig can miss a real refresh (its slice is in the trace), so the control is held
+      // to §10.2's ≥ 99% rule, and every long frame it registers is printed above. The injections below must each
+      // register a long frame or stall *covering* the injected window, which a stray long frame can't satisfy.
+      expect(r.analysis.longShare).toBeLessThanOrEqual(0.01)
     })
 
-    test('a 30 ms busy-wait during a scroll registers as long frames and no stall', async () => {
+    test('a 30 ms busy-wait during a scroll registers a long frame covering it, and no stall', async () => {
       const r = await traced(l, async (page, cdp) => {
         await busyOnWheel(page, 20, 30)
         await scroll(cdp)

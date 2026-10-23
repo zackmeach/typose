@@ -46,7 +46,7 @@ test.describe('startup controls', () => {
     ['show() delayed 300 ms after both ready-to-show and titlebarPainted', { TYPOSE_TEST_DELAY_SHOW: '300' }],
     ["React's mount delayed 300 ms", { TYPOSE_TEST_DELAY_MOUNT: '300' }]
   ] as const) {
-    test(`control: ${control} raises shellVisible by ≥ 300 ms`, async () => {
+    test(`control: ${control} puts shellVisible ≥ 300 ms after the delay starts`, async () => {
       if (!existsSync(join(APP_DIR, 'out-hooks/main/index.js'))) throw new Error('run `npm run build:hooks` first')
       const base: Sample[] = []
       const delayed: Sample[] = []
@@ -66,7 +66,7 @@ test.describe('startup controls', () => {
     })
   }
 
-  test("control: titlebarPresented is Chromium's first displayed frame in a startup trace", async () => {
+  test("control: titlebarPresented is one of the window's displayed frames in a startup trace", async () => {
     const trace = test.info().outputPath('startup-trace.json')
     const cats = 'disabled-by-default-display.framedisplayed,blink.user_timing'
     const l = await launchPackaged({ args: [`--trace-startup=${cats}`, `--trace-startup-file=${trace}`, '--trace-startup-duration=2', '--trace-startup-format=json'] })
