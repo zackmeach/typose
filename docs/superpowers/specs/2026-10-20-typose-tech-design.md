@@ -579,6 +579,7 @@ Nothing can expose DOM that doesn't exist (§14, D5). The design:
 
 ### 11.2 CI (GitHub Actions)
 - **Every push:** a matrix of `windows-latest`, `macos-latest` and `ubuntu-latest`, running `cargo fmt`, `clippy` and `test`; npm `typecheck`, `lint` and `vitest`; and a Playwright smoke run including the network check.
+  - **While the repo is private** [Z60, Z61]: Windows and Linux run on every PR, and macOS runs on merges to `main`, all within the free included minutes. The full matrix on every push applies once the repo is public.
 - **Tags:** the same, plus signed installers built and attached to a draft GitHub Release (§12).
 
 ---
