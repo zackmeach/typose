@@ -11,6 +11,7 @@ ipcRenderer.on('core-gone', (_event, { session }: { session: number }) => forwar
 const typose: TyposeApi = {
   launchPath: () => ipcRenderer.invoke('launch-path'),
   openDialog: () => ipcRenderer.invoke('open-dialog'),
-  mark: (name, t) => ipcRenderer.send('mark', name, t)
+  mark: (name, t) => ipcRenderer.send('mark', name, t),
+  onShown: (cb) => void ipcRenderer.once('shown', () => cb())
 }
 contextBridge.exposeInMainWorld('typose', typose)

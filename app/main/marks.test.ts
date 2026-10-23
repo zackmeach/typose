@@ -1,8 +1,8 @@
 // Plan C4 for what PR 3 adds: the preload's `mark(name, t)` and the TYPOSE_* hooks.
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { HOSTILE } from '../core-host/numbers'
 import { STARTUP_MARKS } from '../shared/protocol'
 import { delayHook, isMark, marksHook } from './marks'
@@ -24,23 +24,56 @@ describe('the test-hooks delays are whole ms in [0, 10000]', () => {
 })
 
 describe('TYPOSE_MARKS', () => {
-  it('is off when unset', () => expect(marksHook(undefined)).toBeNull())
-  for (const path of ['', 'marks.jsonl', './marks.jsonl']) it(`refuses the relative path "${path}"`, () => expect(marksHook(path)).toEqual({ refused: expect.any(String) }))
+  let dir: string
+  let logged: { event: string; data?: Record<string, unknown> }[]
+  const log = (event: string, data?: Record<string, unknown>) => void logged.push({ event, data })
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'typose-marks-'))
+    logged = []
+  })
+  afterEach(() => rmSync(dir, { recursive: true, force: true }))
+
+  it('is off when unset, and says nothing', () => {
+    expect(marksHook(undefined, log)).toBeUndefined()
+    expect(logged).toEqual([])
+  })
+
+  // Refused as strings, before anything touches the file system: a UNC path would connect over SMB (§7.3, Z43).
+  for (const path of ['', 'marks.jsonl', '\\\\server\\share\\marks.jsonl', '\\\\.\\pipe\\marks', '\\\\?\\C:\\marks.jsonl', '\\marks.jsonl', 'C:marks.jsonl'])
+    it(`refuses ${JSON.stringify(path)} on Windows, and logs why`, () => {
+      expect(marksHook(path, log, 'win32')).toBeUndefined()
+      expect(logged).toEqual([{ event: 'hook-refused', data: { hook: 'TYPOSE_MARKS', reason: expect.stringMatching(/drive path/) } }])
+    })
+  for (const path of ['', 'marks.jsonl', './marks.jsonl'])
+    it(`refuses the relative path ${JSON.stringify(path)} elsewhere`, () => {
+      expect(marksHook(path, log, 'linux')).toBeUndefined()
+      expect(logged[0].event).toBe('hook-refused')
+    })
+
+  it('refuses a path that exists and is not a regular file (a directory)', () => {
+    expect(marksHook(dir, log)).toBeUndefined()
+    expect(logged).toEqual([{ event: 'hook-refused', data: { hook: 'TYPOSE_MARKS', reason: expect.stringMatching(/regular file/) } }])
+  })
+
   it('appends one JSON line per mark, on the wall clock', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'typose-marks-'))
-    try {
-      const file = join(dir, 'marks.jsonl')
-      const mark = marksHook(file)
-      if (typeof mark !== 'function') throw new Error('expected a writer')
-      const before = Date.now()
-      mark('show', { hz: 60 })
-      mark('rawUsable', { t: 5 })
-      const lines = readFileSync(file, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
-      expect(lines[0]).toMatchObject({ mark: 'show', hz: 60 })
-      expect(lines[0].t).toBeGreaterThanOrEqual(before)
-      expect(lines[1]).toEqual({ mark: 'rawUsable', t: 5 })
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
+    const file = join(dir, 'marks.jsonl')
+    const mark = marksHook(file, log)!
+    const before = Date.now()
+    mark('show', { hz: 60 })
+    mark('rawUsable', { t: 5 })
+    const lines = readFileSync(file, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+    expect(lines[0]).toMatchObject({ mark: 'show', hz: 60 })
+    expect(lines[0].t).toBeGreaterThanOrEqual(before)
+    expect(lines[1]).toEqual({ mark: 'rawUsable', t: 5 })
+    expect(logged).toEqual([])
+  })
+
+  it('a failing write logs once, turns the hook off, and never throws', () => {
+    const file = join(dir, 'marks.jsonl')
+    const mark = marksHook(file, log)!
+    mkdirSync(file) // the path becomes a directory after the check
+    expect(() => mark('show')).not.toThrow()
+    expect(() => mark('rawUsable')).not.toThrow()
+    expect(logged.map((l) => l.event)).toEqual(['hook-failed'])
   })
 })

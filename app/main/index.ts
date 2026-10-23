@@ -7,13 +7,11 @@ import coreHostPath from '../core-host/index?modulePath'
 import { startLifecycle } from './lifecycle'
 import { delayHook, isMark, marksHook } from './marks'
 
+const mainStart = Date.now() // plan C8's first startup mark: read now, written once the hook is set up below
+
 // Plan C9: armed before anything else. Minidumps stay on this machine (spec §7.3).
 crashReporter.start({ uploadToServer: false })
 const log = startLifecycle()
-const hook = marksHook(process.env.TYPOSE_MARKS)
-if (hook && 'refused' in hook) log('hook-refused', { reason: hook.refused })
-const mark = typeof hook === 'function' ? hook : undefined
-mark?.('mainStart')
 // Plan C8's startup controls, compiled only into the test-hooks build: show() a set delay after both
 // ready-to-show and the title bar's paint, or delay React's mount.
 const showDelay = __TEST_HOOKS__ ? delayHook('TYPOSE_TEST_DELAY_SHOW', process.env.TYPOSE_TEST_DELAY_SHOW) : 0
@@ -23,6 +21,10 @@ let titlebarPainted: () => void = () => {}
 // No proxy resolution at all: with Windows' "Automatically detect settings" on, Chromium otherwise runs WPAD
 // (a DNS lookup for "wpad") at startup in every network context, though Typose requests nothing (spec §7.3).
 app.commandLine.appendSwitch('no-proxy-server')
+
+// Plan §5's read-only measurement hook. A refused path, or a write that fails, is logged and never stops startup.
+const mark = marksHook(process.env.TYPOSE_MARKS, log)
+mark?.('mainStart', { t: mainStart })
 
 protocol.registerSchemesAsPrivileged([
   { scheme: 'typose', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, codeCache: true } }
@@ -113,8 +115,11 @@ function createWindow(): BrowserWindow {
   })
   win.on('show', () => {
     log('window-shown')
-    // Plan C8: shellVisible is the later of this and the title bar's first presentation; runs record the refresh rate.
-    mark?.('show', { hz: screen.getDisplayMatching(win.getBounds()).displayFrequency })
+    // Plan C8: shellVisible is the title bar's first presentation after this; runs record the refresh rate. Under the
+    // hook, the page is told, so it can find that presentation if the title bar was presented while hidden.
+    if (!mark) return
+    mark('show', { hz: screen.getDisplayMatching(win.getBounds()).displayFrequency })
+    win.webContents.send('shown')
   })
   win.on('unresponsive', () => log('unresponsive'))
   win.on('responsive', () => log('responsive'))
@@ -145,7 +150,7 @@ void app.whenReady().then(() => {
   ipcMain.on('mark', (event, name: unknown, t: unknown) => {
     if (!fromApp(win, event) || !isMark(name, t)) return
     mark?.(name, { t })
-    if (name === 'titlebarPainted') titlebarPainted()
+    if (__TEST_HOOKS__ && name === 'titlebarPainted') titlebarPainted()
   })
   if (showDelay) {
     const painted = new Promise<void>((ok) => (titlebarPainted = ok))

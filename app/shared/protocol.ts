@@ -91,8 +91,18 @@ export interface TyposeApi {
   openDialog(): Promise<string | null>
   /** A startup mark at a wall-clock time (ms); main records it only under the TYPOSE_MARKS hook (plan C8). */
   mark(name: StartupMark, t: number): void
+  /** Called once, when main has shown the window; main only tells the page under the TYPOSE_MARKS hook (plan C8). */
+  onShown(cb: () => void): void
 }
 
 /** The renderer's startup marks (plan C8, §5). */
-export const STARTUP_MARKS = ['navigationStart', 'bundleEvaluated', 'titlebarPainted', 'titlebarPresented', 'openRequested', 'rawUsable'] as const
+export const STARTUP_MARKS = [
+  'navigationStart',
+  'bundleEvaluated',
+  'titlebarPainted',
+  'titlebarPresented',
+  'shownPresented',
+  'openRequested',
+  'rawUsable'
+] as const
 export type StartupMark = (typeof STARTUP_MARKS)[number]

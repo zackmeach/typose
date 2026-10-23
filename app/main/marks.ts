@@ -1,17 +1,48 @@
-// Plan §5's read-only measurement hook and plan C8's startup marks. TYPOSE_MARKS names an absolute file; main
-// appends each mark to it as a JSON line, on the wall clock. Without the hook, marks are dropped. Validated per C4.
-import { appendFileSync } from 'node:fs'
-import { isAbsolute } from 'node:path'
+// Plan §5's read-only measurement hook and plan C8's startup marks. TYPOSE_MARKS names a local file; main appends each
+// mark to it as a JSON line, on the wall clock. Without the hook, marks are dropped. Validated per C4: a refused or
+// failing path is logged and never stops startup.
+import { appendFileSync, statSync } from 'node:fs'
 import { isValid } from '../core-host/numbers'
 import { STARTUP_MARKS, type StartupMark } from '../shared/protocol'
+import type { Log } from './lifecycle'
 
 export type Mark = (mark: string, data?: Record<string, unknown>) => void
 
-/** The hook's writer, or why the hook is refused. Unset means off. */
-export function marksHook(path: string | undefined): Mark | { refused: string } | null {
-  if (path === undefined) return null
-  if (!isAbsolute(path)) return { refused: 'TYPOSE_MARKS must be an absolute path' }
-  return (mark, data = {}) => appendFileSync(path, JSON.stringify({ mark, t: Date.now(), ...data }) + '\n')
+/** Why TYPOSE_MARKS can't be used, or null. Checked as a string before anything touches the file system. */
+function refusal(path: string, platform: NodeJS.Platform): string | null {
+  if (platform === 'win32') {
+    // A drive path only: `\\server\share` would connect over SMB (spec §7.3, Z43), and `\\.\` and `\\?\` reach devices.
+    if (!/^[A-Za-z]:[\\/]/.test(path)) return 'must be a drive path (X:\\…), not UNC, device, drive-relative or relative'
+  } else if (!path.startsWith('/')) {
+    return 'must be an absolute path'
+  }
+  try {
+    const st = statSync(path, { throwIfNoEntry: false })
+    if (st && !st.isFile()) return 'names something other than a regular file'
+  } catch (e) {
+    return `can't be checked: ${String(e)}`
+  }
+  return null
+}
+
+/** The hook's writer, or undefined when unset or refused. The first failed write logs once and turns the hook off. */
+export function marksHook(path: string | undefined, log: Log, platform: NodeJS.Platform = process.platform): Mark | undefined {
+  if (path === undefined) return undefined
+  const refused = refusal(path, platform)
+  if (refused) {
+    log('hook-refused', { hook: 'TYPOSE_MARKS', reason: `TYPOSE_MARKS ${refused}` })
+    return undefined
+  }
+  let failed = false
+  return (mark, data = {}) => {
+    if (failed) return
+    try {
+      appendFileSync(path, JSON.stringify({ mark, t: Date.now(), ...data }) + '\n')
+    } catch (e) {
+      failed = true
+      log('hook-failed', { hook: 'TYPOSE_MARKS', error: String(e) })
+    }
+  }
 }
 
 /** A renderer mark is a known name at a wall-clock time in whole ms (C4: a safe integer, never clamped). */
