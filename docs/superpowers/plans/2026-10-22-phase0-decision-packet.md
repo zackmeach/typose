@@ -2,9 +2,11 @@
 
 **Completed 2026-10-22 by Codex at Zack's request.** Checked answers and their notes are the selected direction; the original context and leans are retained below. These are delegated decisions, not quotations from Zack or evidence that a gate has passed.
 
-**Follow-through pending:** carry the decisions into the spec's §0.3 as Z39 onward and the affected brief/plan sections. This edit fills this packet only. Preservation, commits, plan fixes and qualification runs have not been performed by filling it out. PC and Mac sessions remain unbooked.
+**Original handoff (historical):** this packet initially supplied decisions for later spec/plan propagation, preservation and commits. The recorded update below supersedes that initial pending status.
 
 **Recorded 2026-10-22:** spec Draft 4 §0.4 (Z39–Z50) and brief revision 6 §0.5. On approving the follow-through, Zack also parked all screen-reader work until after launch ("park the reader work for an expansion opportunity, no voice work until after launch"). That is Z39, and it supersedes Q1's answer below and Z35.
+
+**Latest decisions:** the [checkpoint addendum](#checkpoint-addendum--conditional-go-to-m1-2026-10-22) below changes the sequence and milestone Mac-access choice. It supersedes conflicting earlier packet answers; propagation into Z38, Z50 and spec §13.1 remains for the implementation owner.
 
 **Baseline before these decisions (reported by the packet's author).**
 - **Plan A** (base + Spike A) is closed. It passed 3 review rounds, then the Z37 amendment passed 2 more.
@@ -521,3 +523,42 @@ Checked means **veto/reopen**, unlike Parts 1–3. Unchecked calls are accepted 
 - **Markdown index memory:** about 66–68 B per block on realistic Markdown, against Z34's 32 B target.
 - **React Aria's bundle:** about 1 MB minified, a cold-start question for spec §10.
 - **Screen readers in logical scrolling (P4):** a screen-reader-driven scroll-into-view on an off-screen cell may read as a proportional jump (×1.5 at 1M rows, ×80 at 50M). S05 of the screen-reader run is where it would show.
+
+---
+
+## Checkpoint addendum — conditional go to M1 (2026-10-22)
+
+**Decision authority:** Codex, on Zack's instruction to re-ground and make decisions (a)–(d). Grounded against repo `c557a4a`, spec Draft 4 through Z52, the B/C round-3 reviews and the agreed next-steps discussion in `<SP>\codex\reply2.md`. These decisions do not claim new measurements or completion of Plan B's in-flight lane.
+
+### (a) Change the Phase 0 sequence: yes
+
+Hold the checkpoint on the evidence already available and authorize a **conditional go to M1** despite the listed failed and pending gates. **Phase 0 is not qualified.** Finish and preserve B's in-flight result, freeze the spike evidence and record the outstanding findings; do not start another general spike review cycle as an entry condition for M1.
+
+Amend Z38, Z50 and §13.1 to separate the checkpoint's development authorization from qualification. Deferred gates remain failed, pending or explicitly parked, with dispositions in the milestone plan. Z49's measurement protocol stays unchanged. This authorizes implementation, not release or a declaration that the spikes passed all gates.
+
+### (b) Does the cold-start budget veto Electron? No
+
+Keep **Electron + Rust (Z25)**. Do not require a pre-M1 reboot campaign to decide the stack. Measure startup on the M1 product app, early enough to inform its implementation.
+
+The reported 410–460 ms warm result on a busy PC is a warning, not a valid cold-start result or evidence that another shell satisfies Typose's full requirements. Retain the **<200 ms PC / <400 ms Mac** targets. Qualification uses one fixed build/layout, launched first after each of five restarts on each reference platform; a second launch is not cold. Keep shell appearance separate from usable document content.
+
+A miss remains a miss and requires optimization or an explicit product-budget decision. It does not automatically discard Electron, weaken the target or become a pass. The startup risk is accepted for starting M1.
+
+### (c) Mac access for milestones: a Mac Zack controls
+
+Choose reliable, repeatable access to an **Apple-silicon Mac under Zack's control**, including permission to install the toolchain, retain builds and restart it. A long-term loan is sufficient; ownership is not required. Do not make repeated milestone qualification depend on ad hoc visits to a friend's machine.
+
+The friend's Mac may bridge an initial batch. This decision makes no purchase, selects no hardware model and asserts no access arrangement. M1 implementation may begin while access is arranged; Mac-dependent acceptance remains pending until measured. Record the chosen reference rig before its qualification runs and explain any baseline change from Z29.
+
+### (d) Carry the risks forward: accepted for the conditional go
+
+| Risk accepted | What this acceptance means |
+|---|---|
+| Startup is likely over budget | Cold startup remains unqualified; settle it on the M1 app under (b). |
+| Far jumps measured 55–103 ms with accessibility on | Retain Z52's 50 ms stall rule and the failing finding. Parking manual reader work does not exempt automated accessibility-mode performance. |
+| G4 has unexplained exits | Keep the incidents unresolved. A passing rerun does not erase them; a corresponding unexplained exit in the M1 baseline blocks M1 closure. |
+| CSV speed is not qualified | Keep Z46 and Z49. Neither the marginal run nor the faster non-qualifying review run settles the gate. |
+| Aggregate memory is unenforced until M1 | Working enforcement and tests remain an M1 exit requirement under Z47. C's block cap does not bound heading text or reference definitions; preserve that finding rather than presenting the cap as a safety guarantee. |
+| Real screen-reader validation is parked until after launch | Retain Z39. Keep automated semantics, keyboard/focus and accessibility-mode gates. Make no verified screen-reader-support claim before real-reader validation. |
+
+**Engineering ownership:** PR boundaries, product contracts, diagnostic implementation and the remaining gate-to-milestone assignments stay with the implementation owner. Preserve C's cap-validation finding alongside its memory finding. This addendum changes the decision record only; it does not implement the disposition plan, update spike refs or close any gate.
