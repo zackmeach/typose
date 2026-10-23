@@ -3,7 +3,7 @@
 - **Date:** 2026-10-20 · **Status:** Draft 4 (2026-10-22).
   - Draft 2 folded in the external review of Draft 1 (Astra, 2026-10-20); each finding and its resolution is in §16.
   - Draft 3 records Zack's Phase 0 decisions Z30–Z38 (§0.3) and updates the affected sections.
-  - Draft 4 records Zack's decisions Z39–Z50 (§0.4), from the Phase 0 decision packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`), and updates the affected sections. Z39 parks screen-reader validation until after launch and supersedes Z35.
+  - Draft 4 records Zack's decisions Z39–Z50 (§0.4), from the Phase 0 decision packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`), and updates the affected sections. Z39 parks screen-reader validation until after launch and supersedes Z35. Z51 and Z52 came later the same day, from Spike B's round-3 review.
 - **Implements:** the design brief `docs/superpowers/specs/2026-10-20-typose-design-brief.md` (revision 6). §14 lists the changes this spec asked of the brief; revision 4 applied them. Revision 5 records Z30–Z37. Revision 6 records the product-facing parts of Z39–Z50. Nothing in the brief is overridden silently.
 - **Inputs:**
   - Two independent research reports, `astra-research.md` and `fable-research.md` (repo root, local only, not committed).
@@ -59,6 +59,8 @@ The packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`) holds
 | Z48 | **CSV header detection** stays the bounded sniffer in v1.<br>• ⓘ's "First row is header" override is a Grid-milestone acceptance criterion. It's visible and reversible, recovers the first data record when detection is wrong, never edits source bytes, and recomputes record numbering consistently (§4.2). |
 | Z49 | **Gate-run protocol** for qualification timing (§10.3):<br>• Quiet machine: no other heavy work or agent lanes; the CPU under 10% for a minute before each timing run, with load recorded during it; Defender on.<br>• Automated warm runs, the operator-controlled cold-restart batch and manual checks run as separate batches.<br>• Every failed or invalid run is kept with its reason, never replaced by a clean rerun in the report. |
 | Z50 | **Mac gates are required to close Phase 0** (performance and trackpad), on the friend's Apple-silicon Mac [Z29], using the same preserved revisions, lockfiles and fixture definitions.<br>• If access or restart permission is unavailable, the affected gates stay pending and go to the checkpoint. Phase 0 never closes Windows-only silently, and warm samples never count as cold.<br>• Repeatable Mac access for later milestones is decided before M1 (§13.1). |
+| Z51 | **Rows follows the Grid's key model (Z40).** When Rows navigation owns focus:<br>• Shift+Space selects the row (the record), and Space doesn't page-scroll; Page Up/Down page.<br>• A focused child control keeps Space, and IME composition passes through.<br>Selection is a Rows-milestone acceptance test (M3); the spikes don't implement it (§6.1). |
+| Z52 | **A far jump is scrolling under §10.2's "no stall > 50ms" rule.** A far jump is a window replacement: a scrollbar jump, an Outline jump, or open-then-scroll.<br>• Spike B's G9 gains a jump case with accessibility on from launch.<br>• Spike B measured 55–103ms for these jumps with accessibility on (12ms with it off), almost all of it accessibility-tree serialization. So the case fails today, and that failure is a Phase 0 finding for the checkpoint.<br>• Bringing the jumps under budget, for example by replacing the window in smaller pieces, is milestone work (§10.2, §13.1). |
 
 ---
 
@@ -395,7 +397,7 @@ interface Lens {
 | Sidebar | React Aria `Tree` |
 | Grid | `role=grid` with `aria-rowcount`/`aria-colcount` (the true totals, or `-1` while indexing) and `aria-rowindex`/`aria-colindex` on every rendered row and cell. Roving focus, with the **focused row kept mounted** even when it scrolls out of view.<br>• The row-number column is column 1, so the first data column is announced as "column 2" with its name [Z32].<br>• Row-number cells show the source record number (1 = the first data record) [Z31].<br>• `aria-rowindex` stays positional, with the header row as row 1.<br>• Keys [Z40]: Shift+Space selects the row and Ctrl+Space the column; Page Up/Down page; Space doesn't page-scroll; a focused child control keeps Space, and IME composition passes through. |
 | Tree | `role=tree` with `aria-level`, `aria-setsize` and `aria-posinset` taken from the core's counts |
-| Rows | `role=treegrid` (expandable rows) |
+| Rows | `role=treegrid` (expandable rows). Keys follow the Grid's [Z51]: Shift+Space selects the row; Space doesn't page-scroll; a focused child control keeps Space. |
 | Rendered | Document semantics: real `h1–h6`, lists, tables and `main`. Heading navigation across the virtualized body uses §6.2. |
 | Transcript | `role=feed` of `article`s with `aria-setsize`/`aria-posinset`, turn headings and the role label as the accessible name |
 | Mermaid, KaTeX | The diagram iframe is labelled, and the source stays available. MathML output is used for math. |
@@ -532,7 +534,7 @@ Nothing can expose DOM that doesn't exist (§14, D5). The design:
 | First screen, fixture set ≤ 100MB, ready lens | < 50ms | < 100ms |
 | First screen, 1GiB/10GiB JSONL (Raw, Rows), warm cache | < 50ms | < 100ms |
 | Lens switch to a ready lens (+ the 90ms fade) | < 25ms | < 50ms |
-| Scrolling, any lens, during indexing | ≥ 99% of frames < 16.7ms, no stall > 50ms | same |
+| Scrolling, any lens, during indexing, including far jumps that replace the window, with accessibility mode on or off [Z52] | ≥ 99% of frames < 16.7ms, no stall > 50ms | same |
 | Viewport page fetch, 64KiB, round trip | p95 < 3ms | p95 < 3ms |
 | Index throughput, JSONL line index | ≥ 1 GB/s warm | ≥ 0.5 GB/s |
 | Index throughput, CSV record index (whole path; p50 of 30 warm release runs on the 100MiB and 1GiB CSV fixtures) [Z46] | ≥ 0.9 GB/s warm | ≥ 0.45 GB/s |
@@ -662,7 +664,8 @@ Sequence [Z38, amended by Z39]:
   - heading jumps, both through the Outline and through the screen reader's heading key, land on headings **outside** the mounted window (*a real reader's heading key is parked [Z39]; the Outline and a simulated heading key are gated automatically*);
   - 100 peek open/close cycles with zero focus loss;
   - nothing unreachable at 200% zoom;
-  - with accessibility on, ≤ 1% long frames during 10s of auto-scroll.
+  - with accessibility on, ≤ 1% long frames during 10s of auto-scroll;
+  - with accessibility on from launch, no stall > 50ms on a far jump (a scrollbar jump, an Outline jump, open-then-scroll) [Z52]. This fails today at 55–103ms, a Phase 0 finding.
 
 **Spike C: lossless source model, hostile input, non-locking handles**
 - **Build:**
@@ -687,7 +690,7 @@ Sequence [Z38, amended by Z39]:
 |---|---|---|
 | M1 | **Walking skeleton.** Repo, CI, security baseline (§7), core host + protocol, byte store and generations, the Raw lens on the virtualizer, title bars on Windows and macOS, single instance and CLI. | Open a 10GiB file into Raw within the §10.2 budgets, on an unsigned dev build (signing starts at M7, §15). Z34's aggregate accounting and enforcement, with a deterministic multi-document budget-exhaustion test [Z47] |
 | M2 | **Workspace.** Sidebar roots, pills, cards and splits, session restore, quick open, the command palette and command table, settings + `config.toml` + themes, the empty state. | Brief §3, §4.1–4.3, §7.8 and §7.10, verified against the canvas boards |
-| M3 | **Data lenses.** Grid, Rows, Table, JSON and YAML Tree, ⓘ and problems. | Brief §5.3–5.5 and §7.6–7.7; the Spike C gates as regression tests; the Grid's Shift+Space/Ctrl+Space selection [Z40] and the "First row is header" override [Z48] |
+| M3 | **Data lenses.** Grid, Rows, Table, JSON and YAML Tree, ⓘ and problems. | Brief §5.3–5.5 and §7.6–7.7; the Spike C gates as regression tests; the Grid's Shift+Space/Ctrl+Space selection [Z40], Rows' Shift+Space selection [Z51] and the "First row is header" override [Z48] |
 | M4 | **Markdown and links.** Rendered, callouts, Mermaid, KaTeX and Shiki, link resolution, the peek, hand-off. | Brief §4.4–4.6 and §5.2; the hostile-fixture network check; `data:` images within their caps, with refusals and zero network effects [Z43] |
 | M5 | **Transcript.** Both adapters, sidechains and branches. | Brief §5.4 against real Claude Code sessions |
 | M6 | **Find, go to, copy, print.** | Brief §7.4, §7.5 and §7.11 |

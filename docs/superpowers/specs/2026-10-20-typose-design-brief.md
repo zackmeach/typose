@@ -1,7 +1,7 @@
 # Typose — Design Brief (look, feel, experience)
 
 - **Date:** 2026-10-20 · **Revision:** 6 (2026-10-22).
-  - Revision 6 records the product-facing parts of Zack's decisions Z39–Z50 (§0.5). Screen-reader validation is parked until after launch, and supersedes Z35. It also covers the Grid keys, UTF-16 CSV/TSV, inline and network-path images, front matter, TSV quoting and header detection. The technical design logs the rest (Z41, Z46, Z47, Z49, Z50).
+  - Revision 6 records the product-facing parts of Zack's decisions Z39–Z50 (§0.5). Screen-reader validation is parked until after launch, and supersedes Z35. It also covers the Grid keys, UTF-16 CSV/TSV, inline and network-path images, front matter, TSV quoting and header detection. The technical design logs the rest (Z41, Z46, Z47, Z49, Z50). Z51 (Rows keys) and Z52 (far jumps under the scrolling budget) followed the same day.
   - Revision 5 records Zack's Phase 0 decisions Z30–Z37 (§0.4). They cover giant-Markdown behavior, grid record numbers, screen-reader navigation and testing, the memory-budget behavior, the YAML Tree ceiling and the Raw first-screen definition.
   - Revision 2 applied the fixes from the adversarial review (verdict: FIX-FIRST).
   - Revision 3 applies the validated layout critique (`docs/design/critique-2026-10-20.md`): no-wrap splits, sidebar auto-collapse, breadcrumb shrink order, a yellow tint instead of orange, the scrim/shadow tokens, the two density scales and inset focus rings.
@@ -86,6 +86,8 @@ The product-facing ones. The technical design's §0.4 holds all of Z39–Z50, an
 | Z44 | **Front matter** is recognized only at the start of a Markdown file, and only when it closes within the first 64KB. Anywhere else, or longer, it reads as ordinary Markdown. |
 | Z45 | **TSV honors double quotes** like CSV (not strict IANA TSV) (§5.3). |
 | Z48 | **Header detection** stays automatic in v1, and ⓘ's "First row is header" override is required at the Grid milestone: visible, reversible, and recovering the first record when detection is wrong (§5.3). |
+| Z51 | **Rows keys follow the Grid's:** Shift+Space selects the row, and Space doesn't page-scroll; Page Up/Down page (§7.4). |
+| Z52 | **A far jump counts as scrolling.** A scrollbar jump, an Outline jump or open-then-scroll must not stall over the scrolling budget, with accessibility mode on or off (§8.1). |
 
 ---
 
@@ -620,6 +622,7 @@ See §7.10.
   - **Ctrl+C copies TSV**, including the header row when whole columns are selected.
 - **Tree and Rows:**
   - Click a node or row to select it.
+  - In Rows, **Shift+Space selects the row** and Space doesn't scroll, as in the Grid [Z51].
   - Ctrl+C copies its **source text** (the raw line, for Rows).
 - **Go to line/row (Ctrl+G)** opens a small input where the find bar sits, and accepts a line number in Raw and Rendered or a row number in Grid and Rows.
 
@@ -714,7 +717,7 @@ See §7.10.
 | Budget | Target |
 |---|---|
 | **First screen, files ≤ 100MB** | **< 100ms in every *ready* lens [Z17]**, measured on a **named fixture set** (normal records up to 100MB per format).<br>"First screen" means the top of the file is rendered and scrollable. In Raw, it's the first bounded piece, visible and usable, with continuation available while scanning proceeds. A huge first line doesn't make Raw wait for the line's end [Z37]. Whole-file work (fold counts, sort, the Outline, value pills past row 1,000, full validation) completes **progressively in the background** and never blocks input. Until it's done, counts show `…`.<br>Markdown may render **provisionally** from the start of the file, then reconcile in place (a reference definition can sit at the end), keeping the reading position.<br>There is one file-backed architecture for every size. The 100MB line only decides which background work runs and which lenses unlock later. |
-| Scrolling | 60fps with no dropped frames, in any lens and at any file size (virtualized everywhere).<br>Beyond the engine's height cap, scrolling is **logical**: wheel, trackpad and keys move 1:1, and the scrollbar gives coarse positioning. |
+| Scrolling | 60fps with no dropped frames, in any lens and at any file size (virtualized everywhere).<br>Beyond the engine's height cap, scrolling is **logical**: wheel, trackpad and keys move 1:1, and the scrollbar gives coarse positioning.<br>A far jump (scrollbar, Outline, open-then-scroll) is held to the same standard, with accessibility mode on or off [Z52]. |
 | Lens switch | < 50ms + the 90ms cross-fade, **to a ready lens**. Switching to a lens that isn't ready yet shows the progress line at once. |
 | Cold start | **Shell visible < 400ms**, and **first restored lens content < 1s**.<br>Gated at half those values on Zack's PC, and at the full values on an Apple-silicon Mac (Z29). |
 | Memory | Files over 100MB are file-backed and indexed, never fully parsed into memory. |
