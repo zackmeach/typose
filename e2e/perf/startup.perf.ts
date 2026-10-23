@@ -37,8 +37,10 @@ async function startup(opts: LaunchOptions) {
     reason = (e as Error).message
   }
   const m = readMarks(l)
-  const exit = await closePackaged(l)
-  if (!reason && (exit.code !== 0 || exit.signal !== null)) reason = `the launch didn't quit cleanly: ${JSON.stringify(exit)}`
+  // A launch that had to be killed is this run's invalidity, never the batch's end: every sample is kept.
+  const exit = await closePackaged(l).catch((e: Error) => e)
+  if (exit instanceof Error) reason ??= `the launch didn't quit cleanly: ${exit.message}`
+  else if (!reason && (exit.code !== 0 || exit.signal !== null)) reason = `the launch didn't quit cleanly: ${JSON.stringify(exit)}`
   const at = (name: string) => (m[name] ? m[name].t - l.spawnedAt : NaN)
   const presentedBy = at('titlebarPresented') >= at('show') ? 'titlebarPresented' : 'shownPresented'
   const shellVisible = at(presentedBy)

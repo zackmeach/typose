@@ -52,8 +52,11 @@ export function record(key: string, value: Record<string, unknown>): void {
   appendFileSync(join(RESULTS, `m1-${hostname()}.jsonl`), JSON.stringify({ key, at: new Date().toISOString(), ...value }) + '\n')
 }
 
-/** Records a test's run once it has ended, with Playwright's verdict as its status and the failure as its reason. */
+/**
+ * Records a test's run once it has ended, with Playwright's verdict as its status and its failure as `testError`: the
+ * value's own `reason` (why a run is invalid) is a different fact, and neither overwrites the other.
+ */
 export function recordOutcome(info: TestInfo, key: string, value: Record<string, unknown>): void {
-  const reason = info.errors.map((e) => e.message?.split('\n')[0]).filter(Boolean).join('; ') || undefined
-  record(key, { status: info.status, reason, ...value })
+  const testError = info.errors.map((e) => e.message?.split('\n')[0]).filter(Boolean).join('; ') || undefined
+  record(key, { ...value, status: info.status, testError })
 }

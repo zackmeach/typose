@@ -44,6 +44,16 @@ describe('TYPOSE_MARKS', () => {
       expect(marksHook(path, log, 'win32')).toBeUndefined()
       expect(logged).toEqual([{ event: 'hook-refused', data: { hook: 'TYPOSE_MARKS', reason: expect.stringMatching(/drive path/) } }])
     })
+  for (const name of ['CON', 'con.jsonl', 'NUL', 'nul.', 'AUX.tar.gz', 'PRN .txt', 'COM1', 'com9.jsonl', 'LPT1', 'lpt9.log', 'COM¹'])
+    it(`refuses the reserved device name ${JSON.stringify(name)} as the file on Windows`, () => {
+      expect(marksHook(`C:\\typose-no-such-dir/sub\\${name}`, log, 'win32')).toBeUndefined()
+      expect(logged).toEqual([{ event: 'hook-refused', data: { hook: 'TYPOSE_MARKS', reason: expect.stringMatching(/reserved device/) } }])
+    })
+  for (const name of ['CONSOLE.jsonl', 'COM10.jsonl', 'marks.con', 'nul-marks.jsonl'])
+    it(`takes ${JSON.stringify(name)}: a device name only as part of the file name`, () => {
+      expect(marksHook(`C:\\typose-no-such-dir\\${name}`, log, 'win32')).toBeTypeOf('function')
+      expect(logged).toEqual([])
+    })
   for (const path of ['', 'marks.jsonl', './marks.jsonl'])
     it(`refuses the relative path ${JSON.stringify(path)} elsewhere`, () => {
       expect(marksHook(path, log, 'linux')).toBeUndefined()

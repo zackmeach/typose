@@ -39,8 +39,11 @@ export const test = base.extend<{ finishLaunches: void }>({
     // oxlint-disable-next-line no-empty-pattern -- Playwright reads fixture dependencies from this pattern
     async ({}, use) => {
       await use()
-      for (const l of running) await finish(l)
-      for (const cleanup of cleanups) await cleanup().catch(() => {}) // each removes itself, which a Set allows mid-loop
+      try {
+        for (const l of running) await finish(l)
+      } finally {
+        for (const cleanup of cleanups) await cleanup().catch(() => {}) // each removes itself, which a Set allows mid-loop
+      }
     },
     { auto: true }
   ]
