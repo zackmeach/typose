@@ -410,7 +410,7 @@ Each PR's tests land in that PR, and every PR extends C4's table to what it adds
 - **Stopping budget:** Zack verifies that the $0 limit stops billing rather than only alerting, or that free capacity is verified. The `gh` token has no `user` scope, so this is unverified here. It doesn't block local development, but hosted CI can't run until it's verified (PR 1).
 - **Measured minutes (PR 2's runs on 2026-10-23, replacing the estimate).** Billed means each job rounded up to the whole minute, then Windows ×2, Linux ×1 and macOS ×10.
   - **A PR's first run, with cold caches** (pr run 39981985343): Windows 5m46s (12 billed), Linux 3m02s (4) and lint 1m06s (2), so 18 billed.
-  - **A later push to the same PR, with warm caches** (pr run 39983589063, which ran every step): Windows 3m02s (8 billed), Linux 2m12s (3) and lint 54s (1), so 12 billed. The warm cache cut Windows' napi build from 84 s to 22 s and its `cargo test` from 91 s to 37 s.
+  - **A later push to the same PR, with warm caches** (pr run 39983589063, which ran every step): Windows 3m03s (8 billed), Linux 2m12s (3) and lint 54s (1), so 12 billed. The warm cache cut Windows' napi build from 84 s to 22 s and its `cargo test` from 91 s to 37 s.
   - **A macOS merge run** took 1m34s and 1m28s before PR 2's caches (main-macos runs 39977019396 and 39979583756), so 20 billed.
   - So a merged PR with ~3 runs costs about 18 + 12 + 12 + 20 ≈ 62 billed minutes, or about 32 merged PRs a month on the 2,000-minute quota (`reply3.md:61`). The estimate said 250 and 8.
   - A PR's first run is always cold: `main` runs only macOS, so Windows and Linux caches are saved on each PR's own ref, which other PRs can't read.
