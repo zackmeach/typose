@@ -3,7 +3,7 @@
 - **Date:** 2026-10-20 · **Status:** Draft 4 (2026-10-22).
   - Draft 2 folded in the external review of Draft 1 (Astra, 2026-10-20); each finding and its resolution is in §16.
   - Draft 3 records Zack's Phase 0 decisions Z30–Z38 (§0.3) and updates the affected sections.
-  - Draft 4 records Zack's decisions Z39–Z50 (§0.4), from the Phase 0 decision packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`), and updates the affected sections. Z39 parks screen-reader validation until after launch and supersedes Z35. Z51 and Z52 came later the same day, from Spike B's round-3 review. Z53–Z56 record the Phase 0 checkpoint: a conditional go to M1, with Phase 0 not qualified. Z57–Z59 settle M1's merge authority and closure rules, and Z60 the CI matrix.
+  - Draft 4 records Zack's decisions Z39–Z50 (§0.4), from the Phase 0 decision packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`), and updates the affected sections. Z39 parks screen-reader validation until after launch and supersedes Z35. Z51 and Z52 came later the same day, from Spike B's round-3 review. Z53–Z56 record the Phase 0 checkpoint: a conditional go to M1, with Phase 0 not qualified. Z57–Z59 settle M1's merge authority and closure rules, Z60 the CI matrix, and Z61 no spending until after launch.
 - **Implements:** the design brief `docs/superpowers/specs/2026-10-20-typose-design-brief.md` (revision 6). §14 lists the changes this spec asked of the brief; revision 4 applied them. Revision 5 records Z30–Z37. Revision 6 records the product-facing parts of Z39–Z50. Nothing in the brief is overridden silently.
 - **Inputs:**
   - Two independent research reports, `astra-research.md` and `fable-research.md` (repo root, local only, not committed).
@@ -69,6 +69,7 @@ The packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`) holds
 | Z58 | **M1 stays open while its Mac acceptance is pending** [Z55]. It doesn't close on Windows alone (§13.2). |
 | Z59 | **A missed cold-startup target blocks M1 closure** until it's fixed or Zack explicitly changes the budget [Z54] (§10.2, §13.2). |
 | Z60 | **CI on the private repo:** Windows and Linux run on every PR; macOS runs on merges to `main`, until the repo goes public (§11.2). |
+| Z61 | **No spending until after launch, once Typose is working.** Everything uses free resources:<br>• GitHub Free for the private repo. Actions stay within the included minutes, with a $0 spending limit, so overage pauses CI rather than billing.<br>• A loaned or borrowed Mac only [Z55]; nothing is bought.<br>• No paid subscriptions.<br>Consequence: §12.1's paid signing (Azure Trusted Signing, the Apple Developer Program) can't start before launch, so how the launch builds are signed is open (§15). |
 
 ---
 
@@ -734,8 +735,13 @@ Each item below changes the brief and needs Zack's acceptance. "Both" means both
 ---
 
 ## 15. Open questions
-1. **Repository:** GitHub org or name, and when it goes public (before or after M1)?
-2. **Signing spend:** when to start the Apple Developer ($99/yr) and Azure Trusted Signing (~$10/mo) subscriptions. Proposed: at M7, with unsigned dev builds before that.
+1. **Repository:** answered. It's `github.com/zackmeach/typose`, private until launch [Z60].
+2. **Signing spend:** Z61 rules out paid signing before launch. Open: how the launch builds are signed. Options:
+   - unsigned launch builds, with Windows SmartScreen and macOS Gatekeeper warnings, and no Homebrew cask until notarized;
+   - a free open-source signing route for Windows (e.g. SignPath Foundation's program, which requires a public repository);
+   - launch after the subscriptions start, once Typose is proven working.
+
+   Decide before M7.
 3. **Minimum OS versions:** proposed to be Electron's own floor at release time.
 4. **Crash reports:** local minidumps only, plus "Report an issue", which opens a prefilled GitHub issue in the browser at the user's click. Is that enough for v1?
 
