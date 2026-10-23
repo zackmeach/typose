@@ -323,6 +323,13 @@ mod tests {
                 "COM1",
                 "lpt9.log",
                 "CONIN$",
+                "NUL:",
+                "CON:",
+                "COM1:",
+                "CONIN$:",
+                r"C:\Windows\nul:stream",
+                r"\\localhost\mailslot\typose-no-such-slot",
+                r"\\localhost\IPC$\typose-no-such-pipe",
             ]
             .map(PathBuf::from),
         );
@@ -337,6 +344,184 @@ mod tests {
             })
             .collect();
         assert!(opened.is_empty(), "not refused: {opened:#?}");
+    }
+
+    /// A named-pipe server that can tell whether a client ever connected: in `PIPE_NOWAIT` mode
+    /// `ConnectNamedPipe` answers at once, `ERROR_PIPE_LISTENING` until a client comes.
+    #[cfg(windows)]
+    struct PipeServer {
+        handle: windows_sys::Win32::Foundation::HANDLE,
+        path: String,
+    }
+
+    #[cfg(windows)]
+    impl PipeServer {
+        fn new(name: &str) -> PipeServer {
+            use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+            use windows_sys::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
+            use windows_sys::Win32::System::Pipes::{CreateNamedPipeW, PIPE_NOWAIT, PIPE_TYPE_BYTE};
+            let path = format!(r"\\.\pipe\typose-core-{}-{name}", std::process::id());
+            let wide: Vec<u16> = path.encode_utf16().chain([0]).collect();
+            let mode = PIPE_TYPE_BYTE | PIPE_NOWAIT;
+            let handle =
+                unsafe { CreateNamedPipeW(wide.as_ptr(), PIPE_ACCESS_DUPLEX, mode, 1, 0, 0, 0, std::ptr::null()) };
+            assert_ne!(handle, INVALID_HANDLE_VALUE, "{}", io::Error::last_os_error());
+            let server = PipeServer { handle, path };
+            assert!(!server.connected()); // the first call starts listening
+            server
+        }
+
+        fn connected(&self) -> bool {
+            use windows_sys::Win32::Foundation::{
+                ERROR_NO_DATA, ERROR_PIPE_CONNECTED, ERROR_PIPE_LISTENING, GetLastError,
+            };
+            use windows_sys::Win32::System::Pipes::ConnectNamedPipe;
+            let ok = unsafe { ConnectNamedPipe(self.handle, std::ptr::null_mut()) };
+            let error = unsafe { GetLastError() };
+            assert!(ok == 0 && [ERROR_PIPE_LISTENING, ERROR_PIPE_CONNECTED, ERROR_NO_DATA].contains(&error), "{error}");
+            error != ERROR_PIPE_LISTENING
+        }
+
+        fn name(&self) -> &str {
+            &self.path[r"\\.\pipe\".len()..]
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for PipeServer {
+        fn drop(&mut self) {
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle) };
+        }
+    }
+
+    /// Makes `link` a directory junction (a mount point) to the NT path `target`, which needs no privilege.
+    #[cfg(windows)]
+    fn junction(link: &Path, target: &str) {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
+        use windows_sys::Win32::System::IO::DeviceIoControl;
+        use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
+        const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+        fs::create_dir(link).unwrap();
+        let flags = FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS;
+        let dir = OpenOptions::new().write(true).custom_flags(flags).open(link).unwrap();
+        let subst: Vec<u16> = target.encode_utf16().collect();
+        let names: Vec<u16> = subst.iter().copied().chain([0, 0]).collect(); // the target, then an empty print name
+        let mut buf = Vec::new();
+        buf.extend(IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+        buf.extend(((8 + 2 * names.len()) as u16).to_le_bytes()); // ReparseDataLength
+        buf.extend(0u16.to_le_bytes()); // Reserved
+        buf.extend(0u16.to_le_bytes()); // SubstituteNameOffset
+        buf.extend(((2 * subst.len()) as u16).to_le_bytes()); // SubstituteNameLength
+        buf.extend(((2 * subst.len() + 2) as u16).to_le_bytes()); // PrintNameOffset
+        buf.extend(0u16.to_le_bytes()); // PrintNameLength
+        buf.extend(names.iter().flat_map(|u| u.to_le_bytes()));
+        let mut returned = 0;
+        let (ptr, len, null) = (buf.as_ptr().cast(), buf.len() as u32, std::ptr::null_mut());
+        let no_overlap = std::ptr::null_mut();
+        let ok = unsafe {
+            DeviceIoControl(
+                dir.as_raw_handle() as _,
+                FSCTL_SET_REPARSE_POINT,
+                ptr,
+                len,
+                null,
+                0,
+                &mut returned,
+                no_overlap,
+            )
+        };
+        assert_ne!(ok, 0, "{}", io::Error::last_os_error());
+    }
+
+    /// A scratch directory under %TEMP%, removed on drop (junctions included, not followed).
+    #[cfg(windows)]
+    struct Scratch(PathBuf);
+
+    #[cfg(windows)]
+    impl Scratch {
+        fn new(name: &str) -> Scratch {
+            let dir = std::env::temp_dir().join(format!("typose-core-{}-{name}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir(&dir).unwrap();
+            Scratch(dir)
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Spec §3.3 🔒: a named pipe is refused before anything opens it, by every route, because opening (or just
+    /// stat-ing) a pipe connects to its server. A live server for each route checks that no client ever came.
+    #[cfg(windows)]
+    #[test]
+    fn a_named_pipe_is_refused_by_every_route_and_no_client_connects() {
+        let scratch = Scratch::new("pipes");
+        let mut routes: Vec<(&str, PipeServer, PathBuf)> = Vec::new();
+        let direct = PipeServer::new("direct");
+        let path = PathBuf::from(&direct.path);
+        routes.push(("direct", direct, path));
+        // Every UNC spelling: host names, case, either slash, a trailing dot, and the verbatim form.
+        for (route, unc) in [
+            ("UNC", r"\\localhost\pipe\"),
+            ("UNC by address, upper case", r"\\127.0.0.1\PIPE\"),
+            ("UNC with forward slashes", "//localhost/pipe/"),
+            ("UNC share with a trailing dot", r"\\localhost\pipe.\"),
+            ("verbatim UNC", r"\\?\UNC\localhost\pipe\"),
+        ] {
+            let server = PipeServer::new(&route.replace([' ', ','], "-"));
+            let path = PathBuf::from(format!("{unc}{}", server.name()));
+            routes.push((route, server, path));
+        }
+        let jn = PipeServer::new("junction");
+        let link = scratch.0.join("j");
+        junction(&link, r"\??\pipe\");
+        let path = link.join(jn.name());
+        routes.push(("junction into \\??\\pipe\\", jn, path));
+        let sl = PipeServer::new("symlink");
+        let link = scratch.0.join("s");
+        match std::os::windows::fs::symlink_file(&sl.path, &link) {
+            Ok(()) => routes.push(("symlink to \\\\.\\pipe\\", sl, link)),
+            // ERROR_PRIVILEGE_NOT_HELD: no Developer Mode and no admin. The junction covers link resolution.
+            Err(e) if e.raw_os_error() == Some(1314) => println!("symlink route skipped: {e}"),
+            Err(e) => panic!("symlink: {e}"),
+        }
+        let failures: Vec<String> = routes
+            .iter()
+            .filter_map(|(route, server, path)| {
+                let result = Document::open(path);
+                let connected = server.connected();
+                let refused = matches!(result, Err(DocError::Refused(_)));
+                let outcome = result.map_or_else(|e| e.to_string(), |_| "opened".into());
+                (connected || !refused).then(|| format!("{route} {path:?}: client connected: {connected}; {outcome}"))
+            })
+            .collect();
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// The reparse-point walk refuses only device targets: links to regular files still open.
+    #[cfg(windows)]
+    #[test]
+    fn links_to_regular_files_still_open() {
+        let scratch = Scratch::new("links");
+        let real = scratch.0.join("real");
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("f.txt"), b"through a link").unwrap();
+        junction(&scratch.0.join("j"), &format!(r"\??\{}", real.display()));
+        let doc = Document::open(&scratch.0.join("j").join("f.txt")).unwrap();
+        assert_eq!(doc.read(1, 0, 14).unwrap(), b"through a link");
+        drop(doc);
+        let link = scratch.0.join("s.txt");
+        match std::os::windows::fs::symlink_file(real.join("f.txt"), &link) {
+            Ok(()) => assert_eq!(Document::open(&link).unwrap().read(1, 0, 7).unwrap(), b"through"),
+            Err(e) if e.raw_os_error() == Some(1314) => println!("symlink case skipped: {e}"),
+            Err(e) => panic!("symlink: {e}"),
+        }
     }
 
     #[cfg(unix)]
