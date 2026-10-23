@@ -3,7 +3,7 @@
 - **Date:** 2026-10-20 · **Status:** Draft 4 (2026-10-22).
   - Draft 2 folded in the external review of Draft 1 (Astra, 2026-10-20); each finding and its resolution is in §16.
   - Draft 3 records Zack's Phase 0 decisions Z30–Z38 (§0.3) and updates the affected sections.
-  - Draft 4 records Zack's decisions Z39–Z50 (§0.4), from the Phase 0 decision packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`), and updates the affected sections. Z39 parks screen-reader validation until after launch and supersedes Z35. Z51 and Z52 came later the same day, from Spike B's round-3 review. Z53–Z56 record the Phase 0 checkpoint: a conditional go to M1, with Phase 0 not qualified. Z57–Z59 settle M1's merge authority and closure rules.
+  - Draft 4 records Zack's decisions Z39–Z50 (§0.4), from the Phase 0 decision packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`), and updates the affected sections. Z39 parks screen-reader validation until after launch and supersedes Z35. Z51 and Z52 came later the same day, from Spike B's round-3 review. Z53–Z56 record the Phase 0 checkpoint: a conditional go to M1, with Phase 0 not qualified. Z57–Z59 settle M1's merge authority and closure rules, and Z60 the CI matrix.
 - **Implements:** the design brief `docs/superpowers/specs/2026-10-20-typose-design-brief.md` (revision 6). §14 lists the changes this spec asked of the brief; revision 4 applied them. Revision 5 records Z30–Z37. Revision 6 records the product-facing parts of Z39–Z50. Nothing in the brief is overridden silently.
 - **Inputs:**
   - Two independent research reports, `astra-research.md` and `fable-research.md` (repo root, local only, not committed).
@@ -68,6 +68,7 @@ The packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`) holds
 | Z57 | **Merge authority:** the implementer merges each PR once its review is clean and CI is green, within an approved milestone plan. |
 | Z58 | **M1 stays open while its Mac acceptance is pending** [Z55]. It doesn't close on Windows alone (§13.2). |
 | Z59 | **A missed cold-startup target blocks M1 closure** until it's fixed or Zack explicitly changes the budget [Z54] (§10.2, §13.2). |
+| Z60 | **CI on the private repo:** Windows and Linux run on every PR; macOS runs on merges to `main`, until the repo goes public (§11.2). |
 
 ---
 
