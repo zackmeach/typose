@@ -1,5 +1,5 @@
 // Plan C4 for what PR 3 adds: the preload's `mark(name, t)` and the TYPOSE_* hooks.
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -27,15 +27,20 @@ describe('TYPOSE_MARKS', () => {
   it('is off when unset', () => expect(marksHook(undefined)).toBeNull())
   for (const path of ['', 'marks.jsonl', './marks.jsonl']) it(`refuses the relative path "${path}"`, () => expect(marksHook(path)).toEqual({ refused: expect.any(String) }))
   it('appends one JSON line per mark, on the wall clock', () => {
-    const file = join(mkdtempSync(join(tmpdir(), 'typose-marks-')), 'marks.jsonl')
-    const mark = marksHook(file)
-    if (typeof mark !== 'function') throw new Error('expected a writer')
-    const before = Date.now()
-    mark('show', { hz: 60 })
-    mark('rawUsable', { t: 5 })
-    const lines = readFileSync(file, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
-    expect(lines[0]).toMatchObject({ mark: 'show', hz: 60 })
-    expect(lines[0].t).toBeGreaterThanOrEqual(before)
-    expect(lines[1]).toEqual({ mark: 'rawUsable', t: 5 })
+    const dir = mkdtempSync(join(tmpdir(), 'typose-marks-'))
+    try {
+      const file = join(dir, 'marks.jsonl')
+      const mark = marksHook(file)
+      if (typeof mark !== 'function') throw new Error('expected a writer')
+      const before = Date.now()
+      mark('show', { hz: 60 })
+      mark('rawUsable', { t: 5 })
+      const lines = readFileSync(file, 'utf8').trim().split('\n').map((l) => JSON.parse(l))
+      expect(lines[0]).toMatchObject({ mark: 'show', hz: 60 })
+      expect(lines[0].t).toBeGreaterThanOrEqual(before)
+      expect(lines[1]).toEqual({ mark: 'rawUsable', t: 5 })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
