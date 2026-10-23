@@ -19,3 +19,11 @@ mod big_offsets;
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
+
+// PLANT (plan PR 2 acceptance; reverted): a formatting error, which `cargo fmt --check` must fail on.
+pub fn planted_fmt_error( ) -> u8 {1}
+
+// PLANT (plan PR 2 acceptance; reverted): a clippy warning (ptr_arg), which clippy -D warnings must fail on.
+pub fn planted_clippy_warning(v: &Vec<u8>) -> usize {
+    v.len()
+}

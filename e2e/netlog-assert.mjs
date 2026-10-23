@@ -53,3 +53,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   )
   process.exit(violations.length ? 1 : 0)
 }
+
+// PLANT (plan PR 2 acceptance; reverted): a lint warning, which `oxlint --deny-warnings` must fail on.
+export function plantedLintWarning() {
+  debugger
+}

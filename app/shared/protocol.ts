@@ -90,3 +90,6 @@ export interface TyposeApi {
   /** The OS Open dialog; null when cancelled. */
   openDialog(): Promise<string | null>
 }
+
+// PLANT (plan PR 2 acceptance; reverted): a type error, which `npm run check` must fail on.
+export const plantedTypeError: number = 'not a number'
