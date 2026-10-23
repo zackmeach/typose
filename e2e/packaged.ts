@@ -7,18 +7,27 @@ import { type ChildProcess, spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { type Exit, keepEvidence } from './app'
+import { type Exit, cleanups, keepEvidence } from './app'
 
 const DIST = resolve(__dirname, '../app/dist')
 
-/** electron-builder --dir's layout per platform: the executable, and the binary that holds the fuse wire. */
+/** electron-builder --dir's layout per platform: the executable, the binary that holds the fuse wire, and the asar. */
 export const PACKAGED = {
-  win32: { exe: join(DIST, 'win-unpacked/Typose.exe'), fuses: join(DIST, 'win-unpacked/Typose.exe') },
+  win32: {
+    exe: join(DIST, 'win-unpacked/Typose.exe'),
+    fuses: join(DIST, 'win-unpacked/Typose.exe'),
+    asar: join(DIST, 'win-unpacked/resources/app.asar')
+  },
   darwin: {
     exe: join(DIST, 'mac-arm64/Typose.app/Contents/MacOS/Typose'),
-    fuses: join(DIST, 'mac-arm64/Typose.app/Contents/Frameworks/Electron Framework.framework/Electron Framework')
+    fuses: join(DIST, 'mac-arm64/Typose.app/Contents/Frameworks/Electron Framework.framework/Electron Framework'),
+    asar: join(DIST, 'mac-arm64/Typose.app/Contents/Resources/app.asar')
   },
-  linux: { exe: join(DIST, 'linux-unpacked/typose'), fuses: join(DIST, 'linux-unpacked/typose') }
+  linux: {
+    exe: join(DIST, 'linux-unpacked/typose'),
+    fuses: join(DIST, 'linux-unpacked/typose'),
+    asar: join(DIST, 'linux-unpacked/resources/app.asar')
+  }
 }[process.platform as 'win32' | 'darwin' | 'linux']
 
 export interface PackagedLaunch {
@@ -33,6 +42,8 @@ export interface PackagedLaunch {
   /** With `cdp`: the browser over CDP and the app's page. */
   browser?: Browser
   page?: Page
+  /** Closes this launch if the test ends with it still open (registered with app.ts's fixture). */
+  cleanup: () => Promise<unknown>
 }
 
 export interface LaunchOptions {
@@ -42,6 +53,8 @@ export interface LaunchOptions {
   file?: string
   cdp?: boolean
   netlog?: string
+  /** Set TYPOSE_MARKS (the default). `false` launches with the hook unset, as a user's launch is. */
+  marks?: boolean
   env?: Record<string, string>
 }
 
@@ -56,28 +69,35 @@ export async function launchPackaged(opts: LaunchOptions = {}): Promise<Packaged
   if (opts.cdp) args.push('--remote-debugging-port=0')
   if (opts.netlog) args.push(`--log-net-log=${opts.netlog}`)
   if (opts.file) args.push(opts.file)
+  const env = { ...base, ...(opts.marks === false ? {} : { TYPOSE_MARKS: marksFile }), ...opts.env }
   const spawnedAt = Date.now()
-  const proc = spawn(exe, args, { env: { ...base, TYPOSE_MARKS: marksFile, ...opts.env }, stdio: ['ignore', 'ignore', 'pipe'] })
+  const proc = spawn(exe, args, { env, stdio: ['ignore', 'ignore', 'pipe'] })
   const exited = new Promise<Exit>((ok) => proc.once('exit', (code, signal) => ok({ code, signal })))
   let stderr = ''
   proc.stderr!.on('data', (d: Buffer) => (stderr += d.toString()))
-  const l: PackagedLaunch = { proc, pid: proc.pid!, userData, marksFile, spawnedAt, exited }
+  const l: PackagedLaunch = { proc, pid: proc.pid!, userData, marksFile, spawnedAt, exited, cleanup: () => closePackaged(l) }
+  cleanups.add(l.cleanup) // a test that fails before closing it still closes it, with its evidence (plan C9)
   if (!opts.cdp) return l
-  const ws = await new Promise<string>((ok, fail) => {
-    const timer = setTimeout(() => fail(new Error(`no DevTools endpoint after 30 s:\n${stderr}`)), 30_000)
-    const seen = () => {
-      const m = /DevTools listening on (ws:\/\/\S+)/.exec(stderr)
-      if (m) {
-        clearTimeout(timer)
-        ok(m[1])
+  try {
+    const ws = await new Promise<string>((ok, fail) => {
+      const timer = setTimeout(() => fail(new Error(`no DevTools endpoint after 30 s:\n${stderr}`)), 30_000)
+      const seen = () => {
+        const m = /DevTools listening on (ws:\/\/\S+)/.exec(stderr)
+        if (m) {
+          clearTimeout(timer)
+          ok(m[1])
+        }
       }
-    }
-    proc.stderr!.on('data', seen)
-    void exited.then((e) => fail(new Error(`exited ${JSON.stringify(e)} before DevTools listened:\n${stderr}`)))
-  })
-  l.browser = await chromium.connectOverCDP(ws)
-  const context = l.browser.contexts()[0]
-  l.page = context.pages().find((p) => p.url().startsWith('typose:')) ?? (await context.waitForEvent('page'))
+      proc.stderr!.on('data', seen)
+      void exited.then((e) => fail(new Error(`exited ${JSON.stringify(e)} before DevTools listened:\n${stderr}`)))
+    })
+    l.browser = await chromium.connectOverCDP(ws)
+    const context = l.browser.contexts()[0]
+    l.page = context.pages().find((p) => p.url().startsWith('typose:')) ?? (await context.waitForEvent('page'))
+  } catch (e) {
+    await closePackaged(l).catch(() => {}) // no orphaned app or profile; the evidence is kept
+    throw e
+  }
   return l
 }
 
@@ -108,16 +128,15 @@ export async function waitMarks(l: PackagedLaunch, names: string[], timeout = 30
  * elsewhere, SIGTERM. Then keeps the run's evidence (plan C9) and deletes the profile unless `keep`.
  */
 export async function closePackaged(l: PackagedLaunch, keep = false): Promise<Exit> {
+  cleanups.delete(l.cleanup)
   await l.browser?.close().catch(() => {}) // disconnects; the app stays up
   if (l.proc.exitCode === null && l.proc.signalCode === null) {
     if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(l.pid)])
     else l.proc.kill('SIGTERM')
   }
-  const exit = await Promise.race([l.exited, new Promise<null>((ok) => setTimeout(() => ok(null), 15_000))])
-  if (!exit) {
-    l.proc.kill('SIGKILL')
-    throw new Error(`pid ${l.pid} didn't exit within 15 s of its close`)
-  }
+  const closed = await Promise.race([l.exited, new Promise<null>((ok) => setTimeout(() => ok(null), 15_000))])
+  const exit = closed ?? (l.proc.kill('SIGKILL'), await l.exited)
   keepEvidence(l.userData, l.pid, exit, keep)
+  if (!closed) throw new Error(`pid ${l.pid} didn't exit within 15 s of its close, and was killed`)
   return exit
 }

@@ -1,8 +1,18 @@
-// Plan PR 3 on the packaged, fused build (`npm run package` first): its fuses, driving it over CDP, and the NetLog.
+// Plan PR 3 on the packaged, fused build (`npm run package` first): its fuses, what ships in its asar, driving it
+// over CDP, the measurement hook's refusal, and the NetLog.
 import { expect } from '@playwright/test'
-import { readFileSync } from 'node:fs'
-import { assertNetLog, fixture, test, visibleRows, waitIndexed, waitOpen } from './app'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { assertNetLog, fixture, lifecycle, test, visibleRows, waitIndexed, waitOpen } from './app'
 import { PACKAGED, closePackaged, launchPackaged } from './packaged'
+
+test('no test-hooks code ships: the asar holds none of its names', () => {
+  // The asar stores its files uncompressed, so a byte search sees every bundle in it.
+  const asar = readFileSync(PACKAGED.asar)
+  expect(asar.includes('TYPOSE_MARKS')).toBe(true) // the search works: the read-only hook's name is there
+  for (const name of ['TYPOSE_TEST', 'delayMount', '__TEST_HOOKS__']) expect(asar.includes(name), name).toBe(false)
+})
 
 /** The fuse wire, read straight from the binary rather than through @electron/fuses, which wrote it. */
 function fuseWire(binary: string): number[] {
@@ -34,7 +44,8 @@ test('the fuses read back as spec §7.1 lists them', () => {
 
 test('the fused build listens on --remote-debugging-port=0, connectOverCDP attaches, and it opens a file', async () => {
   const lines = Array.from({ length: 3000 }, (_, i) => `packaged line ${i}`)
-  const l = await launchPackaged({ cdp: true, file: fixture('packaged.txt', lines.join('\n')) })
+  // With TYPOSE_MARKS unset, as a user's launch is.
+  const l = await launchPackaged({ cdp: true, marks: false, file: fixture('packaged.txt', lines.join('\n')) })
   const win = l.page!
   expect(win.url()).toBe('typose://app/index.html')
   await waitOpen(win)
@@ -42,6 +53,20 @@ test('the fused build listens on --remote-debugging-port=0, connectOverCDP attac
   expect((await visibleRows(win))[0]).toEqual({ line: 1, text: lines[0] })
   expect(await waitIndexed(win)).toBe(3000)
   expect(await closePackaged(l)).toEqual({ code: 0, signal: null })
+})
+
+test('a TYPOSE_MARKS that names a directory is refused and logged, and the app still starts with its window', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'typose-marks-dir-'))
+  try {
+    const l = await launchPackaged({ cdp: true, env: { TYPOSE_MARKS: dir } })
+    await expect(l.page!.locator('.open-button')).toBeVisible() // the window, its page and the core are up
+    const log = lifecycle(l.userData)
+    expect(await closePackaged(l, true)).toEqual({ code: 0, signal: null })
+    expect(log.find((r) => r.event === 'hook-refused')).toMatchObject({ hook: 'TYPOSE_MARKS', reason: expect.stringMatching(/regular file/) })
+    rmSync(l.userData, { recursive: true, force: true })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 // The forced hunspell fetch in netlog.e2e.ts needs main-process access, which the fused build doesn't give; that test

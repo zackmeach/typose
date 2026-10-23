@@ -30,6 +30,8 @@ export interface Launched {
 }
 
 const running = new Set<Launched>()
+/** Other launches to finish when the test ends (the packaged build's, from packaged.ts). */
+export const cleanups = new Set<() => Promise<unknown>>()
 
 /** Playwright's `test`, plus: every launch a test leaves open is finished when it ends, pass or fail. */
 export const test = base.extend<{ finishLaunches: void }>({
@@ -38,6 +40,7 @@ export const test = base.extend<{ finishLaunches: void }>({
     async ({}, use) => {
       await use()
       for (const l of running) await finish(l)
+      for (const cleanup of cleanups) await cleanup().catch(() => {}) // each removes itself, which a Set allows mid-loop
     },
     { auto: true }
   ]
