@@ -70,6 +70,7 @@ The packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`) holds
 | Z59 | **A missed cold-startup target blocks M1 closure** until it's fixed or Zack explicitly changes the budget [Z54] (§10.2, §13.2). |
 | Z60 | **CI on the private repo:** Windows and Linux run on every PR; macOS runs on merges to `main`, until the repo goes public (§11.2). |
 | Z61 | **No spending until after launch, once Typose is working.** Everything uses free resources:<br>• GitHub Free for the private repo. Actions stay within the included minutes, with a $0 spending limit, so overage pauses CI rather than billing.<br>• A loaned or borrowed Mac only [Z55]; nothing is bought.<br>• No paid subscriptions.<br>Consequence: §12.1's paid signing (Azure Trusted Signing, the Apple Developer Program) can't start before launch, so how the launch builds are signed is open (§15). |
+| Z62 | **The 16.7 ms / ≥ 99% frame gate (§10.2, plan §5, OQ-6) judges cadence: every presented frame after the first in a demanded interval.** The first frame after an input is judged by responsiveness: the 50 ms stall rule and plan §5's 50 ms input-latency gate. A run whose demands each produce one frame (discrete keypresses) reports the frame gate as not applicable, never as passed. |
 
 ---
 
