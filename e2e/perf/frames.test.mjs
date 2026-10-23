@@ -3,8 +3,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { analyzeFrames } from './frames.mjs'
 
-// Builders, in ms on one clock (the renderer's performance.now() is the trace clock here, offset 0). 165 Hz, as on the PC.
-const HZ = 165
+// Builders, in ms on one clock (the renderer's performance.now() is the trace clock here, offset 0).
 const renderer = (pid) => ({ ph: 'M', name: 'process_name', pid, args: { name: 'Renderer' } })
 let ids = 0
 /** A renderer frame presented at `t`: its PipelineReporter slice, begun at `began` (one refresh earlier by default). */
@@ -23,23 +22,26 @@ const input = (t, paintAt, key = String(t), lag = 1, kind = 'wheel') => {
   return [stamp(t + lag, `typose:input ${seq} ${kind} ${t} ${t + lag}`), ...(paintAt === null ? [] : [stamp(paintAt, `typose:painted ${seq} ${key}`)])]
 }
 const frames = (from, to, every) => Array.from({ length: Math.floor((to - from) / every) + 1 }, (_, i) => frame(from + i * every))
-const analyze = (...parts) => analyzeFrames([renderer(1), ...parts.flat(3)], { hz: HZ })
+const analyze = (...parts) => analyzeFrames([renderer(1), ...parts.flat(3)])
 
 /** A continuous scroll: an input every 5 ms from 0 to `until`, each painted 4 ms later, so each demand overlaps the next. */
 const scroll = (until) => Array.from({ length: until / 5 + 1 }, (_, i) => input(i * 5, i * 5 + 4))
 
-/** 21 discrete keypresses 100 ms apart, each answered by one frame presented `after` ms later, its slice begun at `began`. */
-const keypresses = (after, began) =>
-  Array.from({ length: 21 }, (_, i) => [input(i * 100, i * 100 + after - 5, String(i), 1, 'keydown'), frame(i * 100 + after, { began: i * 100 + began })])
+/** 21 discrete keypresses 100 ms apart, each answered by one frame presented `after` ms later. */
+const keypresses = (after) => Array.from({ length: 21 }, (_, i) => [input(i * 100, i * 100 + after - 5, String(i), 1, 'keydown'), frame(i * 100 + after)])
 
-test('a steady scroll at 164 Hz has no long frame and no stall, and nearly every frame is judged', () => {
+test('a steady scroll at 164 Hz has no long frame and no stall, and nearly every frame is judged on cadence', () => {
   const r = analyze(scroll(500), frames(6.1, 520, 6.1))
   assert.equal(r.valid, true)
   assert.equal(r.longFrames, 0)
   assert.deepEqual(r.stalls, [])
   assert.deepEqual(r.neverPainted, [])
   assert.ok(r.frames > 50)
-  assert.equal(r.pass, true)
+  assert.equal(r.cadence, 'pass')
+  assert.equal(r.responsiveness, 'pass')
+  // Every input's first frame is a responsiveness sample: the next frame, at most one 6.1 ms refresh away.
+  assert.equal(r.firstFrame.n, 101)
+  assert.ok(r.firstFrame.max <= 6.1)
 })
 
 test('a 30 ms hole in presentation during the scroll is one long frame and no stall', () => {
@@ -48,10 +50,10 @@ test('a 30 ms hole in presentation during the scroll is one long frame and no st
   assert.deepEqual(r.stalls, [])
 })
 
-test('a 60 ms hole in presentation during the scroll is a stall covering it', () => {
+test('a 60 ms hole in presentation during the scroll is a stall covering it, and fails cadence', () => {
   const r = analyze(scroll(500), frames(6.1, 200, 6.1), frames(262, 520, 6.1))
-  assert.equal(r.stalls.length, 1)
-  assert.ok(r.stalls[0].from <= 200 && r.stalls[0].to >= 262)
+  assert.ok(r.stalls.some((s) => !s.first && s.from <= 200 && s.to >= 262))
+  assert.equal(r.cadence, 'fail')
 })
 
 test('a partially presented frame (compositor only, rows stale) does not end a stall', () => {
@@ -62,43 +64,61 @@ test('a partially presented frame (compositor only, rows stale) does not end a s
     frame(230, { state: 'STATE_DROPPED' }),
     frames(262, 520, 6.1)
   )
-  assert.equal(r.stalls.length, 1)
-  assert.ok(r.stalls[0].from <= 200 && r.stalls[0].to >= 262)
+  assert.ok(r.stalls.some((s) => !s.first && s.from <= 200 && s.to >= 262))
 })
 
 test('a stall opened by a frame already in the pipeline says when that frame began', () => {
   // A block from 200 to 260: the frame begun at 199 still presents at 205, then nothing until 262.
   const r = analyze(scroll(500), frames(6.1, 196, 6.1), frame(205), frames(262, 520, 6.1))
-  assert.deepEqual(r.stalls.map(({ from, to, began }) => ({ from, to, began })), [{ from: 205, to: 262, began: 199 }])
+  const cadence = r.stalls.filter((s) => !s.first)
+  assert.deepEqual(cadence.map(({ from, to, began }) => ({ from, to, began })), [{ from: 205, to: 262, began: 199 }])
 })
 
 test('a jump whose first frame comes 70 ms after its input is a stall, from the input', () => {
   const r = analyze(frame(0), input(100, 160), frame(170), frame(176))
   assert.deepEqual(r.stalls, [{ from: 100, to: 170, ms: 70, began: 100, first: true }])
+  assert.equal(r.responsiveness, 'fail')
 })
 
-test('discrete keypresses: every response frame is judged, on its own production time', () => {
-  // A 10 ms response (slice begun 4 ms after the key) passes; all 21 frames count.
-  const fast = analyze(keypresses(10, 4))
-  assert.equal(fast.frames, 21)
-  assert.equal(fast.longFrames, 0)
-  assert.equal(fast.pass, true)
-  // A 45 ms response fails, whether the frame starts late (a handler blocked first) or takes long to produce.
-  for (const began of [39, 1]) {
-    const slow = analyze(keypresses(45, began))
-    assert.equal(slow.frames, 21)
-    assert.equal(slow.longFrames, 21, `slice begun at +${began} ms`)
-    assert.deepEqual(slow.stalls, [])
-    assert.equal(slow.pass, false)
+test('discrete keypresses each answered by one frame: cadence is not applicable, and responsiveness is judged', () => {
+  for (const after of [10, 45]) {
+    const r = analyze(keypresses(after))
+    assert.equal(r.valid, true)
+    assert.equal(r.frames, 0, `${after} ms: no frame is judged on cadence`)
+    assert.equal(r.cadence, 'n/a', `${after} ms`)
+    assert.equal(r.pass, undefined, `${after} ms: no overall pass stands in for the frame gate`)
+    assert.deepEqual(r.stalls, [], `${after} ms`)
+    assert.equal(r.responsiveness, 'pass', `${after} ms`)
+    assert.deepEqual(r.firstFrame, { n: 21, p50: after, p95: after, max: after })
   }
+  // A 61 ms response is a stall on every key.
+  const slow = analyze(keypresses(61))
+  assert.equal(slow.cadence, 'n/a')
+  assert.equal(slow.stalls.length, 21)
+  assert.ok(slow.stalls.every((s) => s.first && s.ms === 61 && s.began === s.from))
+  assert.equal(slow.responsiveness, 'fail')
 })
 
-test('an opening frame is excused one refresh of waiting for its BeginFrame, and no more', () => {
-  // Slice begun 6 ms after the key (inside one 6.06 ms refresh), presented 6 ms later: 12 ms from the key, 6 ms judged.
-  assert.equal(analyze(input(0, 8), frame(12, { began: 6 })).longFrames, 0)
-  // Begun 20 ms after the key (a 14 ms block before the frame), presented 6 ms later: judged 26 − 6.06 ≈ 20 ms.
+test('a present reported by two slices (a forked frame and the next) is one frame, begun when the earlier began', () => {
+  // As seen on keypresses: the frame begun 5 ms before the key forks, and presents with the key's own frame at 13.
+  const r = analyze(input(0, 1, 'x', 1, 'keydown'), frame(13, { began: -5 }), frame(13, { began: 8 }))
+  assert.equal(r.frames, 0)
+  assert.equal(r.cadence, 'n/a')
+  assert.deepEqual(r.firstFrame, { n: 1, p50: 13, p95: 13, max: 13 })
+  // In a scroll, the doubled present is neither a judged frame nor a gap: 61 presents in the demand judge 60 gaps.
+  const scrolling = analyze(scroll(360), frames(6, 372, 6), frame(186, { began: 170 }))
+  assert.equal(scrolling.frames, 60)
+  // A stall opened by that present says when its earliest slice began.
+  const stall = analyze(scroll(360), frames(6, 180, 6), frame(186, { began: 170 }), frame(186), frames(250, 372, 6))
+  assert.deepEqual(stall.stalls.filter((s) => !s.first).map(({ from, to, began }) => ({ from, to, began })), [{ from: 186, to: 250, began: 170 }])
+})
+
+test('the first frame is judged on input to present, never on its slice: a frame begun late is not a long frame', () => {
+  // Begun 20 ms after the key (a block before the frame), presented 6 ms later: a 26 ms response and nothing on cadence.
   const r = analyze(input(0, 22, 'x', 1, 'keydown'), frame(26, { began: 20 }))
-  assert.deepEqual(r.long, [{ from: 6.061, to: 26, ms: 19.939, began: 0, opening: true }])
+  assert.deepEqual(r.long, [])
+  assert.equal(r.cadence, 'n/a')
+  assert.deepEqual(r.firstFrame, { n: 1, p50: 26, p95: 26, max: 26 })
 })
 
 test('but every later frame of the same demand is judged on its gap: a page 20 ms after the jump frame is long', () => {
@@ -106,6 +126,8 @@ test('but every later frame of the same demand is judged on its gap: a page 20 m
   const r = analyze(input(100, 125), frame(110), frame(130))
   assert.equal(r.longFrames, 1)
   assert.deepEqual(r.long, [{ from: 110, to: 130, ms: 20, began: 104 }])
+  assert.equal(r.cadence, 'fail')
+  assert.equal(r.responsiveness, 'pass')
 })
 
 test('idle time is never demanded: a frame long after the view settled is not a gap', () => {
@@ -117,10 +139,10 @@ test('idle time is never demanded: a frame long after the view settled is not a 
 test('a target that never paints fails, and so does one painted after 1 s', () => {
   const never = analyze(frame(0), input(10, null), frame(20))
   assert.deepEqual(never.neverPainted.map((n) => n.at), [10])
-  assert.equal(never.pass, false)
+  assert.equal(never.responsiveness, 'fail')
   const late = analyze(frame(0), input(10, 1200), frame(1205))
   assert.equal(late.neverPainted.length, 1)
-  assert.equal(late.pass, false)
+  assert.equal(late.responsiveness, 'fail')
 })
 
 test('an input that changes nothing owes no frame, unless its mark is over 50 ms late', () => {
@@ -151,19 +173,16 @@ test('nothing to judge is invalid, never a pass', () => {
     'only inputs that change nothing': [renderer(1), stamp(-10, 'typose:painted 0 k'), ...frame(5), ...input(0, 2, 'k'), ...input(50, 52, 'k')]
   }
   for (const [name, events] of Object.entries(cases)) {
-    const r = analyzeFrames(events, { hz: HZ })
+    const r = analyzeFrames(events)
     assert.equal(r.valid, false, name)
-    assert.equal(r.pass, false, name)
+    assert.equal(r.cadence, 'invalid', name)
+    assert.equal(r.responsiveness, 'invalid', name)
     assert.ok(r.reason, name)
   }
 })
 
 test('a second renderer is invalid: the frames could belong to another page', () => {
-  const r = analyzeFrames([renderer(1), renderer(2), ...frame(0), ...frame(5, { pid: 2 }), ...input(0, 3)], { hz: HZ })
+  const r = analyzeFrames([renderer(1), renderer(2), ...frame(0), ...frame(5, { pid: 2 }), ...input(0, 3)])
   assert.equal(r.valid, false)
   assert.match(r.reason, /one renderer/)
-})
-
-test('the analysis needs the panel refresh rate', () => {
-  assert.throws(() => analyzeFrames([renderer(1)]), /refresh rate/)
 })
