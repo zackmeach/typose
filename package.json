@@ -1,0 +1,30 @@
+{
+  "name": "typose-repo",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT OR Apache-2.0",
+  "workspaces": ["core/typose-node", "app"],
+  "scripts": {
+    "build:addon": "npm run build --workspace typose-node",
+    "build": "npm run build --workspace typose",
+    "start": "npm run start --workspace typose",
+    "typecheck": "tsc --noEmit -p app/shared && tsc --noEmit -p app/main && tsc --noEmit -p app/preload && tsc --noEmit -p app/core-host && tsc --noEmit -p app/renderer && tsc --noEmit -p e2e",
+    "check": "npm run typecheck && vitest run && node --test e2e/netlog-assert.test.mjs",
+    "lint": "oxlint --deny-warnings app e2e",
+    "e2e": "playwright test -c e2e/playwright.config.ts",
+    "fixtures": "cargo run --release --manifest-path core/Cargo.toml -p fixtures-gen --"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "electron": "44.9.2",
+    "electron-vite": "6.0.0",
+    "oxlint": "1.89.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.4",
+    "vitest": "5.0.5"
+  }
+}
