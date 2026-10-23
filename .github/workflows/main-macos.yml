@@ -1,9 +1,11 @@
 # macOS on merges to main only, while the repo is private (Z60). A red run is fixed in the next PR.
+# `workflow_dispatch` lets a macOS fix be checked on its branch before merge (`gh workflow run main-macos.yml --ref <branch>`).
 name: main-macos
 
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read

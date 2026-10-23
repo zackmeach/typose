@@ -22,11 +22,13 @@ test('a window close is a clean quit sequence, exit 0', async () => {
   await finish(l)
 })
 
-test('forcefullyCrashRenderer() logs render-process-gone with crashed', async () => {
+test('forcefullyCrashRenderer() logs render-process-gone with crashed (killed on macOS)', async () => {
   const l = await launch({ file: file() })
   await waitOpen(l.win)
   await l.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.forcefullyCrashRenderer())
-  await expect.poll(() => lifecycle(l.userData).find((r) => r.event === 'render-process-gone')).toMatchObject({ reason: 'crashed' })
+  // Electron reports the forced crash as killed on macOS (main-macos run 39977019396), crashed on Windows and Linux.
+  const reason = process.platform === 'darwin' ? 'killed' : 'crashed'
+  await expect.poll(() => lifecycle(l.userData).find((r) => r.event === 'render-process-gone')).toMatchObject({ reason })
   expect(await l.app.evaluate(() => process.pid)).toBe(l.pid) // main lives on
   await finish(l)
 })
