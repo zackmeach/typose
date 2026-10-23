@@ -24,10 +24,6 @@ test('the NetLog shows no network activity', async () => {
   await waitIndexed(l.win)
   await l.win.locator('.vl-scroller').focus()
   for (const key of ['PageDown', 'PageDown', 'Control+End', 'Control+Home', 'End']) await l.win.keyboard.press(key)
-  // PLANT (plan PR 2 acceptance; reverted): a test-only external request, which the NetLog assertion must catch.
-  // preconnect resolves and connects below the webRequest guard, so the request reaches Chromium's network stack.
-  await l.app.evaluate(({ session }) => session.defaultSession.preconnect({ url: 'https://example.com', numSockets: 1 }))
-  await new Promise((r) => setTimeout(r, 3000))
   expect(await l.app.evaluate(({ crashReporter }) => crashReporter.getUploadToServer())).toBe(false)
   expect(await l.app.evaluate(({ session }) => session.defaultSession.isSpellCheckerEnabled())).toBe(false)
   // Hunspell (Linux for every language, Windows for those it lacks, such as `sh`; never macOS) fetches dictionaries
