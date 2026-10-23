@@ -113,6 +113,11 @@ function handle(win: BrowserWindow, channel: string, fn: () => unknown): void {
 }
 
 void app.whenReady().then(() => {
+  // Chromium's hunspell (Linux, and Windows for languages it lacks) loads its dictionaries even with spellcheck off,
+  // and downloads a missing one through a loader the network guard never sees. Point those downloads at our own
+  // scheme, where nothing serves them, before any window exists (spec §7.3).
+  session.defaultSession.setSpellCheckerDictionaryDownloadURL(`${ORIGIN}/no-dictionaries/`)
+  session.defaultSession.setSpellCheckerEnabled(false)
   serveApp()
   const win = createWindow()
   const loaded = new Promise<void>((ok) => win.webContents.once('did-finish-load', () => ok()))
