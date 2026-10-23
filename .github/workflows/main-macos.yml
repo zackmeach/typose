@@ -6,7 +6,7 @@ name: main-macos
 
 on:
   push:
-    branches: [main, m1/pr2-ci-hardening] # TEMP (PR 2's docs-only probe; reverted)
+    branches: [main]
     paths-ignore: ['docs/**', '*.md'] # as pr.yml; for a push, GitHub judges only the pushed commits
   workflow_dispatch:
 
@@ -19,7 +19,6 @@ permissions:
 
 jobs:
   test:
-    if: github.ref_name != 'm1/pr2-ci-hardening' # TEMP (PR 2's docs-only probe; reverted): no macOS minutes
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
