@@ -294,7 +294,7 @@ The document keeps its explicitly charged state (its floor, checkpoints, hashes,
 
 **Acceptance:** four controlled failures, each told apart by the log and exit status alone, as in plan B rev3 `REVIEW.md:126-128`:
 - a window close: a clean quit sequence, exit 0;
-- `forcefullyCrashRenderer()`: `render-process-gone` with `crashed`;
+- `forcefullyCrashRenderer()`: `render-process-gone` with `crashed` (`killed` on macOS, plan §7);
 - a core kill, per C7;
 - an armed `process.crash()` in main: an external exit of 0xC0000005 on Windows, a Crashpad dump, and the unclean marker at the next launch.
 
@@ -686,6 +686,10 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 - **No `TYPOSE_*` hooks in PR 1.** *Why:* Chromium's `--log-net-log` and `--user-data-dir` switches and argv cover what the e2e needs; the measurement hooks belong to PR 3's instruments.
 - **"End reaches the last line" became Ctrl+End.** *Why:* PR 1's scope gives Home/End to horizontal scrolling, and §6 ships Ctrl+Home/End. The gate (the last line of 1 GiB is reachable) is unchanged.
 - **`electron-builder` (PR 3) and `axe-core`/`@axe-core/playwright` (PR 7)** are installed, at the listed pins, by the PRs that use them. *Why:* PR 1 neither packages nor runs axe.
+
+**Amendments from the first macOS run (main-macos run 39977019396, on PR 1's merge):**
+- **C9's `forcefullyCrashRenderer()` case** expects `crashed` on Windows and Linux and `killed` on macOS. *Why:* Electron reports the forced crash as `killed` on macOS. The gate is unchanged: the four controlled failures stay told apart by the log and exit status alone.
+- **`main-macos.yml` also takes `workflow_dispatch`.** *Why:* a macOS fix can be run on its branch before merge. The automatic triggers stay Z60's.
 
 **Implementer proposals Zack may veto (one place):**
 1. **Memory-refused open state** (C1), shown in the card: "Can't open `<file>` · Typose's memory budget is full. Close a file, then Retry." Brief §7.9 has no such state yet.

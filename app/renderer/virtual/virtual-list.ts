@@ -35,11 +35,12 @@ export class VirtualList {
     this.element.addEventListener(
       'wheel',
       (e) => {
-        if (!isLogical(this.state.geometry.total)) return // native scrolling handles both axes, Shift+wheel too
+        // Shift turns a vertical wheel horizontal. Native scrolling does that on Windows and Linux, not on macOS.
+        const shifted = e.shiftKey && e.deltaX === 0
+        if (!shifted && !isLogical(this.state.geometry.total)) return // native scrolling handles both axes
         e.preventDefault()
         const vp = this.state.geometry.viewport
-        // Shift turns a vertical wheel horizontal, as native scrolling does.
-        const [dx, dy] = e.shiftKey && e.deltaX === 0 ? [e.deltaY, 0] : [e.deltaX, e.deltaY]
+        const [dx, dy] = shifted ? [e.deltaY, 0] : [e.deltaX, e.deltaY]
         if (dx) this.element.scrollLeft += wheelPixels(dx, e.deltaMode, H_STEP, this.element.clientWidth)
         if (dy) this.apply(this.state.moveBy(wheelPixels(dy, e.deltaMode, this.rowHeight, vp)))
       },
