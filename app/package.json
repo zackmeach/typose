@@ -9,7 +9,7 @@
     "build": "electron-vite build",
     "build:hooks": "electron-vite build --mode test-hooks",
     "start": "electron-vite preview",
-    "package": "electron-builder --dir"
+    "package": "install-electron && electron-builder --dir --publish never"
   },
   "dependencies": {
     "typose-node": "0.0.0"
