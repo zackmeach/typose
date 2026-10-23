@@ -20,10 +20,11 @@ permissions:
 jobs:
   test:
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 20 # the e2e step's 12 after a ~1-minute setup, with room left for the evidence upload
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Rust (the toolchain rust-toolchain.toml pins)
+      - id: rust
+        name: Rust (the toolchain rust-toolchain.toml pins)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
@@ -38,18 +39,21 @@ jobs:
         with:
           path: ~/Library/Caches/electron
           key: electron-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
-      - run: npm ci
+      - id: deps
+        run: npm ci
+      # From here each step runs when what it needs succeeded, so one failure doesn't hide the others.
       # Electron 44 installs no binary at `npm ci`; the first require('electron') fetches it. Fetch it here, from the
       # cache when warm, so the e2e step times only the e2e.
-      - id: setup
+      - id: electron
         name: Electron binary
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
         run: npx --no install-electron
-      # From here each step needs only what it names, so a failure doesn't hide the steps after it.
       - id: napi
         name: napi build (before the typecheck, which reads the addon's generated types)
+        if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
         run: npm run build:addon
       - name: cargo test
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
         run: cargo test --locked
         working-directory: core
       - name: npm run check
@@ -60,8 +64,8 @@ jobs:
         if: ${{ !cancelled() && steps.napi.outcome == 'success' }}
         run: npm run build
       - name: e2e and the NetLog assertion
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        timeout-minutes: 15
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.electron.outcome == 'success' }}
+        timeout-minutes: 12 # past Playwright's 10-minute test timeout
         run: npm run e2e
       # Failure evidence (plan C9): kept 5 days, for the orchestrator to copy into .evidence/m1/ci/ before it expires.
       - name: Collect the failure evidence (bounded)
