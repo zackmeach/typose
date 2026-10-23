@@ -8,8 +8,9 @@ export type { Limits, WireMap } from 'typose-node'
 
 /** A continuation token (plan C3): the core issues it and checks it when it comes back; the renderer only echoes it. */
 export interface Token extends Continuation {
-  /** The core host's session (plan C7), stamped on the way out. */
+  /** The core host's session and the token's document (plan C7), stamped on the way out. */
   session: number
+  doc: number
 }
 
 /** A page item as it travels: the core's, with the session stamped into its token. */

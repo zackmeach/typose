@@ -65,6 +65,19 @@ export class PageCache {
     this.setMounted(this.mounted)
   }
 
+  /** Drops every item `test` picks, mounted or not, so it's fetched again; returns how many. */
+  drop(test: (item: PageItem) => boolean): number {
+    let dropped = 0
+    for (const [key, item] of this.items) {
+      if (!test(item)) continue
+      this.items.delete(key)
+      this.cached -= charge(item)
+      dropped++
+    }
+    this.setMounted(this.mounted)
+    return dropped
+  }
+
   private put(key: Key, item: PageItem): void {
     const old = this.items.get(key)
     if (old) this.cached -= charge(old)

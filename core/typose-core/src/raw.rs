@@ -66,13 +66,13 @@ impl Raw {
         (index.line_count(), index.done)
     }
 
-    /// Up to `count` lines from `start` (plan C2's bounds) of generation `generation`, with one identity check
-    /// before and one after.
+    /// Up to `count` lines from `start` (plan C2's bounds) of generation `generation`, with an identity check after
+    /// the reads (`Document::verified`).
     pub fn page(&self, generation: u32, start: u64, count: usize) -> Result<Vec<LinePiece>, DocError> {
         self.page_with(generation, start, count, || {})
     }
 
-    /// `between` runs after the first identity check and before the reads: the mutation-race test writes there.
+    /// `between` runs just before the reads: the mutation-race test writes there.
     fn page_with(
         &self,
         generation: u32,
@@ -135,7 +135,8 @@ fn whitespace_only(head: &[u8], encoding: &'static Encoding) -> bool {
     } else if encoding == UTF_8 {
         std::str::from_utf8(text).is_ok_and(|s| s.chars().all(char::is_whitespace))
     } else {
-        text.iter().all(u8::is_ascii_whitespace)
+        // A single-byte fallback: its decoded chars, by the same rule as UTF-8's (windows-1252's 0xA0 is NBSP).
+        encoding.decode_without_bom_handling(text).0.chars().all(char::is_whitespace)
     }
 }
 
@@ -177,6 +178,8 @@ mod tests {
         assert!(blank("blank-bom", b"\xEF\xBB\xBF \n"));
         assert!(blank("blank-u16", b"\xFF\xFE \0\n\0\x00\x30")); // U+3000, an ideographic space
         assert!(blank("blank-nbsp", "\u{A0}\n".as_bytes()));
+        assert!(blank("blank-1252-nbsp", b"\xA0\n\xA0\x0B")); // windows-1252 (0xA0 alone isn't UTF-8): NBSP, VT
+        assert!(!blank("blank-1252-text", b"\xA0\xE9"));
         assert!(!blank("blank-text", b"\n\n x\n"));
         assert!(!blank("blank-u16-odd", b"\xFF\xFE \0\n"));
         assert!(!blank("blank-big", &[b' '; 2 << 20])); // past the first chunk: shown as blank lines
@@ -246,8 +249,8 @@ mod tests {
         assert_eq!((indexed, blocks), (Err("frozen: changed on disk".into()), 1));
     }
 
-    /// Spec §13.1 Spike C's mutation race, through Raw's pages: an in-place, same-size write between the identity
-    /// check and the read, with the timestamp restored, is caught by chunk verification in 1,000 of 1,000 runs.
+    /// Spec §13.1 Spike C's mutation race, through Raw's pages: an in-place, same-size write just before the read,
+    /// with the timestamp restored, is caught by chunk verification in 1,000 of 1,000 runs.
     #[test]
     fn mutation_race_against_raw_pages_is_caught_1000_of_1000() {
         const LINE: usize = 64;

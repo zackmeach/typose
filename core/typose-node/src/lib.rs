@@ -247,7 +247,7 @@ impl Doc {
             });
             if let Err(e) = result {
                 let progress = IndexProgress {
-                    lines: sent_lines as f64,
+                    lines: raw.lines_known().0 as f64, // what the index published, not the last count sent
                     bytes: 0.0,
                     done: false,
                     elapsed_ms: 0.0,

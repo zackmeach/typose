@@ -88,6 +88,12 @@ export class RawLens {
     return this.slot(Math.floor(this.list.state.top / ROW_HEIGHT)).line
   }
 
+  /** The index is done. A last piece fetched before the index knew where its line ends says "More on this line":
+   *  drop it, so it's fetched again and says how much more (brief §5.1). Its row shows the old text until then. */
+  indexDone(): void {
+    if (this.cache.drop((item) => item.more && !item.next && item.rest === undefined) > 0) this.want(this.list.visibleRange())
+  }
+
   /** The document froze (spec §3.1): keep what's shown, ask for nothing more. */
   freeze(): void {
     this.stopped = true

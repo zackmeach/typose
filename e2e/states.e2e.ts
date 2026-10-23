@@ -70,12 +70,18 @@ test('a same-size write freezes the document with nothing new shown; Ctrl+R relo
   // Electron's default menu binds Ctrl+R to reloading the page. Its accelerators are live where its menu bar is,
   // which the hidden title bar leaves out on Windows: show it, so this fails wherever Ctrl+R could reach it.
   await l.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setMenuBarVisibility(true))
-  // Ctrl+R as the OS delivers it. Playwright's keyboard goes through CDP, which never reaches the menu.
-  const ctrlR = () =>
-    l.app.evaluate(({ BrowserWindow }) => {
-      const contents = BrowserWindow.getAllWindows()[0].webContents
-      for (const type of ['keyDown', 'char', 'keyUp'] as const) contents.sendInputEvent({ type, keyCode: type === 'char' ? 'r' : 'R', modifiers: ['control'] })
-    })
+  // A key as the OS delivers it. Playwright's keyboard goes through CDP, which never reaches the menu.
+  const press = (keyCode: string, modifiers: ('control' | 'meta')[]) =>
+    l.app.evaluate(
+      ({ BrowserWindow }, { keyCode, modifiers }) => {
+        const contents = BrowserWindow.getAllWindows()[0].webContents
+        for (const type of ['keyDown', 'char', 'keyUp'] as const)
+          if (type !== 'char' || keyCode.length === 1) contents.sendInputEvent({ type, keyCode: type === 'char' ? keyCode.toLowerCase() : keyCode, modifiers })
+      },
+      { keyCode, modifiers }
+    )
+  // Ctrl+R, or Cmd+R on macOS, where the default menu binds Cmd+R.
+  const reloadKey = () => press('R', [process.platform === 'darwin' ? 'meta' : 'control'])
   await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '1')
 
   // A same-size, in-place write near the end, where nothing has been read yet.
@@ -91,12 +97,35 @@ test('a same-size write freezes the document with nothing new shown; Ctrl+R relo
   expect(atEnd.at(-1)!.line).toBeGreaterThan(59_950)
   expect(atEnd.filter((r) => r.text !== '')).toEqual([]) // frozen before anything there was read: nothing new shows
 
-  await ctrlR()
+  await reloadKey()
   await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '2')
   await expect(win.locator('.banner')).toHaveCount(0)
   await expect.poll(async () => (await visibleRows(win)).find((r) => r.line === 59_991)?.text).toBe('CHANGED'.padEnd(63, '!'))
+  // Brief §7.2 binds Reload to F5 too.
+  await press('F5', [])
+  await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '3')
   expect(await win.evaluate(() => (window as unknown as { pageLifetime?: string }).pageLifetime)).toBe('the page that opened the file')
   expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+test("the opening line's sweep holds still under reduced motion (brief §6.6, §9)", async () => {
+  const l = await launch()
+  const { win } = l
+  await expect(win.locator('.open-button')).toBeVisible()
+  // The indeterminate line shows only during a slow open, so the same element is mounted here to read its styles.
+  const animations = () =>
+    win.evaluate(() => {
+      const line = Object.assign(document.createElement('div'), { className: 'progress-line indeterminate' })
+      line.append(document.createElement('div'))
+      document.querySelector('.card')!.append(line)
+      const running = line.firstElementChild!.getAnimations().length
+      line.remove()
+      return running
+    })
+  expect(await animations()).toBe(1) // the control: it sweeps by default
+  await win.emulateMedia({ reducedMotion: 'reduce' })
+  expect(await animations()).toBe(0)
   await finish(l)
 })
 

@@ -54,10 +54,12 @@ export function App({ core }: { core: CoreClient }) {
           : c
       )
     })
-    // Ctrl+R is Reload (spec §3.1), not the page reload Electron's default menu binds to it. Ctrl+Shift+R isn't
-    // taken over here: the menu is PR 7's.
+    // Ctrl+R and F5 are Reload (spec §3.1, brief §7.2), not the page reload Electron's default menu binds to
+    // Ctrl+R. Ctrl+Shift+R isn't taken over here: the menu is PR 7's.
     const onKey = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() !== 'r' || !(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey) return
+      const modified = e.ctrlKey || e.metaKey || e.shiftKey || e.altKey
+      const ctrlR = e.key.toLowerCase() === 'r' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey
+      if (!ctrlR && (e.key !== 'F5' || modified)) return
       e.preventDefault()
       void reload()
     }
@@ -174,6 +176,7 @@ export function App({ core }: { core: CoreClient }) {
               opened={card.opened}
               name={fileName(card.path)}
               lines={card.lines}
+              indexed={card.indexed}
               limits={limits}
               frozen={frozen !== undefined}
               onFrozen={(why) => setCard((c) => (c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c))}
@@ -218,13 +221,14 @@ interface RawHostProps {
   opened: Opened
   name: string
   lines: number
+  indexed: boolean
   limits: Limits
   frozen: boolean
   onFrozen(why: string): void
 }
 
 /** Mounts the Raw controller into the card body, and passes it the index's line count as it grows. */
-function RawHost({ core, opened, name, lines, limits, frozen, onFrozen }: RawHostProps) {
+function RawHost({ core, opened, name, lines, indexed, limits, frozen, onFrozen }: RawHostProps) {
   const host = useRef<HTMLDivElement>(null)
   const lens = useRef<RawLens | null>(null)
   const onFrozenNow = useRef(onFrozen)
@@ -239,6 +243,9 @@ function RawHost({ core, opened, name, lines, limits, frozen, onFrozen }: RawHos
     return () => raw.dispose()
   }, [core, opened, name, limits])
   useEffect(() => lens.current?.setLineCount(lines), [lines])
+  useEffect(() => {
+    if (indexed) lens.current?.indexDone()
+  }, [indexed])
   useEffect(() => {
     if (frozen) lens.current?.freeze()
   }, [frozen])

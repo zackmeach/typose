@@ -54,13 +54,14 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     if (!doc) throw new Refusal('NoDocument', `no document ${id}`)
     return doc
   }
-  // Continuation tokens leave with this session in them and are refused from any other (plan C3, C7).
-  const stamp = (item: CorePageItem): PageItem => {
-    if (item.next) Object.assign(item.next, { session })
+  // Continuation tokens leave with this session and their document in them, and are refused for any other
+  // (plan C3; C7: every token carries `{session, doc, gen}`).
+  const stamp = (doc: number, item: CorePageItem): PageItem => {
+    if (item.next) Object.assign(item.next, { session, doc })
     return item as PageItem
   }
-  const stampPage = (page: CorePage): Page => {
-    page.items.forEach(stamp)
+  const stampPage = (doc: number, page: CorePage): Page => {
+    for (const item of page.items) stamp(doc, item)
     return page as Page
   }
   /** Starts indexing a document's current generation, and describes it with its first page. */
@@ -72,7 +73,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       emit(event)
     })
     const { size, encoding, lines, indexed, blank } = doc
-    return { doc: id, gen, size, encoding, lines, indexed, blank, firstPage: stampPage(firstPage) }
+    return { doc: id, gen, size, encoding, lines, indexed, blank, firstPage: stampPage(id, firstPage) }
   }
 
   // Each handler checks all of its parameters before it calls the addon or changes state.
@@ -99,13 +100,14 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       if (Object.hasOwn(p, 'continuation')) {
         const t = p.continuation
         if (!isRecord(t)) throw new Refusal('InvalidParams', 'continuation must be a token', 'continuation')
-        const [tokenSession, gen, line, offset] = ['session', 'gen', 'line', 'offset'].map((f) => int(t, f, `continuation.${f}`))
+        const [tokenSession, tokenDoc, gen, line, offset] = ['session', 'doc', 'gen', 'line', 'offset'].map((f) => int(t, f, `continuation.${f}`))
         const doc = getDoc(id)
         if (tokenSession !== session) throw new Refusal('Stale', `a token of session ${tokenSession}; this is session ${session}`)
-        return { items: [stamp(doc.piece(gen, line, offset))] }
+        if (tokenDoc !== id) throw new Refusal('InvalidParams', `a token of document ${tokenDoc}, not ${id}`, 'continuation.doc')
+        return { items: [stamp(id, doc.piece(gen, line, offset))] }
       }
       const [gen, start, count] = [int(p, 'gen'), int(p, 'start'), int(p, 'count')]
-      return stampPage(getDoc(id).page(gen, start, count))
+      return stampPage(id, getDoc(id).page(gen, start, count))
     },
     // A failed reload (the file is gone, say) leaves the document at its old generation.
     reload: (p): Opened => {

@@ -31,6 +31,27 @@ function scanGate(m: Marks): string[] {
   return failures
 }
 
+/** The veto's negative controls: a run's marks with the scan-completion mark missing, after index done, or before
+ *  the first screen. The last is placed past the budget's exemption, so it fails however fast the first screen was.
+ *  The gate must fail each. */
+function vetoControls(m: Marks): [control: string, marks: Marks][] {
+  const o = m['typose:open-start']!
+  const late = { 'typose:line-scan': o + BUDGET_MS + 2, 'typose:first-screen': o + BUDGET_MS + 3 }
+  return [
+    ['line-scan missing', { ...m, 'typose:line-scan': undefined }],
+    ['line-scan after index-done', { ...m, 'typose:line-scan': m['typose:index-done']! + 1 }],
+    ['line-scan before first-screen', { ...m, ...late, 'typose:index-done': Math.max(m['typose:index-done']!, o + BUDGET_MS + 2) }]
+  ]
+}
+
+test("the veto's controls fail the gate wherever the first screen lands", () => {
+  for (const first of [40, 147]) {
+    const marks: Marks = { 'typose:open-start': 1000, 'typose:first-screen': 1000 + first, 'typose:line-scan': 1231, 'typose:index-done': 1231 }
+    expect(scanGate(marks), `first screen at ${first} ms`).toEqual([])
+    for (const [control, m] of vetoControls(marks)) expect(scanGate(m), `${control}, first screen at ${first} ms`).not.toEqual([])
+  }
+})
+
 test("1 GiB on one line: the first piece shows before the scan passes the line's end, and more loads on demand", async () => {
   test.setTimeout(10 * 60_000)
   // One JSON record of 1 GiB: a 54-byte head, the payload, then `"}` and a newline.
@@ -63,9 +84,7 @@ test("1 GiB on one line: the first piece shows before the scan passes the line's
     console.log(`scan marks (ms after open): ${MARKS.map((n) => `${n} ${((marks[n] ?? NaN) - marks['typose:open-start']!).toFixed(1)}`).join(', ')}`)
     expect(scanGate(marks)).toEqual([])
     // The negative control: without the scan-completion mark, or with it out of order, the same run fails the gate.
-    expect(scanGate({ ...marks, 'typose:line-scan': undefined })).not.toEqual([])
-    expect(scanGate({ ...marks, 'typose:line-scan': marks['typose:index-done']! + 1 })).not.toEqual([])
-    expect(scanGate({ ...marks, 'typose:line-scan': marks['typose:first-screen']! - 1 })).not.toEqual([])
+    for (const [control, m] of vetoControls(marks)) expect(scanGate(m), control).not.toEqual([])
   })
 
   await test.step("the line's first MiB loads on demand, piece by piece, then says how much more there is", async () => {

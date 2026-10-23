@@ -32,13 +32,13 @@ pub const MAP_MAX: usize = map_max(PIECE_BYTES);
 
 /// An upper bound on one item's structured-clone bytes besides its text and map points: the keys, the numbers
 /// (each at most a tag and 8 bytes), the map's kind, the typed array's header and the continuation token, with the
-/// session the core host adds. Measured in the Node wire test.
-pub const ITEM_WIRE_FIXED: usize = 256;
+/// session and document the core host adds. Measured in the Node wire test (264 bytes at most).
+pub const ITEM_WIRE_FIXED: usize = 288;
 
 /// Plan C2's wire bound, from the actual representation: a page `{items}` whose items are `{gen, line, offset,
 /// text, more, map, next, rest}`. Text is at most 2 bytes per UTF-16 unit and a unit per source byte; the map is
 /// at most `map_max(bytes)`, which is 8 + 6 bytes per source byte; and the source bytes sum to at most
-/// `PAGE_BYTES`. So the sum, not `MAX_ITEMS` × `MAP_MAX`, bounds a page (2,367,552 bytes). Nothing preallocates
+/// `PAGE_BYTES`. So the sum, not `MAX_ITEMS` × `MAP_MAX`, bounds a page (2,400,320 bytes). Nothing preallocates
 /// from it.
 pub const PAGE_WIRE_MAX: usize = 64 + MAX_ITEMS * (ITEM_WIRE_FIXED + 8) + PAGE_BYTES * (2 + 6);
 

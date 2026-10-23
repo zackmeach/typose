@@ -59,4 +59,16 @@ describe('PageCache', () => {
     expect(cache.has('0:1')).toBe(true)
     expect([cache.has('0:2'), cache.has('0:500')]).toEqual([false, true])
   })
+
+  it('drops the items a test picks, mounted ones too, and charges only what stays', () => {
+    const cache = new PageCache(2 * PIECE + MAP_MAX)
+    const tail = cjk(0) // a last piece whose line's end wasn't known: no `next`, no `rest`
+    const going = { ...cjk(1), next: { session: 1, doc: 1, gen: 1, line: 1, offset: 65_535 } } // its line goes on
+    cache.add([going])
+    cache.addPiece('0:15', tail)
+    cache.setMounted([1, '0:15'])
+    expect(cache.drop((item) => item.more && !item.next && item.rest === undefined)).toBe(1)
+    expect([cache.has('0:15'), cache.has(1)]).toEqual([false, true])
+    expect(cache.charged).toBe(2 * charge(going))
+  })
 })

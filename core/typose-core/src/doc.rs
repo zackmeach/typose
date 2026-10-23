@@ -23,13 +23,16 @@ impl FileId {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Storage::FileSystem::{
             BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
-            FILE_SHARE_WRITE, GetFileInformationByHandle,
+            FILE_SHARE_WRITE, GetFileInformationByHandle, SECURITY_IDENTIFICATION,
         };
         // Access 0 = query only: no read access requested, so nothing is locked and nothing is scanned.
+        // Identification-level QoS: if a swap ever wins the race between the route check and this open, a pipe
+        // server on the other end can identify the caller but can't impersonate it.
         let f = std::fs::OpenOptions::new()
             .access_mode(0)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .security_qos_flags(SECURITY_IDENTIFICATION)
             .open(path)?;
         let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
         if unsafe { GetFileInformationByHandle(f.as_raw_handle() as _, &mut info) } == 0 {
@@ -149,7 +152,7 @@ impl Document {
         self.read_with(generation, start, end, || {})
     }
 
-    /// `between` runs after the first identity check and before the read: the mutation-race test injects writes there.
+    /// `between` runs just before the read: the mutation-race test injects writes there.
     pub fn read_with(
         &self,
         generation: u32,
@@ -163,8 +166,10 @@ impl Document {
         })
     }
 
-    /// `reads` through the store between one identity check before and one after (plan PR 1: per page, not per
-    /// line or chunk, since a path stat costs ~24 µs). Every chunk read inside still verifies its hash (§3.1).
+    /// `reads` through the store, then one identity check (plan PR 1: per page, not per line or chunk; amended in
+    /// PR 4: after only). The reads go through the open handle, never the path, and the check compares the path
+    /// with the identity taken at open, so a change before or during the reads fails it, and nothing they read
+    /// is returned. Every chunk read inside still verifies its hash (§3.1). A frozen document reads nothing.
     pub fn verified<T>(
         &self,
         generation: u32,
@@ -173,7 +178,9 @@ impl Document {
         if generation != self.generation {
             return Err(DocError::Stale { current: self.generation, asked: generation });
         }
-        self.check()?;
+        if let Some(why) = self.frozen() {
+            return Err(DocError::Frozen(why));
+        }
         let out = reads(&self.store).map_err(|e| self.fail(e))?;
         self.check()?;
         Ok(out)
@@ -247,8 +254,8 @@ mod tests {
         assert_eq!(doc.read(2, 3 * CHUNK as u64, 3 * CHUNK as u64 + 4).unwrap(), b"more");
     }
 
-    /// Spec §13.1 Spike C: an in-place, same-size write between the identity check and the read,
-    /// with the timestamp restored, is caught by chunk verification in 1,000 of 1,000 runs.
+    /// Spec §13.1 Spike C: an in-place, same-size write just before the read, with the timestamp restored, is caught
+    /// by chunk verification in 1,000 of 1,000 runs.
     #[test]
     fn mutation_race_is_caught_by_chunk_verification_1000_of_1000() {
         let original = pattern(4 * CHUNK, 7);
@@ -625,8 +632,9 @@ mod tests {
     }
 
     /// Plan PR 4 (PR 1's known limit 1): after the open, the path is swapped to reach a pipe, by re-pointing a
-    /// junction in it or by remapping its drive letter. Raw's later reads check the path before opening it, and its
-    /// index reopens the document's handle rather than the path, so no client ever connects and the document freezes.
+    /// junction in it (the file's parent, or three levels up) or by remapping its drive letter (written in either
+    /// case). Raw's later reads check the path before opening it, and its index reopens the document's handle rather
+    /// than the path, so no client ever connects and the document freezes.
     #[cfg(windows)]
     #[test]
     fn swapping_the_path_onto_a_pipe_after_the_open_connects_nothing() {
@@ -637,11 +645,19 @@ mod tests {
         fs::create_dir(&real).unwrap();
         let letter = DosDevice::free_letter();
         let mut failures = Vec::new();
-        for (i, route) in ["junction", "drive letter"].into_iter().enumerate() {
-            let server = PipeServer::new(&format!("swap-{i}"));
-            fs::write(real.join(server.name()), b"a regular file\n").unwrap();
-            let subst = (route == "drive letter").then(|| DosDevice::define(letter, &real.to_string_lossy(), false));
+        let routes = ["junction", "deep junction", "drive letter", "lower-case drive letter"];
+        for (i, route) in routes.into_iter().enumerate() {
+            // A pipe name may hold backslashes, so the deep route's pipe is the file's whole path under the link.
+            let server = PipeServer::new(&format!("swap-{i}{}", if route == "deep junction" { r"\a\f" } else { "" }));
+            let file = real.join(server.name());
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(&file, b"a regular file\n").unwrap();
+            let drive = route.ends_with("drive letter");
+            let subst = drive.then(|| DosDevice::define(letter, &real.to_string_lossy(), false));
             let path = match subst {
+                Some(_) if route.starts_with("lower-case") => {
+                    PathBuf::from(format!(r"{}:\{}", letter.to_ascii_lowercase(), server.name()))
+                }
                 Some(_) => PathBuf::from(format!(r"{letter}:\{}", server.name())),
                 None => {
                     junction(&link, &format!(r"\??\{}", real.display()));
@@ -667,6 +683,9 @@ mod tests {
             let connected = server.connected();
             if connected || !page.as_ref().is_err_and(|e| e.starts_with("frozen: changed on disk")) {
                 failures.push(format!("{route}: client connected: {connected}; page {page:?}; index {index:?}"));
+            }
+            if !drive {
+                fs::remove_dir(&link).unwrap(); // the junction, for the next route
             }
         }
         assert!(failures.is_empty(), "{failures:#?}");

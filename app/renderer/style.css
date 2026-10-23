@@ -160,6 +160,13 @@ body {
     transform: translateX(340%);
   }
 }
+/* Brief §6.6, §9 🔒: no sweep under reduced motion; a still, full-width line says the same. */
+@media (prefers-reduced-motion: reduce) {
+  .progress-line.indeterminate > div {
+    width: 100%;
+    animation: none;
+  }
+}
 .banner {
   padding: 6px 12px;
   border-bottom: 1px solid var(--border);

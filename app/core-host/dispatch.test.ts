@@ -28,7 +28,7 @@ beforeEach(() => {
   vi.clearAllMocks()
 })
 
-const token = { session: 7, gen: 1, line: 0, offset: 1 }
+const token = { session: 7, doc: 1, gen: 1, line: 0, offset: 1 }
 
 // Each method's numeric fields, with valid values for the others. `continuation.x` is a token's field.
 const TABLE: [method: string, field: string, base: Record<string, unknown>][] = [
@@ -39,6 +39,7 @@ const TABLE: [method: string, field: string, base: Record<string, unknown>][] = 
   ['page', 'start', { doc: 1, lens: 'raw', gen: 1, count: 1 }],
   ['page', 'count', { doc: 1, lens: 'raw', gen: 1, start: 0 }],
   ['page', 'continuation.session', { doc: 1, lens: 'raw', continuation: token }],
+  ['page', 'continuation.doc', { doc: 1, lens: 'raw', continuation: token }],
   ['page', 'continuation.gen', { doc: 1, lens: 'raw', continuation: token }],
   ['page', 'continuation.line', { doc: 1, lens: 'raw', continuation: token }],
   ['page', 'continuation.offset', { doc: 1, lens: 'raw', continuation: token }],
@@ -64,7 +65,8 @@ describe('every numeric parameter takes only integers in its range', () => {
       it(`${method}.${field} = ${String(value)}`, () => {
         const response = call(method, withValue(base, field, value))
         if (isValid(value, min, max)) {
-          expect('error' in response && response.error.code === 'InvalidParams').toBe(false)
+          // In range: not refused for its range (a token of another document is still refused, as such).
+          expect(response).not.toMatchObject({ error: { code: 'InvalidParams', field, message: expect.stringContaining('must be an integer') } })
           return
         }
         expect(response).toMatchObject({ id: nextId - 1, session: 7, error: { code: 'InvalidParams', field } })
@@ -78,14 +80,28 @@ describe('every numeric parameter takes only integers in its range', () => {
 })
 
 describe('continuation tokens (plan C3)', () => {
-  it('leave stamped with this session, from a window and from a piece', () => {
-    expect(call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 })).toMatchObject({ result: { items: [{ next: { session: 7 } }] } })
-    expect(call('page', { doc: 1, lens: 'raw', continuation: token })).toMatchObject({ result: { items: [{ next: { session: 7 } }] } })
+  it('leave stamped with this session and their document, from a window and from a piece', () => {
+    const stamped = { result: { items: [{ next: { session: 7, doc: 1 } }] } }
+    expect(call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 })).toMatchObject(stamped)
+    expect(call('page', { doc: 1, lens: 'raw', continuation: token })).toMatchObject(stamped)
     expect(piece).toHaveBeenCalledWith(1, 0, 1)
   })
 
   it("from another session are Stale, and the addon isn't asked", () => {
     expect(call('page', { doc: 1, lens: 'raw', continuation: { ...token, session: 6 } })).toMatchObject({ error: { code: 'Stale' } })
+    expect(piece).not.toHaveBeenCalled()
+  })
+
+  it("from another document are refused, and the addon isn't asked (plan C7: tokens carry their doc)", () => {
+    expect(call('open', { path: 'b.txt', count: 1 })).toMatchObject({ result: { doc: 2 } })
+    vi.clearAllMocks()
+    for (const [doc, tokenDoc] of [
+      [2, 1],
+      [1, 2]
+    ])
+      expect(call('page', { doc, lens: 'raw', continuation: { ...token, doc: tokenDoc } })).toMatchObject({
+        error: { code: 'InvalidParams', field: 'continuation.doc' }
+      })
     expect(piece).not.toHaveBeenCalled()
   })
 
