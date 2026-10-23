@@ -29,7 +29,7 @@ export function App({ core }: { core: CoreClient }) {
     document.title = title
   }, [title])
 
-  // Plan C8's shellVisible: React's first commit of the title bar, once that frame is produced.
+  // Plan C8's titlebarPainted, for the startup breakdown: React's first commit of the title bar, once that frame is produced.
   useLayoutEffect(() => markPainted('titlebarPainted'), [])
 
   useEffect(() => {

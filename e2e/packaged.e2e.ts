@@ -44,6 +44,8 @@ test('the fused build listens on --remote-debugging-port=0, connectOverCDP attac
   expect(await closePackaged(l)).toEqual({ code: 0, signal: null })
 })
 
+// The forced hunspell fetch in netlog.e2e.ts needs main-process access, which the fused build doesn't give; that test
+// runs the same main code on the dev layout.
 test('the NetLog shows no network activity on the packaged build', async () => {
   const log = test.info().outputPath('netlog-packaged.json')
   const file = fixture('packaged-net.txt', Array.from({ length: 3000 }, (_, i) => `line ${i} café 語 😀`).join('\n'))

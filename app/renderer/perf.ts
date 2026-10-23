@@ -15,8 +15,9 @@ export function markBundleEvaluated(): void {
 }
 
 /**
- * Marks when the frame that first showed the title bar reached the screen: Element Timing's renderTime for the
- * element marked `elementtiming="titlebar"`, a presentation time, which comes after the window's `show`.
+ * Marks when the frame that first showed the title bar was presented: Element Timing's renderTime for the element
+ * marked `elementtiming="titlebar"`. In the app's own path that lands after the window's `show`; shellVisible takes the
+ * later of the two, since a frame presented while the window is still hidden isn't on screen.
  */
 export function markTitlebarPresented(): void {
   const observer = new PerformanceObserver((list) => {

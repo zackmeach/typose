@@ -113,7 +113,7 @@ function createWindow(): BrowserWindow {
   })
   win.on('show', () => {
     log('window-shown')
-    // Plan C8: shellVisible is the later of this and the title bar's paint; every run records the refresh rate.
+    // Plan C8: shellVisible is the later of this and the title bar's first presentation; runs record the refresh rate.
     mark?.('show', { hz: screen.getDisplayMatching(win.getBounds()).displayFrequency })
   })
   win.on('unresponsive', () => log('unresponsive'))
