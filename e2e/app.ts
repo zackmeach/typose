@@ -3,7 +3,8 @@
 // observed exit status. `finish` keeps each run's lifecycle log, exit status and any new dumps (plan C9); a test
 // that fails before calling it gets the same from the `test` exported here.
 import { type ElectronApplication, type Page, test as base, _electron as electron, expect } from '@playwright/test'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 
@@ -71,16 +72,21 @@ export async function finish(l: Launched, keep = false): Promise<Exit> {
   const closing = l.app.close().catch(() => {})
   const exit = await l.exited
   await closing
+  keepEvidence(l.userData, l.pid, exit, keep)
+  return exit
+}
+
+/** Copies a run's exit status, lifecycle log and any dumps into the test's output; deletes the profile unless `keep`. */
+export function keepEvidence(userData: string, pid: number, exit: Exit, keep: boolean): void {
   const out = base.info().outputPath()
   mkdirSync(out, { recursive: true })
-  writeFileSync(join(out, `exit-${l.pid}.json`), JSON.stringify(exit)) // one test may launch twice
+  writeFileSync(join(out, `exit-${pid}.json`), JSON.stringify(exit)) // one test may launch twice
   for (const name of ['lifecycle.jsonl', 'lifecycle.1.jsonl']) {
-    const log = join(l.userData, 'logs', name)
-    if (existsSync(log)) copyFileSync(log, join(out, `${l.pid}-${name}`))
+    const log = join(userData, 'logs', name)
+    if (existsSync(log)) copyFileSync(log, join(out, `${pid}-${name}`))
   }
-  for (const dump of dumps(l.userData)) copyFileSync(dump, join(out, basename(dump)))
-  if (!keep) rmSync(l.userData, { recursive: true, force: true })
-  return exit
+  for (const dump of dumps(userData)) copyFileSync(dump, join(out, basename(dump)))
+  if (!keep) rmSync(userData, { recursive: true, force: true })
 }
 
 /** Crashpad dumps under a profile. */
@@ -119,6 +125,14 @@ export function lifecycle(userData: string): LifecycleRecord[] {
     .trim()
     .split('\n')
     .map((l) => JSON.parse(l) as LifecycleRecord)
+}
+
+/** Runs netlog-assert.mjs on a log, as CI does. */
+export function assertNetLog(log: string): string {
+  expect(statSync(log).size).toBeGreaterThan(0) // a NetLog always holds metadata; emptiness isn't the test
+  const run = spawnSync(process.execPath, [join(__dirname, 'netlog-assert.mjs'), log], { encoding: 'utf8' })
+  expect(run.status, run.stdout + run.stderr).toBe(0)
+  return run.stdout
 }
 
 export function fixture(name: string, bytes: string | Uint8Array): string {

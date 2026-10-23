@@ -1,18 +1,7 @@
 // Spec §7.3's NetLog assertion, with the crash reporter armed (it always is, plan C9): open files of two
 // encodings, scroll, then fail on any outside-scheme request, DNS lookup, proxy probe or socket connect.
 import { expect } from '@playwright/test'
-import { spawnSync } from 'node:child_process'
-import { statSync } from 'node:fs'
-import { join } from 'node:path'
-import { finish, fixture, launch, test, waitIndexed } from './app'
-
-/** Runs netlog-assert.mjs on a log, as CI does. */
-function assertNetLog(log: string): string {
-  expect(statSync(log).size).toBeGreaterThan(0) // a NetLog always holds metadata; emptiness isn't the test
-  const run = spawnSync(process.execPath, [join(__dirname, 'netlog-assert.mjs'), log], { encoding: 'utf8' })
-  expect(run.status, run.stdout + run.stderr).toBe(0)
-  return run.stdout
-}
+import { assertNetLog, finish, fixture, launch, test, waitIndexed } from './app'
 
 test('the NetLog shows no network activity', async () => {
   const files = [

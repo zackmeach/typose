@@ -1,6 +1,8 @@
 # Build outputs
 node_modules/
 app/out/
+app/out-hooks/
+app/dist/
 core/target/
 core/typose-node/*.node
 core/typose-node/index.js
@@ -11,6 +13,7 @@ playwright-report/
 # Generated fixtures and logs
 .fixtures/
 *.netlog.json
+/.evidence/
 
 # Research inputs: local only, never committed (spec header)
 astra-research.md
