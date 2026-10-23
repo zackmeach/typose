@@ -78,7 +78,7 @@ fn offsets_beyond_4_gib_are_exact_in_every_layer() {
     // Line index over the whole file: one giant line of zeros per gap, so only byte-bounded checkpoints help.
     let shared = RwLock::new(LineIndex::default());
     let t = Instant::now();
-    build(&File::open(&path).unwrap(), LEN, IndexConfig::default(), &store.hashes(), &shared, |_| {}).unwrap();
+    build(&File::open(&path).unwrap(), LEN, IndexConfig::default(), &store.hashes(), &shared, |_| true).unwrap();
     let ms = t.elapsed().as_millis().max(1);
     let idx = shared.into_inner().unwrap();
     println!(

@@ -6,12 +6,18 @@ use crate::pages::MAX_ITEMS;
 
 /// Every numeric protocol field and its inclusive range. The core host checks requests against this same table,
 /// which it reads through the addon, so the two sides can't drift.
-pub const RANGES: [(&str, u64, u64); 5] = [
+pub const RANGES: [(&str, u64, u64); 9] = [
     ("id", 1, MAX_SAFE),       // a request id
     ("protocol", 0, MAX_SAFE), // the handshake's protocol version
     ("doc", 1, MAX_SAFE),      // a document id
     ("start", 0, MAX_SAFE),    // a line number
     ("count", 1, MAX_ITEMS as u64),
+    ("gen", 1, u32::MAX as u64), // a document generation (spec §3.1); generations start at 1
+    // A continuation token's fields (plan C3). The core checks the rest: the session and generation are current,
+    // and the offset is a cut of the line.
+    ("session", 1, MAX_SAFE),
+    ("line", 0, MAX_SAFE),
+    ("offset", 0, MAX_SAFE),
 ];
 
 /// `field`'s inclusive range. Panics on a field missing from `RANGES`, which is a bug, not input.

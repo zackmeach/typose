@@ -50,13 +50,27 @@ impl std::fmt::Display for StoreError {
 /// Windows even stat-ing one, connects to its server, and opening a FIFO blocks. `Ok(Some(why))` is a refusal;
 /// `Err` is the path's own error (missing, permission denied).
 pub fn refusal(path: &Path) -> io::Result<Option<&'static str>> {
-    #[cfg(windows)]
-    if let Some(why) = windows::refusal(path)? {
+    if let Some(why) = route_refusal(path)? {
         return Ok(Some(why));
     }
-    // A stat. On Unix it opens nothing. On Windows it opens a query handle, once `windows::refusal` has followed
+    // A stat. On Unix it opens nothing. On Windows it opens a query handle, once `route_refusal` has followed
     // every link in the path to a location that isn't a device.
     Ok((!std::fs::metadata(path)?.is_file()).then_some("not a regular file"))
+}
+
+/// The part of `refusal` that opens nothing a device could answer, to run before any by-path access after the
+/// open too (plan PR 4): a path swapped for a link into the pipe namespace, or a drive letter remapped onto it,
+/// must not connect a later identity check. On Unix a stat opens nothing, so there's nothing to check.
+pub fn route_refusal(path: &Path) -> io::Result<Option<&'static str>> {
+    #[cfg(windows)]
+    {
+        windows::refusal(path)
+    }
+    #[cfg(unix)]
+    {
+        let _ = path;
+        Ok(None)
+    }
 }
 
 #[cfg(windows)]
@@ -67,12 +81,14 @@ mod windows {
     /// Links followed before giving up (Windows itself stops at 63).
     const MAX_LINKS: usize = 32;
 
-    /// First by path form, then through every link in the path, following none of them:
+    /// First by path form, then the drive, then through every link in the path, following none of them:
     /// - the form: `\\.\`, `\\?\` and `\??\` paths (either slash), UNC shares that reach pipes and mailslots, and
     ///   reserved device names;
-    /// - the links: each component in turn, through `symlink_metadata`, which opens a link itself and never its
-    ///   target. A junction's or symlink's target gets the same form check before anything past the link is
-    ///   touched, so a link into `\??\pipe\` is refused.
+    /// - the drive letter's target (`drive`), read without opening anything;
+    /// - the links: each component in turn, through `GetFileAttributesW`, which reads a link's own attributes, then
+    ///   for a reparse point `symlink_metadata`, which opens the link itself and never its target. A junction's or
+    ///   symlink's target gets the same checks before anything past the link is touched, so a link into
+    ///   `\??\pipe\` is refused.
     pub fn refusal(path: &Path) -> io::Result<Option<&'static str>> {
         // The raw form first: `absolute` would read `\??\C:\x` as a rooted path on the current drive.
         if let Some(why) = form(path) {
@@ -83,12 +99,86 @@ mod windows {
             if let Some(why) = form(&path) {
                 return Ok(Some(why));
             }
+            match drive(&path)? {
+                Drive::Refused(why) => return Ok(Some(why)),
+                Drive::Path(mapped) => {
+                    path = std::path::absolute(mapped)?;
+                    continue;
+                }
+                Drive::Disk => {}
+            }
             match first_link(&path)? {
                 Some(resolved) => path = std::path::absolute(resolved)?,
                 None => return Ok(None),
             }
         }
         Ok(Some("too many links"))
+    }
+
+    enum Drive {
+        /// No drive letter, or one on a volume or another device: the walk goes on.
+        Disk,
+        Refused(&'static str),
+        /// The same path through what the drive letter stands for, to check again.
+        Path(PathBuf),
+    }
+
+    /// A drive letter is a name in the session's DOS-device namespace: `DefineDosDeviceW` (no privilege needed) or
+    /// `subst` can point it anywhere, and a path through it reaches whatever that is. `QueryDosDeviceW` reads the
+    /// target without opening anything:
+    /// - the pipe and mailslot devices are refused, as their `\\.\` paths are;
+    /// - a subst-style target (`\??\C:\dir`, `\??\UNC\host\share`) is translated back to a path, any other target in
+    ///   the DOS-device namespace (`\??\PIPE`) is refused;
+    /// - a network redirector's (`\Device\Mup\…`, `\Device\LanmanRedirector\…`) becomes the UNC path it reaches, so
+    ///   `form` judges its share;
+    /// - any other device (a volume, a CD, a RAM or encrypted disk) is a drive.
+    fn drive(path: &Path) -> io::Result<Drive> {
+        use windows_sys::Win32::Storage::FileSystem::QueryDosDeviceW;
+        let mut components = path.components();
+        let Some(Component::Prefix(prefix)) = components.next() else { return Ok(Drive::Disk) };
+        let Prefix::Disk(letter) = prefix.kind() else { return Ok(Drive::Disk) };
+        let rest = components.as_path().to_string_lossy().into_owned(); // `\dir\file`
+        let name = [u16::from(letter), u16::from(b':'), 0];
+        let mut buf = vec![0u16; 4096];
+        let n = unsafe { QueryDosDeviceW(name.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+        if n == 0 {
+            return Err(io::Error::last_os_error()); // no such drive
+        }
+        let end = buf.iter().position(|&u| u == 0).unwrap_or(n as usize);
+        let target = String::from_utf16_lossy(&buf[..end]);
+        let lower = target.to_ascii_lowercase();
+        // `target` below `prefix`: what follows it, if it's the prefix itself or a path under it.
+        let under = |prefix: &str| {
+            lower
+                .strip_prefix(prefix)
+                .filter(|r| r.is_empty() || r.starts_with('\\'))
+                .map(|r| &target[target.len() - r.len()..])
+        };
+        if under(r"\device\namedpipe").is_some() || under(r"\device\mailslot").is_some() {
+            return Ok(Drive::Refused("a drive mapped to pipes or mailslots"));
+        }
+        let unc = |host_share: &str| {
+            let full = format!("{host_share}{rest}");
+            Ok(Drive::Path(PathBuf::from(format!(r"\\{}", full.trim_start_matches('\\')))))
+        };
+        if let Some(r) = under(r"\device\mup").or_else(|| under(r"\device\lanmanredirector")) {
+            // `\;LanmanRedirector\;Z:0000…\host\share`: the `;` components are the redirector's own.
+            return unc(&r.split('\\').filter(|c| !c.is_empty() && !c.starts_with(';')).collect::<Vec<_>>().join(r"\"));
+        }
+        for alias in [r"\??\", r"\dosdevices\", r"\global??\"] {
+            if lower.starts_with(alias) {
+                let inner = &target[alias.len()..];
+                if inner.get(..4).is_some_and(|p| p.eq_ignore_ascii_case(r"UNC\")) {
+                    return unc(&inner[4..]);
+                }
+                let bytes = inner.as_bytes();
+                if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+                    return Ok(Drive::Path(PathBuf::from(format!("{inner}{rest}"))));
+                }
+                return Ok(Drive::Refused("a drive mapped to a device"));
+            }
+        }
+        Ok(Drive::Disk)
     }
 
     fn form(path: &Path) -> Option<&'static str> {
@@ -134,8 +224,11 @@ mod windows {
             if matches!(component, Component::Prefix(_) | Component::RootDir) {
                 continue;
             }
-            // `is_symlink` is true for symlinks and junctions (name surrogates), not for placeholders like OneDrive's.
-            if std::fs::symlink_metadata(&walked)?.file_type().is_symlink() {
+            // `GetFileAttributesW` returns a link's own attributes, without a handle: one query per component, which
+            // keeps the walk cheap enough to run before every identity check (plan PR 4). Only a reparse point needs
+            // `symlink_metadata`, whose `is_symlink` is true for symlinks and junctions (name surrogates), not for
+            // placeholders like OneDrive's.
+            if reparse_point(&walked)? && std::fs::symlink_metadata(&walked)?.file_type().is_symlink() {
                 let target = std::fs::read_link(&walked)?;
                 // A relative target is relative to the link's directory; an absolute one replaces the whole path.
                 let base = walked.parent().unwrap_or(&walked);
@@ -143,6 +236,18 @@ mod windows {
             }
         }
         Ok(None)
+    }
+
+    fn reparse_point(path: &Path) -> io::Result<bool> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_REPARSE_POINT, GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
+        };
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+        match unsafe { GetFileAttributesW(wide.as_ptr()) } {
+            INVALID_FILE_ATTRIBUTES => Err(io::Error::last_os_error()),
+            attributes => Ok(attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0),
+        }
     }
 }
 
@@ -248,6 +353,30 @@ impl ByteStore {
 
     pub fn hashes(&self) -> Arc<ChunkHashes> {
         self.hashes.clone()
+    }
+
+    /// Another handle to the file this store has open, made from the handle and never from the path, which may lead
+    /// somewhere else by now (a link into the pipe namespace; plan PR 4). On Windows `ReOpenFile` makes a new file
+    /// object, so its reads don't queue behind this handle's; on Unix `pread` never queues, so a `dup` will do.
+    pub fn reopen(&self) -> io::Result<File> {
+        #[cfg(unix)]
+        {
+            self.file.try_clone()
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::{AsRawHandle, FromRawHandle};
+            use windows_sys::Win32::Foundation::{GENERIC_READ, INVALID_HANDLE_VALUE};
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, ReOpenFile,
+            };
+            let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+            let handle = unsafe { ReOpenFile(self.file.as_raw_handle() as _, GENERIC_READ, share, 0) };
+            if handle == INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(unsafe { File::from_raw_handle(handle as _) })
+        }
     }
 
     pub fn chunk(&self, idx: u64) -> Result<Arc<Vec<u8>>, StoreError> {

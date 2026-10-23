@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
-use crate::store::{ByteStore, NotRegular, StoreError, refusal};
+use crate::store::{ByteStore, NotRegular, StoreError, refusal, route_refusal};
 
 /// What change detection compares, taken from the path (never the open handle, spec §3.3).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,6 +66,8 @@ pub enum DocError {
     Refused(String),
     /// A NUL in the first 8KB without a UTF-16 BOM (spec §4.1).
     Binary,
+    /// A caller's value the core couldn't have issued: a forged continuation (plan C3).
+    Invalid(String),
 }
 
 impl std::fmt::Display for DocError {
@@ -76,6 +78,7 @@ impl std::fmt::Display for DocError {
             DocError::Frozen(why) => write!(f, "frozen: {why}"),
             DocError::Refused(why) => write!(f, "refused: {why}"),
             DocError::Binary => write!(f, "binary file"),
+            DocError::Invalid(why) => f.write_str(why),
         }
     }
 }
@@ -171,12 +174,17 @@ impl Document {
             return Err(DocError::Stale { current: self.generation, asked: generation });
         }
         self.check()?;
-        let out = reads(&self.store).map_err(|e| match e {
-            StoreError::Changed { chunk } => self.freeze(format!("changed on disk (chunk {chunk})")),
-            StoreError::Io(e) => self.freeze(format!("read failed: {e}")),
-        })?;
+        let out = reads(&self.store).map_err(|e| self.fail(e))?;
         self.check()?;
         Ok(out)
+    }
+
+    /// A failed read freezes the document: a chunk that no longer matches, or an I/O error (plan C6).
+    pub(crate) fn fail(&self, e: StoreError) -> DocError {
+        match e {
+            StoreError::Changed { chunk } => self.freeze(format!("changed on disk (chunk {chunk})")),
+            StoreError::Io(e) => self.freeze(format!("read failed: {e}")),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -193,6 +201,13 @@ impl Document {
         if let Some(why) = self.frozen() {
             return Err(DocError::Frozen(why));
         }
+        // `FileId::of` opens the path. Since the open, the path or a link or drive letter in it may have been swapped
+        // to reach a pipe, so the route is checked first, as the open checked it (plan PR 4).
+        match route_refusal(&self.path) {
+            Ok(None) => {}
+            Ok(Some(why)) => return Err(self.freeze(format!("changed on disk: now {why}"))),
+            Err(e) => return Err(self.freeze(format!("unavailable: {e}"))),
+        }
         match FileId::of(&self.path) {
             Ok(now) if now == self.id => Ok(()),
             Ok(_) => Err(self.freeze("changed on disk".into())),
@@ -200,7 +215,9 @@ impl Document {
         }
     }
 
-    fn freeze(&self, why: String) -> DocError {
+    /// Freezes the document (spec §3.1): nothing more is read until Reload. Also how Raw stops a superseded
+    /// generation's index (`Raw::reload`) and records an index failure (plan C6).
+    pub(crate) fn freeze(&self, why: String) -> DocError {
         *self.frozen.lock().unwrap() = Some(why.clone());
         DocError::Frozen(why)
     }
@@ -524,6 +541,137 @@ mod tests {
         }
     }
 
+    /// Drive-letter tests take turns: each borrows a free letter of this logon session's DOS-device namespace.
+    #[cfg(windows)]
+    static DRIVES: Mutex<()> = Mutex::new(());
+
+    /// A drive letter defined with `DefineDosDeviceW` (per logon session, no privilege), removed on drop, so a
+    /// failing assert can't leave it behind.
+    #[cfg(windows)]
+    struct DosDevice {
+        name: Vec<u16>,
+        target: Vec<u16>,
+        flags: u32,
+    }
+
+    #[cfg(windows)]
+    impl DosDevice {
+        /// The last letter from Z down that names nothing in this session.
+        fn free_letter() -> char {
+            use windows_sys::Win32::Storage::FileSystem::QueryDosDeviceW;
+            let mut buf = [0u16; 512];
+            ('G'..='Z')
+                .rev()
+                .find(|&c| {
+                    let name = [c as u16, u16::from(b':'), 0];
+                    unsafe { QueryDosDeviceW(name.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) == 0 }
+                })
+                .expect("a free drive letter")
+        }
+
+        /// `raw`: `target` is an NT path (`\Device\…`); otherwise a path, as `subst` takes it.
+        fn define(letter: char, target: &str, raw: bool) -> DosDevice {
+            use windows_sys::Win32::Storage::FileSystem::{DDD_RAW_TARGET_PATH, DefineDosDeviceW};
+            let flags = if raw { DDD_RAW_TARGET_PATH } else { 0 };
+            let device = DosDevice {
+                name: [letter as u16, u16::from(b':'), 0].to_vec(),
+                target: target.encode_utf16().chain([0]).collect(),
+                flags,
+            };
+            let ok = unsafe { DefineDosDeviceW(flags, device.name.as_ptr(), device.target.as_ptr()) };
+            assert_ne!(ok, 0, "DefineDosDeviceW {letter}: -> {target}: {}", io::Error::last_os_error());
+            device
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for DosDevice {
+        fn drop(&mut self) {
+            use windows_sys::Win32::Storage::FileSystem::{
+                DDD_EXACT_MATCH_ON_REMOVE, DDD_REMOVE_DEFINITION, DefineDosDeviceW,
+            };
+            let flags = self.flags | DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE;
+            let ok = unsafe { DefineDosDeviceW(flags, self.name.as_ptr(), self.target.as_ptr()) };
+            assert!(ok != 0 || std::thread::panicking(), "removing the drive: {}", io::Error::last_os_error());
+        }
+    }
+
+    /// Plan PR 4 (PR 1's known limit 2): a drive letter mapped onto the pipe namespace, by `DefineDosDeviceW` as any
+    /// program in the session can, is refused before anything opens the path. A subst'd folder still opens.
+    #[cfg(windows)]
+    #[test]
+    fn a_drive_letter_mapped_onto_pipes_is_refused_and_no_client_connects() {
+        let _turn = DRIVES.lock().unwrap_or_else(|e| e.into_inner());
+        let letter = DosDevice::free_letter();
+        let mut failures = Vec::new();
+        let routes = [(r"\Device\NamedPipe", ""), (r"\??\PIPE", ""), (r"\Device\Mup", r"localhost\pipe\")];
+        for (i, (target, under)) in routes.into_iter().enumerate() {
+            let server = PipeServer::new(&format!("drive-{i}"));
+            let _drive = DosDevice::define(letter, target, true);
+            let path = PathBuf::from(format!(r"{letter}:\{under}{}", server.name()));
+            let result = Document::open(&path);
+            let connected = server.connected();
+            if connected || !matches!(result, Err(DocError::Refused(_))) {
+                let outcome = result.map_or_else(|e| e.to_string(), |_| "opened".into());
+                failures.push(format!("{letter}: -> {target}, {path:?}: client connected: {connected}; {outcome}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+        let scratch = Scratch::new("subst");
+        fs::write(scratch.0.join("f.txt"), b"through a subst").unwrap();
+        let _drive = DosDevice::define(letter, &scratch.0.to_string_lossy(), false);
+        let doc = Document::open(Path::new(&format!(r"{letter}:\f.txt"))).unwrap();
+        assert_eq!(doc.read(1, 0, 15).unwrap(), b"through a subst");
+    }
+
+    /// Plan PR 4 (PR 1's known limit 1): after the open, the path is swapped to reach a pipe, by re-pointing a
+    /// junction in it or by remapping its drive letter. Raw's later reads check the path before opening it, and its
+    /// index reopens the document's handle rather than the path, so no client ever connects and the document freezes.
+    #[cfg(windows)]
+    #[test]
+    fn swapping_the_path_onto_a_pipe_after_the_open_connects_nothing() {
+        use crate::raw::Raw;
+        let _turn = DRIVES.lock().unwrap_or_else(|e| e.into_inner());
+        let scratch = Scratch::new("swap");
+        let (real, link) = (scratch.0.join("real"), scratch.0.join("j"));
+        fs::create_dir(&real).unwrap();
+        let letter = DosDevice::free_letter();
+        let mut failures = Vec::new();
+        for (i, route) in ["junction", "drive letter"].into_iter().enumerate() {
+            let server = PipeServer::new(&format!("swap-{i}"));
+            fs::write(real.join(server.name()), b"a regular file\n").unwrap();
+            let subst = (route == "drive letter").then(|| DosDevice::define(letter, &real.to_string_lossy(), false));
+            let path = match subst {
+                Some(_) => PathBuf::from(format!(r"{letter}:\{}", server.name())),
+                None => {
+                    junction(&link, &format!(r"\??\{}", real.display()));
+                    link.join(server.name())
+                }
+            };
+            let raw = Raw::open(&path).unwrap();
+            assert_eq!(raw.page(1, 0, 1).unwrap()[0].text, "a regular file");
+            // The swap: the same path now reaches the pipe.
+            let _pipe_drive = match subst {
+                Some(subst) => {
+                    drop(subst);
+                    Some(DosDevice::define(letter, r"\Device\NamedPipe", true))
+                }
+                None => {
+                    fs::remove_dir(&link).unwrap(); // the junction, not its target
+                    junction(&link, r"\??\pipe\");
+                    None
+                }
+            };
+            let page = raw.page(1, 0, 1).map(|_| ()).map_err(|e| e.to_string());
+            let index = raw.index(|_| {});
+            let connected = server.connected();
+            if connected || !page.as_ref().is_err_and(|e| e.starts_with("frozen: changed on disk")) {
+                failures.push(format!("{route}: client connected: {connected}; page {page:?}; index {index:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_fifo_is_refused_without_blocking() {
@@ -581,6 +729,12 @@ mod tests {
             "identity check alone",
             Box::new(|_| {
                 FileId::of(&path).unwrap();
+            }),
+        );
+        time(
+            "route check alone",
+            Box::new(|_| {
+                route_refusal(&path).unwrap();
             }),
         );
     }

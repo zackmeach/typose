@@ -22,7 +22,7 @@ describe('PageCache', () => {
     let seen = 0
     for (let top = 0; top < 4_000; top += 7) {
       const [first, last] = [Math.max(0, top - 10), top + 21]
-      cache.setMounted(first, last)
+      cache.setMounted(Array.from({ length: last - first }, (_, k) => first + k))
       // Pages of up to 4 such items, as the core sends them; every third item has a dense breakpoint map.
       for (let line = first; line < last; line += 4)
         cache.add(Array.from({ length: Math.min(4, last - line) }, (_, k) => cjk(line + k, (line + k) % 3 ? 0 : 12_000)))
@@ -40,7 +40,7 @@ describe('PageCache', () => {
     expect(charge(item)).toBe(2 * 21_845 + 400)
     cache.add([item])
     expect(cache.charged).toBe(charge(item))
-    cache.setMounted(0, 1)
+    cache.setMounted([0])
     expect(cache.charged).toBe(2 * charge(item))
   })
 
@@ -48,5 +48,15 @@ describe('PageCache', () => {
     const cache = new PageCache(2 * PIECE + MAP_MAX)
     cache.add([cjk(0), cjk(1)])
     expect(cache.has(0) && cache.has(1)).toBe(true)
+  })
+
+  it("charges a line's further pieces like first pieces, and evicts them oldest first but never a mounted one", () => {
+    const cache = new PageCache(2 * PIECE + MAP_MAX)
+    cache.setMountedRows(1)
+    cache.setMounted(['0:1'])
+    for (let k = 1; k <= 500; k++) cache.addPiece(`0:${k}`, cjk(0)) // 500 × 43,690 bytes: past the cap
+    expect(cache.charged).toBeLessThanOrEqual(cache.cap)
+    expect(cache.has('0:1')).toBe(true)
+    expect([cache.has('0:2'), cache.has('0:500')]).toEqual([false, true])
   })
 })

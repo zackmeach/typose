@@ -7,9 +7,13 @@ import type { Response } from '../shared/protocol'
 import { type Addon, makeDispatcher } from './dispatch'
 import { HOSTILE, isValid } from './numbers'
 
-const page = vi.fn(() => ({ items: [] }))
+// An item whose line goes on, so its token shows the session stamped on the way out.
+const item = () => ({ gen: 1, line: 0, offset: 0, text: 'x', more: true, next: { gen: 1, line: 0, offset: 1 } })
+const page = vi.fn(() => ({ items: [item()] }))
+const piece = vi.fn(item)
+const reload = vi.fn()
 const startIndex = vi.fn()
-const doc = { generation: 1, size: 3, encoding: 'UTF-8', lines: 0, indexed: false, page, startIndex } as unknown as Doc
+const doc = { generation: 1, size: 3, encoding: 'UTF-8', lines: 0, indexed: false, blank: false, page, piece, reload, startIndex } as unknown as Doc
 const openDoc = vi.fn(() => doc)
 const addon: Addon = { coreVersion: () => '0.0.0', limits, openDoc }
 const range = (field: string) => limits().ranges.find((r) => r.field === field)!
@@ -24,37 +28,84 @@ beforeEach(() => {
   vi.clearAllMocks()
 })
 
-// Each method's numeric fields, with valid values for the others.
+const token = { session: 7, gen: 1, line: 0, offset: 1 }
+
+// Each method's numeric fields, with valid values for the others. `continuation.x` is a token's field.
 const TABLE: [method: string, field: string, base: Record<string, unknown>][] = [
   ['hello', 'protocol', {}],
   ['open', 'count', { path: 'b.txt' }],
-  ['page', 'doc', { lens: 'raw', start: 0, count: 1 }],
-  ['page', 'start', { doc: 1, lens: 'raw', count: 1 }],
-  ['page', 'count', { doc: 1, lens: 'raw', start: 0 }],
+  ['page', 'doc', { lens: 'raw', gen: 1, start: 0, count: 1 }],
+  ['page', 'gen', { doc: 1, lens: 'raw', start: 0, count: 1 }],
+  ['page', 'start', { doc: 1, lens: 'raw', gen: 1, count: 1 }],
+  ['page', 'count', { doc: 1, lens: 'raw', gen: 1, start: 0 }],
+  ['page', 'continuation.session', { doc: 1, lens: 'raw', continuation: token }],
+  ['page', 'continuation.gen', { doc: 1, lens: 'raw', continuation: token }],
+  ['page', 'continuation.line', { doc: 1, lens: 'raw', continuation: token }],
+  ['page', 'continuation.offset', { doc: 1, lens: 'raw', continuation: token }],
+  ['reload', 'doc', { count: 1 }],
+  ['reload', 'count', { doc: 1 }],
   ['close', 'doc', {}]
 ]
 
+/** `base` with `field` (a token's, for `continuation.x`) set to `value`, or missing for `undefined`. */
+function withValue(base: Record<string, unknown>, field: string, value: unknown): Record<string, unknown> {
+  const [outer, inner] = field.split('.')
+  if (inner) return { ...base, [outer]: withValue(base[outer] as Record<string, unknown>, inner, value) }
+  const params = { ...base }
+  if (value === undefined) delete params[field]
+  else params[field] = value
+  return params
+}
+
 describe('every numeric parameter takes only integers in its range', () => {
   for (const [method, field, base] of TABLE) {
-    const { min, max } = range(field)
+    const { min, max } = range(field.replace('continuation.', ''))
     for (const value of [...HOSTILE, min, max, max + 1]) {
       it(`${method}.${field} = ${String(value)}`, () => {
-        const params = value === undefined ? { ...base } : { ...base, [field]: value } // undefined: the field is missing
-        const response = call(method, params)
+        const response = call(method, withValue(base, field, value))
         if (isValid(value, min, max)) {
           expect('error' in response && response.error.code === 'InvalidParams').toBe(false)
           return
         }
         expect(response).toMatchObject({ id: nextId - 1, session: 7, error: { code: 'InvalidParams', field } })
-        expect(openDoc).not.toHaveBeenCalled()
-        expect(page).not.toHaveBeenCalled()
-        expect(startIndex).not.toHaveBeenCalled()
+        for (const spy of [openDoc, page, piece, reload, startIndex]) expect(spy).not.toHaveBeenCalled()
         // No state change: document 1 is still open, and the next open is document 2.
-        expect(call('page', { doc: 1, lens: 'raw', start: 0, count: 1 })).toHaveProperty('result')
+        expect(call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 })).toHaveProperty('result')
         expect(call('open', { path: 'c.txt', count: 1 })).toMatchObject({ result: { doc: 2 } })
       })
     }
   }
+})
+
+describe('continuation tokens (plan C3)', () => {
+  it('leave stamped with this session, from a window and from a piece', () => {
+    expect(call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 })).toMatchObject({ result: { items: [{ next: { session: 7 } }] } })
+    expect(call('page', { doc: 1, lens: 'raw', continuation: token })).toMatchObject({ result: { items: [{ next: { session: 7 } }] } })
+    expect(piece).toHaveBeenCalledWith(1, 0, 1)
+  })
+
+  it("from another session are Stale, and the addon isn't asked", () => {
+    expect(call('page', { doc: 1, lens: 'raw', continuation: { ...token, session: 6 } })).toMatchObject({ error: { code: 'Stale' } })
+    expect(piece).not.toHaveBeenCalled()
+  })
+
+  it('must be an object', () => {
+    for (const continuation of [null, 7, 'token', [1, 2]])
+      expect(call('page', { doc: 1, lens: 'raw', continuation })).toMatchObject({ error: { code: 'InvalidParams', field: 'continuation' } })
+    expect(piece).not.toHaveBeenCalled()
+  })
+})
+
+it('reload opens the next generation, starts its index and returns its first page', () => {
+  expect(call('reload', { doc: 1, count: 5 })).toMatchObject({ result: { doc: 1, gen: 1, blank: false, firstPage: { items: [{ next: { session: 7 } }] } } })
+  expect(reload).toHaveBeenCalledOnce()
+  expect(page).toHaveBeenCalledWith(1, 0, 5)
+  expect(startIndex).toHaveBeenCalledOnce()
+  reload.mockImplementationOnce(() => {
+    throw Object.assign(new Error('io: not found'), { code: 'NotFound' })
+  })
+  expect(call('reload', { doc: 1, count: 5 })).toMatchObject({ error: { code: 'NotFound' } })
+  expect(call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 })).toHaveProperty('result') // still open
 })
 
 it('a request id is validated too, and the reply then carries id null', () => {
@@ -76,7 +127,7 @@ it('a lens other than raw, a bad path and an unknown document are typed errors',
   expect(call('page', { doc: 1, lens: 'rows', start: 0, count: 1 })).toMatchObject({ error: { code: 'InvalidParams', field: 'lens' } })
   for (const path of ['', 'a\0b', 7, null, 'x'.repeat(32_768)])
     expect(call('open', { path, count: 1 })).toMatchObject({ error: { code: 'InvalidParams', field: 'path' } })
-  expect(call('page', { doc: 9, lens: 'raw', start: 0, count: 1 })).toMatchObject({ error: { code: 'NoDocument' } })
+  expect(call('page', { doc: 9, lens: 'raw', gen: 1, start: 0, count: 1 })).toMatchObject({ error: { code: 'NoDocument' } })
   expect(call('hello', { protocol: 2 })).toMatchObject({ error: { code: 'Unsupported' } })
   expect(openDoc).not.toHaveBeenCalled()
 })

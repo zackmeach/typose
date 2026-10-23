@@ -130,3 +130,55 @@ body {
 .vl-row .more {
   color: var(--text2);
 }
+.vl-row button.more {
+  font: inherit;
+  color: var(--accent);
+  background: none;
+  border: none;
+  padding: 0 4px;
+  cursor: pointer;
+}
+
+/* Brief §8.2: a thin progress line under the card header; §7.9: the "Changed on disk" banner. */
+.progress-line {
+  height: 2px;
+  overflow: hidden;
+}
+.progress-line > div {
+  height: 100%;
+  background: var(--accent);
+}
+.progress-line.indeterminate > div {
+  width: 30%;
+  animation: progress-sweep 1.2s linear infinite;
+}
+@keyframes progress-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+.banner {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-raised);
+}
+.banner-button {
+  font: inherit;
+  color: var(--accent);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+.banner-button[data-focus-visible] {
+  outline: 2px solid var(--accent);
+}
+.card-state {
+  text-align: center;
+}
+.card-state .open-button {
+  margin: 0 4px;
+}
