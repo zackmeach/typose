@@ -1,3 +1,7 @@
+> **Status: FROZEN, NOT CLOSED (2026-10-22, spec Z53).** This is the final text of plan C (scratch `PLAN-C.md`, sha256 `2674178fc42a5a5a…`; the text below this note is byte-identical to it). Its code is on branch `spike/c` (`766e158`), tag `phase0-snap2/spike-c`. The last executed review (round 3) was **FIX-FIRST**; its findings are recorded, not fixed. Per Z53 there's no further review round.
+> - **Open:** MAJOR A: the Markdown block cap (`BLOCK_BYTES` 256) doesn't bound memory, because long headings and reference definitions grow outside it. That becomes an M1 requirement (Z47, Z56, spec §3.6). MINOR B: `cap()` accepts Infinity/1e12, covered by M1 contract C4. The NITs are in the review.
+> - **Evidence:** `.evidence/phase0/snap2/MANIFEST.md`. Phase 0 isn't qualified.
+
 # Typose Phase 0 · Spike C Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -6,7 +10,7 @@
 - documents with generations: non-locking handles, 1,000 mutation cycles, and the mutation race caught by chunk verification;
 - byte maps with zero selection-endpoint mismatches across UTF-8, malformed UTF-8, Windows-1252 and UTF-16LE/BE, and correct offsets beyond 4 GiB;
 - the JSON/JSONC structural scanner, its span-fidelity gate, its hostile inputs, and the scanner decision against `jiter` and `struson`;
-- the CSV record index, its span-fidelity gate, its hostile inputs, and sequential CSV index throughput (moved here from Spike A);
+- the CSV record index, its span-fidelity gate, its hostile inputs, and its warm throughput against Z46's gate (PC ≥ 0.9 GB/s, Mac ≥ 0.45 GB/s; moved here from Spike A);
 - the Markdown block pipeline: `pulldown-cmark` blocks in bounded windows, sanitized with `ammonia`, with byte-mapped text runs, its span, byte-map and hostile-HTML gates, oversized blocks, hostile inputs, cancel latency and throughput;
 - untrusted content in the renderer: YAML in a Web Worker with exact byte spans and its span gate, KaTeX in a worker behind DOMPurify, Mermaid in a sandboxed frame, and the zero-effects gate; YAML throughput sets `yaml.treeMaxBytes`;
 - the Spike C core in the app: napi and the core host, a Rendered lens whose selections copy exact source bytes, link clicks that navigate nowhere, index progress and the block-budget stop (Z30, Z34), zero effects for hostile Markdown, and the oversized, hostile-input and cancel gates measured in the app.
@@ -14,6 +18,7 @@
 **Architecture:**
 - **Tasks C0–C4e are Rust in `spike-core`.** New modules:
   - `doc`: `Document` with generations, path-identity checks and verified reads;
+  - `budget`: Z47's gate caps, from physical RAM (and, in tests, the process's private bytes);
   - `bytemap`: UTF-16 offset → source byte, with outward snapping;
   - `encoding`: sniffing, mapped decoding, UTF-16 newline units;
   - `json`: a push scanner, the container index with element checkpoints, lazy children;
@@ -25,18 +30,18 @@
 - **Tasks C5b1–C5b5 bring the core into the app:** napi `Source` (the verified copy path), `MdView` and cancellable index jobs that report progress, the core host's methods for them, a minimal Rendered lens that pairs every DOM text node with its run before hydration and stops on the block budget, and the end-to-end gates. `spike-core` gains only `ByteStore::open_shared`, two tests and an ignored corpus writer.
 
 **Tech Stack:** as plan A, plus:
-- **dependencies:** encoding_rs 0.8.42, csv-core 0.1.13 (pinned `=0.1.13`), ammonia 4.2.4, pulldown-cmark 0.13.4 (pinned `=0.13.4`; default features off), and windows-sys 0.61 on Windows (`FileId`);
-- **dev-dependencies:** jiter 0.17 and struson 0.7 (the benchmark only), and more windows-sys features on Windows (sparse files, peak working set);
+- **dependencies:** encoding_rs 0.8.42, csv-core 0.1.13 (pinned `=0.1.13`), ammonia 4.2.4 (pinned `=4.2.4`), pulldown-cmark 0.13.4 (pinned `=0.13.4`; default features off), and windows-sys 0.61 on Windows (`FileId`, physical RAM);
+- **dev-dependencies:** jiter 0.17 and struson 0.7 (the benchmark only), and more windows-sys features on Windows (sparse files, private bytes, peak working set);
 - **app (Tasks C5a1–C5a4, exact versions):** yaml 2.9.1, katex 0.19.0, dompurify 3.4.17, mermaid 12.2.0. Mermaid brings its own katex 0.18.10;
 - **spike-node (Task C5b1):** encoding_rs 0.8.42 and serde_json 1, both already in `Cargo.lock`.
 
-**Spec:** `docs/superpowers/specs/2026-10-20-typose-tech-design.md` (Draft 2): §3.1–3.5, §4.1–4.3, §4.6, §11.1, §13.1 Spike C, §14 D1 and D17. The design brief, revision 4, is `docs/superpowers/specs/2026-10-20-typose-design-brief.md` (§4.6, §5.2, §5.3, §5.5, §7.4, §7.6, §7.7, §7.9, §8.1–8.2).
+**Spec:** `docs/superpowers/specs/2026-10-20-typose-tech-design.md` (Draft 4, 2026-10-22; Zack's decisions Z30–Z38 in §0.3 and Z39–Z50 in §0.4): §3.1–3.6, §4.1–4.6, §7.1–7.3, §10.2–10.3, §11.1, §13.1 Spike C, §14 D1 and D17. The design brief, revision 6, is `docs/superpowers/specs/2026-10-20-typose-design-brief.md` (§4.6, §5.2, §5.3, §5.5, §7.4, §7.6, §7.7, §7.9, §8.1–8.2).
 
-**Builds on:** plan A, `docs/superpowers/plans/2026-10-20-typose-phase0-base-and-spike-a.md`, Tasks 1–10: the code on `spike/a`, as amended for Zack's ruling Z37 (plan A at sha256 `f55dac02…`: Raw's first screen is the first bounded piece; `pages::piece`, napi `Doc.piece` and the RPC `piece` continue a long line; a `fullLineScan` mark). Plan A's Task 11 adds only results files.
+**Builds on:** plan A, `docs/superpowers/plans/2026-10-20-typose-phase0-base-and-spike-a.md`, Tasks 1–10: the code on `spike/a`, as amended for Zack's ruling Z37 (plan A at sha256 `982821e5…`, its final text: Raw's first screen is the first bounded piece; `pages::piece`, napi `Doc.piece` and the RPC `piece` continue a long line; a `fullLineScan` mark). Plan A's Task 11 adds only results files. Before Task C0, restore plan A's three lockfiles (`spikes/core/Cargo.lock`, `spikes/app/package-lock.json`, `spikes/core/spike-node/package-lock.json`) from tag `phase0-snap1/spike-a`, as plan A's Notes say: its manifests use semver ranges, and a fresh resolve drifts (napi 3.15.0 on 2026-10-22, against the validated 3.14.2). The crates and packages this plan adds resolve at their own steps: `ammonia`, `pulldown-cmark` and the four npm packages are pinned exactly, their dependencies aren't, so qualification runs use `spike/c`'s committed lockfiles (Z41). This plan's replay resolved ammonia's ICU crates (through `url` and `idna`) newer than the lanes' and round 2's `Cargo.lock`: seven `icu_*` crates at 2.4.0 against 2.3.0–2.3.1, and `tinystr`, `yoke`, `zerovec` and `zerovec-derive` one patch up. Every gate and probe printed the same output.
 
 **Test counts:** plan A's Task 12 is conditional: it runs only if indexing is below 1 GB/s, and the scratch run indexed at about 4 GB/s. Every count in this plan assumes Task 12 **did not run**. If it ran, its test `index::tests::parallel_build_matches_sequential` is one more `spike-core` test: add 1 to a run's `passed` count when the run's filter matches it (no filter, or `index`), and 1 to its `filtered out` count otherwise. The counts quoted are the unit tests' `test result` line. From Task C2b on, `cargo test -p spike-core` also runs `tests\json_spans.rs`: its own line reads `1 passed` with no filter, and `0 passed` with `1 filtered out` under a filter its test doesn't match.
 
-**Validated:** every code block in Tasks C0–C5b5 was applied literally from this text, step by step, to a fresh build of plan A Tasks 1–10 (as amended for Z37), and every command was run on Zack's PC (2026-10-21) except Task C5a6 Step 2, the long YAML measurement, whose numbers are lane C5a's. The counts, errors and outputs stated as expected are the ones that replay printed. The code was first written and validated in seven scratch lanes (C0–C4, C5a, C5b); after the plan's first review, a fix lane changed Tasks C0–C4e. The code is byte-identical to the fix lane's validated tree (C0–C4e), lane C5a's files (C5a1–C5a7) and lane C5b's tree (C5b1–C5b5), carried onto plan A's Z37 amendment, except in three places: Task C1b converts plan A's new `pages::piece`, its two Z37 tests and napi `Doc::piece` (the lanes predate Z37); Task C4b pins `pulldown-cmark` to `=0.13.4` (0.13.5 appeared after the lanes ran, and Task C4c's scanner mirrors 0.13.4's block rules); and Task C4d's generator drops a dead assignment that made every `spike-core` test build warn.
+**Validated:** every code block in Tasks C0–C5b5 was applied literally from this text, step by step, to a fresh build of plan A Tasks 1–10 (sha256 `982821e5…`, whose code blocks are `7b282cf3…`'s, which the build used; its three lockfiles match tag `phase0-snap1/spike-a` byte for byte), and the Git Bash form of every command was run on Zack's PC (2026-10-22), except Task C5a6 Step 2, the long YAML measurement, which is pending (lane C5a's numbers there are context, not this plan's run: Z41). The counts, errors and outputs stated as expected are the ones that replay printed. Other lanes were loading the PC throughout, so its timings are indicative, not qualification results (Z49). Three falsifications were added after the chain ran: the uncapped opens in Task C2c Step 6 (the bench) and Task C4e Step 2 (`md_perf`), and the vacuous row in Task C5b4 Step 1. They ran on the replay's end state, where the files under test are as their task committed them. The code was first written and validated in seven scratch lanes (C0–C4, C5a, C5b); after the plan's first review, a fix lane changed Tasks C0–C4e. The code is byte-identical to the fix lane's validated tree (C0–C4e), lane C5a's files (C5a1–C5a7) and lane C5b's tree (C5b1–C5b5), carried onto plan A's Z37 amendment, except where this plan changes it on purpose: Task C1b converts plan A's new `pages::piece`, its two Z37 tests and napi `Doc::piece` (the lanes predate Z37); Tasks C4a and C4b pin `ammonia` to `=4.2.4` and `pulldown-cmark` to `=0.13.4` (0.13.5 appeared after the lanes ran, and Task C4c's scanner mirrors 0.13.4's block rules); Task C4d's generator drops a dead assignment that made every `spike-core` test build warn; and the second review's fixes (listed under "Fixed after the second review" in the Notes).
 
 **Measurements:** numbers quoted as "the scratch run gave" or "on the lane machine" come from those lanes, on the same PC with other builds running. They show the output's format and its scale. They aren't expectations: record your own.
 
@@ -47,6 +52,8 @@
 - **Staging:** stage explicit paths only and never use `git add -A`. Never stage research files: `astra-research.md`, `fable-research.md`, `docs/research/`. Never stage proptest's saved seeds (`spikes/core/spike-core/proptest-regressions/`, `spikes/core/spike-core/tests/*.proptest-regressions`): the red and falsification steps write failing seeds there. Task C0 gitignores them, and each step deletes them anyway.
 - **Rule 8 (standing procedure):** whoever writes a file reads the final on-disk version in full before calling the task done.
 - **Gate thresholds:** on Zack's PC they are **half** the budget, unless marked **Mac** (spec Z29, §10.2). A failing gate is a result: record the number and the suspected cause, and fix the harness only if the harness itself is wrong.
+- **Qualification (Z49):** a timing run counts only on a quiet machine: no other heavy work or agent lanes, CPU under 10% for a minute before the run, load recorded during it, Defender on. This plan's replay ran while other lanes loaded the PC, so every timing it quotes is indicative, not a gate result, and each step that quotes one gives the load. Keep every failed or invalid run with its reason; never replace it with a clean rerun.
+- **Memory caps (Z47):** Z34's aggregate accounting and enforcement (25% of physical RAM across all open documents) are **not implemented**: they're an M1 exit requirement. Until then every gate run passes an explicit cap, and an uncapped open fails the run: `MdConfig::gate()` and `ScanOptions::gate()` in the core (Tasks C2a, C4c), napi `gateCaps()` in the app (Task C5b1). A cap is 25% of the machine's physical RAM divided by the most private memory one unit was measured to cost: 256 B per Markdown block (Task C4e) and 40 B per JSON container (Task C2a). CSV takes no cap: its index holds 24 B per checkpoint plus 440 B per mid-record checkpoint, about one per MiB of file.
 - **File access:** positional reads only. **No memory-mapping on any OS** (spec §3.3).
 - **Fixed sizes (from plan A):**
   - Chunk: `CHUNK = 1 MiB`, hashed with xxh3 on first read and verified on every later read.
@@ -56,7 +63,7 @@
 - **Commands:** run them from the directory each step names. They work in PowerShell and in Git Bash unless a step gives both forms.
 - **A rare e2e flake:** a Playwright worker can die as it launches Electron, with `Error: worker process exited unexpectedly (code=3221226505, signal=null)` (0xC0000409). The test is reported failed after `0ms`, before any sample, and the Electron it was launching keeps running. The cause wasn't found; lane C5b hit it in e2e and perf runs alike, once in its replay of Task C5a2's red step. Stop that Electron (its executable is under this tree's `spikes/app/node_modules/electron`), then rerun the test, or a perf row alone with `-g '<its title>'`.
 - **Disk:**
-  - Fixtures go in `spikes/.fixtures/` (gitignored). Task C2c's JSON fixtures take about 1.4 GB (deleted after its Step 7), Task C3c's CSV fixtures about 1.3 GiB (1 GiB of it deleted at the end of the task), and Task C4e's Markdown fixtures about 960 MB (deleted after its Step 3), plus a 1 GiB file it deletes itself. Tasks C5a2–C5a6 write private Electron profiles and effects logs there; Task C5a7 deletes them. Task C5b2 leaves a 59 MB Markdown file there, Task C5b3 writes 498 small files and Task C5b4 about 630 MB of fixtures; Task C5b5 deletes `spikes/.fixtures/`.
+  - Fixtures go in `spikes/.fixtures/` (gitignored). Task C2c's JSON fixtures take about 1.4 GB (deleted after its Step 7), Task C3c's CSV fixtures about 1.3 GiB (1 GiB of it deleted at the end of the task), and Task C4e's Markdown fixtures about 960 MB (deleted after its Step 3), plus a 1 GiB file it deletes itself. Tasks C5a2–C5a6 write private Electron profiles and effects logs there; Task C5a7 deletes them. Task C5b2 leaves a 59 MB Markdown file there, Task C5b3 writes 498 small files and Task C5b4 about 630 MB of fixtures (its nested JSON replaces 100 MiB of `[`: the same size); Task C5b5 deletes `spikes/.fixtures/`.
   - Tests write temporary files into `%TEMP%`: Task C2a's up to about 0.7 GB at once, Task C3a's 100 and 200 MB. Those are deleted on any exit (`store::testutil::Temp`); plan A's `temp_file` leaves its small files behind, so clear the `spike-core-*` files between runs.
 - **Edit instructions:** an `<!-- op: … -->` comment sits above every code block that is file content. It repeats what the prose says, in a form a script can replay:
   - `create PATH`: the next block is the whole new file;
@@ -77,8 +84,9 @@ spikes/
   core/
     Cargo.toml                  + debug-build opt-level 3 for memchr and xxhash-rust (C1d)
     spike-core/
-      Cargo.toml                + windows-sys (C0), encoding_rs (C1b), csv-core (C3a), ammonia (C4a), pulldown-cmark (C4b); dev: windows-sys features (C1d, C2c), jiter, struson (C2c)
+      Cargo.toml                + windows-sys (C0; physical RAM, C2a), encoding_rs (C1b), csv-core (C3a), ammonia (C4a), pulldown-cmark (C4b), the last three pinned; dev: windows-sys features (C1d, C2a), jiter, struson (C2c)
       src/lib.rs                module wiring
+      src/budget.rs             Z47's gate caps: physical RAM, a cap per unit cost; private bytes for the measurements (C2a)
       src/doc.rs                FileId, DocError, Document: generations, identity checks, verified reads (C0)
       src/bytemap.rs            ByteMap, MapBuilder (C1a)
       src/encoding.rs           sniff, decode, newline_and_cr, newline_ends; the byte-map gate (C1b, C1c)
@@ -125,30 +133,57 @@ spikes/
   results/
     json-bench.txt              benchmark output and the scanner decision (C2c)
     csv-throughput.txt          CSV index throughput (C3c)
-    yaml-<hostname>.json        YAML worker throughput (C5a6)
+    yaml-<hostname>.json        YAML worker throughput (C5a6 Step 2, when it runs: pending in this plan's replay)
     spike-c-<hostname>.json     the app's oversized, hostile-input and cancel numbers (C5b4)
 ```
 
 ## Notes for the checkpoint (deviations from the spec, by design)
 
-- **UTF-16 CSV/TSV is refused** (Task C3a). Spec §4.2 and §3.4 offer Grid for every CSV/TSV. A UTF-16 one, such as Excel's "Unicode Text" export, gets Grid locked with `csv::UTF16_REFUSED`, and Raw remains. csv-core tokenizes bytes, and UTF-16 has no single-byte delimiters, quotes or line ends. Transcoding with an offset map is the alternative if this matters later. Cells don't yet carry their U+FFFD count as a problem (spec §4.1); add a field when ⓘ needs it.
-- **YAML front matter exists only at offset 0** (Task C4c; spec §4.6): after a BOM, and closing within the first 64 KiB. pulldown-cmark accepts a metadata block at any block start, which made the block index depend on window size, so a mid-document `---` … `---` pair is a rule and what follows. Longer front matter reads as a rule and Markdown.
-- **An image keeps `data-src` only for a live target** (Tasks C4a–C4b): http, https, `mailto` or a relative path that isn't a network path. Brief §4.6's "Load remote images" therefore can't load a UNC or `smb:` image (no network path may sit in `data-src`), and a `data:` image is dropped too; carrying them needs a new attribute and a ruling. Links to other schemes and network paths stay clickable: `href="#"` with the target in `data-href`, for the hand-off (brief §4.4).
-- **Lazy continuation after an oversized quote or list** (Task C4c). A line outside an oversized quote or list that doesn't interrupt a paragraph is taken as a lazy continuation. pulldown-cmark continues the block there only when the innermost open block is a paragraph, and telling that apart needs a block parser (fences, indented code at the item's content column, HTML blocks, tables, headings, nested quotes and lists, empty items), so the scanner doesn't approximate it. Five shapes disagree by window size (19 of 26 window sizes each in the fix lane's probe): a quote that ends in a heading, a blank `>` or a closed fence, and a list that ends in a closed fence or an empty item, each followed by an unindented line that can't interrupt. The span gate's generator writes none of them. Likewise, a `|` row followed by a delimiter row with as many columns ends a paragraph in pulldown-cmark, but that needs a line of lookahead, so such a table stays inside an oversized paragraph.
+- **UTF-16 CSV/TSV is Raw only (Z42; Task C3a).** A UTF-16 CSV or TSV, such as Excel's "Unicode Text" export, gets the Grid locked with Z42's text, `csv::UTF16_REFUSED` = "Grid is unavailable for UTF-16 CSV/TSV. Open in Raw, or convert a copy to UTF-8.", and Raw remains. That covers UTF-16LE and BE, whether the sniff found a BOM or the encoding says so: an override never reads a file with a UTF-16 BOM as a single-byte encoding to unlock the Grid. A BOM-less UTF-16 file sniffs as `Binary` (spec §4.1), and an override on it can't be told from the bytes. csv-core tokenizes bytes, and UTF-16 has no single-byte delimiters, quotes or line ends; transcoding with original-byte maps is deferred beyond v1. Cells don't yet carry their U+FFFD count as a problem (spec §4.1); add a field when ⓘ needs it.
+- **YAML front matter exists only at offset 0 (Z44; Task C4c):** after an optional BOM, and closing within the first 64 KiB (`front_matter_closes_within_64_kib` fails if the limit is raised). pulldown-cmark accepts a metadata block at any block start, which made the block index depend on window size, so a mid-document `---` … `---` pair is a rule and what follows. Longer or unterminated front matter reads as ordinary Markdown, never discarded. Z44's window independence holds for front matter and `---` pairs (the second review's probe: 26 cases × 6 window sizes); the lazy-continuation shapes below are the known exception, pending an owner call.
+- **Images (Z43; Tasks C4a–C4b).** An image keeps `data-src` only for http, https or a relative path that isn't a network path; `mailto:` is never an image target (`image_target`; `mailto_is_never_an_image_target`). UNC, `smb:` and ambiguous network paths (`//host`, slash and backslash variants) never get one, so even "Load remote images" can't fetch them (pinned by four tests). **Inline `data:` images are an unvalidated v1 Rendered requirement (Z43):** base64 PNG, JPEG, GIF or WebP within the per-image caps, through a bounded resource path. The spike drops them, so allowed types, oversize and decode refusals and zero network effects are still to be gated. Links to other schemes and network paths stay clickable: `href="#"` with the target in `data-href`, for the hand-off (brief §4.4).
+- **Lazy continuation after an oversized quote or list** (Task C4c). A line outside an oversized quote or list that doesn't interrupt a paragraph is taken as a lazy continuation. pulldown-cmark continues the block there only when the innermost open block is a paragraph, and telling that apart needs a block parser (fences, indented code at the item's content column, HTML blocks, tables, headings, nested quotes and lists, empty items), so the scanner doesn't approximate it. Six shapes disagree by window size (19 of 26 window sizes each in the fix lane's probe; the sixth, from the second review's probe, at 64 KiB and 4 KiB windows): a quote that ends in a heading, a blank `>` or a closed fence, and a list that ends in a closed fence, an empty item or an indented heading, each followed by an unindented line that can't interrupt. The span gate's generator writes none of them. Likewise, a `|` row followed by a delimiter row with as many columns ends a paragraph in pulldown-cmark, but that needs a line of lookahead, so such a table stays inside an oversized paragraph.
 - **Cancelling inside a window costs index speed** (Task C4c). Checking the flag every 1,024 parser events and headings, and committing a window's headings and slugs all or nothing, makes `index_all` about 22–33% slower on a heading flood and about 5–6% slower on realistic Markdown (release, interleaved A/B in the fix lane). The cause is the per-window slug table. An undo log is the cheaper alternative if that matters.
 - **JSON index jobs report no progress** (Task C5b1). `json::scan` builds its index privately and publishes nothing until it returns, so `indexJson` sends only its last event. Z30 asks for progress on giant Markdown, which the Markdown and CSV jobs report, so this is a gap in the spike, not a Z30 violation. Reporting needs a callback or shared state in Task C2a's scanner.
-- **The aggregate memory budget isn't built** (Tasks C5b1–C5b2). Z34's safety limit, 25% of RAM across all open documents, is computed nowhere. `MdConfig::max_blocks` and its `TOO_MANY_BLOCKS` stop show the mechanism end to end: the Rendered lens stops whole, says why, and Raw stays. But `maxBlocks` must be passed explicitly: the core host opens with no limit unless `mdOpen` passes one.
-- **Raw's first screen beside a running format index passes on plan A's Z37 mark** (Task C5b4). With the format index running, p95 was 20.5–27.4 ms on all six hostile inputs; 3 of 120 samples went over 50 ms under load, as did 2 of Raw alone's, and an earlier run under lighter load had none (max 29.0 ms). The index moved Raw's p50 by at most 3.5 ms against Raw alone. Before Z37, plan A marked a one-line file's first screen only once its line index had scanned the whole line, and lane C5b's runs on that mark were marginal (p95 48.0 and 49.3 ms on the one-line Markdown files; Raw alone over 50 ms at p95 on two one-line files). The inputs are 100–200 MB; a multi-GB single line isn't measured here.
-- **Known gaps in the app** (Tasks C5b1–C5b2): after `reload`, the core host reopens the Markdown view without restarting its index job (and without `maxBlocks`); the Rendered list is forward-only, which is an M4 item; copy returns the verified bytes but doesn't write the clipboard (M6).
-- **Decided after the first review** (Zack's rulings Z30–Z38, recorded in the spec's Draft 3, §0.3):
+- **Z34's aggregate accounting and enforcement are not implemented** (an M1 exit requirement, Z47). Phase 0 shows only the bounded stop and the Raw fallback, through `MdConfig::max_blocks` and its `TOO_MANY_BLOCKS` stop: the Rendered lens stops whole, says why, and Raw stays (Tasks C5b1–C5b2). Every gate run passes an explicit cap sized from 25% of the machine's RAM (Global Constraints), and the core, the addon and the core host refuse an uncapped open.
+- **Raw's first screen beside a running format index: logic validated; measured under load, not a qualification result; qualification pending (Z49)** (Task C5b4). On plan A's Z37 mark, with the format index running, p95 was 17.2–25.9 ms on all six hostile inputs in this plan's replay, with no sample over 50 ms, while the CPU ran at a mean 31% (max 53%); round 2's run under heavier load had 3 of 120 samples over 50 ms, as did 2 of Raw alone's. The index moved Raw's p50 by at most 1.4 ms against Raw alone. Before Z37, plan A marked a one-line file's first screen only once its line index had scanned the whole line, and lane C5b's runs on that mark were marginal (p95 48.0 and 49.3 ms on the one-line Markdown files; Raw alone over 50 ms at p95 on two one-line files). The inputs are 100–200 MB; a multi-GB single line isn't measured here.
+- **Known gaps in the app** (Tasks C5b1–C5b2): after `reload`, the core host reopens the Markdown view with its cap but without restarting its index job; the Rendered list is forward-only, which is an M4 item; copy returns the verified bytes but doesn't write the clipboard (M6).
+- **Decided after the first review** (Zack's rulings Z30–Z38, recorded in the spec's §0.3 (Draft 4)):
   - **Z36: the YAML Tree ceiling is 8 MiB in v1**, with Raw above it. That confirms Task C5a6's `yaml.treeMaxBytes`. Smaller files must still respect the memory and structural limits.
-  - **Z34: 32 B per block is an optimization target for the Markdown index, not its safety limit.** The safety limit is one budget of 25% of RAM across all open documents, including their indexes, caches and temporary parsing allocations. When it, or `MdConfig::max_blocks`, is reached, Rendered stops building, says why it's unavailable, and Raw stays. Task C4e's per-block heap figures are inputs to that budget.
-  - **Z30: Rendered on a 1 GiB Markdown file at roughly 20 s is acceptable**, not a deadline, while Raw opens immediately (Task C4e's `md-real-1gib.md` indexed in a p50 of 21.4 s in the fix lane's run and 22.4 s in this plan's replay). The giant-Markdown index needs progress events and cancellation: Task C5b1's Markdown and CSV jobs report progress at most 10 times a second and cancel within 50 ms, and Task C5b2's Rendered lens shows the progress in a `role="status"` line.
+  - **Z34: 32 B per block is an optimization target for the Markdown index, not its safety limit.** The safety limit is one budget of 25% of RAM across all open documents, including their indexes, caches and temporary parsing allocations. When `MdConfig::max_blocks` is reached, Rendered stops building, says why it's unavailable, and Raw stays; the 25% budget itself isn't computed (Z47). Task C4e's per-block private bytes are inputs to that budget; `heap_bytes()` is a lower-bound estimate.
+  - **Z30: Rendered on a 1 GiB Markdown file at roughly 20 s is acceptable**, not a deadline, while Raw opens immediately (Task C4e's `md-real-1gib.md` indexed in a p50 of 21.4 s in the fix lane's run and 21.2 s in this plan's replay, under load). The giant-Markdown index needs progress events and cancellation: Task C5b1's Markdown and CSV jobs report progress at most 10 times a second and cancel within 50 ms, and Task C5b2's Rendered lens shows the progress in a `role="status"` line.
+- **Decided on 2026-10-22** (Zack's decisions Z39–Z50, spec §0.4), as they bind this plan:
+  - **Z39:** screen-reader validation is parked until after launch. This plan has no screen-reader or speech work; the Rendered lens's status line is a `role="status"` live region, and nothing here verifies that a reader announces it.
+  - **Z40:** Grid keys are a Grid-milestone acceptance test; nothing here.
+  - **Z41:** `spike/c` is preserved with its tested lockfile, and a results template is never relabelled as a run: Task C5a6 commits `yaml-<hostname>.json` only when its Step 2 ran (pending in this plan's replay).
+  - **Z42:** UTF-16 CSV/TSV is Raw only (Task C3a; above).
+  - **Z43:** `data:` images are a v1 requirement this spike doesn't validate; network-path images stay blocked; `mailto:` is never an image target (Tasks C4a–C4b; above).
+  - **Z44:** front matter at offset 0 within 64 KiB (Task C4c; above).
+  - **Z45: TSV quoting.** One deterministic CSV-style dialect for every delimiter: double quotes may enclose tabs and newlines, `""` escapes a quote, and quoting is never inferred from a sample. This isn't strict IANA TSV: a stray leading `"` swallows the following records until the next quote, bounded and cancellable, and Raw keeps the bytes (`csv::tests::tsv_quoting_is_csv_style`, and an unmatched TSV quote in `cancel_returns_within_50ms`; Task C3a).
+  - **Z46:** the CSV record index's warm throughput gate is PC ≥ 0.9 GB/s and Mac ≥ 0.45 GB/s, judged on the p50 of 30 release runs on each of the 100 MiB and 1 GiB fixtures, with n, p95 elapsed time and the slowest run (Task C3c). The verdict comes from the quiet-window run (Z49); the Mac figure is pending the Mac batch (Z50). This plan's replay, under load (CPU mean 14%, max 33%), printed p50 1.04 GB/s on 100 MiB (met) and **0.89 GB/s on 1 GiB (MISSED)**: the PC gate is open until that run, and on this evidence it is marginal.
+  - **Z47:** aggregate enforcement isn't implemented (above); gate runs pass explicit caps (Global Constraints).
+  - **Z48:** CSV header detection stays the bounded sniffer; ⓘ's "First row is header" is a Grid-milestone criterion. `CsvRow.record` 0 is the file's first record, a header only if the sniff or ⓘ says so.
+  - **Z49:** the qualification protocol (Global Constraints). This plan's numbers are logic validation under load, not qualification results.
+  - **Z50:** Spike C has a Mac gate, the CSV record index's throughput (Z46): it stays pending until the Mac batch, which uses the same revision, lockfile and fixture definitions. Nothing here ran on the Mac.
+- **Fixed after the second review** (2026-10-22), beside the rulings above:
+  - **Fix 17's in-parse cancel check is pinned:** `a_cancelled_window_commits_nothing_without_headings` fails when it's removed (Task C4c).
+  - **The app's byte-map gate catches one corrupted map entry:** besides 240 random selections, it selects every element of every block whole (Task C5b2).
+  - **Index memory is measured, not estimated:** Task C4e checks each hostile input's allowance against the private bytes its open document holds; `heap_bytes()` is a lower bound (Task C4e has the figures).
+  - **No vacuous hostile row:** the in-app JSON row is nested arrays that are still indexing at Raw's first screen, and a row counts only if its index was running at Raw's first screen in at least 18 of 20 runs (Task C5b4).
+  - **`ammonia` is pinned to `=4.2.4`**, as `pulldown-cmark` is: the sanitizer's string rewrite depends on its serialization (Task C4a).
+- **Known spike limitations:**
+  - **Long lines are cut at byte offsets** (plan A's byte-offset contract, inherited by Task C1b). A piece ends at `offset + 65,536` bytes, which can split a character: a UTF-8 sequence there decodes as U+FFFD at the end of one piece and the start of the next (5 false replacements on one 200 KB line of `aé日😀` in the second review's probe, 4 with a BOM), a UTF-16 surrogate pair split by a cut gives 2, and an odd offset into UTF-16 garbles the whole piece (only an unvalidated RPC offset can reach that). Copy stays exact, because the maps are right, but `decode` counts each false U+FFFD as a problem (brief §7.7). M1's opaque continuation token aligns cuts to character boundaries; `piece`'s contract is unchanged here.
+  - **A Raw line of exactly `MAX_PIECE` bytes plus CRLF** gets `more: true` and then an empty continuation piece, which a renderer shows as an empty item (plan A's code).
+- **Residuals** (no defect at this head; each widens a future surface):
+  - **Image targets are classified on the URL string.** Code that later percent-decodes before resolving (`%2F%2Fhost`, `%5C%5Chost`: both live today), or resolves a relative image against a document opened from a UNC share, can reach a UNC path. M-milestone code should classify after resolving against the document's location.
+  - **Rust-side file reads in the core host are invisible to the fs recorder,** which sees only what `core-host.ts` reports through `effect('open', …)`. A future core path that opens a file on its own wouldn't trip the zero-effects gate.
+  - **Two growths outside Z47's accounting (M1):** `Source.read(gen, start, end)` has no size bound, and `MdView.pending` keeps every item handed out with unresolved labels.
+  - **The core host doesn't validate the `piece` offset** from the renderer (spec §7.1 requires it): an odd UTF-16 offset garbles the piece (above).
 - **Declined after the first review** (recorded; no code):
   - **Page caps use different units** (review MINOR 12): `pages::lines` and CSV `records` cap source bytes, CSV `fields` unescaped bytes, and `md::page` HTML bytes, while spec §3.4 says only "256 KiB". One unit (for example, what crosses IPC) is a spec §3.4 checkpoint item, and it would reopen plan A's `pages.rs`.
   - **`csv::fields` re-tokenizes a record from its start** (review MINOR 14): for a huge record that misses spec §3.5's "no rescan reads more than 1 MiB" (about 0.34 s for a 50 MB record in a debug build). It's lane C3's open question 7: copying a cell beyond the first window re-tokenizes from the record's start. Resuming from the checkpoints when `first > 0` is the fix if it matters.
   - **Duplicate span types** (review N6): `json::Span`, `csv::Span` and `md`'s `(u64, u64)` stand in for spec §3.2's single `SourceSpan`. M1 unifies them.
-  - **Compacting the Markdown index** (16-byte blocks): not done; Z34 makes 32 B per block an optimization target rather than a limit. Spec §3.5 calls the index "small". Task C4e measures 194.3 B per block on a heading flood (97 B per source byte), 41.9 B per block on one-letter paragraphs, and about 66–68 B per block, about 1 byte of heap per source byte, on realistic Markdown. `MdConfig::max_blocks` is the hook the budget stops Rendered with (Z34).
+  - **Compacting the Markdown index** (16-byte blocks): not done; Z34 makes 32 B per block an optimization target rather than a limit. Spec §3.5 calls the index "small". Task C4e measures the private bytes an open document holds: 218.4 B per block on a heading flood (about 109 B per source byte), 57.0 B per block on one-letter paragraphs, and 80.9–119.4 B per block on realistic Markdown, 64 MiB of it plan A's chunk cache (`heap_bytes()`, a lower bound, says 194.3, 41.9 and 66.9–68.2). `MdConfig::max_blocks` is the hook the budget stops Rendered with (Z34).
 
 ---
 
@@ -2419,6 +2454,8 @@ git commit -m "spike(c): exact offsets beyond 4 GiB through store, index, pages,
 - Create: `spikes/core/spike-core/src/json.rs`
 - Modify: `spikes/core/spike-core/src/lib.rs` (`pub mod json;`)
 - Modify: `spikes/core/spike-core/src/store.rs` (the test helper `testutil::Temp`)
+- Create: `spikes/core/spike-core/src/budget.rs` (Z47's gate caps)
+- Modify: `spikes/core/spike-core/Cargo.toml` (two windows-sys features: physical RAM; private bytes in tests)
 
 **Interfaces:**
 - **Consumes:** `store::{ByteStore, StoreError, CHUNK}` (plan A Task 4) and `pages::{MAX_PAGE, MAX_PIECE}` (plan A Task 6). No new dependencies: `memchr` and `xxhash-rust` are already there.
@@ -2437,7 +2474,9 @@ git commit -m "spike(c): exact offsets beyond 4 GiB through store, index, pages,
     - `line` and `column` are 1-based within the scanned range;
     - `column` counts code points;
     - both are 0 for `Cancelled`.
-  - `pub struct ScanOptions { pub jsonc: bool, pub max_depth: usize, pub max_containers: usize, pub cp_children: u64, pub cp_bytes: u64, pub window: usize }`. `Default`: `jsonc: true`, `max_depth: 10_000`, `max_containers: u32::MAX as usize`, `cp_children: 1024`, `cp_bytes: 1 << 20`, `window: 64 << 10`.
+  - `pub struct ScanOptions { pub jsonc: bool, pub max_depth: usize, pub max_containers: usize, pub cp_children: u64, pub cp_bytes: u64, pub window: usize }`. `Default`: `jsonc: true`, `max_depth: 10_000`, `max_containers: u32::MAX as usize`, `cp_children: 1024`, `cp_bytes: 1 << 20`, `window: 64 << 10`. `ScanOptions::gate()` is the default with `max_containers` = `budget::cap(CONTAINER_BYTES)`, every gate run's options (Z47).
+  - `pub const CONTAINER_BYTES: u64 = 40;`: the most private memory one container was measured to cost (the test `a_container_costs_at_most_container_bytes`).
+  - Module `spike_core::budget`: `pub fn physical_ram() -> u64`, `pub fn cap(unit_bytes: u64) -> usize` (25% of physical RAM over `unit_bytes`), and, in tests, `private_bytes() -> Option<u64>` (Windows; `None` elsewhere).
   - `pub struct Paged<T>`: a vector kept in 65,536-element pages. It has:
     - `len(&self) -> usize`;
     - `get(&self, i: usize) -> Option<&T>`;
@@ -2518,6 +2557,94 @@ pub(crate) mod testutil {
         }
     }
 }
+```
+
+Z47 needs the machine's physical RAM, and a test needs the process's private bytes: add a windows-sys feature to each Windows table in `spikes/core/spike-core/Cargo.toml`. Replace
+<!-- op: replace spikes/core/spike-core/Cargo.toml -->
+```toml
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+proptest = "1.12"
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_IO", "Win32_System_Ioctl"] }
+```
+with
+```toml
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_SystemInformation"] }
+
+[dev-dependencies]
+proptest = "1.12"
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_IO", "Win32_System_Ioctl", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+```
+
+`spikes/core/spike-core/src/budget.rs`, the caps every gate run passes until M1 enforces Z34's budget (Z47):
+<!-- op: create spikes/core/spike-core/src/budget.rs -->
+```rust
+//! Z47: Z34's aggregate budget (25% of physical RAM across all open documents) is not implemented: it's an M1
+//! exit requirement. Until then every gate run passes an explicit cap: 25% of this machine's physical RAM divided by
+//! the most private memory measured per unit of an index (`json::CONTAINER_BYTES`, `md::BLOCK_BYTES`).
+use std::sync::OnceLock;
+
+/// This machine's physical RAM, in bytes (read once).
+pub fn physical_ram() -> u64 {
+    static RAM: OnceLock<u64> = OnceLock::new();
+    *RAM.get_or_init(read_ram)
+}
+
+#[cfg(windows)]
+fn read_ram() -> u64 {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut m: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    m.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
+    assert_ne!(unsafe { GlobalMemoryStatusEx(&mut m) }, 0, "GlobalMemoryStatusEx failed");
+    m.ullTotalPhys
+}
+
+#[cfg(target_os = "macos")]
+fn read_ram() -> u64 {
+    let out = std::process::Command::new("sysctl").args(["-n", "hw.memsize"]).output().expect("sysctl hw.memsize");
+    String::from_utf8_lossy(&out.stdout).trim().parse().expect("hw.memsize")
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn read_ram() -> u64 {
+    let info = std::fs::read_to_string("/proc/meminfo").expect("/proc/meminfo");
+    let kib = info.lines().find_map(|l| l.strip_prefix("MemTotal:")).expect("MemTotal");
+    kib.trim().trim_end_matches("kB").trim().parse::<u64>().expect("MemTotal") * 1024
+}
+
+/// A gate run's cap: 25% of physical RAM (Z34's share) over `unit_bytes`, the most private memory one unit costs.
+pub fn cap(unit_bytes: u64) -> usize {
+    (physical_ram() / 4 / unit_bytes) as usize
+}
+
+/// This process's private bytes (its commit charge), to measure what an index really holds. `None` off Windows.
+#[cfg(all(test, windows))]
+pub(crate) fn private_bytes() -> Option<u64> {
+    use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    let mut c: PROCESS_MEMORY_COUNTERS_EX = unsafe { std::mem::zeroed() };
+    c.cb = size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
+    let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut c as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS, c.cb) };
+    (ok != 0).then_some(c.PrivateUsage as u64)
+}
+
+#[cfg(all(test, not(windows)))]
+pub(crate) fn private_bytes() -> Option<u64> {
+    None
+}
+```
+
+Add `pub mod budget;` to `src/lib.rs`, above `pub mod bytemap;`:
+<!-- op: insert-adjacent-before spikes/core/spike-core/src/lib.rs :: pub mod bytemap; -->
+```rust
+pub mod budget;
 ```
 
 Add `pub mod json;` to `src/lib.rs`, below `pub mod index;`:
@@ -2639,6 +2766,17 @@ impl Default for ScanOptions {
     }
 }
 
+/// The most private memory one container costs: 35–37 bytes measured on floods of empty and one-element containers
+/// (`a_container_costs_at_most_container_bytes`), against the 32 bytes `heap_bytes` counts.
+pub const CONTAINER_BYTES: u64 = 40;
+
+impl ScanOptions {
+    /// A gate run's options (Z47): `max_containers` is 25% of physical RAM over `CONTAINER_BYTES`.
+    pub fn gate() -> Self {
+        ScanOptions { max_containers: crate::budget::cap(CONTAINER_BYTES).min(NO_PARENT as usize), ..Self::default() }
+    }
+}
+
 /// A vector kept in pages of 65,536 elements, so growing it never moves more than one page. A plain `Vec`
 /// doubling past 2^24 containers copied 537 MB in one push and held off cancellation for up to 88 ms.
 #[derive(Debug)]
@@ -2743,7 +2881,27 @@ mod tests {
     }
 
     fn index(name: &str, bytes: &[u8]) -> (ByteStore, JsonIndex) {
-        index_with(name, bytes, ScanOptions::default())
+        index_with(name, bytes, ScanOptions::gate())
+    }
+
+    /// Z47's JSON cap rests on this: a flood of empty containers, the most containers per byte, costs at most
+    /// `CONTAINER_BYTES` of private memory each. One test thread, so nothing else allocates meanwhile:
+    /// cargo test -p spike-core a_container_costs -- --ignored --nocapture --test-threads 1
+    #[test]
+    #[ignore]
+    fn a_container_costs_at_most_container_bytes() {
+        let bytes = [b"[".as_slice(), &b"[],".repeat(4_000_000), b"0]"].concat();
+        let path = Temp(temp_file("json-flood", &bytes));
+        drop(bytes);
+        let store = ByteStore::open(&path).unwrap();
+        let Some(before) = crate::budget::private_bytes() else {
+            return println!("private bytes: not measured on this OS");
+        };
+        let idx = scan(&store, 0..store.len(), &ScanOptions::gate(), &AtomicBool::new(false)).unwrap();
+        let n = idx.containers.len();
+        let per = (crate::budget::private_bytes().unwrap() - before) as f64 / n as f64;
+        println!("{n} containers: {per:.1} private bytes each, {:.1} by heap_bytes", idx.heap_bytes() as f64 / n as f64);
+        assert!(per <= CONTAINER_BYTES as f64, "{per:.1} B per container");
     }
 
     /// Sources here spell a JSON backslash `~`, so no backslash-u escape has to survive copy and paste.
@@ -3080,8 +3238,8 @@ mod tests {
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run (`spikes/core`): `cargo test -p spike-core json`
-Expected: the build fails with 33 errors, every one a missing implementation, plus 7 unused-import warnings (one is `MAX_PAGE`, which only the implementation uses):
-- ``error[E0425]: cannot find function `scan` in this scope`` (5);
+Expected: the build fails with 34 errors, every one a missing implementation, plus 7 unused-import warnings (one is `MAX_PAGE`, which only the implementation uses):
+- ``error[E0425]: cannot find function `scan` in this scope`` (6);
 - `` `children` `` (14);
 - `` `duplicate_keys` `` (4);
 - ``error[E0599]: no method named `heap_bytes` found for struct `json::JsonIndex` `` (10).
@@ -3841,7 +3999,7 @@ fn push_utf8(out: &mut Vec<u8>, cp: u32) {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run (`spikes/core`): `cargo test -p spike-core json -- --nocapture --test-threads=1`
-Expected: `20 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out`: the 19 `json` tests, plus Task C1a's `bytemap::tests::json_form_names_its_kind`, whose name the filter also matches. The hostile tests print their times. On the lane machine (debug build, one test at a time, and without Task C1d's debug-build opt-level for `memchr` and `xxhash-rust`) they were:
+Expected: `20 passed; 0 failed; 1 ignored; 0 measured; 44 filtered out`: the 19 `json` tests, plus Task C1a's `bytemap::tests::json_form_names_its_kind`, whose name the filter also matches; the ignored one is Step 5's measurement. The hostile tests print their times. On the lane machine (debug build, one test at a time, and without Task C1d's debug-build opt-level for `memchr` and `xxhash-rust`) they were:
 
 - 100 MB of `[`: `TooDeep` at offset 10,000 in 5.7 ms, with a 320,096-byte index;
 - 100 MB of `{"a":`: `TooDeep` at offset 50,000 in 7.4 ms, with a 320,096-byte index;
@@ -3853,12 +4011,28 @@ Expected: `20 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out`: the 19 
 With Task C1d's opt-level, most of these take a fraction of that: in the replay, the 200 MB string took 95 ms and cancellation's max was 1.1 ms. The asserted bounds are looser: 1 s for the depth- and budget-capped inputs, 60 s for the full scans, and 50 ms for cancellation and for the mid-array `children`.
 
 Then run (`spikes/core`): `cargo test -p spike-core`
-Expected: `63 passed; 0 failed; 1 ignored` (Task C1d's 44 plus these 19).
+Expected: `63 passed; 0 failed; 2 ignored` (Task C1d's 44 plus these 19; Step 5's measurement is the second ignored test).
 
-- [ ] **Step 5: Read your own work (rule 8), then commit**
+- [ ] **Step 5: Measure what a container costs (Z47), and falsify the measurement**
+
+`ScanOptions::gate()` sizes the JSON cap from `CONTAINER_BYTES`, so that figure must be measured, in private bytes, not taken from `heap_bytes()`. Run (`spikes/core`): `cargo test -p spike-core a_container_costs -- --ignored --nocapture --test-threads 1`
+Expected: `1 passed; 0 failed; 0 ignored; 0 measured; 64 filtered out`, after a line `4000001 containers: … private bytes each, 32.0 by heap_bytes`: 35–37 bytes on this PC (35.2 in this plan's replay) (a container record is 32 bytes; the rest is the pages' allocator overhead).
+
+Now make the estimate the cost. Replace
+<!-- op: temporary spikes/core/spike-core/src/json.rs -->
+```rust
+pub const CONTAINER_BYTES: u64 = 40;
+```
+with
+```rust
+pub const CONTAINER_BYTES: u64 = 32;
+```
+and run the same command. Expected: FAIL, `0 passed; 1 failed; 0 ignored; 0 measured; 64 filtered out`, after the panic `35.2 B per container` (this replay's figure): the cap would under-reserve. Put `40` back.
+
+- [ ] **Step 6: Read your own work (rule 8), then commit**
 
 ```bash
-git add spikes/core/spike-core/src/json.rs spikes/core/spike-core/src/lib.rs spikes/core/spike-core/src/store.rs
+git add spikes/core/spike-core/Cargo.toml spikes/core/spike-core/src/budget.rs spikes/core/spike-core/src/json.rs spikes/core/spike-core/src/lib.rs spikes/core/spike-core/src/store.rs
 git commit -m "spike(c): JSON/JSONC structural scanner with container index and lazy children"
 ```
 
@@ -4147,7 +4321,8 @@ proptest! {
         let e = emit(&doc);
         let file = temp(&e.out);
         let store = ByteStore::open(&file.0).unwrap();
-        let opts = ScanOptions { jsonc: doc.jsonc, window, cp_children, cp_bytes, ..ScanOptions::default() };
+        let opts = ScanOptions { jsonc: doc.jsonc, window, cp_children, cp_bytes, ..ScanOptions::gate() };
+        assert!(opts.max_containers < NO_PARENT as usize, "a gate run opened a document uncapped (Z47)");
         let idx = scan(&store, 0..store.len(), &opts, &AtomicBool::new(false)).unwrap();
         prop_assert_eq!(idx.error, None);
         prop_assert_eq!(idx.root, Some(e.root));
@@ -4194,12 +4369,12 @@ with this one, which ends a number one byte late when its delimiter is the first
                     Some(j) => return Ok(self.pos + j as u64 + u64::from(j == 0 && self.pos == self.buf_start)),
 ```
 Run (`spikes/core`): `cargo test -p spike-core --test json_spans`
-Expected: FAIL. Proptest seeds each run at random, so the document it shrinks to varies; what's fixed is the line, `json_spans.rs:258`, and that a number's span ends one byte late. The replay's run began like this:
+Expected: FAIL. Proptest seeds each run at random, so the document it shrinks to varies; what's fixed is the line, `json_spans.rs:259`, and that a number's span ends one byte late. This plan's replay shrank to the lane machine's document (below):
 
 ```text
 Test failed: assertion failed: `(left == right)` 
-  left: `[Child { key: None, value: Span { start: 44, end: 65 }, kind: Number, container: None, text: [49, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 93] }]`,
- right: `[Child { key: None, value: Span { start: 44, end: 64 }, kind: Number, container: None, text: [49, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48] }]` at spike-core\tests\json_spans.rs:258.
+  left: `[Child { key: None, value: Span { start: 1, end: 22 }, kind: Number, container: None, text: [49, 50, 51, 52, 53, 54, 55, 56, 57, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 48, 93] }]`,
+ right: `[Child { key: None, value: Span { start: 1, end: 21 }, kind: Number, container: None, text: [49, 50, 51, 52, 53, 54, 55, 56, 57, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 48] }]` at spike-core\tests\json_spans.rs:259.
 minimal failing input: doc = Doc {
 ```
 
@@ -4252,12 +4427,12 @@ with this one, which records a closing bracket one byte late when it is the firs
                         self.token(b, at + u64::from(i == 1 && matches!(b, b']' | b'}')))?;
 ```
 Run (`spikes/core`): `cargo test -p spike-core --test json_spans`
-Expected: FAIL at `json_spans.rs:252`, with the root container's `end` one byte past the generator's. Proptest seeds each run at random, so the document it shrinks to varies: the replay's began like this:
+Expected: FAIL at `json_spans.rs:253`, with the root container's `end` one byte past the generator's. Proptest seeds each run at random, so the document it shrinks to varies: this plan's replay began like this:
 
 ```text
 Test failed: assertion failed: `(left == right)` 
-  left: `Some((Array, Span { start: 0, end: 22 }))`,
- right: `Some((Array, Span { start: 0, end: 21 }))` at spike-core\tests\json_spans.rs:252.
+  left: `Some((Object, Span { start: 0, end: 27 }))`,
+ right: `Some((Object, Span { start: 0, end: 26 }))` at spike-core\tests\json_spans.rs:253.
 minimal failing input: doc = Doc {
 ```
 
@@ -4304,9 +4479,23 @@ Run (`spikes/core`): `cargo test -p spike-core --test json_spans`
 Expected: `1 passed`. It took 62–72 s in a debug build on the lane machine. Zero mismatches across 10,000 cases is the §13.1 gate.
 
 Then run (`spikes/core`): `cargo test -p spike-core`
-Expected: `63 passed; 0 failed; 1 ignored` for the unit tests, then `1 passed` for `tests\json_spans.rs`.
+Expected: `63 passed; 0 failed; 2 ignored` for the unit tests, then `1 passed` for `tests\json_spans.rs`.
 
-- [ ] **Step 5: Read your own work (rule 8), then commit**
+- [ ] **Step 5: Prove the gate refuses to run uncapped (Z47)**
+
+Every document the gate scans gets `ScanOptions::gate()`'s `max_containers`: 25% of this machine's physical RAM over `CONTAINER_BYTES` (Task C2a), and the gate asserts it. Replace this line of `tests/json_spans.rs`
+<!-- op: temporary spikes/core/spike-core/tests/json_spans.rs -->
+```rust
+        let opts = ScanOptions { jsonc: doc.jsonc, window, cp_children, cp_bytes, ..ScanOptions::gate() };
+```
+with
+```rust
+        let opts = ScanOptions { jsonc: doc.jsonc, window, cp_children, cp_bytes, ..ScanOptions::default() };
+```
+Run (`spikes/core`): `cargo test -p spike-core --test json_spans`
+Expected: FAIL, `0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out`, after the panic `a gate run opened a document uncapped (Z47)` at `json_spans.rs:250` (once per case proptest tries while it shrinks). Put the line back, and delete the saved seed: `rm spike-core/tests/json_spans.proptest-regressions` (PowerShell: `Remove-Item spike-core/tests/json_spans.proptest-regressions`).
+
+- [ ] **Step 6: Read your own work (rule 8), then commit**
 
 ```bash
 git add spikes/core/spike-core/tests/json_spans.rs
@@ -4329,7 +4518,7 @@ git commit -m "spike(c): span-fidelity gate over 10,000 generated JSON/JSONC doc
   - Task C2a's API;
   - `jiter` 0.17 (`Jiter`, `Peek`);
   - `struson` 0.7 (`JsonStreamReader`, `ReaderSettings`, `ValueType`, the `JsonReader` trait);
-  - `windows-sys` 0.61 (`GetProcessMemoryInfo`, `GetCurrentProcess`) for the peak working set.
+  - `windows-sys` 0.61 (`GetProcessMemoryInfo`, `GetCurrentProcess`, from Task C2a) for the peak working set.
 - **Produces:**
   - `fixtures_gen::json_doc<W: Write>(w: &mut W, shape: &str, target_bytes: u64) -> io::Result<u64>`. It writes at least `target_bytes` and returns the element count. The shapes are:
     - `records`: an array of ~190-byte objects, like `jsonl` lines joined;
@@ -4447,14 +4636,14 @@ Expected:
 
 - [ ] **Step 6: Add the dev-dependencies and the benchmark**
 
-In `spikes/core/spike-core/Cargo.toml`, add `jiter` and `struson` to `[dev-dependencies]`, and two features to the Windows dev-dependency table Task C1d added. Replace
+In `spikes/core/spike-core/Cargo.toml`, add `jiter` and `struson` to `[dev-dependencies]` (Task C2a already added the Windows dev features). Replace
 <!-- op: replace spikes/core/spike-core/Cargo.toml -->
 ```toml
 [dev-dependencies]
 proptest = "1.12"
 
 [target.'cfg(windows)'.dev-dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_IO", "Win32_System_Ioctl"] }
+windows-sys = { version = "0.61", features = ["Win32_System_IO", "Win32_System_Ioctl", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
 ```
 with
 ```toml
@@ -4482,7 +4671,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 use jiter::{Jiter, Peek};
-use spike_core::json::{children, duplicate_keys, scan, JsonIndex, Kind, ScanOptions};
+use spike_core::json::{children, duplicate_keys, scan, JsonIndex, Kind, ScanOptions, NO_PARENT};
 use spike_core::store::ByteStore;
 use struson::reader::{JsonReader, JsonStreamReader, ReaderSettings, ValueType};
 
@@ -4502,9 +4691,16 @@ fn summary(recs: impl Iterator<Item = [u64; 3]>) -> String {
     format!("containers={n} children={kids} hash={h:016x}")
 }
 
+/// The scanner's options in every run here (Z47): an explicit cap, and a run without one fails.
+fn gate() -> ScanOptions {
+    let opts = ScanOptions::gate();
+    assert!(opts.max_containers < NO_PARENT as usize, "a gate run opened a document uncapped (Z47)");
+    opts
+}
+
 fn typose_index(path: &Path) -> Result<(ByteStore, JsonIndex), String> {
     let store = ByteStore::open(path).map_err(|e| e.to_string())?;
-    let idx = scan(&store, 0..store.len(), &ScanOptions::default(), &AtomicBool::new(false)).map_err(|e| e.to_string())?;
+    let idx = scan(&store, 0..store.len(), &gate(), &AtomicBool::new(false)).map_err(|e| e.to_string())?;
     match idx.error {
         Some(e) => Err(format!("{e:?}")),
         None => Ok((store, idx)),
@@ -4741,7 +4937,7 @@ fn cancel_latency(path: &Path) -> Result<(), String> {
     let mut full = Duration::ZERO;
     for _ in 0..2 {
         let t = Instant::now(); // the second scan is warm
-        scan(&store, 0..store.len(), &ScanOptions::default(), &AtomicBool::new(false)).map_err(|e| e.to_string())?;
+        scan(&store, 0..store.len(), &gate(), &AtomicBool::new(false)).map_err(|e| e.to_string())?;
         full = t.elapsed();
     }
     let (mut worst, mut real, mut run) = (Duration::ZERO, 0, 0u32);
@@ -4752,7 +4948,7 @@ fn cancel_latency(path: &Path) -> Result<(), String> {
         let cancel = Arc::new(AtomicBool::new(false));
         let (s, c) = (store.clone(), cancel.clone());
         let worker = std::thread::spawn(move || {
-            let idx = scan(&s, 0..s.len(), &ScanOptions::default(), &c);
+            let idx = scan(&s, 0..s.len(), &gate(), &c);
             let returned = Instant::now();
             let idx = idx.map(|i| (i.error.map(|e| e.kind), i.containers.len())); // drops the index
             (idx, returned, returned.elapsed())
@@ -4783,7 +4979,7 @@ fn probes() -> Result<(), String> {
         let path = dir.join(name);
         std::fs::write(&path, src).map_err(|e| e.to_string())?;
         let store = ByteStore::open(&path).map_err(|e| e.to_string())?;
-        let idx = scan(&store, 0..store.len(), &ScanOptions::default(), &AtomicBool::new(false)).map_err(|e| e.to_string())?;
+        let idx = scan(&store, 0..store.len(), &gate(), &AtomicBool::new(false)).map_err(|e| e.to_string())?;
         Ok((store, idx))
     };
     let show = |r: Result<Recs, String>| match r {
@@ -4933,6 +5129,18 @@ fn main() -> Result<(), String> {
 Run (`spikes/core`): `cargo build --release -p spike-core --example json_bench`
 Expected: it builds with no warnings. Then run `cargo tree -p spike-core -e normal`; its output must contain neither `jiter` nor `struson`.
 
+Then see the bench refuse to scan uncapped (Z47). In `examples/json_bench.rs`, `gate`, replace
+<!-- op: temporary spikes/core/spike-core/examples/json_bench.rs -->
+```rust
+    let opts = ScanOptions::gate();
+```
+with
+```rust
+    let opts = ScanOptions::default();
+```
+Run (`spikes/core`): `cargo run --release -q -p spike-core --example json_bench -- --probes` (the probes scan small in-memory documents, so no fixture is needed).
+Expected: FAIL, the panic `a gate run opened a document uncapped (Z47)`. Put the line back (the file is new in this task).
+
 - [ ] **Step 7: Run every measurement**
 
 Run (`spikes/core`): `cargo run --release -q -p spike-core --example json_bench -- --all ../.fixtures ../results/json-bench.txt`
@@ -5037,27 +5245,27 @@ struson  numbers-100m.json: containers=1 children=10591677 hash=b8cae47d2f9da514
 struson  numbers-100m.json: peak working set 6 MB
 dups     ../.fixtures\wide-100m.json: scan 0.130 s (0.806 GB/s); duplicate_keys over 1 objects / 4993220 keys: 0.871 s (174 ns/key), 49 duplicates; peak working set 206 MB
 dups     ../.fixtures\records-1g.json: scan 0.992 s (1.082 GB/s); duplicate_keys over 5740203 objects / 22960812 keys: 2.305 s (100 ns/key), 0 duplicates; peak working set 246 MB
-cancel   run  0: Some(Cancelled) after 0 containers, latency 495.4µs, then drop 100ns
-cancel   run  1: Some(Cancelled) after 998901 containers, latency 83.4µs, then drop 1.4642ms
-cancel   run  2: Some(Cancelled) after 2063001 containers, latency 244.2µs, then drop 2.8718ms
-cancel   run  3: Some(Cancelled) after 3274460 containers, latency 272.7µs, then drop 3.8686ms
-cancel   run  4: Some(Cancelled) after 4453144 containers, latency 269.1µs, then drop 4.7599ms
-cancel   run  5: Some(Cancelled) after 5648326 containers, latency 180.6µs, then drop 6.4447ms
-cancel   run  6: Some(Cancelled) after 6810849 containers, latency 48.4µs, then drop 7.3585ms
-cancel   run  7: Some(Cancelled) after 8202310 containers, latency 428.2µs, then drop 8.2318ms
-cancel   run  8: Some(Cancelled) after 9086408 containers, latency 199.7µs, then drop 8.8926ms
-cancel   run  9: Some(Cancelled) after 10478001 containers, latency 704µs, then drop 10.3275ms
-cancel   run 10: Some(Cancelled) after 11607734 containers, latency 318.7µs, then drop 13.7001ms
-cancel   run 11: Some(Cancelled) after 10461708 containers, latency 74.5µs, then drop 12.6707ms
-cancel   run 12: Some(Cancelled) after 10969072 containers, latency 20.1µs, then drop 14.7432ms
-cancel   run 13: Some(Cancelled) after 12229902 containers, latency 152.9µs, then drop 18.5867ms
-cancel   run 14: Some(Cancelled) after 12950042 containers, latency 97.8µs, then drop 16.2939ms
-cancel   run 15: Some(Cancelled) after 16077040 containers, latency 216.2µs, then drop 20.5965ms
-cancel   run 16: Some(Cancelled) after 19302346 containers, latency 480.8µs, then drop 21.8818ms
-cancel   run 17: Some(Cancelled) after 19417001 containers, latency 136.2µs, then drop 22.7573ms
-cancel   run 18: Some(Cancelled) after 21578001 containers, latency 225.7µs, then drop 24.7461ms
-cancel   run 19: Some(Cancelled) after 23460903 containers, latency 270.9µs, then drop 24.5009ms
-cancel   ../.fixtures\deep-100m.json: warm full scan 703.2593ms; n_real=20 of 20 runs; max latency 704µs
+cancel   run  0: Some(Cancelled) after 0 containers, latency 581.8µs, then drop 100ns
+cancel   run  1: Some(Cancelled) after 1097001 containers, latency 168.2µs, then drop 1.4226ms
+cancel   run  2: Some(Cancelled) after 2095774 containers, latency 91.5µs, then drop 2.454ms
+cancel   run  3: Some(Cancelled) after 2996034 containers, latency 116.5µs, then drop 4.8677ms
+cancel   run  4: Some(Cancelled) after 4273026 containers, latency 188.3µs, then drop 4.6882ms
+cancel   run  5: Some(Cancelled) after 6270493 containers, latency 469.9µs, then drop 5.6178ms
+cancel   run  6: Some(Cancelled) after 7662001 containers, latency 164.6µs, then drop 8.2747ms
+cancel   run  7: Some(Cancelled) after 8497001 containers, latency 322.2µs, then drop 7.8207ms
+cancel   run  8: Some(Cancelled) after 10772791 containers, latency 278.5µs, then drop 9.6296ms
+cancel   run  9: Some(Cancelled) after 12197001 containers, latency 114.8µs, then drop 11.3832ms
+cancel   run 10: Some(Cancelled) after 12426182 containers, latency 380.9µs, then drop 11.0515ms
+cancel   run 11: Some(Cancelled) after 14325342 containers, latency 120.5µs, then drop 16.9405ms
+cancel   run 12: Some(Cancelled) after 14129001 containers, latency 306.3µs, then drop 12.9321ms
+cancel   run 13: Some(Cancelled) after 14718237 containers, latency 180.3µs, then drop 18.2823ms
+cancel   run 14: Some(Cancelled) after 15504027 containers, latency 282.9µs, then drop 14.8643ms
+cancel   run 15: Some(Cancelled) after 14636426 containers, latency 415.1µs, then drop 13.208ms
+cancel   run 16: Some(Cancelled) after 17976200 containers, latency 71.9µs, then drop 22.5839ms
+cancel   run 17: Some(Cancelled) after 17452340 containers, latency 70.7µs, then drop 19.1701ms
+cancel   run 18: Some(Cancelled) after 17976200 containers, latency 110.3µs, then drop 17.9067ms
+cancel   run 19: Some(Cancelled) after 19859001 containers, latency 204.2µs, then drop 18.0553ms
+cancel   ../.fixtures\deep-100m.json: warm full scan 667.196ms; n_real=20 of 20 runs; max latency 581.8µs
 ```
 Delete the four JSON fixtures (≈ 1.4 GB). Git Bash: `rm ../.fixtures/records-1g.json ../.fixtures/wide-100m.json ../.fixtures/deep-100m.json ../.fixtures/numbers-100m.json`. PowerShell: `Remove-Item ../.fixtures/records-1g.json, ../.fixtures/wide-100m.json, ../.fixtures/deep-100m.json, ../.fixtures/numbers-100m.json`.
 
@@ -5114,12 +5322,12 @@ git commit -m "spike(c): JSON scanner benchmark against jiter and struson, with 
   - `pub struct CsvConfig { pub delimiter: u8, pub cp_records: u64, pub cp_bytes: u64, pub block: usize, pub encoding: &'static Encoding }`. Defaults: `b','`, 1024, 1 MiB, 4 MiB, `UTF_8`. `encoding` is what Task C1b's `sniff` (or ⓘ) decided.
   - `pub struct Checkpoint { pub record: u64, pub offset: u64, /* private */ mid: Option<Box<csv_core::Reader>> }` (`Debug` only, deliberately not `Clone`). `record` = records completed before `offset`; `mid` is csv-core's state when `offset` is inside a record.
   - `pub struct CsvIndex { pub delimiter: u8, pub encoding: &'static Encoding, pub checkpoints: Vec<Checkpoint>, pub records: u64, pub indexed_bytes: u64, pub done: bool, pub refused: Option<&'static str> }` (`Debug`, and `Default` by hand: `&'static Encoding` has none; the default encoding is `UTF_8`). `records` counts completed records only. `refused` is set, with `done` and no records, when the encoding can't be indexed.
-  - `pub const UTF16_REFUSED: &str`: why Grid stays locked for a UTF-16 file (spec §3.4's lens reason); Raw shows it.
+  - `pub const UTF16_REFUSED: &str = "Grid is unavailable for UTF-16 CSV/TSV. Open in Raw, or convert a copy to UTF-8."`: Z42's lock text, the lens reason (spec §3.4) for a UTF-16 file; Raw shows it.
   - `pub struct CsvProgress { pub records: u64, pub bytes: u64, pub done: bool, pub elapsed_ms: u64 }`
   - `pub struct Field { pub span: Span, pub text: String, pub more: bool, pub map: ByteMap }`. `span` is the raw field, quotes included; `text` is the unescaped value (≤ `MAX_PIECE` bytes of it) decoded in the index's encoding; `more` means the value continues past `text`; `map` maps `text`'s UTF-16 offsets to source bytes: a quote csv-core dropped joins the character after it, and the closing quote the last one unless the value is cut.
-  - `pub struct CsvRow { pub record: u64, pub span: Span, pub cells: Vec<Field>, pub more: bool }`. `record` is the 0-based source record (the header is record 0); `span` excludes the terminator; `cells` come from the record's first `MAX_PIECE` bytes; `more` means the record continues past them.
+  - `pub struct CsvRow { pub record: u64, pub span: Span, pub cells: Vec<Field>, pub more: bool }`. `record` is the 0-based source record (record 0 is the file's first record, a header only if the sniff or ⓘ says so: Z48); `span` excludes the terminator; `cells` come from the record's first `MAX_PIECE` bytes; `more` means the record continues past them.
   - `pub fn sniff(store: &ByteStore) -> Result<Dialect, StoreError>`
-  - `pub fn build(file: &File, len: u64, cfg: CsvConfig, hashes: &ChunkHashes, shared: &RwLock<CsvIndex>, cancel: &AtomicBool, on_progress: impl FnMut(CsvProgress)) -> Result<bool, StoreError>`. It publishes `cfg.encoding` first; for UTF-16LE/BE it publishes `refused = Some(UTF16_REFUSED)` and `done`, reports progress once and returns `Ok(true)` with no records. Otherwise it publishes into `shared` and calls `on_progress` after every block and when done, hashes every chunk it reads, checks `cancel` at least every 64 KiB, and returns `Ok(false)` if cancelled, `Ok(true)` when done.
+  - `pub fn build(file: &File, len: u64, cfg: CsvConfig, hashes: &ChunkHashes, shared: &RwLock<CsvIndex>, cancel: &AtomicBool, on_progress: impl FnMut(CsvProgress)) -> Result<bool, StoreError>`. It publishes `cfg.encoding` first; for UTF-16LE/BE, or a file that starts with a UTF-16 BOM whatever `cfg.encoding` says (Z42), it publishes `refused = Some(UTF16_REFUSED)` and `done`, reports progress once and returns `Ok(true)` with no records. Otherwise it publishes into `shared` and calls `on_progress` after every block and when done, hashes every chunk it reads, checks `cancel` at least every 64 KiB, and returns `Ok(false)` if cancelled, `Ok(true)` when done.
   - `pub fn locate_record(store: &ByteStore, index: &CsvIndex, n: u64) -> Result<Option<u64>, StoreError>`. Record `n`'s start; scans ≤ `cp_bytes` past a checkpoint.
   - `pub fn records(store: &ByteStore, index: &CsvIndex, start: u64, count: u32) -> Result<Vec<CsvRow>, StoreError>`. ≤ `count` rows, holding at most `MAX_PAGE` bytes.
   - `pub fn fields(store: &ByteStore, index: &CsvIndex, span: Span, first: usize, count: usize) -> Result<Vec<Field>, StoreError>`. Per-field spans on demand: re-tokenizes the record at `span` and returns fields `first..first + count`, holding at most `MAX_PAGE` bytes of text.
@@ -5140,7 +5348,7 @@ git commit -m "spike(c): JSON scanner benchmark against jiter and struson, with 
   - A longer record is cut (`more`). Its end and the next record's start come from the checkpoints, not from a scan.
   - Only completed records count. A record still being indexed isn't paged yet, so the Grid shows a 200 MB first record once the indexer has passed it (~0.2 s at the ~1 GB/s measured in Task C3c); Raw shows it at once.
 - **Per-field spans** aren't stored. `fields` re-tokenizes one record on demand (spec §4.2).
-- **Encoding** (spec §3.2, §4.1). A cell's text is csv-core's unescaped bytes decoded with Task C1b's `decode` (from offset 1, so a leading U+FEFF stays text). Its map comes from re-reading the field's raw bytes and following csv-core's quote states (the opening quote, `""` as one quote, a lone closing quote, then literal), checked byte for byte against csv-core's value; a whole-field element is the fallback if they ever disagree. That holds for UTF-8 and single-byte encodings, where `"`, delimiters and line ends are single bytes. UTF-16 has none of those, so it's refused (`UTF16_REFUSED`; see the Notes for the checkpoint). Not done: per-cell U+FFFD counts as problems (spec §4.1); `decode` returns them and `Field` doesn't carry them yet.
+- **Encoding** (spec §3.2, §4.1). A cell's text is csv-core's unescaped bytes decoded with Task C1b's `decode` (from offset 1, so a leading U+FEFF stays text). Its map comes from re-reading the field's raw bytes and following csv-core's quote states (the opening quote, `""` as one quote, a lone closing quote, then literal), checked byte for byte against csv-core's value; a whole-field element is the fallback if they ever disagree. That holds for UTF-8 and single-byte encodings, where `"`, delimiters and line ends are single bytes. UTF-16 has none of those, so it's refused (`UTF16_REFUSED`, Z42), and a UTF-16 BOM refuses it under any encoding override. Every delimiter, tab included, uses one CSV-style quoting dialect (Z45; see the Notes). Not done: per-cell U+FFFD counts as problems (spec §4.1); `decode` returns them and `Field` doesn't carry them yet.
 - **Cancellation:** `build` checks the flag before every step of ≤ 64 KiB. The longest gap is one block read in between: 4 MiB, ~1 ms. (The lane measured ~20 ms in a debug build, where xxh3 is slow; Task C1d's debug-build opt-level for `xxhash-rust` removes that.)
 - **Sniffing heuristic** (overridable):
   - **Delimiter:** parse the first 64 KiB with each of `,` `\t` `;` `|`. Pick the one whose most common field count covers the largest share of records; on a tie, the larger count; then that order. A sample that only parses as one column gets `,`. The sample's last record is dropped unless the sample is the whole file.
@@ -5193,7 +5401,7 @@ use crate::pages::{MAX_PAGE, MAX_PIECE};
 use crate::store::{read_exact_at, ByteStore, ChunkHashes, StoreError, CHUNK};
 
 /// Why Grid stays locked for a UTF-16 file (spec §3.4's lens reason); Raw shows it. A deviation from spec §4.2.
-pub const UTF16_REFUSED: &str = "Grid is unavailable for UTF-16 files: the CSV reader splits single-byte delimiters, quotes and line ends.";
+pub const UTF16_REFUSED: &str = "Grid is unavailable for UTF-16 CSV/TSV. Open in Raw, or convert a copy to UTF-8.";
 pub const SNIFF_BYTES: u64 = 65_536;
 const DELIMITERS: [u8; 4] = [b',', b'\t', b';', b'|'];
 const BOM: &[u8] = b"\xEF\xBB\xBF";
@@ -5220,7 +5428,8 @@ pub struct CsvConfig {
     pub cp_records: u64,
     pub cp_bytes: u64,
     pub block: usize,
-    /// What C1's `sniff` (or ⓘ) decided. Cells decode with it.
+    /// What C1's `sniff` (or ⓘ) decided. Cells decode with it. A file with a UTF-16 BOM is refused whatever this
+    /// says: an override never reads UTF-16 as a single-byte encoding to unlock the Grid (Z42).
     pub encoding: &'static Encoding,
 }
 
@@ -5278,7 +5487,8 @@ pub struct Field {
     pub map: ByteMap,
 }
 
-/// One Grid row. `record` is the 0-based source record: the header is record 0, and blank lines don't count.
+/// One Grid row. `record` is the 0-based source record: record 0 is the file's first record, a header only if the
+/// sniff or ⓘ says so (Z48), and blank lines don't count.
 /// `cells` come from the record's first `MAX_PIECE` bytes; `more` means the record continues past them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CsvRow {
@@ -5451,16 +5661,17 @@ mod tests {
 
     #[test]
     fn cancel_returns_within_50ms() {
-        let shapes: [(&str, Vec<u8>); 3] = [
-            ("csv-cancel-rows", b"a,\"b\nc\",d\n".repeat(10_000_000)),
-            ("csv-cancel-quote", [b"\"".as_slice(), &b"x,\n".repeat(33_000_000)].concat()),
-            ("csv-cancel-blank", b"\r\n".repeat(50_000_000)),
+        let shapes: [(&str, u8, Vec<u8>); 4] = [
+            ("csv-cancel-rows", b',', b"a,\"b\nc\",d\n".repeat(10_000_000)),
+            ("csv-cancel-quote", b',', [b"\"".as_slice(), &b"x,\n".repeat(33_000_000)].concat()),
+            ("csv-cancel-blank", b',', b"\r\n".repeat(50_000_000)),
+            ("csv-cancel-tsv-quote", b'\t', [b"\"".as_slice(), &b"x\t\n".repeat(33_000_000)].concat()), // Z45: an unmatched TSV quote
         ];
-        let paths: Vec<_> = shapes.iter().map(|(name, bytes)| Temp(temp_file(name, bytes))).collect();
+        let paths: Vec<_> = shapes.iter().map(|(name, delimiter, bytes)| (Temp(temp_file(name, bytes)), *delimiter)).collect();
         drop(shapes);
         let mut worst = Duration::ZERO;
         for run in 0..21 {
-            let path = &paths[run % 3];
+            let (path, delimiter) = &paths[run % 4];
             let len = std::fs::metadata(&**path).unwrap().len();
             let (cancel, hashes, shared) = (AtomicBool::new(false), ChunkHashes::default(), RwLock::new(CsvIndex::default()));
             let file = File::open(&**path).unwrap();
@@ -5470,7 +5681,7 @@ mod tests {
                     cancel.store(true, Ordering::Relaxed);
                     Instant::now()
                 });
-                let finished = build(&file, len, CsvConfig::default(), &hashes, &shared, &cancel, |_| {}).unwrap();
+                let finished = build(&file, len, CsvConfig { delimiter: *delimiter, ..CsvConfig::default() }, &hashes, &shared, &cancel, |_| {}).unwrap();
                 let returned = Instant::now();
                 assert!(!finished, "the build finished before the flag was set; use a bigger input");
                 returned.saturating_duration_since(setter.join().unwrap())
@@ -5528,12 +5739,58 @@ mod tests {
     #[test]
     fn utf16_is_refused_with_a_reason() {
         // csv-core splits single-byte delimiters and line ends; UTF-16 has none. Grid stays locked; Raw shows it.
-        let bytes: Vec<u8> = [0xFF, 0xFE].into_iter().chain("a\tb\r\n1\t2\r\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
-        for encoding in [UTF_16LE, UTF_16BE] {
-            let (store, idx) = index_with("csv-utf16", &bytes, CsvConfig { delimiter: b'\t', encoding, ..CsvConfig::default() });
-            assert_eq!((idx.refused, idx.records, idx.done, idx.encoding), (Some(UTF16_REFUSED), 0, true, encoding));
-            assert!(records(&store, &idx, 0, 10).unwrap().is_empty());
+        // Z42: a UTF-16 BOM refuses it under any encoding override, so a single-byte reading can't unlock the Grid.
+        let le: Vec<u8> = [0xFF, 0xFE].into_iter().chain("a\tb\r\n1\t2\r\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        let be: Vec<u8> = [0xFE, 0xFF].into_iter().chain("a\tb\r\n1\t2\r\n".encode_utf16().flat_map(u16::to_be_bytes)).collect();
+        for bytes in [&le, &be] {
+            for encoding in [UTF_16LE, UTF_16BE, encoding_rs::WINDOWS_1252, UTF_8] {
+                let (store, idx) = index_with("csv-utf16", bytes, CsvConfig { delimiter: b'\t', encoding, ..CsvConfig::default() });
+                assert_eq!((idx.refused, idx.records, idx.done, idx.encoding), (Some(UTF16_REFUSED), 0, true, encoding), "{}", encoding.name());
+                assert!(records(&store, &idx, 0, 10).unwrap().is_empty());
+            }
         }
+        assert_eq!(UTF16_REFUSED, "Grid is unavailable for UTF-16 CSV/TSV. Open in Raw, or convert a copy to UTF-8.");
+    }
+
+    #[test]
+    fn tsv_quoting_is_csv_style() {
+        // Z45: one deterministic CSV-style dialect for every delimiter. Double quotes may enclose tabs and newlines,
+        // `""` escapes a quote, and quoting is never inferred from a sample. Not strict IANA TSV: a leading quote
+        // always opens a quoted field.
+        let cells = |name: &str, bytes: &[u8]| -> Vec<Vec<(String, u64, u64)>> {
+            assert_eq!(sniff_sample(bytes, true).delimiter, b'\t');
+            let (store, idx) = index_with(name, bytes, CsvConfig { delimiter: b'\t', ..CsvConfig::default() });
+            let rows = records(&store, &idx, 0, 10).unwrap();
+            rows.into_iter().map(|r| r.cells.into_iter().map(|c| (c.text, c.span.start, c.span.end)).collect()).collect()
+        };
+        let want = |cells: &[(&str, u64, u64)]| cells.iter().map(|&(t, s, e)| (t.to_string(), s, e)).collect::<Vec<_>>();
+        let head = want(&[("a", 0, 1), ("b", 2, 3)]);
+        for (name, bytes, second) in [
+            ("tsv-tab", b"a\tb\n\"x\ty\"\tz\n".as_slice(), want(&[("x\ty", 4, 9), ("z", 10, 11)])),
+            ("tsv-newline", b"a\tb\n\"x\ny\"\tz\n".as_slice(), want(&[("x\ny", 4, 9), ("z", 10, 11)])),
+            ("tsv-escaped", b"a\tb\n\"say \"\"hi\"\"\"\tz\n".as_slice(), want(&[("say \"hi\"", 4, 16), ("z", 17, 18)])),
+            ("tsv-leading", b"a\tb\n\"Hello\" world\tz\n".as_slice(), want(&[("Hello world", 4, 17), ("z", 18, 19)])),
+            ("tsv-mid", b"a\tb\n5\" pipe\tz\n".as_slice(), want(&[("5\" pipe", 4, 11), ("z", 12, 13)])),
+        ] {
+            assert_eq!(cells(name, bytes), [head.clone(), second], "{name}");
+        }
+        // An unmatched quote takes the rest of the file as one record, but stays bounded and cancellable, and Raw
+        // keeps every line (Task C3a's cancel test times it; here a set flag stops the build at its first check).
+        let bytes = [b"a\tb\n\"open\tz\n".as_slice(), &b"value\tvalue\tvalue\n".repeat(200_000)].concat();
+        let path = Temp(temp_file("tsv-unmatched", &bytes));
+        let (store, idx) = index_path(&path, CsvConfig { delimiter: b'\t', ..CsvConfig::default() });
+        assert_eq!(idx.records, 2);
+        assert_bounded(&idx, 1 << 20);
+        let rows = records(&store, &idx, 0, 10).unwrap();
+        assert_eq!(rows[1].span, Span { start: 4, end: bytes.len() as u64 });
+        assert!(rows[1].more && rows[1].cells[0].more && rows[1].cells[0].text.len() < MAX_PIECE);
+        let shared = RwLock::new(CsvIndex::default());
+        let stopped = build(&File::open(&*path).unwrap(), store.len(), CsvConfig { delimiter: b'\t', ..CsvConfig::default() }, &store.hashes(), &shared, &AtomicBool::new(true), |_| {});
+        assert!(!stopped.unwrap());
+        let lines = RwLock::new(crate::index::LineIndex::default());
+        crate::index::build(&File::open(&*path).unwrap(), store.len(), crate::index::IndexConfig::default(), &store.hashes(), &lines, |_| {}).unwrap();
+        let raw = crate::pages::lines(&store, &lines.read().unwrap(), 100_001, 1).unwrap();
+        assert_eq!(raw[0].text, "value\tvalue\tvalue");
     }
 
     #[test]
@@ -5614,8 +5871,8 @@ mod tests {
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run (`spikes/core`): `cargo test -p spike-core csv`
-Expected: compile errors, `due to 29 previous errors; 8 warnings emitted`:
-- `error[E0425]: cannot find function` for `build` (3), `run` (1), `sniff` (1), `records` (11), `sniff_sample` (3), `locate_record` (4), `primed` (1), `copy_reader` (1) and `fields` (2);
+Expected: compile errors, `due to 33 previous errors; 8 warnings emitted`:
+- `error[E0425]: cannot find function` for `build` (4), `run` (1), `sniff` (1), `records` (13), `sniff_sample` (4), `locate_record` (4), `primed` (1), `copy_reader` (1) and `fields` (2);
 - `error[E0433]: cannot find type` for `Tok` and `Ev` (1 each).
 
 - [ ] **Step 3: Implement**
@@ -5838,18 +6095,20 @@ pub fn build(
     let started = Instant::now();
     let progress = |records, bytes, done| CsvProgress { records, bytes, done, elapsed_ms: started.elapsed().as_millis() as u64 };
     shared.write().unwrap().encoding = cfg.encoding;
-    if cfg.encoding == UTF_16LE || cfg.encoding == UTF_16BE {
+    let mut head = [0u8; 3];
+    let lead = len.min(3) as usize;
+    read_exact_at(file, &mut head[..lead], 0)?;
+    // Z42: UTF-16 is Raw only, whether the encoding says so or the file starts with a UTF-16 BOM: an override can't
+    // read it as a single-byte encoding to unlock the Grid.
+    let utf16_bom = matches!(Encoding::for_bom(&head[..lead]), Some((e, _)) if e == UTF_16LE || e == UTF_16BE);
+    if utf16_bom || cfg.encoding == UTF_16LE || cfg.encoding == UTF_16BE {
         let mut w = shared.write().unwrap();
         (w.refused, w.done) = (Some(UTF16_REFUSED), true);
         on_progress(progress(0, 0, true));
         return Ok(true);
     }
     let cp_bytes = cfg.cp_bytes.max(1);
-    let mut head = [0u8; 3];
-    let bom = len >= 3 && {
-        read_exact_at(file, &mut head, 0)?;
-        head[..] == *BOM
-    };
+    let bom = lead == 3 && head[..] == *BOM;
     let mut tok = Tok::fresh(cfg.delimiter, if bom { 3 } else { 0 }, 0);
     let mut fresh = vec![Checkpoint { record: 0, offset: tok.pos, mid: None }];
     let (mut last_cp, mut since) = (tok.pos, 0u64);
@@ -6061,14 +6320,54 @@ fn field(store: &ByteStore, span: Span, val: &[u8], more: bool, encoding: &'stat
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run (`spikes/core`): `cargo test -p spike-core csv`
-Expected: `23 passed; 0 failed; 0 ignored; 0 measured; 64 filtered out`, then `0 passed` with `1 filtered out` for `tests\json_spans.rs`.
+Expected: `24 passed; 0 failed; 0 ignored; 0 measured; 65 filtered out`, then `0 passed` with `1 filtered out` for `tests\json_spans.rs`.
 - `cancel_returns_within_50ms` prints `cancel: n=21, max …` with `--nocapture`, and fails at 50 ms or more.
 - The 100 MB and 200 MB tests write temp files of that size and delete them on any exit (`store::testutil::Temp`).
 
 Run (`spikes/core`): `cargo test -p spike-core`
-Expected: `86 passed; 0 failed; 1 ignored` (Task C2c's 63 plus these 23; the ignored one is Task C0's `handle_lifetime_costs`), then `1 passed` for `tests\json_spans.rs`.
+Expected: `87 passed; 0 failed; 2 ignored` (Task C2c's 63 plus these 24; the ignored ones are Task C0's `handle_lifetime_costs` and Task C2a's container measurement), then `1 passed` for `tests\json_spans.rs`.
 
-- [ ] **Step 5: Read your own work (rule 8), then commit**
+- [ ] **Step 5: Falsify the UTF-16 refusal and the TSV dialect**
+
+Two breaks, one at a time. `csv.rs` was written in this task, so put each line back by hand.
+
+**Break 1: an override unlocks the Grid** (only `cfg.encoding` decides, as before Z42). In `build`, replace
+<!-- op: temporary spikes/core/spike-core/src/csv.rs -->
+```rust
+    if utf16_bom || cfg.encoding == UTF_16LE || cfg.encoding == UTF_16BE {
+```
+with
+```rust
+    if cfg.encoding == UTF_16LE || cfg.encoding == UTF_16BE {
+```
+Run (`spikes/core`): `cargo test -p spike-core csv::tests::utf16_is_refused_with_a_reason -- --exact`
+Expected: FAIL, `0 passed; 1 failed; 0 ignored; 0 measured; 88 filtered out`: the BOM'd UTF-16LE file indexes as `windows-1252` records (and the build warns that `utf16_bom` is unused):
+```text
+assertion `left == right` failed: windows-1252
+  left: (None, 5, true, Encoding { name: "windows-1252", .. })
+ right: (Some("Grid is unavailable for UTF-16 CSV/TSV. Open in Raw, or convert a copy to UTF-8."), 0, true, Encoding { name: "windows-1252", .. })
+```
+Put the line back.
+
+**Break 2: TSV without quoting** (a tab-delimited reader that reads `"` as text, as strict IANA TSV would). In `primed`, replace
+<!-- op: temporary spikes/core/spike-core/src/csv.rs -->
+```rust
+    let mut r = ReaderBuilder::new().delimiter(delimiter).build();
+```
+with
+```rust
+    let mut r = ReaderBuilder::new().delimiter(delimiter).quoting(delimiter != b'\t').build();
+```
+Run (`spikes/core`): `cargo test -p spike-core csv::tests::tsv_quoting_is_csv_style -- --exact`
+Expected: FAIL, `0 passed; 1 failed; 0 ignored; 0 measured; 88 filtered out`, at the quoted tab:
+```text
+assertion `left == right` failed: tsv-tab
+  left: [[("a", 0, 1), ("b", 2, 3)], [("\"x", 4, 6), ("y\"", 7, 9), ("z", 10, 11)]]
+ right: [[("a", 0, 1), ("b", 2, 3)], [("x\ty", 4, 9), ("z", 10, 11)]]
+```
+Put the line back, and rerun both tests: `1 passed; 0 failed; 0 ignored; 0 measured; 88 filtered out` each.
+
+- [ ] **Step 6: Read your own work (rule 8), then commit**
 
 ```bash
 git add spikes/core/spike-core/Cargo.toml spikes/core/Cargo.lock spikes/core/spike-core/src/lib.rs spikes/core/spike-core/src/index.rs spikes/core/spike-core/src/csv.rs
@@ -6233,7 +6532,7 @@ Add at the end of `mod tests` in `csv.rs` (before the file's last line, `}`):
 - [ ] **Step 2: Run the gate**
 
 Run (`spikes/core`): `cargo test -p spike-core span_fidelity`
-Expected: `1 passed; 0 failed; 0 ignored; 0 measured; 87 filtered out`, after about 75–85 s (proptest notes that the test "has been running for over 60 seconds"), then `0 passed` with `1 filtered out` for `tests\json_spans.rs`.
+Expected: `1 passed; 0 failed; 0 ignored; 0 measured; 89 filtered out`, after about 75–85 s (proptest notes that the test "has been running for over 60 seconds"), then `0 passed` with `1 filtered out` for `tests\json_spans.rs`.
 
 - [ ] **Step 3: Falsify the gate: break mid-record resume and watch it fail**
 
@@ -6247,17 +6546,18 @@ with
         let reader = primed(delimiter); // FALSIFY: drop the saved mid-record state
 ```
 Run (`spikes/core`): `cargo test -p spike-core csv::`
-Expected: FAIL, `21 passed; 3 failed; 0 ignored; 0 measured; 64 filtered out`.
+Expected: FAIL, `21 passed; 4 failed; 0 ignored; 0 measured; 65 filtered out`.
 - `span_fidelity` fails within its first few cases (proptest seeds each run at random: four runs failed after 0, 4, 1 and 0 passing cases), then shrinks to a `minimal failing input`. Three of them failed on `locate_record` (`left: None`, `right: Some(…)`), one on a record's start (`left: Some(104)`, `right: Some(101)`).
 - `a_checkpoint_inside_a_quoted_field_resumes_there` fails with `resumed at 2`, `left: Some(4)`, `right: Some(9)`.
 - `an_unterminated_quote_runs_to_eof_as_one_200mb_record` fails with a record that ends early: `end: 199229446` instead of `200000009`.
+- `tsv_quoting_is_csv_style` (Task C3a, MINOR 8) fails the same way on its unmatched quote: `left: Span { start: 4, end: 3145745 }`, `right: Span { start: 4, end: 3600012 }`.
 
 Restore the original line. Delete `spikes/core/spike-core/proptest-regressions/`, where proptest saved the failing seed (it's gitignored since Task C0; delete it anyway):
 - Git Bash: `rm -r spike-core/proptest-regressions`
 - PowerShell: `Remove-Item -Recurse -Force spike-core/proptest-regressions`
 
 Run (`spikes/core`): `cargo test -p spike-core`
-Expected: `87 passed; 0 failed; 1 ignored`, then `1 passed` for `tests\json_spans.rs`.
+Expected: `88 passed; 0 failed; 2 ignored`, then `1 passed` for `tests\json_spans.rs`.
 
 - [ ] **Step 4: Read your own work (rule 8), then commit**
 
@@ -6403,8 +6703,10 @@ Expected (about 1.3 GiB in all):
 Add at the end of `mod tests` in `spikes/core/spike-core/src/csv.rs` (before the file's last line, `}`):
 <!-- op: append-in-module spikes/core/spike-core/src/csv.rs -->
 ```rust
-    /// Spec §3.5 / §10.2: sequential CSV indexing against plan A's line index on the same bytes, warm, plus the
-    /// same two scans in memory (no I/O, no hashing) and 64-row page latency. Reads `spikes/.fixtures/{100m,1g}.csv`.
+    /// Z46 (spec §10.2): the CSV record index's warm throughput, judged on the p50 of 30 release runs on each of the
+    /// 100 MiB and 1 GiB fixtures, with the sample count, p95 elapsed time and slowest run; beside it plan A's line
+    /// index on the same bytes, the same two scans in memory (no I/O, no hashing: context only) and 64-row page
+    /// latency. Reads `spikes/.fixtures/{100m,1g}.csv`, and fails if either is missing.
     /// Run: cargo test --release -p spike-core csv_throughput -- --ignored --nocapture
     #[test]
     #[ignore]
@@ -6414,11 +6716,19 @@ Add at the end of `mod tests` in `spikes/core/spike-core/src/csv.rs` (before the
             v.sort_by(|a, b| a.partial_cmp(b).unwrap());
             format!("n={} p50 {:.2} min {:.2} max {:.2}", v.len(), v[v.len() / 2], v[0], v[v.len() - 1])
         };
+        // Z46's line: p50 throughput (from the median elapsed time), the slowest run and the p95 elapsed time.
+        let rate = |len: u64, mut secs: Vec<f64>| {
+            secs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let (gb, n) = (len as f64 / 1e9, secs.len());
+            let p50 = gb / secs[n / 2];
+            let line = format!("n={n} p50 {p50:.2} GB/s, slowest {:.2} GB/s, p95 elapsed {:.1} ms", gb / secs[n - 1], secs[(n * 95).div_ceil(100) - 1] * 1e3);
+            (p50, line)
+        };
+        let (target, machine) = if cfg!(target_os = "macos") { (0.45, "Mac") } else { (0.9, "PC") };
         for name in ["100m.csv", "1g.csv"] {
             let path = Path::new("../../.fixtures").join(name);
             let Ok(store) = ByteStore::open(&path) else {
-                println!("{name}: missing, skipped");
-                continue;
+                panic!("{name}: missing; Z46 needs both fixtures");
             };
             let (len, delimiter) = (store.len(), sniff(&store).unwrap().delimiter);
             let csv_index = || {
@@ -6444,17 +6754,17 @@ Add at the end of `mod tests` in `spikes/core/spike-core/src/csv.rs` (before the
             };
             let (idx, lines) = (csv_index(), line_index()); // warm-up: the file is in the page cache from here on
             assert_eq!(tokenize(), idx.records);
-            let gbps = |f: &dyn Fn()| {
+            let secs = |f: &dyn Fn()| {
                 let t = Instant::now();
                 f();
-                len as f64 / t.elapsed().as_secs_f64() / 1e9
+                t.elapsed().as_secs_f64()
             };
             let (mut csv, mut line, mut csv_mem, mut line_mem) = (vec![], vec![], vec![], vec![]);
-            for _ in 0..7 {
-                csv.push(gbps(&|| drop(csv_index())));
-                line.push(gbps(&|| drop(line_index())));
-                csv_mem.push(gbps(&|| _ = std::hint::black_box(tokenize())));
-                line_mem.push(gbps(&|| _ = std::hint::black_box(memchr::memchr_iter(b'\n', &bytes).count())));
+            for _ in 0..30 {
+                csv.push(secs(&|| drop(csv_index())));
+                line.push(secs(&|| drop(line_index())));
+                csv_mem.push(secs(&|| _ = std::hint::black_box(tokenize())));
+                line_mem.push(secs(&|| _ = std::hint::black_box(memchr::memchr_iter(b'\n', &bytes).count())));
             }
             let pages: Vec<f64> = (0..200u64)
                 .map(|i| {
@@ -6468,16 +6778,18 @@ Add at the end of `mod tests` in `spikes/core/spike-core/src/csv.rs` (before the
             println!("{name}: {len} bytes, {} records, {} lines", idx.records, lines.line_count());
             let sizes = (size_of::<Checkpoint>(), size_of::<Reader>());
             println!("  checkpoints {} ({mids} mid-record), ~{} KiB ({} B each + {} B per mid)", idx.checkpoints.len(), memory / 1024, sizes.0, sizes.1);
-            println!("  csv index, GB/s:              {}", stat(csv));
-            println!("  line index, GB/s:             {}", stat(line));
-            println!("  csv-core in memory, GB/s:     {}", stat(csv_mem));
-            println!("  memchr '\\n' in memory, GB/s:  {}", stat(line_mem));
+            let (p50, csv) = rate(len, csv);
+            println!("  csv index:                    {csv}");
+            println!("  Z46 ({machine} >= {target} GB/s at p50): {}", if p50 >= target { "met" } else { "MISSED" });
+            println!("  line index:                   {}", rate(len, line).1);
+            println!("  csv-core in memory:           {}", rate(len, csv_mem).1);
+            println!("  memchr '\\n' in memory:        {}", rate(len, line_mem).1);
             println!("  records(_, 64), µs:           {}", stat(pages));
         }
     }
 ```
 Run (`spikes/core`): `cargo test -p spike-core`
-Expected: `87 passed; 0 failed; 2 ignored`, then `1 passed` for `tests\json_spans.rs`.
+Expected: `88 passed; 0 failed; 3 ignored`, then `1 passed` for `tests\json_spans.rs`.
 
 - [ ] **Step 7: Measure sequential CSV indexing, warm**
 
@@ -6487,33 +6799,37 @@ cargo test --release -p spike-core csv_throughput -- --ignored --nocapture | tee
 ```
 Run this in Git Bash: PowerShell's redirection writes a BOM under 5.1 and none under 7, so the committed file would differ by shell.
 
-Each fixture is indexed once to warm the page cache, then n=7 times by each index. The scratch run printed (other lanes were building on the same machine at the time):
+Each fixture is indexed once to warm the page cache, then n=30 times by each index (Z46). The test fails if either fixture is missing. This plan's replay printed this (`spikes/results/csv-throughput.txt`), with other lanes loading the PC: CPU at a mean 14% and a max 33% while it ran (2 s samples, Z49), so it is indicative, not a qualification result. Under that load the 1 GiB fixture's p50 came in at 0.89 GB/s, just under the gate, while the 100 MiB fixture met it:
 ```text
 100m.csv: 104857760 bytes, 621097 records, 745301 lines
   checkpoints 607 (0 mid-record), ~14 KiB (24 B each + 440 B per mid)
-  csv index, GB/s:              n=7 p50 1.01 min 0.98 max 1.03
-  line index, GB/s:             n=7 p50 4.28 min 3.95 max 4.55
-  csv-core in memory, GB/s:     n=7 p50 1.21 min 1.16 max 1.25
-  memchr '\n' in memory, GB/s:  n=7 p50 21.83 min 16.93 max 23.74
-  records(_, 64), µs:           n=200 p50 523.10 min 131.70 max 1155.40
+  csv index:                    n=30 p50 1.04 GB/s, slowest 0.76 GB/s, p95 elapsed 135.4 ms
+  Z46 (PC >= 0.9 GB/s at p50): met
+  line index:                   n=30 p50 4.00 GB/s, slowest 2.55 GB/s, p95 elapsed 36.1 ms
+  csv-core in memory:           n=30 p50 1.33 GB/s, slowest 0.78 GB/s, p95 elapsed 113.8 ms
+  memchr '\n' in memory:        n=30 p50 25.75 GB/s, slowest 19.66 GB/s, p95 elapsed 5.2 ms
+  records(_, 64), µs:           n=200 p50 717.30 min 298.70 max 2933.70
+test csv::tests::csv_throughput has been running for over 60 seconds
 1g.csv: 1073741851 bytes, 6351495 records, 7621830 lines
   checkpoints 6203 (0 mid-record), ~145 KiB (24 B each + 440 B per mid)
-  csv index, GB/s:              n=7 p50 1.00 min 0.99 max 1.02
-  line index, GB/s:             n=7 p50 4.28 min 3.86 max 4.35
-  csv-core in memory, GB/s:     n=7 p50 1.24 min 1.19 max 1.25
-  memchr '\n' in memory, GB/s:  n=7 p50 22.99 min 19.92 max 23.60
-  records(_, 64), µs:           n=200 p50 603.10 min 169.20 max 1467.40
+  csv index:                    n=30 p50 0.89 GB/s, slowest 0.76 GB/s, p95 elapsed 1405.9 ms
+  Z46 (PC >= 0.9 GB/s at p50): MISSED
+  line index:                   n=30 p50 3.66 GB/s, slowest 2.63 GB/s, p95 elapsed 373.6 ms
+  csv-core in memory:           n=30 p50 1.12 GB/s, slowest 0.92 GB/s, p95 elapsed 1063.9 ms
+  memchr '\n' in memory:        n=30 p50 21.17 GB/s, slowest 11.04 GB/s, p95 elapsed 87.8 ms
+  records(_, 64), µs:           n=200 p50 749.40 min 429.90 max 2721.30
 ```
 Then run (`spikes/core`): `cargo test --release -p spike-core cancel_returns -- --nocapture`
-Expected: `2 passed`: the filter also matches Task C2a's `json::tests::cancel_returns_within_50ms`, which prints `cancel latency, max over 20 runs: …`. The CSV test prints `cancel: n=21, max …`, under 2 ms (scratch runs: 0.59–1.33 ms; the replay: 1.02 ms). The lane measured ~20 ms in a debug build, one 4 MiB block's hashing between checks; Task C1d's debug-build opt-level for `xxhash-rust` brings that to about 1 ms.
+Expected: `2 passed`: the filter also matches Task C2a's `json::tests::cancel_returns_within_50ms`, which prints `cancel latency, max over 20 runs: …`. The CSV test prints `cancel: n=21, max …`, under 2 ms (scratch runs: 0.59–1.33 ms; this plan's replay: 0.68 ms). The lane measured ~20 ms in a debug build, one 4 MiB block's hashing between checks; Task C1d's debug-build opt-level for `xxhash-rust` brings that to about 1 ms.
 
-Judge the CSV index against spec §10.2's 1 GB/s line-index budget on the PC, and record the verdict in the Spike C report. In the scratch run:
-- it sat at the budget (p50 1.00–1.01 GB/s, min 0.98), not above it with margin;
-- it was bound by csv-core, not by I/O or hashing: csv-core alone, in memory, reached 1.21–1.24 GB/s, while the line index reached 4.28 GB/s from the page cache.
+Judge the CSV index against Z46 (spec §10.2): p50 ≥ 0.9 GB/s on both fixtures, warm, release, n=30, and record n, p50, p95 elapsed and the slowest run in the Spike C report. The test prints the verdict line `Z46 (PC >= 0.9 GB/s at p50): met` or `MISSED` (`Mac` and 0.45 on a Mac). A run on a loaded machine isn't a qualification result (Z49): the verdict comes from the quiet-window run (Z38 step 3). The Mac target (≥ 0.45 GB/s) stays pending until the Mac batch (Z50). The index is bound by csv-core, not by I/O or hashing: csv-core alone, in memory, runs near the index's rate, while the line index runs several times faster from the page cache (the scratch run: 1.21–1.24 GB/s against 4.28).
 
-- [ ] **Step 8: Delete the 1 GiB fixture**
+- [ ] **Step 8: Delete the 1 GiB fixture, and see the instrument refuse a missing one**
 
 Git Bash: `rm ../.fixtures/1g.csv`. PowerShell: `Remove-Item ../.fixtures/1g.csv`.
+
+Run (`spikes/core`): `cargo test --release -p spike-core csv_throughput -- --ignored --nocapture`
+Expected: FAIL, `0 passed; 1 failed; 0 ignored; 0 measured; 90 filtered out`, after the 100 MiB fixture's lines, with the panic `1g.csv: missing; Z46 needs both fixtures`. (Don't tee it: `csv-throughput.txt` keeps Step 7's run.)
 
 - [ ] **Step 9: Read your own work (rule 8), then commit**
 
@@ -6538,7 +6854,7 @@ git commit -m "spike(c): CSV fixtures and sequential CSV index throughput"
 - Create: `spikes/core/spike-core/src/sanitize.rs`
 
 **Interfaces:**
-- **Consumes:** `memchr` (already a dependency), `ammonia` 4.2.4 (added here).
+- **Consumes:** `memchr` (already a dependency), `ammonia` 4.2.4 (added here, pinned `=4.2.4`: the string rewrite below depends on its serialization).
 - **Produces (`spike_core::sanitize`):**
   - `pub const RAW_TAGS: [&str; 20]`: brief §4.6's allowlist (`b i em strong code kbd sub sup br hr details summary a img table thead tbody tr th td`); `a` keeps `href` (as `data-href`, see `escape_raw`), `img` keeps `src` and `alt`.
   - `pub const OWN_TAGS: [&str; 16]`: the emitter's own tags. Raw HTML can't produce them.
@@ -6547,6 +6863,7 @@ git commit -m "spike(c): CSV fixtures and sequential CSV index throughput"
   - `pub fn escape_text(s: &str, out: &mut String)`: escapes `&`, `<`, `>` and U+00A0 exactly as html5ever serializes them, so emitted text and sanitized text compare equal.
   - `pub fn escape_attr(s: &str) -> String`: the same, plus `"`.
   - `pub enum Target { Live, Inert, Dropped }` and `pub fn target(url: &str) -> Target`: a link or image target as WHATWG URL parsing reads it (C0 controls and spaces trimmed, tabs and newlines removed, `\` read as `/`). `//`, `\\`, `/\` or `\/` first is a network path: `Inert`. Otherwise an `http`, `https` or `mailto` scheme, or none, is `Live`; `javascript`, `vbscript` or `data` is `Dropped`; any other scheme is `Inert`.
+  - `pub fn image_target(url: &str) -> Target`: as `target`, except that `mailto:` is `Inert`: never an image target (Z43). An image keeps `data-src` only when this is `Live`.
   - `pub fn sanitize(html: &str) -> String`: ammonia (allowlist plus `OWN_TAGS`, per-tag attributes and classes, no generic attributes, schemes `http`/`https`/`mailto`, no `rel` added), then `<img>` → the placeholder, with `data-src` only for a `Live` target, and every `<a>` rebuilt from its `data-href` (or `href`) alone: `Live` → `<a href="v">`, `Inert` → `<a href="#" data-href="v">`, `Dropped` → `<a href="#">`. Running it again on its output is the identity.
   - **For Task C5b (the renderer):** a click on an `<a>` reads `data-href` when there is one and hands it to spec §7.2's hand-off; otherwise it reads `href`. `data-src` appears only for live targets (http, https, relative, and `mailto`, which is harmless).
   - `pub fn segments(html: &str) -> Vec<&str>`: the text between tags of serialized HTML, one entry per DOM text node.
@@ -6560,7 +6877,7 @@ In `spikes/core/spike-core/Cargo.toml`, add `ammonia` at the top of `[dependenci
 ```
 ```toml
 [dependencies]
-ammonia = "4.2.4"
+ammonia = "=4.2.4"
 ```
 In `src/lib.rs`, add `pub mod sanitize;` above `pub mod store;`:
 <!-- op: replace spikes/core/spike-core/src/lib.rs -->
@@ -6823,7 +7140,8 @@ pub fn escape_attr(s: &str) -> String {
 /// What a link or image target may become (brief §4.4, §4.6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
-    /// http, https, mailto, or a relative path that isn't a network path: a live `href` or `data-src`.
+    /// http, https, mailto, or a relative path that isn't a network path: a live `href`, or for an image (not
+    /// mailto, `image_target`) a `data-src`.
     Live,
     /// Any other scheme (`file:`, `smb:`, …) or a network path (`//host`, `\\host`): inert data, for the hand-off
     /// to decide on a click.
@@ -6850,6 +7168,15 @@ pub fn target(url: &str) -> Target {
     }
 }
 
+/// What an image target may become: as `target`, except that `mailto:` is never an image target (Z43).
+pub fn image_target(url: &str) -> Target {
+    let s: String = url.trim_matches(|c: char| c <= ' ').chars().filter(|c| !matches!(c, '\t' | '\n' | '\r')).collect();
+    match target(url) {
+        Target::Live if s.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("mailto:")) => Target::Inert,
+        t => t,
+    }
+}
+
 /// Every fragment's last step: ammonia, then `<img>` → placeholder, and each link's target judged once: a live
 /// `href`, `href="#"` with an inert `data-href`, or `href="#"` alone. Every link keeps an href, so it keeps its
 /// role and keyboard focus (brief §9).
@@ -6864,10 +7191,11 @@ pub fn sanitize(html: &str) -> String {
         let end = i + rest[i..].find('>').map_or(rest.len() - i, |e| e + 1);
         let tag = &rest[i..end];
         let value = |name: &str| tag.split_once(&format!(" {name}=\"")).map(|(_, v)| &v[..v.find('"').unwrap_or(v.len())]);
-        let judge = |v: &str| target(&v.replace("&quot;", "\"").replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", "\u{A0}").replace("&amp;", "&"));
+        let decode = |v: &str| v.replace("&quot;", "\"").replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", "\u{A0}").replace("&amp;", "&");
+        let judge = |v: &str| target(&decode(v));
         if tag.starts_with("<img") {
             out.push_str("<span class=\"tp-img\"");
-            for (attr, v) in [("data-src", value("src").filter(|v| judge(v) == Target::Live)), ("data-alt", value("alt"))] {
+            for (attr, v) in [("data-src", value("src").filter(|v| image_target(&decode(v)) == Target::Live)), ("data-alt", value("alt"))] {
                 if let Some(v) = v {
                     out.push_str(&format!(" {attr}=\"{v}\""));
                 }
@@ -6908,7 +7236,7 @@ pub fn segments(html: &str) -> Vec<&str> {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run (`spikes/core`): `cargo test -p spike-core sanitize`
-Expected: `test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 89 filtered out`.
+Expected: `test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 91 filtered out`.
 
 - [ ] **Step 5: Read your own work (rule 8), then commit**
 
@@ -6997,7 +7325,7 @@ use pulldown_cmark::{Alignment, BlockQuoteKind, BrokenLink, CodeBlockKind, Event
 
 use crate::bytemap::{ByteMap, MapBuilder};
 use crate::encoding::decode;
-use crate::sanitize::{Target, allowed_tag, escape_attr, escape_raw, escape_text, sanitize, segments, target};
+use crate::sanitize::{Target, allowed_tag, escape_attr, escape_raw, escape_text, image_target, sanitize, segments};
 
 /// Spec §4.6's extensions, all native to pulldown-cmark 0.13.4. `ENABLE_GFM` parses GitHub's five alert kinds.
 /// Front matter isn't among them: pulldown-cmark accepts a metadata block at any block start, so `md` finds it at
@@ -7188,6 +7516,16 @@ mod tests {
         // isn't kept even as data.
         assert_eq!(html("![a](//evil/x.png) ![b](\\\\\\\\host\\share\\x.png) ![c](c.png)\n"), r#"<p><span class="tp-img">a</span> <span class="tp-img">b</span> <span class="tp-img" data-src="c.png">c</span></p>"#);
         assert_eq!(html("[j](javascript:alert(1)) [m](mailto:a@b.c)\n"), r##"<p><a href="#">j</a> <a href="mailto:a@b.c">m</a></p>"##);
+    }
+
+    #[test]
+    fn mailto_is_never_an_image_target() {
+        // Z43: `mailto:` is a link target, never an image target, in Markdown and in raw HTML, in any case.
+        let html = |md: &str| render(md).html;
+        assert_eq!(html("![m](mailto:a@b.c)\n"), r#"<p><span class="tp-img">m</span></p>"#);
+        assert_eq!(html("![m]( MAILTO:a@b.c)\n"), r#"<p><span class="tp-img">m</span></p>"#);
+        assert_eq!(html("x <img src=\"mailto:a@b.c\" alt=\"m\">\n"), r#"<p>x <span class="tp-img" data-alt="m"></span></p>"#);
+        assert_eq!(html("[m](mailto:a@b.c) ![h](https://ok/h.png)\n"), r#"<p><a href="mailto:a@b.c">m</a> <span class="tp-img" data-src="https://ok/h.png">h</span></p>"#);
     }
 
     #[test]
@@ -7504,7 +7842,7 @@ impl<'a> Emitter<'a> {
             Tag::Link { link_type: LinkType::Email, dest_url, .. } => (format!("<a data-href=\"mailto:{}\">", escape_attr(&dest_url)), "</a>"),
             Tag::Link { dest_url, .. } => (format!("<a data-href=\"{}\">", escape_attr(&dest_url)), "</a>"),
             // Brief §4.6: images load later, behind the per-file bar. Here the URL is inert data, and only a live one.
-            Tag::Image { dest_url, .. } if target(&dest_url) == Target::Live => {
+            Tag::Image { dest_url, .. } if image_target(&dest_url) == Target::Live => {
                 (format!("<span class=\"tp-img\" data-src=\"{}\">", escape_attr(&dest_url)), "</span>")
             }
             Tag::Image { .. } => s("<span class=\"tp-img\">", "</span>"),
@@ -7654,9 +7992,23 @@ impl<'a> Emitter<'a> {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run (`spikes/core`): `cargo test -p spike-core mdemit`
-Expected: `test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 94 filtered out`.
+Expected: `test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 96 filtered out`.
 
-- [ ] **Step 5: Read your own work (rule 8), then commit**
+- [ ] **Step 5: Falsify the image rule for `mailto:` (Z43)**
+
+In `sanitize.rs` (Task C4a), make `image_target` the link rule again: replace
+<!-- op: temporary spikes/core/spike-core/src/sanitize.rs -->
+```rust
+        Target::Live if s.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("mailto:")) => Target::Inert,
+```
+with
+```rust
+        Target::Live if s.is_empty() => Target::Inert,
+```
+Run (`spikes/core`): `cargo test -p spike-core mdemit::tests::mailto_is_never_an_image_target -- --exact`
+Expected: FAIL, `0 passed; 1 failed; 0 ignored; 0 measured; 105 filtered out`, with `left: "<p><span class=\"tp-img\" data-src=\"mailto:a@b.c\">m</span></p>"` against `right: "<p><span class=\"tp-img\">m</span></p>"`. Revert from `spikes/core`: `git checkout -- spike-core/src/sanitize.rs`.
+
+- [ ] **Step 6: Read your own work (rule 8), then commit**
 
 ```bash
 git add spikes/core/spike-core/Cargo.toml spikes/core/Cargo.lock spikes/core/spike-core/src/lib.rs spikes/core/spike-core/src/mdemit.rs
@@ -7773,13 +8125,24 @@ pub struct MdConfig {
     /// The most source bytes in one sub-block.
     pub piece: usize,
     /// More blocks stop indexing with `TOO_MANY_BLOCKS`. Size it from the memory budget (spec §3.6) at the index's
-    /// cost per block: about 24 bytes, up to about 200 for a flood of headings (C4e's hostile inputs).
+    /// private memory per block: about 45–125 bytes on prose, about 225–250 on a flood of headings (C4e).
     pub max_blocks: usize,
 }
 
 impl Default for MdConfig {
     fn default() -> Self {
         MdConfig { window: 64 << 10, piece: 32 << 10, max_blocks: usize::MAX }
+    }
+}
+
+/// The most private memory one block costs: about 225–250 bytes on a flood of headings, which `heap_bytes` reads as
+/// 194–203 (Task C4e measures and asserts it).
+pub const BLOCK_BYTES: u64 = 256;
+
+impl MdConfig {
+    /// A gate run's config (Z47): `max_blocks` is 25% of physical RAM over `BLOCK_BYTES`.
+    pub fn gate() -> Self {
+        MdConfig { max_blocks: crate::budget::cap(BLOCK_BYTES), ..Self::default() }
     }
 }
 
@@ -8299,6 +8662,39 @@ mod tests {
     }
 
     #[test]
+    fn front_matter_closes_within_64_kib() {
+        // Z44: front matter is Meta only when its closing line ends by byte 65,536 (a BOM counts); a byte later the same
+        // bytes read as a rule and a setext heading, at every line ending, with or without a BOM.
+        let fm = |end: usize, nl: &str, bom: bool| -> String {
+            let mut s = format!("{}---{nl}", if bom { "\u{FEFF}" } else { "" });
+            let tail = format!("---{nl}");
+            while s.len() + tail.len() < end {
+                let room = end - tail.len() - s.len();
+                s += &if room > 40 + nl.len() { format!("key: {}{nl}", "v".repeat(30)) } else { format!("{}{nl}", "k".repeat(room - nl.len())) };
+            }
+            format!("{s}{tail}{nl}Body text.{nl}")
+        };
+        for nl in ["\n", "\r\n"] {
+            for bom in [false, true] {
+                let lead = if bom { 3 } else { 0 };
+                let at = |end: usize| spans(&doc("front-64k", &fm(end, nl, bom), MdConfig::default()));
+                assert_eq!(at(65_536)[0], (lead, 65_536, Kind::Meta), "{nl:?}, bom {bom}");
+                assert_eq!(at(65_537).iter().take(2).map(|b| b.2).collect::<Vec<_>>(), [Kind::Rule, Kind::Heading], "{nl:?}, bom {bom}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_cancelled_window_commits_nothing_without_headings() {
+        // A window of paragraphs only: no heading loop runs, so only the check inside the parse (every 1,024 parser
+        // events) can stop it before it commits.
+        let d = doc("cancel-parse", &"a\n\n".repeat(20_000), MdConfig::default());
+        assert!(!d.step_with(&AtomicBool::new(true)).unwrap());
+        let idx = d.index();
+        assert_eq!((idx.pos, idx.blocks.len()), (0, 0));
+    }
+
+    #[test]
     fn cancel_stops_between_steps() {
         let d = doc("cancel", &"para\n\n".repeat(10_000), MdConfig { window: 256, piece: 128, ..MdConfig::default() });
         assert!(!d.index_all(&AtomicBool::new(true)).unwrap());
@@ -8312,7 +8708,7 @@ mod tests {
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run (`spikes/core`): `cargo test -p spike-core md::`
-Expected: ``error: could not compile `spike-core` (lib test) due to 43 previous errors; 10 warnings emitted``. `E0599` no method named `index` (12), `index_all` (11), `page` (4), `render` (4), `reconcile` (4), `first_screen` (3), `step` (1), `step_with` (1), no associated function `new` (1); `E0425` cannot find function `parse_unit` (2). The warnings are unused imports, and items that only the implementation uses (such as the constant `CANCEL_EVERY`).
+Expected: ``error: could not compile `spike-core` (lib test) due to 45 previous errors; 10 warnings emitted``. `E0599` no method named `index` (13), `index_all` (11), `page` (4), `render` (4), `reconcile` (4), `first_screen` (3), `step` (1), `step_with` (2), no associated function `new` (1); `E0425` cannot find function `parse_unit` (2). The warnings are unused imports, and items that only the implementation uses (such as the constant `CANCEL_EVERY`).
 
 - [ ] **Step 3: Implement**
 
@@ -9395,9 +9791,39 @@ impl Scan {
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run (`spikes/core`): `cargo test -p spike-core md::`
-Expected: `test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 103 filtered out`.
+Expected: `test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 106 filtered out`.
 
-- [ ] **Step 5: Read your own work (rule 8), then commit**
+- [ ] **Step 5: Falsify the front-matter limit and the in-parse cancel check**
+
+Two breaks, one at a time. `md.rs` was written in this task, so put each line back by hand.
+
+**Break 1: front matter up to 1 MiB** (Z44 says 64 KiB). Replace
+<!-- op: temporary spikes/core/spike-core/src/md.rs -->
+```rust
+const FRONT_MATTER: u64 = 64 << 10;
+```
+with
+```rust
+const FRONT_MATTER: u64 = 1 << 20;
+```
+Run (`spikes/core`): `cargo test -p spike-core md::tests::front_matter_closes_within_64_kib -- --exact`
+Expected: FAIL, `0 passed; 1 failed; 0 ignored; 0 measured; 123 filtered out`: front matter whose closing line ends at byte 65,537 reads as `Meta` (``assertion `left == right` failed: "\n", bom false``, `left: [Meta, Paragraph]`, `right: [Rule, Heading]`). Put the line back.
+
+**Break 2: no cancel check inside a window's parse** (fix 17's check; the heading loop's stays). In `parse_unit`, replace
+<!-- op: temporary spikes/core/spike-core/src/md.rs -->
+```rust
+    for (n, (event, r)) in parser.into_offset_iter().enumerate() {
+        if n % CANCEL_EVERY == CANCEL_EVERY - 1 && cancel.load(Ordering::Relaxed) {
+```
+with
+```rust
+    for (n, (event, r)) in parser.into_offset_iter().enumerate() {
+        if false && n % CANCEL_EVERY == CANCEL_EVERY - 1 && cancel.load(Ordering::Relaxed) {
+```
+Run (`spikes/core`): `cargo test -p spike-core md::tests::a_cancelled_window_commits_nothing_without_headings -- --exact`
+Expected: FAIL, `0 passed; 1 failed; 0 ignored; 0 measured; 123 filtered out`, at `assertion failed: !d.step_with(&AtomicBool::new(true)).unwrap()`: with the flag already set, the step parses its window through and commits it. Put the line back, and rerun both tests: `1 passed; 0 failed; 0 ignored; 0 measured; 123 filtered out` each.
+
+- [ ] **Step 6: Read your own work (rule 8), then commit**
 
 ```bash
 git add spikes/core/spike-core/src/lib.rs spikes/core/spike-core/src/md.rs
@@ -9471,6 +9897,13 @@ impl Rng {
 /// attributes allowed. No `on*`, no `style`, no resource-loading attribute. Brief §4.4, §4.6: a live `href` is `#`,
 /// http, https, mailto or a relative path that isn't a network path; any other target is inert `data-href`, only
 /// on `<a>`, and never javascript, vbscript or data; no `data-src` is a network path. Sanitizing again changes nothing.
+/// Every gate document opens here. Z47: a gate run passes an explicit cap (`MdConfig::gate()`), and an uncapped
+/// config fails the gate.
+fn open(name: &str, bytes: &[u8], encoding: &'static Encoding, cfg: MdConfig) -> MdDoc {
+    assert!(cfg.max_blocks < usize::MAX, "a gate run opened a document uncapped (Z47)");
+    MdDoc::new(ByteStore::open(&temp_file(name, bytes)).unwrap(), encoding, cfg)
+}
+
 fn check_output(html: &str) -> Result<(), String> {
     const TAGS: [&str; 36] = [
         "b", "i", "em", "strong", "code", "kbd", "sub", "sup", "br", "hr", "details", "summary", "a", "table", "thead", "tbody", "tr",
@@ -9900,8 +10333,8 @@ fn gate_span_fidelity() {
         let g = generate(&mut r, if encoding == WINDOWS_1252 { &LATIN1 } else { &UNICODE });
         let (bytes, map) = encode(&g.s, encoding, encoding != WINDOWS_1252 && r.below(2) == 0);
         // A window shorter than a reference definition and its title has nothing to cut at: see the report.
-        let cfg = MdConfig { window: 128 + r.below(400), piece: 16 + r.below(200), ..MdConfig::default() };
-        let doc = MdDoc::new(ByteStore::open(&temp_file("gate-spans", &bytes)).unwrap(), encoding, cfg);
+        let cfg = MdConfig { window: 128 + r.below(400), piece: 16 + r.below(200), ..MdConfig::gate() };
+        let doc = open("gate-spans", &bytes, encoding, cfg);
         let fail = |what: String| panic!("case {case} ({}, {cfg:?}): {what}\n{:?}", encoding.name(), g.s);
         assert!(doc.index_all(&AtomicBool::new(false)).unwrap());
         let idx = doc.index();
@@ -10157,7 +10590,7 @@ fn gate_byte_maps() {
             g.src(nl);
             g.close();
         }
-        let doc = MdDoc::new(ByteStore::open(&temp_file("gate-maps", &g.bytes)).unwrap(), encoding, MdConfig::default());
+        let doc = open("gate-maps", &g.bytes, encoding, MdConfig::gate());
         assert!(doc.index_all(&AtomicBool::new(false)).unwrap());
         for (b, want) in g.blocks.iter().enumerate() {
             let want: Vec<&WantRun> = want.iter().filter(|w| !w.elements.is_empty()).collect();
@@ -10304,7 +10737,7 @@ fn gate_hostile_html_and_mxss() {
             format!("# {payload}\n"),
         ];
         for md in contexts {
-            let doc = MdDoc::new(ByteStore::open(&temp_file("gate-html", md.as_bytes())).unwrap(), UTF_8, MdConfig::default());
+            let doc = open("gate-html", md.as_bytes(), UTF_8, MdConfig::gate());
             assert!(doc.index_all(&AtomicBool::new(false)).unwrap());
             let mut html = String::new();
             for b in 0..doc.index().blocks.len() as u64 {
@@ -10327,16 +10760,16 @@ fn gate_hostile_html_and_mxss() {
 - [ ] **Step 2: Run the gates**
 
 Run (`spikes/core`): `cargo test -p spike-core md_gates -- --nocapture`
-Expected: `test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 119 filtered out` (about 2 minutes in a debug build), after these three lines:
+Expected: `test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 124 filtered out` (about 2 minutes in a debug build), after these three lines:
 - `span gate: 10000 cases, 64876 block spans, 15034 heading spans, 56932 sub-block spans, 112016 items checked: 0 mismatches`;
 - `byte-map gate: 10000 cases, 110143 runs, 1199556 selection endpoints: 0 mismatches`;
 - `sanitizer gate: 71 payloads × 6 contexts, 535 outputs: all pass`.
 
-The cases are seeded, so these counts are exact. A failure here is a Spike C result: record the case it prints, don't loosen the gate.
+The cases are seeded, so these counts are exact. A failure here is a Spike C result: record the case it prints, don't loosen the gate. Every gate document opens through `md_gates::open` with `MdConfig::gate()`'s cap (Z47: 25% of this machine's physical RAM over `md::BLOCK_BYTES`), and an uncapped config fails the gate (Step 3, break 6).
 
 - [ ] **Step 3: Falsify them**
 
-Each break below is one edit (two for the escape pass). Apply it, run the gate named, and check the failure. Then revert it from `spikes/core` with `git checkout -- spike-core/src/<file>`: the file was committed in Tasks C4a–C4c, so this restores it exactly. The gates write no proptest seeds.
+Each break below is one edit (two for the escape pass). Apply it, run the gate named, and check the failure. Then revert it from `spikes/core` with `git checkout -- spike-core/src/<file>`: the file was committed in Tasks C4a–C4c, so this restores it exactly. Break 6 edits this task's own `md_gates.rs`: put its line back by hand. The gates write no proptest seeds.
 
 **Break 1: span composition** (window-local offsets used as absolute ones). In `md.rs`, `parse_unit`, replace
 <!-- op: temporary spikes/core/spike-core/src/md.rs -->
@@ -10348,7 +10781,7 @@ with
     let at = |r: Range<usize>| (r.start as u64, r.end as u64);
 ```
 Run (`spikes/core`): `cargo test -p spike-core md_gates::gate_span_fidelity -- --exact`
-Expected: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 121 filtered out`, after `case 0 (windows-1252, MdConfig { window: 442, piece: 179, max_blocks: 18446744073709551615 }): blocks`, then `got [(0, 35, Paragraph), (37, 64, Paragraph), (65, 69, Rule), (99, 166, Heading), …]` against `want [(0, 29, Paragraph), (31, 50, Paragraph), (51, 55, Rule), (81, 133, Heading), …]`. Revert `md.rs`.
+Expected: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 126 filtered out`, after `case 0 (windows-1252, MdConfig { window: 442, piece: 179, max_blocks: 33289648 }): blocks` (`max_blocks` is this PC's gate cap, 25% of its RAM over `md::BLOCK_BYTES`; another machine prints its own), then `got [(0, 35, Paragraph), (37, 64, Paragraph), (65, 69, Rule), (99, 166, Heading), …]` against `want [(0, 29, Paragraph), (31, 50, Paragraph), (51, 55, Rule), (81, 133, Heading), …]`. Revert `md.rs`.
 
 **Break 2: entity mapping** (an event's trailing source, such as an entity's tail, no longer joins its last character). In `mdemit.rs`, the last line of `Emitter::text`: replace
 <!-- op: temporary spikes/core/spike-core/src/mdemit.rs -->
@@ -10360,7 +10793,7 @@ with
         self.close(a);
 ```
 Run (`spikes/core`): `cargo test -p spike-core md_gates::gate_byte_maps -- --exact`
-Expected: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 121 filtered out`, after `case 1 (UTF-8 malformed), block 0: run "a*b" (want "a*b")`, then `got [(122, 122), (124, 124), (125, 125), (126, 126)]` against `want [(122, 122), (124, 124), (125, 125), (127, 127)]`. Revert `mdemit.rs`.
+Expected: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 126 filtered out`, after `case 1 (UTF-8 malformed), block 0: run "a*b" (want "a*b")`, then `got [(122, 122), (124, 124), (125, 125), (126, 126)]` against `want [(122, 122), (124, 124), (125, 125), (127, 127)]`. Revert `mdemit.rs`.
 
 **Break 3: escape mapping** (unclaimed bytes before a character, such as an escape's `\`, no longer join it). In `mdemit.rs`, `Emitter::element`: replace
 <!-- op: temporary spikes/core/spike-core/src/mdemit.rs -->
@@ -10372,7 +10805,7 @@ with
         run.1.push((display.encode_utf16().count() as u32, a.max(self.cursor), end));
 ```
 Run (`spikes/core`): `cargo test -p spike-core md_gates::gate_byte_maps -- --exact`
-Expected: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 121 filtered out`, after `case 0 (UTF-8 malformed), block 0: runs don't tile (0, 51): [Run { text: "k�Ж B����rr ", …`. Revert `mdemit.rs`.
+Expected: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 126 filtered out`, after `case 0 (UTF-8 malformed), block 0: runs don't tile (0, 51): [Run { text: "k�Ж B����rr ", …`. Revert `mdemit.rs`.
 
 **Break 4: the escape pass removed** (every complete raw tag goes to ammonia). In `sanitize.rs`, make two replacements. In `escape_raw`, replace
 <!-- op: temporary spikes/core/spike-core/src/sanitize.rs -->
@@ -10393,7 +10826,7 @@ with
     matches!(tag_at(s.as_bytes(), 0), Some((end, _)) if end == s.len())
 ```
 Run (`spikes/core`): `cargo test -p spike-core md_gates::gate_hostile_html_and_mxss -- --exact`
-Expected: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 121 filtered out`, after `"intro\n\n<svg><style><img src=x onerror=alert(1)></style></svg>\n": <svg isn't literal text in "<p>intro</p><p><span class=\"tp-img\" data-src=\"x\"></span></p>"`. The output is still safe (ammonia drops the `svg`); the literal-text rule is what fails. Revert `sanitize.rs`.
+Expected: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 126 filtered out`, after `"intro\n\n<svg><style><img src=x onerror=alert(1)></style></svg>\n": <svg isn't literal text in "<p>intro</p><p><span class=\"tp-img\" data-src=\"x\"></span></p>"`. The output is still safe (ammonia drops the `svg`); the literal-text rule is what fails. Revert `sanitize.rs`.
 
 **Break 5: ammonia allows `style`.** In `sanitize.rs`, replace `.generic_attributes(HashSet::new())` with `.generic_attributes(["style"].into())`:
 <!-- op: temporary spikes/core/spike-core/src/sanitize.rs -->
@@ -10405,14 +10838,26 @@ with
         .generic_attributes(["style"].into()) // ammonia's default allows `lang` and `title` everywhere
 ```
 Run (`spikes/core`): `cargo test -p spike-core md_gates::gate_hostile_html_and_mxss -- --exact`
-Expected: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 121 filtered out`, after `"intro\n\n<b style=\"background:url(http://evil/x)\" class=\"tp-img\" data-src=\"x\">styled</b>\n": attribute style on <b>`. Revert `sanitize.rs`.
+Expected: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 126 filtered out`, after `"intro\n\n<b style=\"background:url(http://evil/x)\" class=\"tp-img\" data-src=\"x\">styled</b>\n": attribute style on <b>`. Revert `sanitize.rs`.
 
-After the last revert, `cargo test -p spike-core md_gates::gate_hostile_html_and_mxss -- --exact` gives `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 121 filtered out`.
+**Break 6: a gate opens uncapped** (Z47). In `md_gates.rs`, `gate_hostile_html_and_mxss`, replace
+<!-- op: temporary spikes/core/spike-core/src/md_gates.rs -->
+```rust
+            let doc = open("gate-html", md.as_bytes(), UTF_8, MdConfig::gate());
+```
+with
+```rust
+            let doc = open("gate-html", md.as_bytes(), UTF_8, MdConfig::default());
+```
+Run (`spikes/core`): `cargo test -p spike-core md_gates::gate_hostile_html_and_mxss -- --exact`
+Expected: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 126 filtered out`, after the panic `a gate run opened a document uncapped (Z47)`. Put the line back.
+
+After the last revert, `cargo test -p spike-core md_gates::gate_hostile_html_and_mxss -- --exact` gives `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 126 filtered out`.
 
 - [ ] **Step 4: Run all core tests**
 
 Run (`spikes/core`): `cargo test -p spike-core`
-Expected: `test result: ok. 120 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out` (about 2 minutes in a debug build): Task C3c's 87, plus 5 `sanitize`, 9 `mdemit`, 16 `md` and 3 gates. Then `1 passed` for `tests\json_spans.rs`.
+Expected: `test result: ok. 124 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out` (about 2 minutes in a debug build): Task C3c's 88, plus 5 `sanitize`, 10 `mdemit`, 18 `md` and 3 gates. Then `1 passed` for `tests\json_spans.rs`.
 
 - [ ] **Step 5: Read your own work (rule 8), then commit**
 
@@ -10467,7 +10912,7 @@ use std::time::{Duration, Instant};
 use encoding_rs::UTF_8;
 use pulldown_cmark::Parser;
 
-use crate::md::{Item, MAX_ITEM_UNITS, MAX_PAGE, MdConfig, MdDoc, RAW_NOTE};
+use crate::md::{BLOCK_BYTES, Item, MAX_ITEM_UNITS, MAX_PAGE, MdConfig, MdDoc, RAW_NOTE};
 use crate::mdemit::OPTIONS;
 use crate::store::ByteStore;
 
@@ -10498,8 +10943,16 @@ fn repeat(w: &mut BufWriter<File>, unit: &[u8], total: usize) {
     }
 }
 
+/// Every measured document opens here. Z47: a gate run passes an explicit cap, and an uncapped config fails it.
 fn open(path: &PathBuf) -> MdDoc {
-    MdDoc::new(ByteStore::open(path).unwrap(), UTF_8, MdConfig::default())
+    let cfg = MdConfig::gate();
+    assert!(cfg.max_blocks < usize::MAX, "a gate run opened a document uncapped (Z47)");
+    MdDoc::new(ByteStore::open(path).unwrap(), UTF_8, cfg)
+}
+
+/// Private bytes now, minus `before`: what the index really holds (MINOR 12: `heap_bytes` is a lower-bound estimate).
+fn private_since(before: Option<u64>) -> Option<usize> {
+    Some(crate::budget::private_bytes()?.saturating_sub(before?) as usize)
 }
 
 /// p50, p95 and max of `samples`, in milliseconds.
@@ -10560,10 +11013,12 @@ fn oversized_fence_then_paragraph() {
 
 type Gen = fn(&mut BufWriter<File>);
 
-/// Spec §13.1 hostile inputs, with how many definitions each holds and the index heap allowed per block. Each one:
-/// no panic and no stack overflow, index time and index heap within bounds, a bounded first screen, and cancel
-/// within 50 ms of the flag (n = 20). A heading costs its `Block` (24 B), its `Heading` (80 B), its slug and a
-/// slug-table entry, so a heading flood gets 256 B per block; everything else 96.
+/// Spec §13.1 hostile inputs, with how many definitions each holds and the memory allowed per block. Each one: no
+/// panic and no stack overflow, index time and memory within bounds, a bounded first screen, and cancel within 50 ms
+/// of the flag (n = 20). Memory is the private bytes the open document holds (MINOR 12), which include plan A's
+/// chunk cache (up to 64 chunks of 1 MiB). A heading costs its `Block` (24 B), its `Heading` (80 B), its slug and a
+/// slug-table entry, plus allocator overhead, so a heading flood gets `md::BLOCK_BYTES` (256 B) per block; everything
+/// else 96.
 fn hostile() -> Vec<(&'static str, usize, usize, Gen)> {
     vec![
         ("100 MB of >", 0, 96, |w| repeat(w, b">", 100 << 20)),
@@ -10571,7 +11026,7 @@ fn hostile() -> Vec<(&'static str, usize, usize, Gen)> {
         ("100 MB of *", 0, 96, |w| repeat(w, b"*", 100 << 20)),
         ("100 MB of `", 0, 96, |w| repeat(w, b"`", 100 << 20)),
         ("100 MB of <", 0, 96, |w| repeat(w, b"<", 100 << 20)),
-        ("400k headings", 0, 256, |w| repeat(w, b"#\n", 800_000)),
+        ("400k headings", 0, BLOCK_BYTES as usize, |w| repeat(w, b"#\n", 800_000)),
         ("400k one-letter paragraphs", 0, 96, |w| repeat(w, b"a\n\n", 1_200_000)),
         // One 100k-deep block indexes in under a millisecond, too fast to cancel: 100 of them, each its own block.
         ("100 × 100k-deep list", 0, 96, |w| {
@@ -10619,10 +11074,12 @@ fn hostile_inputs_index_in_bounds() {
     for (name, defs, per_block, write) in hostile() {
         let path = fixture(&format!("md-hostile-{}.md", slug(name)), write);
         let len = std::fs::metadata(&path).unwrap().len();
+        let before = crate::budget::private_bytes();
         let doc = open(&path);
         let t = Instant::now();
         assert!(doc.index_all(&AtomicBool::new(false)).unwrap());
         let index = t.elapsed();
+        let private = private_since(before);
         let (blocks, heap, big) = {
             let idx = doc.index();
             (idx.blocks.len(), idx.heap_bytes(), idx.big.len())
@@ -10645,19 +11102,24 @@ fn hostile_inputs_index_in_bounds() {
             })
             .collect();
         println!(
-            "{name}: {:.1} MB, index {:.0} ms ({:.0} MB/s), {blocks} blocks ({big} oversized), heap {:.1} MiB = {:.1} B/block; first page {} items in {:.1} ms (max {units} units / {html} B); pulldown: {}",
+            "{name}: {:.1} MB, index {:.0} ms ({:.0} MB/s), {blocks} blocks ({big} oversized), heap {:.1} MiB = {:.1} B/block, private {}; first page {} items in {:.1} ms (max {units} units / {html} B); pulldown: {}",
             len as f64 / 1e6,
             index.as_secs_f64() * 1e3,
             len as f64 / 1e6 / index.as_secs_f64(),
             heap as f64 / f64::from(1 << 20),
             heap as f64 / blocks.max(1) as f64,
+            private.map_or("not measured".into(), |p| format!("{:.1} MiB = {:.1} B/block", p as f64 / f64::from(1 << 20), p as f64 / blocks.max(1) as f64)),
             first.len(),
             screen.as_secs_f64() * 1e3,
             per_mib.join("; ")
         );
         assert!(index < Duration::from_secs(30), "{name}: index took {index:?}");
         assert!(screen < Duration::from_millis(500), "{name}: first page took {screen:?}");
-        assert!(heap <= per_block * blocks + 96 * defs + (1 << 20), "{name}: index heap {heap} bytes for {blocks} blocks, {defs} definitions");
+        // The real cost against the allowance, plus plan A's chunk cache (one chunk per MiB, up to 64) and 4 MiB of slack.
+        let cache = (len.div_ceil(1 << 20).min(64) as usize) << 20;
+        let allowed = per_block * blocks + 96 * defs + cache + (4 << 20);
+        let held = private.unwrap_or(heap); // off Windows, the estimate stands in
+        assert!(held <= allowed, "{name}: holds {held} bytes for {blocks} blocks, {defs} definitions; allowed {allowed}");
     }
 }
 
@@ -10731,12 +11193,14 @@ fn index_throughput() {
         let path = fixture(name, |w| realistic(w, size));
         let len = std::fs::metadata(&path).unwrap().len();
         let mut samples = Vec::new();
-        let mut last = (0, 0, 0);
+        let (mut last, mut private) = ((0, 0, 0), None);
         for _ in 0..runs {
+            let before = crate::budget::private_bytes();
             let doc = open(&path);
             let t = Instant::now();
             assert!(doc.index_all(&AtomicBool::new(false)).unwrap());
             samples.push(t.elapsed());
+            private = private_since(before);
             let idx = doc.index();
             last = (idx.blocks.len(), idx.headings.len(), idx.heap_bytes());
         }
@@ -10745,13 +11209,14 @@ fn index_throughput() {
         let first = open(&path).first_screen(50).unwrap();
         let screen = t.elapsed();
         println!(
-            "{name}: {:.0} MB, index n={runs} p50 {p50:.0} ms ({:.3} GB/s), max {max:.0} ms; {} blocks, {} headings, heap {:.1} MiB = {:.1} B/block; first screen {} items in {:.2} ms",
+            "{name}: {:.0} MB, index n={runs} p50 {p50:.0} ms ({:.3} GB/s), max {max:.0} ms; {} blocks, {} headings, heap {:.1} MiB = {:.1} B/block, private {}; first screen {} items in {:.2} ms",
             len as f64 / 1e6,
             len as f64 / 1e9 / (p50 / 1e3),
             last.0,
             last.1,
             last.2 as f64 / f64::from(1 << 20),
             last.2 as f64 / last.0 as f64,
+            private.map_or("not measured".into(), |p| format!("{:.1} MiB = {:.1} B/block (64 MiB of it plan A's chunk cache)", p as f64 / f64::from(1 << 20), p as f64 / last.0 as f64)),
             first.len(),
             screen.as_secs_f64() * 1e3
         );
@@ -10765,28 +11230,58 @@ fn index_throughput() {
 - [ ] **Step 2: Run the release measurements**
 
 Run (`spikes/core`): `cargo test --release -p spike-core md_perf -- --ignored --nocapture --test-threads 1`
-Expected: `test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 122 filtered out` (about 90 s, plus fixture writing on the first run). Each test prints its numbers. The gates it asserts:
+Expected: `test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 127 filtered out` (about 90 s, plus fixture writing on the first run). Each test prints its numbers. The gates it asserts:
 - oversized p95 < 50 ms;
-- per hostile input: index < 30 s, first page < 500 ms, heap ≤ its per-block allowance (96 B; 256 B for headings) × blocks + 96 B per definition + 1 MiB;
+- per hostile input: index < 30 s, first page < 500 ms, and memory: the private bytes the open document holds ≤ its per-block allowance (96 B; `md::BLOCK_BYTES`, 256 B, for headings) × blocks + 96 B per definition + plan A's chunk cache (one 1 MiB chunk per MiB of file, up to 64) + 4 MiB. `heap_bytes()` is printed beside it: a lower-bound estimate (MINOR 12);
 - cancel max ≤ 50 ms, over 20 real cancels per input.
 
-A failure is a Spike C result: record the line, don't loosen the bound. For comparison, the fix lane's run of this code, on Windows 11 with another lane's builds running:
+A failure is a Spike C result: record the line, don't loosen the bound. The two timing bounds (oversized p95, cancel) are indicative here: this replay ran with other lanes loading the PC (Z49). For comparison, the fix lane's run of this code, on Windows 11 with another lane's builds running:
 - `5 MB fence → paragraph rendered, n=30: p50 4.62 ms, p95 10.59 ms, max 15.81 ms`, `fence: 160 items, largest 32766 UTF-16 units / 32807 HTML bytes; first page 7 items`, `5 MB raw HTML: 161 Raw pieces, largest 32766 units / 60891 HTML bytes`.
 - Hostile inputs: index at most 1,362 ms each, heap at most `83.1 MiB` (`1M footnotes`, `1000001 blocks`). Heap per block: `194.3 B/block` for `400k headings`, `41.9 B/block` for `400k one-letter paragraphs`, `87.1 B/block` for `1M footnotes` (a one-block input's figure is its whole heap). pulldown-cmark's own time stays flat per MiB except on `1M footnotes`: `33.7`, `450.2`, `1872.5 ms/MiB` on 64 KiB, 1 MiB and 4 MiB prefixes. That is quadratic inside pulldown-cmark, and the 64 KiB windows bound it.
 - Cancel: every input reached `n_real=20` within 25 runs; max `6.55 ms` (`1M reference definitions`) over all thirteen inputs.
 - `md-real-100mb.md: 105 MB, index n=5 p50 1818 ms (0.058 GB/s)`, `heap 104.1 MiB = 68.2 B/block`; `md-real-1gib.md: 1074 MB, index n=3 p50 21414 ms (0.050 GB/s)`, `heap 1023.6 MiB = 66.9 B/block`; first screen under 7 ms on both. The 1 GiB fixture is deleted afterwards.
 
+This plan's replay printed, in release, with the CPU at a mean 17% and a max 62% while it ran (2 s samples; Z49: indicative, not qualification results):
+- `5 MB fence → paragraph rendered, n=30: p50 4.28 ms, p95 7.77 ms, max 16.94 ms`, and the same fence and raw-HTML lines as above.
+- Memory, as private bytes the open document holds, with `heap_bytes()` beside it: `400k headings` `private 83.3 MiB = 218.4 B/block` (`heap 74.1 MiB = 194.3 B/block`: the estimate reads 11% low here, and 19% low in the second review's debug probe, 203.3 against 250.3 B/block); `400k one-letter paragraphs` 57.0 B/block (heap 41.9); `1M footnotes` 113.4 B/block (heap 87.1), the largest at `private 108.1 MiB`. Every input stays within its allowance. Index at most 1,365 ms each (`1M footnotes`).
+- Cancel: every input reached `n_real=20` within 24 runs; max `17.69 ms` (`400k headings`).
+- `md-real-100mb.md`: n=5 p50 1800 ms (0.058 GB/s), `private 182.4 MiB = 119.4 B/block (64 MiB of it plan A's chunk cache)`, heap 68.2 B/block; `md-real-1gib.md`: n=3 p50 21212 ms (0.051 GB/s), `private 1237.9 MiB = 80.9 B/block`, heap 66.9 B/block; first screen 3.99 and 3.34 ms.
+
+Then falsify the memory gate: give the heading flood the estimate's figure instead of the measured cost. In `md.rs` (Task C4c), replace
+<!-- op: temporary spikes/core/spike-core/src/md.rs -->
+```rust
+pub const BLOCK_BYTES: u64 = 256;
+```
+with
+```rust
+pub const BLOCK_BYTES: u64 = 194;
+```
+Run (`spikes/core`): `cargo test --release -p spike-core md_perf::hostile_inputs_index_in_bounds -- --ignored --nocapture --test-threads 1`
+Expected: FAIL, `0 passed; 1 failed; 0 ignored; 0 measured; 130 filtered out`, at `400k headings: holds … bytes for 400000 blocks, 0 definitions; allowed …` (this replay: `holds 87437312 bytes`, `allowed 82842880`): `heap_bytes()` reads about 194 B per heading block, and the document holds more. Revert from `spikes/core`: `git checkout -- spike-core/src/md.rs`.
+
+Then open a measured document uncapped (Z47). In `md_perf.rs`, `open`, replace
+<!-- op: temporary spikes/core/spike-core/src/md_perf.rs -->
+```rust
+    let cfg = MdConfig::gate();
+```
+with
+```rust
+    let cfg = MdConfig::default();
+```
+Run (`spikes/core`): `cargo test --release -p spike-core md_perf::oversized_fence_then_paragraph -- --ignored --nocapture --test-threads 1`
+Expected: FAIL, the panic `a gate run opened a document uncapped (Z47)`. Put the line back (`md_perf.rs` is new in this task).
+
 - [ ] **Step 3: Run cancel latency in a debug build**
 
 Run (`spikes/core`): `cargo test -p spike-core md_perf::hostile_inputs_cancel -- --ignored --nocapture --test-threads 1`
-Expected: `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 125 filtered out` (about 40 s in the scratch run, which lacked Task C1d's debug-build opt-level for `memchr` and `xxhash-rust`; 67 s in the replay). Each input prints `warm full index …; cancel n_real=20 of {runs} runs, p50 …, p95 …, max …`. In the fix lane's debug runs of this code, the largest max was `15.10 ms` (`400k one-letter paragraphs`), and `23.36 ms` across its three debug runs since the window-internal cancel check (fix 17); before it, `400k headings` failed this step at `54.95 ms`. In this plan's replay the largest max was `23.98 ms` (`400k one-letter paragraphs`); an earlier run of this step in the same replay, with other lanes holding the CPU near 98%, failed at `52.02 ms` on that input and passed on its rerun (largest max `30.57 ms`). The bound is load-sensitive in a debug build.
+Expected: `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 130 filtered out` (about 40 s in the scratch run, which lacked Task C1d's debug-build opt-level for `memchr` and `xxhash-rust`; 56 s in this plan's replay). Each input prints `warm full index …; cancel n_real=20 of {runs} runs, p50 …, p95 …, max …`. In the fix lane's debug runs of this code, the largest max was `15.10 ms` (`400k one-letter paragraphs`), and `23.36 ms` across its three debug runs since the window-internal cancel check (fix 17); before it, `400k headings` failed this step at `54.95 ms`. In this plan's replay the largest max was `18.76 ms` (`400k one-letter paragraphs`; CPU mean 14%, max 35%). Round 2's replay printed `23.98 ms` on that input; an earlier run of this step in round 2, with other lanes holding the CPU near 98%, failed at `52.02 ms` on it and passed on its rerun (largest max `30.57 ms`). The bound is load-sensitive in a debug build. It stays (owner acceptance, decision packet Part 4), pending a quiet-machine run (Z49): every result in this plan, passing or failing, was taken under load and is non-qualifying.
 
 Delete the Markdown fixtures (≈ 960 MB). Git Bash: `rm ../.fixtures/md-*.md`. PowerShell: `Remove-Item ../.fixtures/md-*.md`.
 
 - [ ] **Step 4: Run all core tests**
 
 Run (`spikes/core`): `cargo test -p spike-core`
-Expected: `test result: ok. 120 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out`, then `1 passed` for `tests\json_spans.rs`. The four measurements are ignored outside Steps 2 and 3.
+Expected: `test result: ok. 124 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out`, then `1 passed` for `tests\json_spans.rs`. The four measurements are ignored outside Steps 2 and 3.
 
 - [ ] **Step 5: Read your own work (rule 8), then commit**
 
@@ -12865,7 +13360,7 @@ git commit -m "spike(c): zero-effects gate: NetLog, request log, Node tripwire, 
 
 **Files:**
 - Create: `spikes/app/perf/yaml.e2e.ts`
-- Create: `spikes/results/yaml-<hostname>.json` (from the run)
+- Create: `spikes/results/yaml-<hostname>.json` (from Step 2's run, only when it runs: pending in this plan's replay)
 
 **Interfaces:**
 - **Consumes:** `launch` (Task C5a2), `window.__spike.untrusted.parseYaml` and plan A's `window.__spike.perf` (`startFrames`/`stopFrames`), `percentile` (plan A Task 3).
@@ -13105,8 +13600,10 @@ Expected: `3 passed`, six `<shape> <n> MiB: {...}` lines. Delete `spikes/results
 
 - [ ] **Step 2: The measured run**
 
-Run (`spikes/app`): `npx playwright test --project=perf yaml` (about 10 minutes on Zack's PC).
-Expected: `3 passed (9.7m)`; `spikes/results/yaml-<hostname>.json` holds 18 `yaml:*` keys. `ci` and `list` at 128 MiB record `failed: "renderer gone: oom (exit code -536870904)"` with `n: 0`. Measured on Zack's PC (n = 5 per row; p50/max wall, ms):
+**Not run in this plan's replay** (2026-10-21 and 2026-10-22): the run takes the renderer to 7.9 GB, and other lanes were running both days. On 2026-10-21 the PC's commit charge stood at 58.7 of 60 GB; on 2026-10-22, at this step, 46.5 of 63.5 GB, enough headroom but not a quiet machine, so a run would not have qualified. It stays pending until the quiet window with commit headroom (Z49, decision packet Q12). The table below is lane C5a's run: context for `yaml.treeMaxBytes` (Z36), not a qualification result.
+
+Run (`spikes/app`), in the quiet window: `npx playwright test --project=perf yaml` (about 10 minutes on Zack's PC).
+Expected: `3 passed`; `spikes/results/yaml-<hostname>.json` holds 18 `yaml:*` keys. `ci` and `list` at 128 MiB record `failed: "renderer gone: oom (exit code -536870904)"` with `n: 0`. Lane C5a measured on Zack's PC (`3 passed (9.7m)`; n = 5 per row; p50/max wall, ms):
 
 | Shape | Size | n | p50 ms | max ms | worker parse p50 ms | MiB/s | nodes | long frames / frames | max frame gap ms | renderer peak / Δ MB | note |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -13141,9 +13638,10 @@ Set **`yaml.treeMaxBytes` = 8 MiB (8,388,608 bytes)**, not the spec's proposed 3
 
 - [ ] **Step 4: Read your own work (rule 8), then commit**
 
+Commit the runner. `spikes/results/yaml-<hostname>.json` goes in only from a run of Step 2: when it runs, commit it on its own (`git add spikes/results/yaml-*.json`, `git commit -m "spike(c): YAML worker throughput, measured"`). Until then record Step 2 as pending in the evidence directory (Z41), and commit nothing under `results/`.
 ```bash
-git add spikes/app/perf/yaml.e2e.ts spikes/results/yaml-*.json
-git commit -m "spike(c): YAML worker throughput; yaml.treeMaxBytes from measurement"
+git add spikes/app/perf/yaml.e2e.ts
+git commit -m "spike(c): YAML worker throughput runner; yaml.treeMaxBytes is 8 MiB (Z36)"
 ```
 
 ---
@@ -13192,7 +13690,7 @@ Delete `spikes/.fixtures/effects/` and `spikes/.fixtures/profiles/` (logs, NetLo
 - **Links (fix 8).** Every link keeps an `href`: a live target (http, https, mailto, or relative and not a network path) stays in `href`; any other target, including `file:`, `smb:`, `about:` and `//…` or `\\…` network paths, becomes `<a href="#" data-href="…">`; `javascript:`, `vbscript:` and `data:` become `<a href="#">`. The click handler prevents every `<a>` click and logs `data-href` before `href`. The link test asserts each of its 16 links' `href` and `data-href` against that contract, then clicks each one five ways: each is focusable now, so Enter is pressed on all 16 (80 clicks). `no_output_can_navigate` needs no change, but its falsification needs two edits, because `sanitize` rebuilds every `<a>` from its target alone and so drops whatever else ammonia kept.
 - **`reconcile` per `(block, piece)`, at most `MAX_PAGE` of HTML a call (fix 3).** `MdView::reconcile` retires the pending items it returns; the renderer swaps each in by `(block, piece)` and calls again until it gets `[]`.
 - **CSV in the sniffed encoding, UTF-16 refused (fix 4).** `indexCsv` sniffs the encoding from the first chunk (`encoding::sniff`, as `MdView.open` does) and passes it as `CsvConfig.encoding`. A UTF-16 CSV ends at once with `done: true` and `reason` = `UTF16_REFUSED`.
-- **`MdConfig::max_blocks` (fix 6).** `MdView.open(source, maxBlocks?)` passes it on (default: no limit, as `MdConfig::default()`). A stop ends the index job with `done: true` and `reason` = `TOO_MANY_BLOCKS`, and the Rendered lens stops on it (Z34). Sizing `maxBlocks` from the safety limit, spec §3.6's aggregate budget (25% of RAM across every open document), is later work: the core host opens with no limit unless `mdOpen` passes `maxBlocks`, and no budget stop of its own is surfaced. (32 B per block is an optimization target, not that limit.)
+- **`MdConfig::max_blocks` (fix 6) and Z47's caps.** `MdView.open(source, maxBlocks)` passes it on; it's required, as `indexJson`'s `maxContainers` is, so an uncapped open throws. `gateCaps()` gives this machine's caps (`MdConfig::gate()`, `ScanOptions::gate()`: 25% of physical RAM over the measured unit cost), and the core host refuses an `mdOpen` or `index` without one, and reopens with the same cap on `reload`. A stop ends the index job with `done: true` and `reason` = `TOO_MANY_BLOCKS`, and the Rendered lens stops on it (Z34). Spec §3.6's aggregate budget (25% of RAM across every open document) is not implemented: an M1 exit requirement (Z47). (32 B per block is an optimization target, not that limit.)
 - **Front matter only at offset 0, interrupted oversized blocks, `fence_of`, cancel inside a window (fixes 2, 18–19, 1 and 17):** no code change here. Every oversized fixture is ASCII, and a job that panics still reports (`spawn_job` catches the unwind and sends `error: "panicked"`), so a regression can't hang a gate. Task C5b4's Markdown cancel times are on the fixed scan.
 
 Counts below are for C0–C4 with round 1's fixes on plan A amended for Z37 (`cargo test -p spike-core`: 120 passed, 6 ignored) plus C5a.
@@ -13208,10 +13706,11 @@ Counts below are for C0–C4 with round 1's fixes on plan A amended for Z37 (`ca
 - **Produces (`spike_core::store`):** `pub fn ByteStore::open_shared(path: &Path, cache_chunks: usize, hashes: Arc<ChunkHashes>) -> io::Result<ByteStore>`: a second handle whose chunks verify against another store's hashes.
 - **Produces (napi, `spike-node`; offsets are numbers, exact below 2^53):**
   - `class Source { static open(path): Source; get generation(): number; get size(): number; read(generation, start, end): Buffer; reload(): number }` — the verified copy path (spec §3.1). `read` throws `stale span (generation G, now N)` or `frozen: …`.
-  - `class MdView { static open(source: Source, maxBlocks?: number): MdView; get encoding(): string; page(block, item, count): string; reconcile(): string; outline(): string; startIndex(onEvent: (e: JobEvent) => void): Job }`. `page` and `reconcile` return JSON `[{block, piece, pieces, span: [start, end], html, runs: [{text, map}], unmapped, note}]` (`map` is `ByteMap::to_json`); `reconcile` returns at most `MAX_PAGE` of HTML a call and `[]` when nothing is left; `outline` returns `{done, headings: [{level, text, slug, block, span}]}`. Its store shares the source's chunk hashes.
+  - `class MdView { static open(source: Source, maxBlocks: number): MdView; get encoding(): string; page(block, item, count): string; reconcile(): string; outline(): string; startIndex(onEvent: (e: JobEvent) => void): Job }`. `page` and `reconcile` return JSON `[{block, piece, pieces, span: [start, end], html, runs: [{text, map}], unmapped, note}]` (`map` is `ByteMap::to_json`); `reconcile` returns at most `MAX_PAGE` of HTML a call and `[]` when nothing is left; `outline` returns `{done, headings: [{level, text, slug, block, span}]}`. Its store shares the source's chunk hashes.
   - `class Job { cancel(): void }`; `interface JobEvent { running: boolean; done: boolean; cancelled: boolean; elapsedMs: number; cancelMs?: number; error?: string; reason?: string; bytes?: number; count?: number }`. While a Markdown or CSV job runs, an event with `running: true` reports `bytes` and `count` (blocks or records) so far, at most every 100 ms; then one last event (`running: false`) says how it ended, with the final `bytes` and `count`. `cancelMs` runs from `cancel()` to the worker's return, timed in the core host; `reason` is set when a job that ran to the end has no usable index (`TOO_MANY_BLOCKS`, `UTF16_REFUSED`).
-  - `indexJson(path, onEvent): Job` (no progress: `json::scan` publishes nothing until it returns), `indexCsv(path, onEvent): Job` (the sniffed encoding and delimiter).
-- **Produces (core host port methods):** `mdOpen({path, block?, count?, maxBlocks?}) → {doc, gen, size, encoding, job, items}` (the first screen in one round trip, spec §3.4), `mdPage({doc, block, item, count}) → items`, `mdReconcile({doc}) → items`, `mdOutline({doc})`, `read({doc, gen, start, end}) → Uint8Array`, `reload({doc}) → {gen}`, `index({path, format: 'md' | 'json' | 'csv'}) → {job}`, `cancel({job}) → boolean` (still running), and `close` now also cancels a Markdown document's index. Event `{event: 'job', job, ...JobEvent}`, for each progress report and the last event; a job is forgotten (and `cancel` returns false) after its last.
+  - `indexJson(path, maxContainers, onEvent): Job` (no progress: `json::scan` publishes nothing until it returns), `indexCsv(path, onEvent): Job` (the sniffed encoding and delimiter; CSV needs no cap).
+  - `gateCaps(): GateCaps`, `interface GateCaps { maxBlocks: number; maxContainers: number }`: this machine's Z47 caps.
+- **Produces (core host port methods):** `caps() → {maxBlocks, maxContainers}` (`gateCaps()`), `mdOpen({path, block?, count?, maxBlocks}) → {doc, gen, size, encoding, job, items}` (`maxBlocks` required: Z47) (the first screen in one round trip, spec §3.4), `mdPage({doc, block, item, count}) → items`, `mdReconcile({doc}) → items`, `mdOutline({doc})`, `read({doc, gen, start, end}) → Uint8Array`, `reload({doc}) → {gen}` (reopens with `mdOpen`'s cap), `index({path, format: 'md' | 'json' | 'csv', maxBlocks?, maxContainers?}) → {job}` (the format's cap required), `cancel({job}) → boolean` (still running), and `close` now also cancels a Markdown document's index. Event `{event: 'job', job, ...JobEvent}`, for each progress report and the last event; a job is forgotten (and `cancel` returns false) after its last.
 
 **Design notes:**
 - **One verified read path for display and copy.** `MdView` reads through `ByteStore::open_shared` on the source's hashes, so a chunk Rendered displayed and the same chunk copy reads are checked against one first-read hash (spec §3.1). With two independent stores, an in-place write between display and copy would go unnoticed.
@@ -13275,7 +13774,7 @@ with:
     pub fn hashes(&self) -> Arc<ChunkHashes> {
 ```
 Run (`spikes/core`): `cargo test -p spike-core store::`
-Expected: `test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 122 filtered out` (then `json_spans`: `0 passed; … 1 filtered out`).
+Expected: `test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 127 filtered out` (then `json_spans`: `0 passed; … 1 filtered out`).
 
 - [ ] **Step 3: Write the failing napi test**
 
@@ -13288,7 +13787,7 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
-const { MdView, Source, indexCsv, indexJson } = require('..')
+const { MdView, Source, gateCaps, indexCsv, indexJson } = require('..')
 
 const DIR = path.join(__dirname, '..', '..', '..', '.fixtures', 'spike-node')
 fs.mkdirSync(DIR, { recursive: true })
@@ -13310,7 +13809,7 @@ const finished = (start) => events(start).then((all) => all.at(-1))
 
 test('a Markdown page carries sanitized HTML, runs with byte maps, spans and the outline', () => {
   const p = file('page.md', '# Title\n\nSome **bold** &amp; é.\n')
-  const md = MdView.open(Source.open(p))
+  const md = MdView.open(Source.open(p), gateCaps().maxBlocks)
   assert.equal(md.encoding, 'UTF-8')
   const [h, para] = JSON.parse(md.page(0, 0, 50))
   assert.deepEqual([h.block, h.piece, h.pieces, h.span, h.html, h.unmapped, h.note], [0, 0, 1, [0, 8], '<h1>Title</h1>', null, null])
@@ -13337,7 +13836,7 @@ test('copy reads verified bytes, and refuses a changed file and a stale generati
 test('reconcile re-renders the items whose references the index found later', async () => {
   const filler = 'filler text for the first window.\n\n'.repeat(3000) // > 64 KiB: the definition is outside the first window
   const p = file('reconcile.md', `see [x][ref]\n\n${filler}[ref]: /url\n`)
-  const md = MdView.open(Source.open(p))
+  const md = MdView.open(Source.open(p), gateCaps().maxBlocks)
   assert.equal(JSON.parse(md.page(0, 0, 1))[0].html, '<p>see [x][ref]</p>')
   assert.deepEqual(JSON.parse(md.reconcile()), []) // not indexed yet
   const e = await finished((done) => md.startIndex(done))
@@ -13345,6 +13844,16 @@ test('reconcile re-renders the items whose references the index found later', as
   const [again] = JSON.parse(md.reconcile())
   assert.deepEqual([again.block, again.piece, again.html], [0, 0, '<p>see <a href="/url">x</a></p>'])
   assert.deepEqual(JSON.parse(md.reconcile()), []) // returned once: the renderer's loop ends
+})
+
+test('every open takes an explicit cap (Z47): gateCaps() sizes it, and an open without one throws', (t) => {
+  const { maxBlocks, maxContainers } = gateCaps()
+  t.diagnostic(`gateCaps: ${JSON.stringify({ maxBlocks, maxContainers })}`)
+  assert.ok(maxBlocks > 1_000_000 && maxContainers > maxBlocks, JSON.stringify({ maxBlocks, maxContainers }))
+  const p = file('uncapped.md', 'a\n')
+  assert.throws(() => MdView.open(Source.open(p)), /u32|Number|number/)
+  assert.throws(() => indexJson(file('uncapped.json', '[]'), undefined, () => {}), /u32|Number|number/)
+  MdView.open(Source.open(p), maxBlocks) // capped: opens
 })
 
 test('a job that ends without a usable index says why: too many blocks, a UTF-16 CSV', async () => {
@@ -13355,14 +13864,14 @@ test('a job that ends without a usable index says why: too many blocks, a UTF-16
   assert.deepEqual([fits.done, fits.reason], [true, undefined])
   const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('a,b\n1,2\n', 'utf16le')])
   const c = await finished((done) => indexCsv(file('utf16.csv', utf16), done))
-  assert.deepEqual([c.done, c.reason], [true, 'Grid is unavailable for UTF-16 files: the CSV reader splits single-byte delimiters, quotes and line ends.'])
+  assert.deepEqual([c.done, c.reason], [true, 'Grid is unavailable for UTF-16 CSV/TSV. Open in Raw, or convert a copy to UTF-8.'])
   const utf8 = await finished((done) => indexCsv(file('utf8.csv', 'a,b\n1,2\n'), done))
   assert.deepEqual([utf8.done, utf8.reason], [true, undefined])
 })
 
 test('Markdown and CSV jobs report progress at most 10 times a second, bytes rising, then end', async (t) => {
   const inputs = [
-    ['md', file('progress.md', 'lorem ipsum dolor sit amet, consectetur *adipiscing* elit\n\n'.repeat(1_000_000)), (p, cb) => MdView.open(Source.open(p)).startIndex(cb)],
+    ['md', file('progress.md', 'lorem ipsum dolor sit amet, consectetur *adipiscing* elit\n\n'.repeat(1_000_000)), (p, cb) => MdView.open(Source.open(p), gateCaps().maxBlocks).startIndex(cb)],
     ['csv', file('progress.csv', 'h1,h2\n' + 'abc,"def"\n'.repeat(12_000_000)), indexCsv]
   ]
   for (const [name, p, start] of inputs) {
@@ -13384,8 +13893,8 @@ test('Markdown and CSV jobs report progress at most 10 times a second, bytes ris
 
 test('every index job stops within 50 ms of cancel, timed where it runs', async (t) => {
   const inputs = [
-    ['md', file('cancel.md', 'lorem ipsum dolor sit amet, consectetur *adipiscing* elit\n'.repeat(500_000)), (p, cb) => MdView.open(Source.open(p)).startIndex(cb)],
-    ['json', file('cancel.json', '[' + '[1,"abc",{"k":null}],'.repeat(2_000_000) + '0]'), indexJson],
+    ['md', file('cancel.md', 'lorem ipsum dolor sit amet, consectetur *adipiscing* elit\n'.repeat(500_000)), (p, cb) => MdView.open(Source.open(p), gateCaps().maxBlocks).startIndex(cb)],
+    ['json', file('cancel.json', '[' + '[1,"abc",{"k":null}],'.repeat(2_000_000) + '0]'), (p, cb) => indexJson(p, gateCaps().maxContainers, cb)],
     ['csv', file('cancel.csv', 'h1,h2\n"open' + 'xxxxxxx,\n'.repeat(6_000_000)), indexCsv]
   ]
   for (const [name, p, start] of inputs) {
@@ -13402,7 +13911,7 @@ test('every index job stops within 50 ms of cancel, timed where it runs', async 
 })
 ```
 Run (`spikes/core/spike-node`): `node --test test/spike-c.test.js`
-Expected: FAIL, `ℹ pass 0`, `ℹ fail 6`, each with `TypeError: Cannot read properties of undefined (reading 'open')` (the addon has no `MdView` or `Source` yet).
+Expected: FAIL, `ℹ pass 0`, `ℹ fail 7`: six with `TypeError: Cannot read properties of undefined (reading 'open')`, and the cap test with `TypeError: gateCaps is not a function` (the addon has no `MdView`, `Source` or `gateCaps` yet).
 
 - [ ] **Step 4: Implement the bindings**
 
@@ -13537,13 +14046,14 @@ pub struct MdView {
 
 #[napi]
 impl MdView {
-    /// `max_blocks` (default: no limit) stops indexing with `md::TOO_MANY_BLOCKS` (spec §3.6).
+    /// `max_blocks` stops indexing with `md::TOO_MANY_BLOCKS` (spec §3.6). Required (Z47): `gateCaps().maxBlocks`
+    /// until M1's budget exists, and an open without it throws.
     #[napi(factory)]
-    pub fn open(source: &Source, max_blocks: Option<u32>) -> Result<MdView> {
+    pub fn open(source: &Source, max_blocks: u32) -> Result<MdView> {
         let doc = source.doc.lock().unwrap();
         let encoding = text_encoding(doc.store())?;
         let store = ByteStore::open_shared(Path::new(&source.path), 64, doc.store().hashes()).map_err(err)?;
-        let cfg = MdConfig { max_blocks: max_blocks.map_or(usize::MAX, |n| n as usize), ..MdConfig::default() };
+        let cfg = MdConfig { max_blocks: max_blocks as usize, ..MdConfig::default() };
         Ok(MdView { md: Arc::new(MdDoc::new(store, encoding, cfg)), encoding, pending: Mutex::default() })
     }
 
@@ -13713,13 +14223,28 @@ fn spawn_job(
     job
 }
 
-/// The JSON container scan of the whole file (spec §4.3), as a job.
+/// Z47's gate caps on this machine: 25% of physical RAM over the most private memory a Markdown block or a JSON
+/// container costs (`md::BLOCK_BYTES`, `json::CONTAINER_BYTES`). Z34's aggregate budget isn't implemented (M1).
+#[napi(object)]
+pub struct GateCaps {
+    pub max_blocks: u32,
+    pub max_containers: u32,
+}
+
 #[napi]
-pub fn index_json(path: String, on_event: ThreadsafeFunction<JobEvent, (), JobEvent, Status, false>) -> Result<Job> {
+pub fn gate_caps() -> GateCaps {
+    let fit = |n: usize| n.min(u32::MAX as usize) as u32;
+    GateCaps { max_blocks: fit(MdConfig::gate().max_blocks), max_containers: fit(ScanOptions::gate().max_containers) }
+}
+
+/// The JSON container scan of the whole file (spec §4.3), as a job, within `max_containers` (required, Z47).
+#[napi]
+pub fn index_json(path: String, max_containers: u32, on_event: ThreadsafeFunction<JobEvent, (), JobEvent, Status, false>) -> Result<Job> {
     let store = ByteStore::open(Path::new(&path)).map_err(err)?;
+    let opts = ScanOptions { max_containers: max_containers as usize, ..ScanOptions::default() };
     // No progress: `json::scan` publishes nothing until it returns (C2a).
     Ok(spawn_job(on_event, None, move |cancel| {
-        let idx = scan(&store, 0..store.len(), &ScanOptions::default(), cancel).map_err(|e| e.to_string())?;
+        let idx = scan(&store, 0..store.len(), &opts, cancel).map_err(|e| e.to_string())?;
         Ok((!idx.error.is_some_and(|e| e.kind == ErrorKind::Cancelled), None))
     }))
 }
@@ -13745,7 +14270,7 @@ pub fn index_csv(path: String, on_event: ThreadsafeFunction<JobEvent, (), JobEve
 }
 ```
 Run (`spikes/core/spike-node`): `npm run build`, then `node --test`
-Expected: the build writes `index.d.ts` with `class Source`, `class MdView`, `class Job`, `interface JobEvent`, `indexCsv` and `indexJson`, and no warnings. Then `ℹ pass 7`, `ℹ fail 0` (plan C's `beyond-4gib` test and these 6), with diagnostics in this shape (times and progress counts vary):
+Expected: the build writes `index.d.ts` with `class Source`, `class MdView`, `class Job`, `interface JobEvent`, `interface GateCaps`, `gateCaps`, `indexCsv` and `indexJson`, and no warnings. Then `ℹ pass 8`, `ℹ fail 0` (plan C's `beyond-4gib` test and these 7), with diagnostics in this shape (times and progress counts vary):
 ```text
 ℹ md: 4 progress events, then {"running":false,"done":true,"cancelled":false,"elapsedMs":506.07310000000007,"bytes":59000000,"count":1000000}
 ℹ csv: 3 progress events, then {"running":false,"done":true,"cancelled":false,"elapsedMs":365.6366,"bytes":120000006,"count":12000001}
@@ -13775,14 +14300,14 @@ function serve(port: MessagePortMain): void {
 ```
 with:
 ```ts
-import { Doc, MdView, Source, coreVersion, indexCsv, indexJson, type Job, type JobEvent } from 'spike-node'
+import { Doc, MdView, Source, coreVersion, gateCaps, indexCsv, indexJson, type Job, type JobEvent } from 'spike-node'
 
 type Handler = (params: any) => unknown
 type Start = (onEvent: (e: JobEvent) => void) => Job
 
 function serve(port: MessagePortMain): void {
   const docs = new Map<number, Doc>()
-  const mds = new Map<number, { source: Source; md: MdView; job: number }>()
+  const mds = new Map<number, { source: Source; md: MdView; job: number; maxBlocks: number }>()
   const jobs = new Map<number, Job>()
   let nextDoc = 1
   let nextJob = 1
@@ -13790,6 +14315,11 @@ function serve(port: MessagePortMain): void {
     const doc = docs.get(id)
     if (!doc) throw new Error(`no document ${id}`)
     return doc
+  }
+  /** Z47: Z34's aggregate budget isn't implemented (M1), so every open takes an explicit cap, and none is an error. */
+  const cap = (n: unknown, name: string): number => {
+    if (typeof n !== 'number' || !(n > 0)) throw new Error(`uncapped open (Z47): pass ${name}`)
+    return n
   }
   const getMd = (id: number) => {
     const md = mds.get(id)
@@ -13822,15 +14352,18 @@ and replace:
 with:
 ```ts
     // Spike C (spec §3.1, §3.4, §4.6). Offsets are numbers, exact up to 2^53: the addon refuses larger files.
-    /** `maxBlocks` stops Rendered's index at that many blocks (spec §3.6's budget; none by default). */
-    mdOpen: ({ path, block = 0, count = 50, maxBlocks }: { path: string; block?: number; count?: number; maxBlocks?: number }) => {
+    /** This machine's gate caps (Z47): what a test passes as `maxBlocks` and `maxContainers`. */
+    caps: () => gateCaps(),
+    /** `maxBlocks` stops Rendered's index at that many blocks (spec §3.6's budget). Required (Z47). */
+    mdOpen: ({ path, block = 0, count = 50, maxBlocks }: { path: string; block?: number; count?: number; maxBlocks: number }) => {
+      const max = cap(maxBlocks, 'maxBlocks')
       effect?.('open', path)
       const source = Source.open(path)
-      const md = MdView.open(source, maxBlocks)
+      const md = MdView.open(source, max)
       const items = JSON.parse(md.page(block, 0, count)) // the first screen, from a prefix parse (spec §14 D1)
       const doc = nextDoc++
       const job = startJob((cb) => md.startIndex(cb))
-      mds.set(doc, { source, md, job })
+      mds.set(doc, { source, md, job, maxBlocks: max })
       return { doc, gen: source.generation, size: source.size, encoding: md.encoding, job, items }
     },
     mdPage: ({ doc, block, item, count }: { doc: number; block: number; item: number; count: number }) =>
@@ -13842,14 +14375,18 @@ with:
       const m = getMd(doc)
       jobs.get(m.job)?.cancel()
       const gen = m.source.reload()
-      m.md = MdView.open(m.source)
+      m.md = MdView.open(m.source, m.maxBlocks) // the cap it was opened with
       return { gen }
     },
-    /** One format's index on its own, as a job: the hostile-input gate runs it beside Raw. */
-    index: ({ path, format }: { path: string; format: 'md' | 'json' | 'csv' }) => {
+    /**
+     * One format's index on its own, as a job: the hostile-input gate runs it beside Raw. Markdown and JSON take a cap
+     * (Z47); CSV's index needs none: 24 B per checkpoint plus 440 B per mid-record one, about one per MiB of file.
+     */
+    index: ({ path, format, maxBlocks, maxContainers }: { path: string; format: 'md' | 'json' | 'csv'; maxBlocks?: number; maxContainers?: number }) => {
+      const max = format === 'md' ? cap(maxBlocks, 'maxBlocks') : format === 'json' ? cap(maxContainers, 'maxContainers') : 0
       effect?.('open', path)
       const start: Start =
-        format === 'json' ? (cb) => indexJson(path, cb) : format === 'csv' ? (cb) => indexCsv(path, cb) : (cb) => MdView.open(Source.open(path)).startIndex(cb)
+        format === 'json' ? (cb) => indexJson(path, max, cb) : format === 'csv' ? (cb) => indexCsv(path, cb) : (cb) => MdView.open(Source.open(path), max).startIndex(cb)
       return { job: startJob(start) }
     },
     /** True if the job was still running: its 'job' event then carries cancelMs. */
@@ -13867,7 +14404,30 @@ with:
 Run (`spikes/app`): `npm run build`
 Expected: exit 0. Task C5b2's tests are the first to go through these methods.
 
-- [ ] **Step 6: Read your own work (rule 8), then commit**
+- [ ] **Step 6: Falsify the cap requirement (Z47)**
+
+Make `MdView.open`'s cap optional again, as it was: in `spikes/core/spike-node/src/lib.rs`, replace
+<!-- op: temporary spikes/core/spike-node/src/lib.rs -->
+```rust
+    pub fn open(source: &Source, max_blocks: u32) -> Result<MdView> {
+```
+with
+```rust
+    pub fn open(source: &Source, max_blocks: Option<u32>) -> Result<MdView> {
+```
+and
+<!-- op: temporary spikes/core/spike-node/src/lib.rs -->
+```rust
+        let cfg = MdConfig { max_blocks: max_blocks as usize, ..MdConfig::default() };
+```
+with
+```rust
+        let cfg = MdConfig { max_blocks: max_blocks.map_or(usize::MAX, |n| n as usize), ..MdConfig::default() };
+```
+Run (`spikes/core/spike-node`): `npm run build`, then `node --test test/spike-c.test.js`
+Expected: `ℹ pass 6`, `ℹ fail 1`: the cap test's `assert.throws` sees no error (`AssertionError [ERR_ASSERTION]: Missing expected exception.`). Put both lines back, then `npm run build` and `node --test`: `ℹ pass 8`.
+
+- [ ] **Step 7: Read your own work (rule 8), then commit**
 
 Re-read `store.rs`'s two edits, `lib.rs`'s new section and `core-host.ts` as they sit on disk.
 ```bash
@@ -13890,7 +14450,7 @@ git commit -m "spike(c): napi Source, MdView and cancellable index jobs; core-ho
   - `interface MdItem { block, piece, pieces, span: [number, number], html, runs: { text, map: ByteMap }[], unmapped: string | null, note: string | null }`, `interface MdOpened { doc, gen, size, encoding, job, items }`, `interface SourceSpan { gen, start, end }`.
   - `endpointByte(scope: Node, node: Node, offset: number, end: boolean): number | null` — a selection endpoint → source byte; a start snaps back, an end forward.
   - `class RenderedView { constructor(parent, core, opened: MdOpened, perf); readonly root; readonly opened; readonly clicked: (string | null)[]; selection(): SourceSpan | null; copy(): Promise<Uint8Array | null>; settled(): Promise<void> }`. Each item is a `div.md-item` with `data-key="<block>:<piece>"`, `data-note` for a Raw note and `data-unmapped` when its runs can't be paired. After the scroller sits a `div.md-status` with `role="status"`: `Indexing for Rendered: <MB> of <MB> MB, <n> blocks` while the index runs, empty once it's done, and on a budget stop `<reason> Raw stays available.`
-  - `window.__spike.openRendered(path, anchor = 0, maxBlocks?): Promise<RenderedView>` — `maxBlocks` goes to `mdOpen`; marks `openStart`, and the view marks `firstScreen` (rAF, then a task) once its items cover the viewport or the document ends: plan A's first-screen measure.
+  - `window.__spike.openRendered(path, anchor = 0, maxBlocks?): Promise<RenderedView>` — `maxBlocks` goes to `mdOpen`, which refuses an open without one (Z47: every test passes `caps().maxBlocks`); marks `openStart`, and the view marks `firstScreen` (rAF, then a task) once its items cover the viewport or the document ends: plan A's first-screen measure.
 - **Produces (`e2e/mdgen.ts`, test-only):** `type Enc = 'utf-8' | 'utf-16le'`; `interface Shown { show, src, math?, start, end }`; `genDoc(seed, enc, blocks): { bytes, blocks: Shown[][] }`; `encode(s, enc)`.
 
 **Design notes:**
@@ -13901,7 +14461,7 @@ git commit -m "spike(c): napi Source, MdView and cancellable index jobs; core-ho
 - **Copy** is `selection()` → `{gen, start, end}` → `read` through `Source.read`: the core refuses a stale generation or a changed file. The clipboard write itself is not wired (M6); the tests compare the bytes `copy()` returns.
 - **Links** (C5a's `_top` gap): a capture-phase `click` and `auxclick` handler on the lens root calls `preventDefault` for every `<a>`, whatever the button or modifier, and logs `data-href` (C4's markup for an inert target) or `href`. Spec §5.4's link resolution is M4 work; the spike follows nothing.
 - **Reconcile** (spec §14 D1): when the index job's last event says `done`, the view calls `mdReconcile` until it returns `[]`, swapping each item in by `(block, piece)` and remounting it if it's mounted.
-- **Progress and the budget stop** (Z30, Z34). The status line is a live region outside `.md-scroller`, so it never adds a Text node to an item. It stays in the accessibility tree while empty (no `display: none`), so its next change is announced. On a last event with `reason`, the view stops whole: it drops its items, fetches nothing more, and says why and that Raw stays available. A truncated Rendered document would read as the whole file. Raw is untouched: it has its own lens and line index (plan A's `open(path, 'raw')`). The progress test watches the status line with a `MutationObserver` (a progress text can come and go between two polls) while a 59 MB file indexes, and needs at least two progress texts, then the line cleared. The budget test opens 5,000 blocks with `maxBlocks` 2, expects the announced reason by role and no `.md-item` left, then opens the same file in Raw and scrolls it to its last line, 9,999.
+- **Progress and the budget stop** (Z30, Z34). The status line is a live region outside `.md-scroller`, so it never adds a Text node to an item. It stays in the accessibility tree while empty (no `display: none`); that a reader announces its changes is unverified here (Z39). On a last event with `reason`, the view stops whole: it drops its items, fetches nothing more, and says why and that Raw stays available. A truncated Rendered document would read as the whole file. Raw is untouched: it has its own lens and line index (plan A's `open(path, 'raw')`). The progress test watches the status line with a `MutationObserver` (a progress text can come and go between two polls) while a 59 MB file indexes, and needs at least two progress texts, then the line cleared. The budget test opens 5,000 blocks with `maxBlocks` 2, expects the reason in the `status` line by role and no `.md-item` left, then opens the same file in Raw and scrolls it to its last line, 9,999.
 - **The oracle** (`mdgen.ts`) writes random headings and paragraphs element by element (words of ASCII, Latin-1, Greek, CJK and astral characters; strong, emphasis, strikethrough, code and link wraps; entities; backslash escapes; inline math) and records the bytes each displayed element owns under C4's rule (an opening marker joins the next character, a closing marker or line ending the previous one). It never sees runs or maps. The test locates each endpoint in the DOM from the generator's own text (and checks the DOM shows exactly that text), sets the selection, and compares `selection()` and `copy()` with the generator's bytes. Starts sometimes fall inside a surrogate pair (must snap back), ends too (must snap forward), and endpoints inside math are KaTeX's own Text nodes (must snap to the whole `$…$`).
 
 - [ ] **Step 1: Write the oracle and the failing tests**
@@ -14066,7 +14626,7 @@ for (const enc of ['utf-8', 'utf-16le'] as Enc[]) {
     const { app, win } = await ready(`rendered-hand-${enc}`)
     const got = await win.evaluate(
       async ({ path, picks }) => {
-        const view = await (window as any).__spike.openRendered(path)
+        const view = await (window as any).__spike.openRendered(path, 0, (await (window as any).__spike.core.call('caps')).maxBlocks)
         await view.settled()
         const MATH = '.tp-math, .tp-math-display'
         const texts = (root: Node): Text[] => {
@@ -14101,6 +14661,7 @@ for (const enc of ['utf-8', 'utf-16le'] as Enc[]) {
 test('byte maps end to end: 240 random selections, zero endpoint mismatches against the generator oracle', async () => {
   const { app, win } = await ready('rendered-random')
   let endpoints = 0
+  let boundaries = 0
   const bad: string[] = []
   for (const [seed, enc] of [[1, 'utf-8'], [2, 'utf-16le']] as [number, Enc][]) {
     const doc = genDoc(seed, enc, 30)
@@ -14120,7 +14681,7 @@ test('byte maps end to end: 240 random selections, zero endpoint mismatches agai
     })
     const got = await win.evaluate(
       async ({ path, blocks, picks }) => {
-        const view = await (window as any).__spike.openRendered(path)
+        const view = await (window as any).__spike.openRendered(path, 0, (await (window as any).__spike.core.call('caps')).maxBlocks)
         await view.settled()
         const MATH = '.tp-math, .tp-math-display'
         const texts = (root: Node): Text[] => {
@@ -14164,7 +14725,26 @@ test('byte maps end to end: 240 random selections, zero endpoint mismatches agai
           getSelection()!.setBaseAndExtent(an, ao, zn, zo)
           out.push({ span: view.selection(), bytes: Array.from(await view.copy()) })
         }
-        return { problems, out }
+        // MINOR 11: every element of every block, selected whole, and a two-unit element (an astral character) also
+        // from and to its middle, which must snap outward. Then every entry of every text run's map is used, so one
+        // wrong entry can't hide between the random picks. Math elements are atomic: their runs map only their edges.
+        const whole = []
+        for (const [b, els] of blocks.entries())
+          for (const [e, el] of els.entries()) {
+            if (el.math) continue
+            const select = (ka: number, kz: number): void => {
+              const [an, ao] = locate({ b, e, k: ka }, false)
+              const [zn, zo] = locate({ b, e, k: kz }, true)
+              getSelection()!.setBaseAndExtent(an, ao, zn, zo)
+              whole.push({ b, e, span: view.selection() })
+            }
+            select(0, el.show.length)
+            if (el.show.length === 2) {
+              select(1, 2)
+              select(0, 1)
+            }
+          }
+        return { problems, out, whole }
       },
       { path, blocks: doc.blocks, picks }
     )
@@ -14178,8 +14758,13 @@ test('byte maps end to end: 240 random selections, zero endpoint mismatches agai
       if (span.end !== end) bad.push(`${enc} pick ${i}: end ${span.end}, want ${end} (${JSON.stringify(z)})`)
       if (Buffer.compare(Buffer.from(bytes), Buffer.from(doc.bytes.subarray(start, end))) !== 0) bad.push(`${enc} pick ${i}: copy differs from the file`)
     })
+    for (const { b, e, span } of got.whole) {
+      const el = doc.blocks[b][e]
+      boundaries += 2
+      if (span.start !== el.start || span.end !== el.end) bad.push(`${enc} block ${b} element ${e}: [${span.start}, ${span.end}), want [${el.start}, ${el.end})`)
+    }
   }
-  console.log(`byte maps end to end: 240 selections, ${endpoints} endpoints, ${bad.length} mismatches`)
+  console.log(`byte maps end to end: 240 selections, ${endpoints} endpoints; boundaries: ${boundaries}; ${bad.length} mismatches`)
   expect(bad.slice(0, 10)).toEqual([])
   await app.close()
 })
@@ -14199,7 +14784,7 @@ test('copy is refused once the file changes, and for a stale generation after re
     })
   const copy = (): Promise<string> =>
     win.evaluate(() => (window as any).__spike.rendered.copy().then((b: Uint8Array) => new TextDecoder().decode(b), (e: Error) => e.message))
-  await win.evaluate((p) => (window as any).__spike.openRendered(p), path)
+  await win.evaluate(async (p) => (window as any).__spike.openRendered(p, 0, (await (window as any).__spike.core.call('caps')).maxBlocks), path)
   expect(await select()).toEqual({ gen: 1, start: 17, end: 22 })
   expect(await copy()).toBe('plain')
   appendFileSync(path, 'more\n')
@@ -14226,7 +14811,7 @@ test('while Rendered indexes, the lens reports progress in a status line, and cl
       const text = document.querySelector('#card [role="status"]')?.textContent ?? null
       if (text !== null && text !== texts.at(-1)) texts.push(text)
     }).observe(document.getElementById('card')!, { subtree: true, childList: true, characterData: true })
-    await (window as any).__spike.openRendered(p)
+    await (window as any).__spike.openRendered(p, 0, (await (window as any).__spike.core.call('caps')).maxBlocks)
   }, path)
   await win.waitForFunction(
     async () => {
@@ -14244,12 +14829,12 @@ test('while Rendered indexes, the lens reports progress in a status line, and cl
   await app.close()
 })
 
-test('over its block budget, Rendered stops with an announced reason, and Raw still pages the file', async () => {
+test('over its block budget, Rendered stops with its reason in a status line, and Raw still pages the file', async () => {
   const path = join(DIR, 'budget.md')
   writeFileSync(path, Array.from({ length: 5000 }, (_, i) => `block ${i}\n`).join('\n')) // 5,000 blocks, 9,999 lines
   const { app, win } = await ready('rendered-budget')
   await win.evaluate((p) => (window as any).__spike.openRendered(p, 0, 2), path) // a budget of 2 blocks
-  const status = win.getByRole('status') // a live region: screen readers announce it
+  const status = win.getByRole('status') // a role="status" live region (announcement unverified: Z39)
   await expect(status).toHaveText('Rendered is unavailable: this file has more blocks than the memory budget allows. Raw stays available.')
   await expect(win.locator('.md-item')).toHaveCount(0) // stopped whole: no partial document on screen
   await win.evaluate((p) => (window as any).__spike.open(p, 'raw'), path)
@@ -14263,7 +14848,7 @@ test('a reference defined after the first window re-renders its item in place (r
   const path = join(DIR, 'reconcile.md')
   writeFileSync(path, `see [x][ref]\n\n${'filler text for the first window.\n\n'.repeat(3000)}[ref]: /url\n`)
   const { app, win } = await ready('rendered-reconcile')
-  const first = await win.evaluate(async (p) => (await (window as any).__spike.openRendered(p)).opened.items[0].html, path)
+  const first = await win.evaluate(async (p) => (await (window as any).__spike.openRendered(p, 0, (await (window as any).__spike.core.call('caps')).maxBlocks)).opened.items[0].html, path)
   expect(first).toBe('<p>see [x][ref]</p>') // provisional: the definition wasn't indexed yet
   await win.waitForFunction(() => document.querySelector('.md-item a[href="/url"]'))
   expect(await win.evaluate(() => document.querySelector('.md-item')!.innerHTML)).toBe('<p>see <a href="/url">x</a></p>')
@@ -14418,7 +15003,7 @@ export class RenderedView {
     this.root = Object.assign(document.createElement('div'), { className: 'md-scroller' })
     this.root.append(this.top, this.bottom)
     this.status.className = 'md-status'
-    this.status.setAttribute('role', 'status') // polite: screen readers announce each change
+    this.status.setAttribute('role', 'status') // a polite live region (announcement unverified: Z39)
     parent.replaceChildren(this.root, this.status)
     const stop = (e: MouseEvent): void => {
       const a = (e.target as Element | null)?.closest?.('a')
@@ -14629,15 +15214,15 @@ with:
 .md-item pre { white-space: pre-wrap; }
 .md-item[data-note]::before { content: attr(data-note); display: block; color: var(--warn); }
 .md-status { position: absolute; left: 0; right: 0; bottom: 0; padding: 4px 24px; background: var(--surface); color: var(--text2); }
-.md-status:empty { padding: 0; } /* still in the accessibility tree, so its next change is announced */
+.md-status:empty { padding: 0; } /* stays in the accessibility tree while empty (announcement unverified: Z39) */
 ```
 
 - [ ] **Step 4: Run them until they pass**
 
 Run (`spikes/app`): `npm run build`, then `npx playwright test --project=e2e rendered`
-Expected: `7 passed`, the line `byte maps end to end: 240 selections, 480 endpoints, 0 mismatches`, and the status line's texts while the 59 MB file indexes, in this shape (the count of progress lines varies, at least 2):
+Expected: `7 passed`, the line `byte maps end to end: 240 selections, 480 endpoints; boundaries: 2550; 0 mismatches` (the boundaries are the whole-element and mid-pair selections, MINOR 11), and the status line's texts while the 59 MB file indexes, in this shape (the count of progress lines varies, at least 2):
 ```text
-["","Indexing for Rendered: 14.5 of 59.0 MB, 246,420 blocks","Indexing for Rendered: 25.3 of 59.0 MB, 428,460 blocks","Indexing for Rendered: 36.7 of 59.0 MB, 622,710 blocks","Indexing for Rendered: 49.4 of 59.0 MB, 836,940 blocks",""]
+["","Indexing for Rendered: 16.2 of 59.0 MB, 274,170 blocks","Indexing for Rendered: 31.8 of 59.0 MB, 539,460 blocks","Indexing for Rendered: 48.5 of 59.0 MB, 821,400 blocks",""]
 ```
 
 - [ ] **Step 5: Falsify the pairing**
@@ -14656,7 +15241,39 @@ Run (`spikes/app`): `npm run build`, then `npx playwright test --project=e2e ren
 Expected: `3 failed`, `4 passed`: both hand-picked tests and the random test fail with `TypeError: Cannot read properties of undefined (reading 'map')` — after KaTeX hydrated, the k-th Text node of an item is past its last run. The stale-copy, progress, budget and reconcile tests still pass.
 Put the original line back (the two lines become `  const bound = runOf.get(t)` again; `rendered.ts` is new in this task, so `git checkout` can't restore it), rebuild, rerun: `7 passed`.
 
-- [ ] **Step 6: Read your own work (rule 8), then commit**
+- [ ] **Step 6: Falsify the byte-map gate with one wrong map entry, and an uncapped open**
+
+Two breaks, one at a time. Both files were written in this task: put each line back by hand.
+
+**Break 1: one map entry off by a byte** (MINOR 11: the random selections alone missed this). In `rendered.ts`, `mount`, replace
+<!-- op: temporary spikes/app/src/renderer/src/rendered.ts -->
+```ts
+    el.innerHTML = item.html // sanitized by the core (spec §4.6)
+```
+with
+```ts
+    el.innerHTML = item.html // sanitized by the core (spec §4.6)
+    const plain = textNodes(el).map((n) => !n.parentElement!.closest(PLACEHOLDERS)) // math runs only map their edges
+    const k = (window as any).__oneEntry ? -1 : item.runs.findIndex((r, i) => plain[i] && r.map.kind === 'breakpoints' && r.map.points.length >= 2)
+    const one = item.runs[k]
+    if (one?.map.kind === 'breakpoints') ((window as any).__oneEntry = true), (one.map.points[1][1] += 1)
+```
+Run (`spikes/app`): `npm run build`, then `npx playwright test --project=e2e rendered -g "byte maps"`
+Expected: FAIL, `1 failed`, after `byte maps end to end: 240 selections, 480 endpoints; boundaries: …; … mismatches` with at least one `block … element …` mismatch. This plan's replay printed `boundaries: 2550; 1 mismatches`, the one being `utf-8 block 29 element 4: [1508, 1511), want [1507, 1511)`: the whole-element pass caught the entry, and the 240 random selections didn't. Put the line back, and `npm run build`.
+
+**Break 2: an open without a cap** (Z47). In `rendered.e2e.ts`, the reconcile test, replace
+<!-- op: temporary spikes/app/e2e/rendered.e2e.ts -->
+```ts
+  const first = await win.evaluate(async (p) => (await (window as any).__spike.openRendered(p, 0, (await (window as any).__spike.core.call('caps')).maxBlocks)).opened.items[0].html, path)
+```
+with
+```ts
+  const first = await win.evaluate(async (p) => (await (window as any).__spike.openRendered(p)).opened.items[0].html, path)
+```
+Run (`spikes/app`): `npx playwright test --project=e2e rendered -g "reconcile"`
+Expected: FAIL, `1 failed`, with `Error: page.evaluate: Error: Error: uncapped open (Z47): pass maxBlocks`. Put the line back, and rerun `npx playwright test --project=e2e rendered`: `7 passed`.
+
+- [ ] **Step 7: Read your own work (rule 8), then commit**
 
 ```bash
 git add spikes/app/src/renderer/src/rendered.ts spikes/app/src/renderer/src/main.ts spikes/app/src/renderer/src/style.css spikes/app/e2e/mdgen.ts spikes/app/e2e/rendered.e2e.ts
@@ -14726,7 +15343,7 @@ fn contexts(payload: &str) -> [String; 6] {
 
 /// Every item of `md`, page by page.
 fn all_items(md: &str) -> Vec<Item> {
-    let doc = MdDoc::new(ByteStore::open(&temp_file("nav", md.as_bytes())).unwrap(), UTF_8, MdConfig::default());
+    let doc = open("nav", md.as_bytes(), UTF_8, MdConfig::gate());
     let (mut items, mut from) = (Vec::new(), (0, 0));
     loop {
         let page = doc.page(from, 1000).unwrap();
@@ -14778,7 +15395,7 @@ fn write_hostile_corpus() {
 }
 ```
 Run (`spikes/core`): `cargo test -p spike-core md_gates::no_output -- --nocapture`
-Expected: `navigation probe: 83 payloads × 6 contexts, 619 outputs: no form, target, base, area, frame or ping` and `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 128 filtered out`. The probe is a gate on C4's sanitizer as it stands, so it passes at once; Step 2 shows it can fail.
+Expected: `navigation probe: 83 payloads × 6 contexts, 619 outputs: no form, target, base, area, frame or ping` and `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 133 filtered out`. The probe is a gate on C4's sanitizer as it stands, so it passes at once; Step 2 shows it can fail.
 
 - [ ] **Step 2: Falsify the probe**
 
@@ -14801,7 +15418,7 @@ temporarily with:
                 Target::Live => out.push_str(tag),
 ```
 Run (`spikes/core`): `cargo test -p spike-core md_gates::no_output`
-Expected: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 128 filtered out`, after the first payload that carries `target` (one of C4d's round-1 payloads; `escape_raw` has already moved a raw `href` to `data-href`):
+Expected: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 133 filtered out`, after the first payload that carries `target` (one of C4d's round-1 payloads; `escape_raw` has already moved a raw `href` to `data-href`):
 ```text
 "intro\n\n<a title=\"t\" target=\"_blank\" rel=\"opener\" href=\"https://ok/\">t</a>\n": <a target="_blank" data-href="https://ok/"> in "<p><a target=\"_blank\" data-href=\"https://ok/\">t</a></p>"
 ```
@@ -14811,7 +15428,7 @@ Restore it: `git checkout -- spike-core/src/sanitize.rs`.
 - [ ] **Step 3: Write the corpus**
 
 Run (`spikes/core`): `cargo test -p spike-core write_hostile_corpus -- --ignored --nocapture`
-Expected: `wrote 498 files` and `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 128 filtered out`.
+Expected: `wrote 498 files` and `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 133 filtered out`.
 
 - [ ] **Step 4: Write and run the app's gates**
 
@@ -14883,8 +15500,9 @@ test('zero effects: hostile Markdown, Mermaid, KaTeX and unclicked remote images
     const s = (window as any).__spike
     const tally = { files: 0, items: 0, unmapped: 0, frames: 0, math: 0, images: 0, links: 0, problems: [] as string[], bad: [] as string[] }
     const frame = (): Promise<void> => new Promise((ok) => requestAnimationFrame(() => setTimeout(ok)))
+    const { maxBlocks } = await s.core.call('caps') // Z47: every open capped
     for (const p of paths) {
-      const view = await s.openRendered(p)
+      const view = await s.openRendered(p, 0, maxBlocks)
       const root: HTMLElement = view.root
       const seen = new Set<string>()
       // Scroll to the end, so every item mounts and hydrates once; stop after 10 frames at the bottom without growth.
@@ -14926,7 +15544,7 @@ test('a link click never navigates the app or opens a window, whatever the link 
   const run = await launchRecorded('md-links', {}, [links])
   const { win, app } = run
   await win.waitForFunction(() => (window as any).__spike.openRendered)
-  await win.evaluate((p) => (window as any).__spike.openRendered(p), links)
+  await win.evaluate(async (p) => (window as any).__spike.openRendered(p, 0, (await (window as any).__spike.core.call('caps')).maxBlocks), links)
   const url = win.url()
   const anchors = win.locator('.md-scroller a')
   // C4's link contract: http(s), mailto and non-network relative targets keep href; any other target moves to
@@ -14984,9 +15602,9 @@ test('every detector fails the gate when its effect happens in the Rendered sett
     openExternal: (shell.openExternal as unknown as { tripwire?: boolean }).tripwire
   }))
   expect(armed).toEqual({ lookup: true, openExternal: true }) // before any deliberate effect
-  await win.evaluate(async (p) => (await (window as any).__spike.openRendered(p)).settled(), all)
+  await win.evaluate(async (p) => (await (window as any).__spike.openRendered(p, 0, (await (window as any).__spike.core.call('caps')).maxBlocks)).settled(), all)
   // Files: a document outside `opened`, through the core host's Markdown path.
-  await win.evaluate((p) => (window as any).__spike.openRendered(p), links)
+  await win.evaluate(async (p) => (window as any).__spike.openRendered(p, 0, (await (window as any).__spike.core.call('caps')).maxBlocks), links)
   // Requests, guard log: an http image in a test-only page without the app's CSP or sanitizer.
   // Requests, NetLog: the same from a page in a partition without the guard (loopback port 9: nothing leaves).
   await app.evaluate(async ({ BrowserWindow }) => {
@@ -15088,7 +15706,7 @@ git commit -m "spike(c): no sanitizer output navigates; link clicks intercepted;
 **Design notes:**
 - **Measured like plan A's first screen:** one fresh launch per sample (private profile, zoom 1), the shell visible and settled for 500 ms, then open; the sample is `firstScreen − openStart` in the renderer.
 - **Oversized** (spec §13.1, §14 D17): C4e's fixture (a 5 MiB `rust` fence of a 43-byte line, then `The paragraph after the fence.`), opened in Rendered anchored at block 1 — the paragraph — so the gate is about the fence not delaying what follows it. Then a second launch opens at block 0 and scrolls two viewports at a time to the end, so every item mounts once, and records the longest item text in the DOM.
-- **Hostile inputs:** C4's 100 MiB of `[` and of `>` and its 1M footnotes, C2's 100 MiB JSON `[`, C3's 200 MB unterminated CSV quote, and C2's 84 MB cancel array (its fixture is named `88m`), because 100 MiB of `[` stops at the JSON depth cap within milliseconds and so never runs long enough to cancel. Per sample: start the format's index as a core-host job, open the file in plan A's Raw, wait for Raw's first screen, then cancel and wait for the job's last event (progress events are skipped), then for Raw's full line scan. `runningAtFirstScreen` says the index was still running when Raw painted; `cancelMs` is the core host's own measure.
+- **Hostile inputs:** C4's 100 MiB of `[` and of `>` and its 1M footnotes, C2's 84 MB cancel array (its fixture is named `88m`), C3's 200 MB unterminated CSV quote, and 100 MiB of JSON arrays nested 512 deep (within the depth cap). C2's 100 MiB of `[` isn't one: it stops at the JSON depth cap within milliseconds, so it never runs long enough to cancel, and Raw beside it runs alone (MINOR 14). A row counts toward the Raw-beside-an-index gate only if its index was still running at Raw's first screen in at least 18 of 20 runs; the test fails otherwise. Every open passes this machine's cap (`caps()`, Z47). Per sample: start the format's index as a core-host job, open the file in plan A's Raw, wait for Raw's first screen, then cancel and wait for the job's last event (progress events are skipped), then for Raw's full line scan. `runningAtFirstScreen` says the index was still running when Raw painted; `cancelMs` is the core host's own measure.
 - **Raw's first-screen mark is plan A's Z37 mark:** the first page painted, the rows available up to a viewport. On a one-line file that is line 0's first 64 KiB piece, painted while plan A's line index is still scanning the line; on a file of short lines it is still a full viewport. The control (`CONTROL=1`) runs Raw with no format index beside it.
 - **Raw's full line scan is its own metric** (Zack's ruling Z37): `fullScanMs` runs from open to plan A's `indexDone` mark (the whole file scanned), recorded beside the first screen in every sample, with the format index and in the control. Z37 makes Raw's first screen the first bounded piece visible and usable while the scan continues (50 ms PC target); plan A is amended for it, and the numbers below are on that mark.
 
@@ -15122,12 +15740,15 @@ const fixture = (name: string, write: (path: string) => void): string => {
   return path
 }
 
-/** A fresh app with its shell up and settled, as plan A's first-screen runner opens files. */
-async function settled(name: string): Promise<{ win: Page; close: () => Promise<void> }> {
+type Caps = { maxBlocks: number; maxContainers: number }
+
+/** A fresh app with its shell up and settled, as plan A's first-screen runner opens files; and this machine's caps (Z47). */
+async function settled(name: string): Promise<{ win: Page; close: () => Promise<void>; caps: Caps }> {
   const { app, win } = await launch(name)
   await win.waitForFunction(() => (window as any).__spike.openRendered && document.visibilityState === 'visible')
   await win.waitForTimeout(500)
-  return { win, close: () => app.close() }
+  const caps: Caps = await win.evaluate(() => (window as any).__spike.core.call('caps'))
+  return { win, close: () => app.close(), caps }
 }
 
 test('oversized: a 5 MB fence then a one-line paragraph; the paragraph within the first-screen gate, no item over 64 KiB', async () => {
@@ -15137,8 +15758,8 @@ test('oversized: a 5 MB fence then a one-line paragraph; the paragraph within th
   )
   const samples: number[] = []
   for (let i = 0; i < RUNS; i++) {
-    const { win, close } = await settled('perf-oversized')
-    await win.evaluate((p) => (window as any).__spike.openRendered(p, 1), path) // anchored at block 1, the paragraph
+    const { win, close, caps } = await settled('perf-oversized')
+    await win.evaluate(({ path, max }) => (window as any).__spike.openRendered(path, 1, max), { path, max: caps.maxBlocks }) // anchored at block 1, the paragraph
     await win.waitForFunction(() => (window as any).__spike.perf.marks.firstScreen)
     const s = await win.evaluate(() => {
       const { marks } = (window as any).__spike.perf
@@ -15149,9 +15770,9 @@ test('oversized: a 5 MB fence then a one-line paragraph; the paragraph within th
     await close()
   }
   // Every item of the document mounts once on the way down; none may hold more than 64 KiB of text (spec §3.4).
-  const { win, close } = await settled('perf-oversized-dom')
-  const dom = await win.evaluate(async (p) => {
-    const view = await (window as any).__spike.openRendered(p)
+  const { win, close, caps } = await settled('perf-oversized-dom')
+  const dom = await win.evaluate(async ({ p, max }) => {
+    const view = await (window as any).__spike.openRendered(p, 0, max)
     const root: HTMLElement = view.root
     const seen = new Set<string>()
     let maxText = 0
@@ -15168,7 +15789,7 @@ test('oversized: a 5 MB fence then a one-line paragraph; the paragraph within th
     }
     // Every item: the fence's pieces and the paragraph.
     return { items: view.opened.items[0].pieces + 1, mounted: seen.size, maxText, last: [...root.querySelectorAll('.md-item')].at(-1)!.innerHTML }
-  }, path)
+  }, { p: path, max: caps.maxBlocks })
   await close()
   const result = { firstScreenMs: stats(samples), samples, dom }
   console.log(JSON.stringify(result))
@@ -15187,8 +15808,9 @@ const HOSTILE: [string, 'md' | 'json' | 'csv', (path: string) => void][] = [
     'md',
     (p) => writeFileSync(p, Array.from({ length: 1_000_000 }, (_, i) => `[^f${i}]: footnote ${i}\n`).join('') + '\nsee[^f0] and[^f999999]\n')
   ],
-  ['hostile-brackets-100m.json', 'json', (p) => writeFileSync(p, Buffer.alloc(100 << 20, '['))],
-  // C2's cancel input: 100 MB of '[' stops at the depth cap within milliseconds, so it never runs long enough to cancel.
+  // 100 MiB of '[' stops at the depth cap within milliseconds: nothing to cancel, and Raw would run alone. Nested
+  // arrays 512 deep, within the cap, keep the scan running at Raw's first screen (MINOR 14).
+  ['hostile-nested-100m.json', 'json', (p) => writeFileSync(p, '[' + ('['.repeat(512) + '1' + ']'.repeat(512) + ',').repeat(102_200) + '0]')],
   ['hostile-array-88m.json', 'json', (p) => writeFileSync(p, '[' + '[1,"abc",{"k":null}],'.repeat(4_000_000) + '0]')],
   ['hostile-unterminated-200m.csv', 'csv', (p) => writeFileSync(p, Buffer.concat([Buffer.from('h1,h2\n"open'), Buffer.alloc(9 * 22_222_222, 'xxxxxxx,\n')]))]
 ]
@@ -15198,14 +15820,14 @@ for (const [name, format, write] of HOSTILE) {
     const path = fixture(name, write)
     const runs = []
     for (let i = 0; i < RUNS; i++) {
-      const { win, close } = await settled(`perf-hostile-${format}`)
+      const { win, close, caps } = await settled(`perf-hostile-${format}`)
       runs.push(
         await win.evaluate(
-          async ({ path, format }) => {
+          async ({ path, format, caps }) => {
             const s = (window as any).__spike
             const ended = new Map<number, { at: number; e: any }>()
             s.core.onEvent((e: any) => e.event === 'job' && !e.running && ended.set(e.job, { at: performance.now(), e }))
-            const { job } = await s.core.call('index', { path, format })
+            const { job } = await s.core.call('index', { path, format, ...caps }) // Z47: capped
             void s.open(path, 'raw')
             while (!s.perf.marks.firstScreen) await new Promise((ok) => setTimeout(ok, 1))
             const { openStart, firstScreen } = s.perf.marks
@@ -15218,7 +15840,7 @@ for (const [name, format, write] of HOSTILE) {
             const fullScanMs = s.perf.marks.indexDone - openStart
             return { firstScreenMs: firstScreen - openStart, fullScanMs, runningAtFirstScreen: at > firstScreen, live, ...e }
           },
-          { path, format }
+          { path, format, caps }
         )
       )
       await close()
@@ -15237,6 +15859,9 @@ for (const [name, format, write] of HOSTILE) {
     console.log(`${name}: ${JSON.stringify({ ...result, runs: undefined })}`)
     save(`hostile:${name}`, result)
     expect(result.errors).toEqual([])
+    // MINOR 14: a row counts toward the Raw-beside-an-index gate only if the index was running at Raw's first screen
+    // in at least 90% of its runs (18 of 20).
+    expect(result.runningAtFirstScreen).toBeGreaterThanOrEqual(Math.ceil(0.9 * RUNS))
   })
 }
 
@@ -15271,25 +15896,40 @@ Run (`spikes/app`): `npm run build`, then
 
 Expected: `7 passed`, one JSON line per test. The first run writes about 630 MB of fixtures into `spikes/.fixtures/`. Delete `spikes/results/spike-c-<hostname>.json` afterwards.
 
+Then see the runner refuse a vacuous row (MINOR 14): give the nested JSON row 100 MiB of `[` again, which the scan finishes at the depth cap. In `perf/spike-c.e2e.ts`, replace
+<!-- op: temporary spikes/app/perf/spike-c.e2e.ts -->
+```ts
+  ['hostile-nested-100m.json', 'json', (p) => writeFileSync(p, '[' + ('['.repeat(512) + '1' + ']'.repeat(512) + ',').repeat(102_200) + '0]')],
+```
+with
+```ts
+  ['hostile-nested-100m.json', 'json', (p) => writeFileSync(p, Buffer.alloc(100 << 20, '['))],
+```
+Delete the fixture so the runner writes the new one (`spikes/app`, Git Bash: `rm ../.fixtures/hostile-nested-100m.json`; PowerShell: `Remove-Item ../.fixtures/hostile-nested-100m.json`), then run (`spikes/app`):
+- PowerShell: `$env:RUNS=2; npx playwright test --project=perf spike-c -g "hostile hostile-nested"; Remove-Item Env:RUNS`
+- Git Bash: `RUNS=2 npx playwright test --project=perf spike-c -g "hostile hostile-nested"`
+
+Expected: FAIL, `1 failed`, at `expect(result.runningAtFirstScreen).toBeGreaterThanOrEqual(Math.ceil(0.9 * RUNS))` with `Received: 0`: the index never ran at Raw's first screen. Put the line back, then delete the fixture again (Step 2 writes the nested one) and `spikes/results/spike-c-<hostname>.json`.
+
 - [ ] **Step 2: The measured run and the control**
 
 Run (`spikes/app`): `npx playwright test --project=perf spike-c` (about 3 minutes), then the control: PowerShell `$env:CONTROL=1; npx playwright test --project=perf spike-c -g control; Remove-Item Env:CONTROL`, Git Bash `CONTROL=1 npx playwright test --project=perf spike-c -g control` (about 3 minutes).
-Expected: `7 passed`, then `6 passed`. If a row fails after `0ms` because its Playwright worker died as it launched Electron (Global Constraints: a rare e2e flake), stop the Electron it was launching and rerun that row alone with `-g '<its title>'` (for a control row, with `CONTROL=1` set). Each row's results are saved under its own key, so the rerun completes the file. This plan's replay measured, on Zack's PC with other lanes' builds and tests running (ms; n = 20 per row; gate < 50 ms at p95):
+Expected: `7 passed`, then `6 passed`. If a row fails after `0ms` because its Playwright worker died as it launched Electron (Global Constraints: a rare e2e flake), stop the Electron it was launching and rerun that row alone with `-g '<its title>'` (for a control row, with `CONTROL=1` set). Each row's results are saved under its own key, so the rerun completes the file. This plan's replay measured, on Zack's PC with other lanes running: the CPU was at a mean 31% and a max 53% during the run, and a mean 25% and a max 44% during the control (2 s samples). These numbers are logic validation under load, not qualification results: qualification is pending the quiet-window run (Z49). Times are in ms, n = 20 per row, and the gate is < 50 ms at p95.
 
-Oversized (Rendered, anchored at the paragraph after the 5 MiB fence): first screen p50 / p95 / max **15.7 / 20.0 / 20.2**; DOM walk: 162 of 162 items mounted, longest item text 32766 UTF-16 units, last item `<p>The paragraph after the fence.</p>`.
+Oversized (Rendered, anchored at the paragraph after the 5 MiB fence): first screen p50 / p95 / max **13.2 / 16.4 / 16.6**; DOM walk: 162 of 162 items mounted, longest item text 32766 UTF-16 units, last item `<p>The paragraph after the fence.</p>`.
 
 | Input (format index beside Raw) | Raw first screen with the index, p50 / p95 / max | Raw first screen alone (control) | Raw full line scan with the index (Z37) | Raw full line scan alone | Index still running at Raw's first screen | Cancel → stopped (core host), p50 / p95 / max | Live cancels |
 |---|---|---|---|---|---|---|---|
-| Markdown, 100 MiB of `[` (one line) | 18.4 / 26.4 / 36.0 | 19.5 / 24.8 / 25.0 | 36.1 / 41.3 / 47.1 | 30.8 / 56.4 / 57.4 | 20 of 20 | 0.1 / 0.6 / 1.0 | 20 of 20 |
-| Markdown, 100 MiB of `>` (one line) | 18.2 / 23.3 / 24.5 | 18.2 / 23.1 / 28.6 | 38.4 / 56.1 / 81.9 | 29.0 / 51.3 / 62.1 | 20 of 20 | 0.4 / 0.9 / 1.2 | 20 of 20 |
-| Markdown, 1M footnotes (27.8 MB) | 16.7 / 20.5 / 21.5 | 13.2 / 16.9 / 18.1 | 17.3 / 24.7 / 25.1 | 14.7 / 17.1 / 18.1 | 20 of 20 | 0.4 / 2.6 / 3.3 | 20 of 20 |
-| JSON, 100 MiB of `[` (one line) | 18.0 / 22.4 / 182.8 | 16.7 / 74.3 / 163.5 | 32.1 / 42.4 / 48.0 | 30.2 / 44.8 / 45.8 | 0 of 20 | — | 0 of 20 |
-| JSON, 84 MB flat array (one line) | 18.7 / 27.4 / 124.8 | 17.5 / 23.0 / 24.5 | 29.6 / 38.0 / 43.9 | 23.8 / 32.7 / 43.5 | 20 of 20 | 1.4 / 2.7 / 3.6 | 20 of 20 |
-| CSV, 200 MB unterminated quote | 17.4 / 22.9 / 171.3 | 16.5 / 26.4 / 28.3 | 155.0 / 166.4 / 195.9 | 146.7 / 164.6 / 183.2 | 20 of 20 | 0.4 / 1.5 / 1.9 | 20 of 20 |
+| Markdown, 100 MiB of `[` (one line) | 17.5 / 19.4 / 19.8 | 16.7 / 23.2 / 24.5 | 28.3 / 35.1 / 39.1 | 24.8 / 32.3 / 34.0 | 20 of 20 | 0.2 / 0.4 / 0.8 | 20 of 20 |
+| Markdown, 100 MiB of `>` (one line) | 16.5 / 19.0 / 19.1 | 16.9 / 18.1 / 18.4 | 26.4 / 32.2 / 32.8 | 23.7 / 31.9 / 36.1 | 20 of 20 | 0.1 / 0.3 / 0.4 | 20 of 20 |
+| Markdown, 1M footnotes (27.8 MB) | 14.5 / 17.2 / 18.9 | 13.7 / 16.0 / 20.8 | 15.3 / 17.7 / 18.9 | 14.2 / 15.4 / 16.1 | 20 of 20 | 0.5 / 2.3 / 3.2 | 20 of 20 |
+| JSON, 100 MiB of arrays nested 512 deep (one line) | 18.1 / 25.9 / 27.0 | 16.7 / 19.5 / 19.5 | 26.3 / 33.8 / 34.0 | 24.3 / 26.1 / 26.7 | 20 of 20 | 1.8 / 2.6 / 3.2 | 20 of 20 |
+| JSON, 84 MB flat array (one line) | 18.0 / 20.6 / 21.2 | 18.7 / 20.2 / 20.4 | 21.6 / 28.9 / 29.8 | 19.2 / 21.3 / 24.3 | 20 of 20 | 1.3 / 1.8 / 2.0 | 20 of 20 |
+| CSV, 200 MB unterminated quote | 17.0 / 19.3 / 19.8 | 17.0 / 18.2 / 18.6 | 140.8 / 148.4 / 149.7 | 138.0 / 150.1 / 150.8 | 20 of 20 | 0.3 / 0.8 / 1.2 | 20 of 20 |
 
-- **Oversized gate: passes.** The paragraph after the 5 MiB fence paints in p95 20.0 ms, and no mounted item holds more than 32,766 UTF-16 units (all 162 items mounted once).
-- **Cancel gate: passes,** max 3.6 ms over all 100 live cancels, timed in the core host. The 100 MiB JSON `[` finishes before any cancel (20 of 20: the scan stops at the depth cap), so its row is vacuous and the 84 MB array carries the JSON cancel.
-- **Raw's first-screen gate beside a running index: passes at p95 for all six inputs** (plan A's Z37 mark). With the format index running, p95 is 20.5–27.4 ms. Three of 120 samples went over 50 ms (182.8 ms on the JSON `[`, 171.3 ms on the CSV, 124.8 ms on the JSON array), and Raw alone did the same (163.5 and 74.3 ms on the JSON `[`, which puts that row's control p95 at 74.3 ms): this run took 5.8 minutes with other lanes loading the PC, against 2.8 minutes for an earlier run of this replay that had no sample over 50 ms with the index (p95 17.6–20.4 ms, max 29.0 ms). The format index beside Raw moves p50 by −1.1, 0.0, +1.3 and +1.2 ms on the four one-line files, in the table's order, and by +3.5 and +0.9 ms on the footnotes and the CSV. On the one-line files the mark lands on line 0's first piece before the full scan ends in 154 of 160 samples (the rest are those slow samples and two near-ties); the full scan takes p50 29.6–38.4 ms there, 17.3 ms on the footnotes and 155.0 ms on the 200 MB CSV.
+- **Oversized: logic validated; measured under load, not a qualification result; qualification pending (Z49).** Under this run's load the paragraph after the 5 MiB fence painted in p95 16.4 ms, and no mounted item held more than 32,766 UTF-16 units (all 162 items mounted once).
+- **Cancel: logic validated; measured under load, not a qualification result; qualification pending (Z49).** Max 3.2 ms over all 120 live cancels, timed in the core host. Every row, the nested JSON included, was still indexing at Raw's first screen in 20 of 20 runs, so none is vacuous (MINOR 14).
+- **Raw's first screen beside a running index: logic validated; measured under load, not a qualification result; qualification pending (Z49).** On plan A's Z37 mark, p95 with the format index running was 17.2–25.9 ms on all six inputs, and none of the 120 samples, or of Raw alone's 120, went over 50 ms. The format index beside Raw moves p50 by +0.8, −0.4, +1.4 and −0.7 ms on the four one-line files, in the table's order, and by +0.8 and 0.0 ms on the footnotes and the CSV. On the one-line files the mark lands on line 0's first piece before the full scan ends in 151 of 160 samples (79 of 80 with the index, 72 of 80 alone); the full scan takes p50 21.6–28.3 ms there, 15.3 ms on the footnotes and 140.8 ms on the 200 MB CSV. Round 2's run of this step, under heavier load and with the vacuous JSON `[` row, had 3 of 120 samples over 50 ms beside the index (182.8, 171.3 and 124.8 ms) and 2 of Raw alone's (163.5 and 74.3 ms).
 
 - [ ] **Step 3: Read your own work (rule 8), then commit**
 
@@ -15305,15 +15945,15 @@ git commit -m "spike(c): oversized, hostile-input and cancel measurements in the
 - [ ] **Step 1: Run everything**
 
 Run (`spikes/core`): `cargo test -p spike-core`
-Expected: `test result: ok. 122 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out` (C0–C4's 120 with 6 ignored, plus `a_shared_store_verifies_against_the_first_stores_hashes`, `no_output_can_navigate` and the ignored `write_hostile_corpus`), then `json_spans`: `1 passed`.
+Expected: `test result: ok. 126 passed; 0 failed; 8 ignored; 0 measured; 0 filtered out` (C0–C4's 124 with 7 ignored, plus `a_shared_store_verifies_against_the_first_stores_hashes`, `no_output_can_navigate` and the ignored `write_hostile_corpus`), then `json_spans`: `1 passed`.
 Run (`spikes/core`): `cargo test -p fixtures-gen` → `5 passed`.
-Run (`spikes/core/spike-node`): `node --test` → `ℹ pass 7`, `ℹ fail 0`.
+Run (`spikes/core/spike-node`): `node --test` → `ℹ pass 8`, `ℹ fail 0` (plan C's `beyond-4gib` test and Task C5b1's 7).
 Run (`spikes/app`): `npx vitest run` → `Test Files  5 passed (5)`, `Tests  24 passed (24)` (plan A's 11, C1a's 3, C5a's 10; Tasks C5b1–C5b5 add no unit test).
 Run (`spikes/app`): `npm run build`, then `npm run e2e` → `21 passed` (plan A's 3, C5a's 8, `rendered` 7, `md-effects` 3). The `md-effects` tests need Task C5b3's corpus: if `spikes/.fixtures/md-hostile/` is gone, rerun Step 3 of Task C5b3 first.
 
 - [ ] **Step 2: Clean up**
 
-Delete `spikes/.fixtures/` (profiles, effects logs and NetLogs, the corpus, the Rendered, oversized and hostile fixtures: about 750 MB; gitignored).
+Delete `spikes/.fixtures/` (profiles, effects logs and NetLogs, the corpus, the Rendered, oversized and hostile fixtures, and Task C3c's three smaller CSV files: 1.1 GB by `du -sh` in this plan's replay; gitignored).
 
 - [ ] **Step 3: Spec §13.1 Spike C coverage**
 
@@ -15324,11 +15964,12 @@ Delete `spikes/.fixtures/` (profiles, effects logs and NetLogs, the corpus, the 
 | Correct offsets beyond 4 GiB | C1d (core and napi `beyond-4gib.test.js`), C5b1 (ceiling) | exact at 2^32 ± and 5 GiB; JS numbers exact below 2^53, `Source.open` refuses larger files |
 | 1,000 append/truncate/rename/delete cycles on Windows: zero blocked operations, crashes, stale-span copies accepted | C0 (with round 1's rename-away cycle); C5b2 (app: a copy refused after a change, and for generation 1 after reload) | 0 / 0 / 0 (C0); refused, refused (C5b2) |
 | Mutation race: an in-place same-size write between the check and the read caught in 1,000 of 1,000 runs | C0; C5b1 (`open_shared`: display and copy verify against one hash table) | 1,000 of 1,000 |
-| Oversized blocks: a 5 MB fence then a one-line paragraph renders the paragraph within the first-screen gate; no mounted item over 64 KiB | C4e (core), **C5b4 (app)** | app p95 20.0 ms (n = 20), 162 of 162 items mounted, longest 32766 units |
-| Hostile inputs cancel within 50 ms while Raw keeps its first-screen gate | C2a, C3a, C4e (core cancel), C5a2 (YAML worker), **C5b4 (app)** | app cancel max 3.6 ms over 100 live cancels (100 MiB JSON `[` vacuous: done in ms); Raw p95 20.5–27.4 ms for all 6 inputs on plan A's Z37 first-screen mark (3 of 120 samples over 50 ms under load, as Raw alone), full line scan recorded separately (Z37), **see Task C5b4** |
+| Oversized blocks: a 5 MB fence then a one-line paragraph renders the paragraph within the first-screen gate; no mounted item over 64 KiB | C4e (core), **C5b4 (app)** | logic validated; measured under load (CPU mean 31%, max 53%), not a qualification result; qualification pending (Z49): app p95 16.4 ms (n = 20), 162 of 162 items mounted, longest 32766 units |
+| Hostile inputs cancel within 50 ms while Raw keeps its first-screen gate | C2a, C3a, C4e (core cancel), C5a2 (YAML worker), **C5b4 (app)** | logic validated; measured under load (CPU mean 31%, max 53%), not a qualification result; qualification pending (Z49): app cancel max 3.2 ms over 120 live cancels, every row still indexing at Raw's first screen in 20 of 20 runs; Raw p95 17.2–25.9 ms for all 6 inputs on plan A's Z37 first-screen mark, no sample over 50 ms; full line scan recorded separately (Z37), **see Task C5b4** |
 | (ruling Z30) Giant Markdown: Raw opens while Rendered indexes, with progress and cancel | **C5b1** (napi: ≥ 2 progress events, bytes rising, at most 10 Hz, Markdown and CSV; cancel), **C5b2** (the lens's `role="status"` line), C5b4 (Raw beside a running index) | md 59 MB and CSV 120 MB both report progress; the 59 MB file indexes in 0.4–0.7 s (release addon; 0.42 s in this plan's replay), about 7–13 s per GiB, not measured on a 1 GiB file; cancel ≤ 50 ms (C5b1, C5b4); JSON has no progress (C2a's scanner publishes nothing until it returns) |
-| (ruling Z34) Over the memory budget, Rendered stops, says why, and Raw stays | **C5b2** (e2e: `maxBlocks` 2) | the reason plus "Raw stays available." in a `role="status"` line, no item left on screen, Raw pages to line 9,999 of the same file |
+| (Z34/Z47) The bounded stop and Raw fallback (mechanism only; aggregate enforcement not implemented, M1) | **C5b2** (e2e: `maxBlocks` 2) | the reason plus "Raw stays available." in a `role="status"` line, no item left on screen, Raw pages to line 9,999 of the same file |
 | Hostile Markdown, Mermaid and KaTeX fixtures produce zero network requests, process launches or file accesses | C5a5 (Mermaid, KaTeX, YAML), **C5b3 (Markdown in Rendered: 500 files, 80 link clicks)** | 0 violations; each of the 5 detectors falsified in both settings |
 | (spec §7.1) The hostile-fixture gate confirms the frame can't make requests or navigate the app | Mermaid frames: C5a4, C5a5 (`sandbox=""`); Rendered links: C5b2 (click intercept), C5b3 (test) | diagram links dead; 0 of 80 link clicks reach `will-navigate` |
-| Outputs: the YAML worker's throughput (`yaml.treeMaxBytes`) and the scanner decision | C5a6, C2c | 8 MiB; keep the hand-written scanner |
-| **Not covered** | — | No Spike C gate is Mac-marked, and nothing here ran on the Mac. The app-level byte-map run doesn't include malformed UTF-8, Windows-1252 or UTF-16BE files (core only). Raw's first-screen gate beside an index is measured on 100–200 MB files, not multi-GB ones, and on plan A's Z37 first-screen mark. The aggregate memory budget (25% of RAM across open documents) isn't computed: `maxBlocks` is passed explicitly, and no budget stop of its own is surfaced. JSON index jobs report no progress. |
+| Outputs: the YAML worker's throughput (`yaml.treeMaxBytes`) and the scanner decision | C5a6, C2c | 8 MiB (Z36), from lane C5a's run as context: this plan's measured run (C5a6 Step 2) is pending (Z41, Z49); keep the hand-written scanner |
+| (Z46) CSV record index, warm: PC ≥ 0.9 GB/s, Mac ≥ 0.45 GB/s, p50 of 30 runs on 100 MiB and on 1 GiB | C3c | logic validated; measured under load (CPU mean 14%, max 33%), not a qualification result: 1.04 GB/s on 100 MiB, **0.89 GB/s on 1 GiB (under the gate)**; qualification pending (Z49), Mac pending (Z50) |
+| **Not covered** | — | No timing in this plan is a qualification result (Z49): every one ran under load, and the qualification runs are pending the quiet window. The CSV record-index throughput has a Mac gate (Z46, ≥ 0.45 GB/s): pending the Mac batch (Z50), with the same revision, lockfile and fixture definitions. Nothing here ran on the Mac. Inline `data:` images, a v1 requirement (Z43), aren't validated: the spike drops them. The app-level byte-map run doesn't include malformed UTF-8, Windows-1252 or UTF-16BE files (core only). Raw's first-screen gate beside an index is measured on 100–200 MB files, not multi-GB ones, and on plan A's Z37 first-screen mark. Z34's aggregate accounting and enforcement (25% of RAM across open documents) aren't implemented (an M1 exit requirement, Z47): every gate run passes an explicit cap, and no budget stop of its own is surfaced. JSON index jobs report no progress. |

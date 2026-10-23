@@ -1,3 +1,7 @@
+> **Status: FROZEN, NOT CLOSED (2026-10-22, spec Z53).** This is the final text of plan B (scratch `PLAN-B.md`, sha256 `b8bf31ea618589cb…`; the text below this note is byte-identical to it). Its code is on branch `spike/b` (`d83508b`), tag `phase0-snap2/spike-b`. The last executed review (round 3) was APPROVE-WITH-FIXES, and its text fixes plus Z51/Z52 are folded in. Per Z53 there's no further review round.
+> - **Open:** the Z52 far-jump G9 case fails today with accessibility on (55–188 ms). Open-then-scroll with accessibility off (up to 73 ms) is measured, not asserted. G4 has unexplained exits on record. Real screen-reader work is parked (Z39).
+> - **Evidence:** `.evidence/phase0/snap2/MANIFEST.md`. Phase 0 isn't qualified.
+
 # Typose Phase 0 · Spike B Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -20,36 +24,76 @@
 - **Added here:** react 19.3.1, react-dom 19.3.1, react-aria-components 1.22.1, react-aria 3.53.1, @vitejs/plugin-react 6.1.2, axe-core 4.14.0, @axe-core/playwright 4.14.0 (all Task B3a); serde_json 1 as a `fixtures-gen` dev-dependency (Task B2a).
 - **Accessibility probes:** Chromium's DevTools protocol (`Accessibility`, `DOM`, `Runtime`) through Playwright's `newCDPSession`, and Windows UI Automation through a PowerShell script (`UIAutomationClient`, .NET Framework 4.8).
 
-**Spec:** `docs/superpowers/specs/2026-10-20-typose-tech-design.md` (Draft 2): §5.1–5.3, §6, §13.1 Spike B. The design brief, revision 4, is `docs/superpowers/specs/2026-10-20-typose-design-brief.md`: §3.5, §4.5, §5.2–5.4, §6.5–6.6, §7.2, §9.
+**Spec:** `docs/superpowers/specs/2026-10-20-typose-tech-design.md` (Draft 4): §0.3 (Z31 to Z35; Z35 is superseded), §0.4 (Z39, Z40, Z51, Z52), §5.1–5.3, §6, §10.2, §13.1 Spike B. The design brief, revision 6, is `docs/superpowers/specs/2026-10-20-typose-design-brief.md`: §0.4, §0.5, §3.5, §4.5, §5.2–5.4, §6.5–6.6, §7.2, §7.4, §9.
 
 **Phase 0 plan set:**
-1. **Base harness + Spike A:** `2026-10-20-typose-phase0-base-and-spike-a.md`. Its end state (Tasks 1–10) is this plan's starting state.
+1. **Base harness + Spike A:** `2026-10-20-typose-phase0-base-and-spike-a.md`, closed at sha256 `982821e50781010f…` (commit `66da59d`). Its end state (Tasks 1–10) is this plan's starting state.
 2. **Spike C:** `2026-10-20-typose-phase0-spike-c.md`, branched from `spike/a`.
 3. **This plan:** Spike B, branched from `spike/a`.
 
 **Plan A's Task 12** (the parallel indexer) is conditional, and this plan assumes it did not run. If Task 12 ran, add 1 to every `spike-core` test count below.
 
-**Gates** (spec §13.1 Spike B), with the ids the tasks use:
+**Gates** (spec §13.1 Spike B), with the ids the tasks use. Before launch they are automated: their real-reader parts are parked (spec Z39), and this plan claims only what the automated gates show, not screen-reader support.
 
 | Id | Gate | Where |
 |---|---|---|
-| G1 | 100% completion of the 20-task screen-reader script | Task B4 |
-| G2 | Row and column position announced with totals | Tasks B1b, B1c (DOM, CDP, UIA); Task B4 (heard); continuous browse-mode reading of the Grid and Rows is not a requirement (spec Z33) |
-| G3 | Ctrl+End reaches the true last row | Tasks B1b, B1c; Task B4 |
+| G1 | 100% completion of the 20-task screen-reader script | **Parked (spec Z39):** Task B4 is not run before launch |
+| G2 | Row and column position announced with totals | Tasks B1b, B1c: the `aria-*` positions and totals in the DOM, CDP and UIA trees; the announcement itself is parked (spec Z39); continuous browse-mode reading of the Grid and Rows is not a requirement (spec Z33) |
+| G3 | Ctrl+End reaches the true last row | Tasks B1b, B1c |
 | G4 | Zero skipped or duplicated positions across 1,000 rows × 100 columns | Task B1d |
-| G5 | 2,000 consecutive blocks or turns read forward and backward, ≥ 4 window recenters each way, the element under the cursor never unmounted, no position lost | Task B2e; Task B4 |
-| G6 | Heading jumps, through the Outline and the heading key, land on headings outside the mounted window | Task B2e; Task B4 |
+| G5 | 2,000 consecutive blocks or turns read forward and backward, ≥ 4 window recenters each way, the element under the cursor never unmounted, no position lost | Task B2e, with a simulated reading cursor; a real reader's reading is parked (spec Z39) |
+| G6 | Heading jumps, through the Outline and the heading key, land on headings outside the mounted window | Task B2e: the Outline, and a simulated heading key over the AX tree; a real reader's heading key is parked (spec Z39) |
 | G7 | 100 peek open/close cycles with zero focus loss | Task B3c |
-| G8 | Nothing unreachable at 200% zoom | Task B3c (chrome at 1280×800 and 720×480; Grid, Rows, Rendered and Transcript at 1280×800); Task B4 (S20) |
-| G9 | With accessibility on, ≤ 1% long frames during 10 s of auto-scroll | Tasks B1d, B2e |
+| G8 | Nothing unreachable at 200% zoom | Task B3c (chrome at 1280×800 and 720×480; Rendered and Transcript at 1280×800; Grid and Rows at 1280×800, at their first focus stop: each is one tab stop, and moving through the Grid at 200% is the parked S20 C1) |
+| G9 | With accessibility on, ≤ 1% long frames during 10 s of auto-scroll; with accessibility on from launch, no stall over 50 ms on a far jump (spec Z52) | Tasks B1d, B2e; the far-jump case is Task B2e's, and it fails today (Checkpoint item 5) |
 
 **Validated:**
 - Each part was built and run in its own scratch lane on Zack's PC: every unit, e2e and perf test and both mutation checks of Task B3c. The Grid/Rows and Rendered/Transcript lanes also rebuilt their tasks from their text alone.
 - A review of the merged plan found one blocker, four major and seven minor defects, and four nits. A fix lane fixed all but one nit (left as it is, by ruling), in code and in this text, and showed each new or changed check failing first: on the old code, or on a mutation that breaks what the check guards. Those mutations are the fix lane's; the plan's own are Task B3c's two.
-- The fixed plan was then replayed literally in a fresh tree, on plan A's Tasks 1–10 applied from plan A's own text, as amended for Z37 (Task 12 not run). A script applied each step below exactly as written, in order. Every command a step names was run, and every `git add` left `git status` clean apart from files a later task stages and the results file that later e2e runs rewrite (Task B1d Step 4).
-- Every expected result below is one the replay printed, except numbers quoted as "the scratch run gave". The perf gates (Tasks B1d, B2e) and Task B3c's gates passed in the replay too, and Task B3c's two mutations failed their gates as stated. Two needed more than one run on the shared PC: Task B1d's G4 with accessibility on passed on its rerun after the app exited mid-run (Global Constraints), and Task B2e passed in the last of its three full runs; the other two, and one rerun of the Transcript's G9 alone, failed only G9's apply-time bound (Checkpoint item 6).
+- The fixed plan was then replayed literally in a fresh tree. In that replay Task B1d's G4 with accessibility on passed on its rerun after an unexplained mid-run exit, recorded in `REPLAY.md`, before the diagnostics existed, and the Task B2e runs on the loaded PC failed only G9's apply-time bound on the Transcript, which Task B2e Step 2 rules out by requiring a quiet PC.
+- A second review approved that plan with fixes. Round 3 folds them in, with Zack's rulings since (spec Z39, Z40):
+  - Task B1d's G4 runner records an exit's diagnostics, and an exit counts as a G4 failure;
+  - G9 gains spec §10.2's 50 ms stall check, and its timing bounds are judged on a quiet PC;
+  - G4's in-view check sees the sticky header row and row-number column;
+  - a test pins the header's `#`;
+  - Space no longer pages the Grid.
+
+  The review's three findings on the screen-reader script are parked with it, not fixed (Checkpoint items, Parked). Each new check was shown to fail first:
+  - the Space test on the old key handler, and on three narrower mutations;
+  - the `#` test on a build that numbers the header row too;
+  - G4 on a reveal that leaves cells under the row-number column;
+  - the stall check on an injected 300 ms stall.
+
+  G4's diagnostics recorded a window closed 30 s into a shorter snake: the close, the error line, the quit sequence and the exit code.
+- The plan as it now reads was then replayed literally in a fresh tree. The base was plan A's Tasks 1–10, applied from plan A's fix-round text (`f55dac02…`), with Task 12 not run:
+  - plan A's closed text (`982821e5…`) differs from that only in Task 10's runner, Task 11's report and its Notes, which this plan neither uses nor anchors;
+  - the base restores the preserved lockfiles (Global Constraints): its tree equals that of tag `phase0-snap1/spike-a`.
+
+  Task B4 was skipped, as an executor skips it. Every command a step names was run. Every `git add` left `git status` clean, apart from files a later task stages and the results file that later e2e runs rewrite (Task B1d Step 4).
+- Every expected result below is one that replay printed, except numbers quoted as "the scratch run gave" and these, on a PC shared with other lanes (CPU sampled every 10 s):
+  - Task B1d's G9 printed `18 passed` on its second full run. In the first, one run got 131 wheel events and failed the starvation guard, which makes it invalid by design.
+  - Task B1d's G4 printed `3 passed` on its first run, armed, with no exit.
+  - Task B2e first printed `9 passed` and `1 failed`: the Transcript's G9 failed the new stall check at 60.7 ms, and two reruns failed it at 60.6 ms. A trace showed the harness causing it: re-enabling accessibility in place (Checkpoint item 4).
+- Round 3's follow-up then changed two tests:
+  - G9's stress runs each launch fresh;
+  - axe's `heading-order` blocks on the app's own headings, and is exempt only inside `main#doc`.
+
+  Each was shown to fail first: the old G9 test fails its stall check, and the old axe test lets an out-of-order heading pass on the chrome page and outside `main#doc`. The changed tasks (B2e to B3c) were replayed literally again, from Task B2d's commit:
+  - Task B2e printed `10 passed`, at 25% mean CPU. With each stress run in a fresh launch, the Transcript's stress runs peaked at 18.3 ms (apply 10.0 ms), and the Document's at 24.3 ms (apply 11.6 ms). The stall check still failed on the injected 300 ms stall (291.3 ms).
+  - Task B3c's G7 mutation printed `Received: 25` once, and `24` on the rerun (Step 1 allows both).
+  - One `npm run e2e` lost a test to the worker-crash flake (Global Constraints), and printed `37 passed` on the rerun.
+- A fix check of round 3 approved it with fixes, all text. It found that any replacement of the whole accessibility window stalls, not only the toggle (Checkpoint item 5). It also corrected how the old G4 exits read (item 1) and the round-2 stalls (item 4), and listed three more parked questions.
+- Zack then decided P5 and P6 (spec Z51, Z52), which changed code:
+  - Rows follows the Grid's key model (Task B1c);
+  - G9 gains a far-jump case with accessibility on from launch (Task B2e).
+
+  The new Rows test was shown to fail first: on the old key handler, and on three narrower mutations (Chromium's own Space scroll, no IME guard, no child-control guard). The jump case fails today, as Z52 expects, and its control passes. The changed tasks (B1c to B3c) were replayed literally again, from Task B1b's commit, on a shared PC at 29% mean CPU (88% at most):
+  - every step printed what the plan expects, with no stop and no rerun;
+  - Task B1d's G4 printed `3 passed`, armed, with no exit;
+  - Task B2e printed `10 passed` and `2 failed`: the two jump tests, each on `accessibility on` (Step 2 has the values). The stall check still failed on the injected 300 ms stall (297.2 ms);
+  - Task B3c's `npm run e2e` printed `38 passed`.
 - Every code block below is byte-identical to the file as its task committed it, or reproduces that file when applied as its step states to the file before.
-- Not part of the replay: the screen-reader tasks themselves (Task B4, Steps 4–6) and the manual "look at it" steps. Task B4's Step 3 checks were run.
+- Not part of any replay: Task B4, parked (spec Z39; rounds 1 and 2 ran its Step 3 checks, round 3 skips it as an executor does), and the manual "look at it" steps.
 
 Assembling and replaying the lanes found these defects in their text, all fixed below:
 1. Each lane rewrote the `pages` list of `electron.vite.config.ts` with its own pages only, and Task B3a replaced the whole file with `['index', 'chrome']`. Every list now carries every earlier page.
@@ -65,29 +109,79 @@ Assembling and replaying the lanes found these defects in their text, all fixed 
 - **Branch:** `spike/b` is cut from `spike/a` (Task B0, Step 1). Commit on it after each task.
 - **Staging:** stage explicit paths only and never use `git add -A`. Never stage research files: `astra-research.md`, `fable-research.md`, `docs/research/`.
 - **Rule 8 (standing procedure):** whoever writes a file reads the final on-disk version in full before calling the task done.
-- **Private profiles:** every scripted launch from Spike B code passes its own `--user-data-dir`. Every spike runs as `spike-app`, and Chromium persists per-host page zoom in the shared `%APPDATA%\spike-app` profile: a 200% zoom left there by any run halves wheel steps and rows per screen in every later one. The Grid/Rows and Rendered/Transcript harnesses also refuse to measure at any zoom but 100%; the chrome harness starts every launch in a fresh profile and deletes it when the app closes. Plan A's own three e2e tests (`roundtrip`, `open`, `shell`) still launch in the shared profile; they neither read nor set the zoom. So do the manual launches (`npx electron .`) of the "look at it" steps and of Task B4's tasks S01–S19. Task B4's S20 opens at 200% with `TYPOSE_ZOOM=2` in a fresh profile, because a zoom persisted in a profile wins over the knob (Task B0).
+- **Private profiles:** every scripted launch from Spike B code passes its own `--user-data-dir`. Every spike runs as `spike-app`, and Chromium persists per-host page zoom in the shared `%APPDATA%\spike-app` profile: a 200% zoom left there by any run halves wheel steps and rows per screen in every later one. The Grid/Rows and Rendered/Transcript harnesses also refuse to measure at any zoom but 100%; the chrome harness starts every launch in a fresh profile and deletes it when the app closes. Plan A's own three e2e tests (`roundtrip`, `open`, `shell`) still launch in the shared profile; they neither read nor set the zoom. So do the manual launches (`npx electron .`) of the "look at it" steps, and would those of the parked Task B4's S01–S19 (spec Z39); its S20 opens at 200% with `TYPOSE_ZOOM=2` in a fresh profile, because a zoom persisted in a profile wins over the knob (Task B0).
 - **No inherited `TYPOSE_*`:** every harness drops `TYPOSE_*` variables from the environment it launches with, then sets its own.
 - **Gate thresholds:** as in plan A. On Zack's PC they are half the budget, unless marked **Mac**, which uses the full budget (spec Z29, §10.2). A long frame is an rAF interval over 20 ms (plan A's `frameStats`).
 - **Measurements on a shared machine:** the numbers quoted as "the scratch run gave" come from a PC busy with other work. They are what to expect, not pass criteria. The pass criteria are the gates.
-- **Screen readers:** no automated check reaches what NVDA (IAccessible2) announces. The automated gates read the DOM, Chromium's accessibility tree (CDP) and Windows UI Automation (what Narrator consumes). Task B4 is where a person listens.
-- **The Grid and Rows have no wide reading window, per spec §5.3 and §6.2 (Z33).** The wide window is for Rendered and Transcript only. The Grid and Rows keep one viewport of overscan each way in every mode (about 94 rows mounted at the default window) and move by the page's own keys, which load the target before moving focus. Every data cell must be reachable that way; continuous "read all" across the Grid and Rows is not a v1 requirement. Browse-mode table reading (say-all, NVDA's Ctrl+Alt+arrows) runs out of mounted rows within about a screen and a half, so Task B4 tests them in focus mode only.
+- **Screen readers:** no automated check reaches what NVDA (IAccessible2) announces. The automated gates read the DOM, Chromium's accessibility tree (CDP) and Windows UI Automation (what Narrator consumes). No person listens before launch: screen-reader validation is parked until after launch (spec Z39), and Task B4 with it. So this plan claims what the automated gates show, not screen-reader support.
+- **The Grid and Rows have no wide reading window, per spec §5.3 and §6.2 (Z33).** The wide window is for Rendered and Transcript only. The Grid and Rows keep one viewport of overscan each way in every mode (about 94 rows mounted at the default window) and move by the page's own keys, which load the target before moving focus. Every data cell must be reachable that way; continuous "read all" across the Grid and Rows is not a v1 requirement. Browse-mode table reading (say-all, NVDA's Ctrl+Alt+arrows) runs out of mounted rows within about a screen and a half, so the parked Task B4 tests them in focus mode only.
 - **Input starvation is invisible to the frame metric.** A long frame is the page's own work. A run whose input stalls before it reaches the page (lane B1 once saw 48 wheel events in 10 s, unreproduced) has an idle page and clean frames. Task B1d's G9 requires at least 200 wheel events per run; Task B2e's auto-scroll has no input to starve.
 - **A rare stall in accessibility-mode e2e tests.** Under contention, lane B2 saw `a11y-mode` e2e test 2 stall for minutes, twice in about 12 full runs; once it hung in `app.close()` (main alive, no children). A probe measured close at 0.12–13.1 s with accessibility on (n=6) and 0.07–3.8 s off (n=6). Unresolved. If a run hangs there, stop that test's Electron tree and rerun.
-- **G9 measures Electron's accessibility support, not a screen reader.** "Accessibility on" is `app.setAccessibilitySupportEnabled(true)`: Chromium builds and serializes the whole accessibility tree, as it does for a screen reader. But no reader runs, so its own cost (NVDA's IA2 queries and virtual buffer, Narrator's UIA queries) is not in the number. Spec §13.1 heads the gates "NVDA + Narrator on the PC"; the plan has no frame measurement with a reader running. Checkpoint item.
-- **A UIA client reading the Grid during fast key input coincided with app exits.** With UIA read every 100 snake rows, G4 with accessibility on exited mid-run in 2 of 4 runs (`Target page, context or browser has been closed`; no crash dump) and the runs that finished took 610 s and 852 s against 364–435 s without. Narrator is such a client. Unexplained; a Narrator-on G4 run is a checkpoint item. The round-2 replay then saw the same exit in 2 of its 5 accessibility-on G4 runs with UIA read only at the end of the run (1.3 and 1.9 min in, at a burst wait; no Application Error or WER event), and each rerun passed. So the test's own mid-run reads don't explain the exits; another UIA client on the shared machine was not ruled out. If G4 exits like this, rerun it.
+- **G9 measures Electron's accessibility support, not a screen reader.** "Accessibility on" is `app.setAccessibilitySupportEnabled(true)`: Chromium builds and serializes the whole accessibility tree, as it does for a screen reader. But no reader runs, so its own cost (NVDA's IA2 queries and virtual buffer, Narrator's UIA queries) is not in the number. A frame measurement with a reader running is parked with the rest of screen-reader validation (spec Z39; Checkpoint items, Parked).
+- **A UIA client reading the Grid during fast key input coincided with app exits.** With UIA read every 100 snake rows, G4 with accessibility on exited mid-run in 2 of 4 runs (`Target page, context or browser has been closed`; unarmed, so no dump could be written) and the runs that finished took 610 s and 852 s against 364–435 s without. Narrator is such a client. Unexplained; a Narrator-on G4 run is parked (spec Z39). The round-2 replay then saw the same exit in 2 of its 5 accessibility-on G4 runs with UIA read only at the end of the run (1.3 and 1.9 min in, at a burst wait; no Application Error or WER event), and each rerun passed. So the test's own mid-run reads don't explain the exits; another UIA client on the shared machine was not ruled out. Such an exit is a G4 failure, not noise: keep `spikes/.fixtures/g4-diag-<key>.log` (exit code, Electron log, child and render process exits, Crashpad reports under `.fixtures/b1-userdata/Crashpad/reports`) and the Application event log for the minutes around it (PowerShell: `Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 1000, 1001, 1002, 1005; StartTime = (Get-Date).AddMinutes(-30) }`), add them to Checkpoint item 1, then rerun to finish the measurement. A passing rerun doesn't cancel the failure: it is investigated before G4 closes. Run G4 with no desktop automation or other UIA client on the session. It is not the worker crash (the worker goes on to the next test) and not a timeout; ten armed runs in the round-2 review did not reproduce it.
 - **A rare e2e flake:** 2 of round 1's 15 replayed runs of `npm run e2e` and 1 of round 2's 22 lost one test to `Error: worker process exited unexpectedly (code=3221226505, signal=null)` as the test started; round 2 also saw it once in a single-file run. Playwright's worker process died with a fail-fast exit, and left that test's Electron window running (and, for a chrome test, its `typose-chrome-profile-*` in `TEMP`). The cause wasn't found. Close the stray window and rerun the suite.
 - **Commands:** they work in PowerShell and in Git Bash unless a step gives both forms. Run them from the directory each step names.
+- **Lockfiles:** Replays restore the preserved lockfiles (tag `phase0-snap1/spike-a`, spec Z41); a fresh resolve on 2026-10-22 picked napi 3.15.0.
 - **Fixtures** go in `spikes/.fixtures/` (gitignored): plan A's `1g.jsonl` and `10g.jsonl`, and this plan's Grid, document and transcript fixtures (Tasks B1a, B2a), about 270 MB.
 
 ## Checkpoint items
 
 What this plan leaves open for the Phase 0 checkpoint:
-1. **A Narrator-on G4 run.** With a UIA client reading the tree every 100 rows, G4 with accessibility on exited mid-run in 2 of 4 runs and ran 1.5–2× slower (Global Constraints). Task B1d reads UIA only at the end of a run, and the round-2 replay still saw such exits in 2 of 5 runs, so the cause is open.
-2. **Task B4's speech-log check on a real NVDA log.** It was validated on synthetic logs built from the fixtures, not on a real one. It relies on NVDA's Speech viewer keeping the text's case and punctuation (`(block 5508)`); if the viewer spells symbols out, heading numbers are missed and show as breaks: a false fail, never a false pass.
-3. **A frame measurement with a screen reader running.** G9 measures Electron's accessibility support, not a reader's own cost (Global Constraints).
-4. **Tab can outrun the window.** At 200%, with no pause between presses, Tab from the third Transcript article wrapped to the first: the normal window mounts about three tall turns and the next one's fetch hadn't landed. Task B3c's 200% checks Tab at a person's pace, so they pass.
-5. **React Aria's bundle,** about 1 MB minified (Task B3a): a cold-start budget question (spec §10), not measured here.
-6. **G9's apply-time bound on a busy PC.** Task B2e requires every recenter in the stress runs to apply in under 16 ms with accessibility on. The fix lane measured 9.9 ms on the Transcript. The round-2 replay, with other lanes loading the PC, failed it in 3 of its 4 runs of the Transcript's G9 (18.1, 23.5 and 24.1 ms) and passed in the last (11.1 ms); the Document stayed at 7.2–12.8 ms. Decide whether the bound holds on a shared PC or is measured on a quiet one.
+1. **G4 with accessibility on exited mid-run, unexplained.** Four exits are on record, each `Target page, context or browser has been closed` at a burst wait, 1.3 to 2.2 min in: 2 of 4 runs with UIA read every 100 rows, and 2 of the round-2 replay's 5 runs with UIA read only at the end. Each rerun passed. Each exit is a G4 failure that the passing rerun doesn't cancel (Global Constraints), and G4 doesn't close until it is investigated. Ten armed runs (round-2 review: full length, 10× the CDP sampling, and an external UIA client reading the window every second) did not reproduce it; the four exits on record read 'closed' and left no WER event. That doesn't rule out a crash: an unarmed main-process crash reads the same and leaves no event (round-3 fix check). Armed, the diagnostics tell a window close, a renderer crash and a main-process crash apart. The round-3 fix check injected each one:
+   - a window close logged `window close` and the shell's exit code 0;
+   - a renderer crash logged `render-process-gone` and `Target crashed`;
+   - a main-process crash logged exit code 3221225477, main gone, and a Crashpad report.
+
+   Round 3's replay ran G4 armed: 3 of 3 runs passed, with no exit, at 18% mean CPU (42% at most) and no Crashpad report.
+2. **Tab can outrun the window.** At 200%, with no pause between presses, Tab from the third Transcript article wrapped to the first: the normal window mounts about three tall turns and the next one's fetch hadn't landed. Task B3c's 200% checks Tab at a person's pace, so they pass.
+3. **React Aria's bundle,** about 1 MB minified (Task B3a): a cold-start budget question (spec §10), not measured here.
+4. **G9's timing checks are judged on a quiet PC** (Task B2e Step 2; spec Z49).
+   - Loaded runs failed the apply-time bound on the Transcript only (17.9 to 24.1 ms). Load is the suspected cause, not a proven one: the quiet-PC runs decide. The frame each recenter landed in was never long (6 to 18 ms rAF gaps).
+   - Round 2's 42 to 134 ms stalls were in G9 tests that re-enabled accessibility in place (below); load may have lengthened them.
+   - **The 60.6 ms stall that round 3 found was the harness, not recenter cost.** At low load, round 3's replay and two reruns of the Transcript's G9 stalled 60.6 to 60.7 ms, every time, in the second stress run with accessibility on. That run began right after the test re-enabled accessibility in place and put the view back at the top.
+   - A trace of that run (Electron's `contentTracing`) shows one 78.3 ms task 0.14 s into it, almost all accessibility-tree serialization:
+     - `SerializeLifecycleStage` 49.4 ms;
+     - `RenderAccessibilityImpl::SendPendingAccessibilityEvents` 17.9 ms;
+     - `ProcessDeferredUpdatesLifecycleStage` 9.5 ms.
+   - In fresh launches with accessibility on from the start, the same stress run never stalled while scrolling continuously: its longest gap was 18.2 to 24.4 ms in 3 launches, and 30.4 ms for a second run in the same launch.
+   - The recenters themselves take 25 to 30 ms frames in every trace, also mostly serialization (15 to 18 ms of `SerializeLifecycleStage`).
+   - So each stress run now gets a fresh launch (Task B2e Step 1). In round 3's follow-up replay, at 25% mean CPU, both surfaces passed: the Transcript's stress runs peaked at 18.3 ms, and the Document's at 24.3 ms. The failing runs are kept in `REPLAY.md` as evidence. The quiet-PC qualification is still pending (spec Z49).
+5. **Far jumps stall with accessibility on, so G9's jump case fails today (spec Z52: a Phase 0 finding).** A far jump replaces the whole window: a scrollbar jump, an Outline jump, or open-then-scroll. With accessibility on, the renderer then serializes the whole 500-item window at once. Z52 puts far jumps under spec §10.2's "no stall > 50ms", so Task B2e has a jump case per surface: with accessibility on from launch, neither the open run nor the jump run may stall over 50 ms. It fails on both surfaces. The bound isn't loosened, and no product code changes to chase it. Bringing far jumps under budget, for example by replacing the window in smaller pieces, is milestone work (spec Z52).
+   - Five runs of the jump case (four in a sandbox, then the replay's), on a shared PC at 29 to 34% mean CPU. With accessibility on, the longest gap per run was:
+     - Transcript: 97.1 to 158.0 ms in the open run, and 103.1 to 188.2 ms in the jump run;
+     - Document: 54.6 to 91.0 ms in the jump run. In the open run it was 91.1 to 109.2 ms in 4 runs and 18.2 ms in 1: whether the first window's serialization falls inside the measured run varies.
+   - Where the gaps fall: one probe run of the same jumps, at 31% mean CPU, recorded each gap's time (`REPLAY.md`):
+     - Transcript: the scrollbar jumps 78.9 to 85.0 ms, the `goTo` jumps 103.2 and 151.6 ms;
+     - Document: the scrollbar jumps 42.5 to 48.6 ms, the `goTo` jumps 66.7 and 48.5 ms.
+
+     So the Transcript fails on every jump, and the Document on an Outline jump and, in most runs, on opening.
+   - The control passes: with accessibility off, the jump runs peaked at 6.2 to 18.2 ms in the five runs. That shows the check can pass.
+   - **Opening stalls with accessibility off too.** With accessibility off, the open run's longest gap was 24.4 to 72.8 ms on the Transcript (over 50 ms in 2 of 5 runs) and 36.4 to 48.6 ms on the Document. The gap comes in the first frames after the file opens. So open-then-scroll has a cost besides accessibility, and Z52's "12ms with it off" holds for the jumps, not for opening. The round-3 fix check saw the same frame after opening `10g.jsonl`, 67 to 73 ms with accessibility on and off alike. Spec §10.2's budget covers scrolling with accessibility on or off, but Z52's gate, and so this case, asserts accessibility on only. The case saves the open run with accessibility off without asserting it, so no gate covers that stall.
+   - The round-3 fix check's measurements, which Z52 cites (fresh launches, 12 to 27% mean CPU):
+     - Transcript, far scrollbar jumps (to 50%, 90% and 10%) after indexing: 78.7 to 85.0 ms, every jump over 50 ms; 12.1 ms at most with accessibility off;
+     - Transcript, open and then scroll at once: 103 ms;
+     - Document, Outline-style `goTo` jumps: 55 to 61 ms; its scrollbar jumps 42.4 to 42.6 ms.
+
+     Z52's "55–103ms" is that range. The Transcript went higher in the runs above: up to 158.0 ms opening and 188.2 ms in a jump run, with its `goTo` jumps at 103.2 and 151.6 ms in the probe.
+   - The toggle is the same work. Turned on in place, as G9's 2,000 px/s runs do, it costs 79 to 91 ms on the Transcript after the first toggle, and once 60.7 ms after a later one (36 to 43 ms on the Document).
+   - Traced, each Transcript jump is one renderer-main task of 87.9 to 91.9 ms, the toggle's profile (91.2 ms after the first toggle):
+     - `SerializeLifecycleStage` 57.4 to 59.7 ms (toggle: 60.0 ms);
+     - `RenderAccessibilityImpl::SendPendingAccessibilityEvents` 19.3 to 20.5 ms (toggle: 19.7 ms);
+     - `ProcessDeferredUpdatesLifecycleStage` 10.2 to 10.8 ms (toggle: 10.6 ms).
+   - A reader running at launch turns accessibility on from the start, so its user meets this on every far jump. G9's other runs don't: they scroll continuously, and their recenters are incremental (item 4). The 2,000 px/s runs record the toggle's frame but don't assert it.
+6. **P5 is decided: Rows follows the Grid's key model (spec Z51).** Space and Shift+Space move nothing in Rows, and Chromium's own Space scroll is prevented; Page Up/Down page. A focused child control and IME composition keep their keys, with the Grid's known limitation (Task B1b). What stays open is selection: Shift+Space selects the row in the product, and that is the Rows milestone's acceptance test (M3, Task B1c).
+
+**Parked (spec Z39).** These need a real screen reader, so they wait for the expansion after launch:
+- **A Narrator-on G4 run.** With a UIA client reading the tree every 100 rows, G4 with accessibility on exited mid-run in 2 of 4 runs and ran 1.5–2× slower (Global Constraints).
+- **Task B4's speech-log check on a real NVDA log.** It was validated on synthetic logs built from the fixtures, not on a real one. It relies on NVDA's Speech viewer keeping the text's case and punctuation (`(block 5508)`); if the viewer spells symbols out, heading numbers are missed and show as breaks: a false fail, never a false pass.
+- **A frame measurement with a screen reader running.** G9 measures Electron's accessibility support, not a reader's own cost (Global Constraints).
+- **The round-2 review's findings on the script, parked unfixed:**
+  - MAJOR 1: on Narrator and VoiceOver, S11 and S12 have no instrument that can fail them; a block lost between the first and last numbers goes unheard.
+  - MINOR 2: the speech-log check passes a start marker set too late, and an S13 whose heading key did nothing.
+  - MINOR 3: Z35's shorter milestone test is named, not defined.
+- **Spec §6.2's edge-control decision.** The spec leaves it to Spike B to decide whether the edge controls are needed, as the fallback for a screen reader that doesn't scroll. Only a real reader can decide that. The plan builds the controls (Task B2b) and tests them mechanically (Tasks B2c and B2d), but the decision is parked.
+- **P4.** Does a screen-reader-driven scroll-into-view in logical scrolling read as a proportional jump (×1.5 at 1M rows, about ×80 at 50M)? It is named only in the parked script (S05).
+- **G5's premise.** The simulated cursor stands in for a reader scrolling its cursor into view (Task B2e). Whether NVDA, Narrator and VoiceOver do that in browse mode is what the parked run would show.
 
 ---
 
@@ -118,7 +212,7 @@ spikes/
   app/perf/spike-b2.e2e.ts              G5, G6, G9 and the AX findings: Rendered and Transcript (B2e)
   tools/chrome-fixtures.mjs             the chrome page's two small JSONL files (B3a)
   results/spike-b1-<host>.json, spike-b2-<host>.json
-  results/sr-script.md, sr-results.md, sr-nvda-<task>.txt   the 20-task screen-reader script and its results (B4)
+  results/sr-script.md, sr-results.md, sr-nvda-<task>.txt   the 20-task screen-reader script and its results (B4: parked, spec Z39; not created in Phase 0)
 ```
 
 ---
@@ -138,7 +232,7 @@ spikes/
   - main: `TYPOSE_ZOOM=<factor>` is the page zoom the window opens at (`webPreferences.zoomFactor`); unset, or anything but a number in (0, 5], 1.
 
 **Design notes:**
-- **Why a zoom knob.** The window is frameless (plan A Task 8), so Electron's default menu and its Ctrl+= accelerator can't be relied on to zoom. The screen-reader task that checks 200% reachability (Task B4) launches with `TYPOSE_ZOOM=2` instead.
+- **Why a zoom knob.** The window is frameless (plan A Task 8), so Electron's default menu and its Ctrl+= accelerator can't be relied on to zoom. Task B3c's 200% checks of the Grid, Rows, Rendered and Transcript pages launch with `TYPOSE_ZOOM=2` instead, as the parked screen-reader task S20 would (Task B4).
 - **The knob is a default, not a per-host setting.** Chromium persists a page zoom set at runtime (`setZoomFactor`, Ctrl+=) per host in the profile, and that persisted zoom wins over the knob. The second test pins this: it reopens a profile holding 200% with `TYPOSE_ZOOM=1`. So the knob is only reliable in a fresh or private profile.
 - **No test for the page switch here.** Until a second page exists, nothing a test can see changes. Task B1b's Grid e2e test is the first to use it. It fails at Task B1b Step 3 because `grid.html` doesn't exist yet, so the page is a 404. Without this task, main would load `index.html` instead and the failure would be a different one.
 
@@ -276,7 +370,7 @@ Tasks B1a–B1d build on plan A Tasks 1–10 and Task B0:
 - **Grid:** `role=grid`.
   - `aria-rowcount` is the line count including the header line; `aria-colcount` is the CSV column count + 1. Both are `-1` until known: the row count until indexing is done, the column count until the header line loads.
   - ARIA row *r* is file line *r* − 1 (0-based), so row 1 is the header row and the first data record is row 2: `aria-rowindex` is positional. The row-number column shows the record number (spec Z31): 1 for the first data record, so *r* − 1. B1 splits unquoted CSV, where a record is a line; real record numbering is Spike C's record index (C3). Under sorting the number stays the record's (sorting isn't in this spike), and Raw keeps the physical source lines.
-  - ARIA column 1 is the row-number column: a `rowheader` in each data row, a `columnheader` ("#") in the header row. CSV column *k* is ARIA column *k* + 1, so readers announce the first CSV column as column 2, with its name (spec Z32).
+  - ARIA column 1 is the row-number column: a `rowheader` in each data row, a `columnheader` ("#") in the header row. CSV column *k* is ARIA column *k* + 1, so the first CSV column is ARIA column 2 (spec Z32).
 - **Rows:** `role=treegrid`; rows are the focus unit.
   - A top-level row is a line: `aria-level=1`, `aria-posinset` = line + 1, `aria-setsize` = the line total, or `-1` while indexing.
   - An expanded line's keys follow it as `aria-level=2` rows with their own `aria-posinset`/`aria-setsize`.
@@ -290,7 +384,7 @@ Tasks B1a–B1d build on plan A Tasks 1–10 and Task B0:
 | Windows UI Automation (the platform tree Narrator reads) | yes | not readable from the .NET client | yes (ExpandCollapse) | **yes**: GridItem Row/Column, Grid RowCount/ColumnCount (0-based indices) | **yes**: PositionInSet/SizeOfSet |
 | Playwright `ariaSnapshot()` | computed from the DOM by Playwright, not read from the browser, so it proves nothing about the AX tree | | | | |
 
-So the tests check positions and totals in the DOM **and** in the UIA tree, and role, name, focus and level in the CDP tree. NVDA reads IAccessible2, which no automated check here reaches; the manual script (Task B4) covers it. On macOS `uiaByName` returns `null` and those assertions are skipped.
+So the tests check positions and totals in the DOM **and** in the UIA tree, and role, name, focus and level in the CDP tree. NVDA reads IAccessible2, which no automated check here reaches; the manual script (Task B4) would cover it, and is parked (spec Z39). On macOS `uiaByName` returns `null` and those assertions are skipped.
 
 ---
 
@@ -415,7 +509,7 @@ git commit -m "spike(b): unquoted CSV grid fixtures, 1M×20 and 1k×5000"
     - `save(key, value)`, into `spikes/results/spike-b1-<host>.json`;
     - `launch(page: 'grid' | 'treegrid', file)`, which drops inherited `TYPOSE_*` variables and gives the app its own profile (`--user-data-dir=spikes/.fixtures/b1-userdata`): every spike run otherwise shares `%APPDATA%\spike-app`, and a zoom level another run persisted there for `typose://app` halves the viewport. It throws unless `webContents.getZoomFactor()` is 1;
     - `waitIndexed(win): Promise<number>`, `focusLog(win, n)`;
-    - `recordFocus(win)`: from then on, logs every focus move as [aria-rowindex, aria-colindex (0 on a treegrid row), text], and in `__focusOffscreen` the index of every move that left the focused element not wholly inside its grid's client box;
+    - `recordFocus(win)`: from then on, logs every focus move as [aria-rowindex, aria-colindex (0 on a treegrid row), text], and in `__focusOffscreen` the index of every move that left the focused element not wholly inside its grid's client box, or left a Grid data cell partly under the sticky header row or row-number column;
     - `firstLines(path, n)`, `lastLine(path)`, `countLines(path)`: file reads independent of the core;
     - `cdpFocus(cdp): Promise<AXFocus>`: the focused node in the browser's accessibility tree, with its ancestors;
     - `uiaByName(app, name): Promise<Record<string, any> | null>`: the element with that accessible name in the UIA tree.
@@ -437,7 +531,13 @@ git commit -m "spike(b): unquoted CSV grid fixtures, 1M×20 and 1k×5000"
 - **Keys** (all `preventDefault`ed, because Chromium's own scrolling is a proportional jump in logical mode):
   - arrows; Home/End within the row; Ctrl+Home/End to the first cell and the true last cell (Cmd+↑/↓ on macOS, brief §7.2);
   - PageUp/PageDown move the focus and the view one page together;
-  - Space/Shift+Space move the view one page, 1:1, and leave the focus where it is.
+  - Space, Shift+Space and Ctrl+Space move nothing (spec Z40). The fifth e2e test checks Space and Shift+Space. Ctrl+Space and Ctrl+Shift+Space take the same path (`key === ' '`, whatever the modifiers), and the round-3 fix check found they leave the view and the focus alone. No test pins them; adding `Control+Space` to that test's loop is left to the Grid milestone, because changing the test now would rewrite this task's commit and every later one. Space doesn't page-scroll, and Chromium's own Space scroll is prevented too. In the product, Shift+Space selects the row and Ctrl+Space the column. Selection isn't built in the spike, so neither key is claimed here.
+  - **Selection is deferred to the Grid milestone (M3, spec §13.2), with this acceptance test:**
+    - in a grid of at least 3 × 3, with focus on a data cell, Shift+Space selects the cell's row and Ctrl+Space its column;
+    - each selected cell reports `aria-selected="true"` in the DOM and is selected in the UIA tree, and the grid has `aria-multiselectable="true"`;
+    - neither key moves the focus or the view, and Space alone changes nothing;
+    - a keyboard-reachable command (the row-number cell's menu, the column header's menu) makes the same selections where the OS or an input method owns the shortcut.
+- **Only a focused cell's keys are the grid's** (spec Z40). A key from a control inside the grid (a button, checkbox or menu item) is left to it, so Space activates it. So is a key that is part of IME composition (`isComposing`). The spike's grid has no such control; the fifth e2e test puts a button in it to check. **A known spike limitation, for the Grid milestone (M3):** the grid hands every key to a focused child control, arrows included, and gives no key back to cell navigation (no Escape or F2). Z40 only rules that the control keeps Space, so the fifth test's "ArrowDown doesn't move the grid's focus" pins this spike's choice, not Z40.
 - **Focus waits for content** (spec §6.2). Keys run through one promise queue, each from the focus the previous one left. A move `ensure`s its target line, then scrolls, renders and focuses. Focus never lands on a placeholder, and each press yields exactly one focus move, in order.
 - **The focused row stays mounted** out of view, parked just outside the viewport. It keeps its focused cell even when that column scrolls away, and the header row keeps that column's header, so the cell still has its column header in the accessibility tree.
 
@@ -582,7 +682,8 @@ export async function waitIndexed(win: Page): Promise<number> {
 
 /**
  * From now on, logs every focus move as [aria-rowindex, aria-colindex (0 on a treegrid row), text], and in
- * `__focusOffscreen` the index of every move that left the focused element not wholly inside its grid's client box.
+ * `__focusOffscreen` the index of every move that left the focused element not wholly inside its grid's client box, or
+ * left a Grid data cell partly under the sticky header row or row-number column.
  */
 export function recordFocus(win: Page): Promise<void> {
   return win.evaluate(() => {
@@ -595,7 +696,12 @@ export function recordFocus(win: Page): Promise<void> {
         const r = el.getBoundingClientRect()
         const b = g.getBoundingClientRect()
         const [x, y] = [b.left + g.clientLeft, b.top + g.clientTop]
-        if (r.left < x - 0.5 || r.top < y - 0.5 || r.right > x + g.clientWidth + 0.5 || r.bottom > y + g.clientHeight + 0.5) offscreen.push(log.length)
+        // A Grid data cell must also clear the sticky row-number column and header row; treegrid rows have neither.
+        const row = el.closest<HTMLElement>('[role=row]')
+        const data = Number(el.ariaColIndex) > 1 && Number(row?.ariaRowIndex) > 1
+        const left = data ? (row!.querySelector('[role=rowheader]')?.getBoundingClientRect().right ?? x) : x
+        const top = data ? (g.querySelector('[role=row][aria-rowindex="1"]')?.getBoundingClientRect().bottom ?? y) : y
+        if (r.left < left - 0.5 || r.top < top - 0.5 || r.right > x + g.clientWidth + 0.5 || r.bottom > y + g.clientHeight + 0.5) offscreen.push(log.length)
       }
       log.push([Number(el.closest<HTMLElement>('[role=row]')?.ariaRowIndex), Number(el.ariaColIndex ?? 0), el.textContent ?? ''])
     })
@@ -733,6 +839,7 @@ test('grid: true totals and the focused position; Ctrl+End reaches the true last
   await expect(grid).toHaveAttribute('aria-colcount', String(cols))
 
   await corner(win).focus()
+  await expect(corner(win)).toHaveText('#') // the header line is no record (spec Z31)
   await recordFocus(win)
   await win.keyboard.press('Control+End')
   expect((await focusLog(win, 1))[0]).toEqual([lines, cols, last.at(-1)])
@@ -760,9 +867,12 @@ test('grid: true totals and the focused position; Ctrl+End reaches the true last
   const uiaMid = await uiaByName(app, 'r2c3')
   if (uiaMid) expect(uiaMid).toMatchObject({ name: 'r2c3', row: 2, col: 3, rowCount: lines, colCount: cols })
 
-  // Scrolled out of view, the focused cell stays mounted and focused; the next arrow brings it back.
+  // Scrolled out of view (by the wheel: Space doesn't page, spec Z40), the focused cell stays mounted and focused; the
+  // next arrow brings it back.
   const top = () => win.evaluate(() => (window as any).__spike.view.view.state.top as number)
-  for (let i = 0; i < 3; i++) await win.keyboard.press('Space')
+  const box = (await grid.boundingBox())!
+  await win.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  await win.mouse.wheel(0, 3000)
   await expect.poll(top).toBeGreaterThan(2000)
   const where = () =>
     win.evaluate(() => {
@@ -859,10 +969,60 @@ test('grid: 5,000 columns are virtualized horizontally', async () => {
   expect(mounted.cells).toBeLessThan(mounted.rows * 40) // ~3 viewports of columns per row, not 5,001
   await app.close()
 })
+
+test('grid: Space and Shift+Space leave the view alone, PageDown pages; a child control and IME composition keep their keys (spec Z40)', async () => {
+  const { app, win } = await launch('grid', GRID_1M)
+  await waitIndexed(win)
+  await corner(win).focus()
+  await recordFocus(win)
+  await win.keyboard.press('ArrowDown')
+  await win.keyboard.press('ArrowRight')
+  await focusLog(win, 2)
+  // The view's top and the focused text once the key queue has run and two frames have passed.
+  const state = () =>
+    win.evaluate(async () => {
+      await new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok)))
+      return { top: (window as any).__spike.view.view.state.top as number, focused: document.activeElement!.textContent }
+    })
+  const before = await state()
+  expect(before.focused).toBe('r1c1')
+  for (const key of ['Space', 'Shift+Space']) {
+    await win.keyboard.press(key)
+    expect(await state(), key).toEqual(before)
+  }
+  await win.keyboard.press('PageDown')
+  await focusLog(win, 3)
+  const paged = await state()
+  expect(paged.top).toBeGreaterThan(before.top)
+  expect(paged.focused).not.toBe(before.focused)
+  // A key that is part of IME composition is the input method's: the grid neither moves nor prevents it.
+  const ime = await win.evaluate(async () => {
+    const cell = document.activeElement!
+    const e = new KeyboardEvent('keydown', { key: 'ArrowDown', isComposing: true, bubbles: true, cancelable: true })
+    cell.dispatchEvent(e)
+    await new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok)))
+    return { prevented: e.defaultPrevented, stayed: document.activeElement === cell }
+  })
+  expect(ime).toEqual({ prevented: false, stayed: true })
+  // A button inside the grid keeps its keys: Space presses it, and an arrow doesn't move the grid's focus.
+  await win.evaluate(() => {
+    const b = Object.assign(document.createElement('button'), { id: 'probe', textContent: 'probe' })
+    b.addEventListener('click', () => ((window as any).__probeClicks = ((window as any).__probeClicks ?? 0) + 1))
+    document.querySelector('[role=grid]')!.append(b)
+    b.focus({ preventScroll: true })
+  })
+  for (const key of ['Space', 'ArrowDown']) await win.keyboard.press(key)
+  const child = await win.evaluate(async () => {
+    await new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok)))
+    return { clicks: (window as any).__probeClicks, focused: document.activeElement!.id }
+  })
+  expect(child).toEqual({ clicks: 1, focused: 'probe' })
+  await app.close()
+})
 ```
 
 Run (`spikes/app`): `npm run build`, then `npx playwright test --project=e2e grid`
-Expected: FAIL, `4 failed`, each with `TimeoutError: page.waitForFunction: Timeout 30000ms exceeded` in `launch` (`e2e/b1-harness.ts`): `typose://app/grid.html` doesn't exist yet.
+Expected: FAIL, `5 failed`, each with `TimeoutError: page.waitForFunction: Timeout 30000ms exceeded` in `launch` (`e2e/b1-harness.ts`): `typose://app/grid.html` doesn't exist yet.
 
 - [ ] **Step 4: Implement the Grid page**
 
@@ -1161,15 +1321,17 @@ export class Grid {
   }
 
   private key(e: KeyboardEvent): void {
+    // A focused child control (a button, checkbox or menu item) and IME composition keep their keys (spec Z40).
+    if (e.isComposing || !(e.target as HTMLElement).matches('[role=gridcell],[role=rowheader],[role=columnheader]')) return
     const mac = e.metaKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') // Cmd+↑/↓: top/bottom on macOS (brief §7.2)
     const key = mac ? (e.key === 'ArrowUp' ? 'Home' : 'End') : e.key
     const ctrlKey = e.ctrlKey || mac
-    const shiftKey = e.shiftKey
-    if (key !== ' ' && !gridTarget(key, ctrlKey, this.focus, 1, 1, 1)) return
+    // Space doesn't page-scroll the grid, Chromium's own Space scroll included (spec Z40); Page Up/Down page. Shift+Space
+    // and Ctrl+Space select the row and the column in the product: selection isn't built in the spike.
+    if (key === ' ') return e.preventDefault()
+    if (!gridTarget(key, ctrlKey, this.focus, 1, 1, 1)) return
     e.preventDefault() // Chromium's own scrolling would be a proportional jump in logical mode
-    this.queue = this.queue
-      .then(() => (key === ' ' ? this.view.moveBy((shiftKey ? -1 : 1) * (this.view.viewHeight - ROW)) : this.move(key, ctrlKey)))
-      .catch((err: unknown) => console.error('grid move failed', err))
+    this.queue = this.queue.then(() => this.move(key, ctrlKey)).catch((err: unknown) => console.error('grid move failed', err))
   }
 
   /** Keys are applied one at a time, in order, each from the focus the previous one left. */
@@ -1386,10 +1548,10 @@ Run (`spikes/app`): `npm test`
 Expected: `Tests 16 passed`.
 
 Run: `npm run build`, then `npx playwright test --project=e2e grid`
-Expected: `4 passed`.
+Expected: `5 passed`.
 
 Run: `npm run e2e`
-Expected: `9 passed` (plan A's 3, Task B0's 2, these 4).
+Expected: `10 passed` (plan A's 3, Task B0's 2, these 5).
 
 Launch the Grid on the 1M×20 fixture. The PowerShell form clears the variables afterwards.
 - PowerShell: `$env:TYPOSE_PAGE="grid"; $env:TYPOSE_OPEN="$PWD\..\.fixtures\grid-1m-x20.csv"; npx electron .; Remove-Item Env:TYPOSE_PAGE, Env:TYPOSE_OPEN`
@@ -1436,7 +1598,13 @@ git commit -m "spike(b): Grid as role=grid on logical scrolling with horizontal 
 
 **Design notes:**
 - **Rows are the focus unit** (APG treegrid, row mode). Keys:
-  - Up/Down, PageUp/PageDown, Home/End (also with Ctrl, and Cmd+↑/↓ on macOS), Space/Shift+Space;
+  - Up/Down, PageUp/PageDown, Home/End (also with Ctrl, and Cmd+↑/↓ on macOS);
+  - Space and Shift+Space move nothing (spec Z51, the Grid's model of Z40; the second e2e test). Space doesn't page-scroll, and Chromium's own Space scroll is prevented too. In the product, Shift+Space selects the row (the record). Selection isn't built in the spike, so it isn't claimed.
+  - **Selection is deferred to the Rows milestone (M3, spec §13.2), with this acceptance test:**
+    - with focus on a row, Shift+Space selects that row: `aria-selected="true"` on it in the DOM, selected in the UIA tree, and `aria-multiselectable="true"` on the treegrid;
+    - it moves neither the focus nor the view, and Space alone changes nothing;
+    - a keyboard-reachable command (the row's menu) makes the same selection where the OS or an input method owns the shortcut.
+  - Only a focused row's keys are Rows' (spec Z51): a key from a control inside the treegrid is left to it, and so is a key that is part of IME composition. The guards are the Grid's (Task B1b), and so is its known limitation: arrows go to the child control too, with no key back to the rows.
   - Right: a collapsed line expands; an expanded line moves to its first child;
   - Left: a child moves to its line; an expanded line collapses.
 - **Expanding** fetches the line through `lines` (≤ 64 KiB) and parses it in the renderer. A line that fails to parse, or is cut at 64 KiB, isn't expandable and carries no `aria-expanded`.
@@ -1631,7 +1799,11 @@ test('treegrid: level, posinset and setsize with true totals; expand and collaps
     })
   await win.keyboard.press('ArrowRight')
   await expect(tg).toHaveAttribute('aria-rowcount', String(lines + kids))
-  for (let i = 0; i < 3; i++) await win.keyboard.press('Space')
+  // Scroll the expanded row above the viewport with the wheel (Space doesn't page Rows, spec Z51).
+  const box = (await tg.boundingBox())!
+  await win.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  await win.mouse.wheel(0, 2_000)
+  await expect.poll(() => win.evaluate(() => (window as any).__spike.view.view.state.top as number)).toBe(2_000)
   const before = await topRow()
   await win.keyboard.press('ArrowLeft') // collapse the focused row, now above the viewport
   await expect(tg).toHaveAttribute('aria-rowcount', String(lines))
@@ -1652,10 +1824,59 @@ test('treegrid: level, posinset and setsize with true totals; expand and collaps
   save('G2:treegrid', { lines, kids, early, axTop, uiaTop, axKid, uiaKid, anchorRow: before, axEnd, uiaEnd })
   await app.close()
 })
+
+test('treegrid: Space and Shift+Space leave the view alone, PageDown pages; a child control and IME composition keep their keys (spec Z51)', async () => {
+  const { app, win } = await launch('treegrid', JSONL)
+  await waitIndexed(win)
+  await win.locator('[role=row][aria-posinset="1"]').focus()
+  await recordFocus(win)
+  await win.keyboard.press('ArrowDown')
+  await focusLog(win, 1)
+  // The view's top and the focused row once the key queue has run and two frames have passed.
+  const state = () =>
+    win.evaluate(async () => {
+      await new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok)))
+      return { top: (window as any).__spike.view.view.state.top as number, focused: document.activeElement!.getAttribute('aria-posinset') }
+    })
+  const before = await state()
+  expect(before.focused).toBe('2')
+  for (const key of ['Space', 'Shift+Space']) {
+    await win.keyboard.press(key)
+    expect(await state(), key).toEqual(before)
+  }
+  await win.keyboard.press('PageDown')
+  await focusLog(win, 2)
+  const paged = await state()
+  expect(paged.top).toBeGreaterThan(before.top)
+  expect(paged.focused).not.toBe(before.focused)
+  // A key that is part of IME composition is the input method's: Rows neither moves nor prevents it.
+  const ime = await win.evaluate(async () => {
+    const row = document.activeElement!
+    const e = new KeyboardEvent('keydown', { key: 'ArrowDown', isComposing: true, bubbles: true, cancelable: true })
+    row.dispatchEvent(e)
+    await new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok)))
+    return { prevented: e.defaultPrevented, stayed: document.activeElement === row }
+  })
+  expect(ime).toEqual({ prevented: false, stayed: true })
+  // A button inside the treegrid keeps its keys: Space presses it, and an arrow doesn't move Rows' focus.
+  await win.evaluate(() => {
+    const b = Object.assign(document.createElement('button'), { id: 'probe', textContent: 'probe' })
+    b.addEventListener('click', () => ((window as any).__probeClicks = ((window as any).__probeClicks ?? 0) + 1))
+    document.querySelector('[role=treegrid]')!.append(b)
+    b.focus({ preventScroll: true })
+  })
+  for (const key of ['Space', 'ArrowDown']) await win.keyboard.press(key)
+  const child = await win.evaluate(async () => {
+    await new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok)))
+    return { clicks: (window as any).__probeClicks, focused: document.activeElement!.id }
+  })
+  expect(child).toEqual({ clicks: 1, focused: 'probe' })
+  await app.close()
+})
 ```
 
 Run (`spikes/app`): `npm run build`, then `npx playwright test --project=e2e treegrid`
-Expected: FAIL, `1 failed`, with `TimeoutError: page.waitForFunction: Timeout 30000ms exceeded` in `launch`: `typose://app/treegrid.html` doesn't exist yet.
+Expected: FAIL, `2 failed`, each with `TimeoutError: page.waitForFunction: Timeout 30000ms exceeded` in `launch`: `typose://app/treegrid.html` doesn't exist yet.
 
 - [ ] **Step 4: Implement the Rows page**
 
@@ -1669,7 +1890,7 @@ import { type Item, type Kid, Outline, keepAnchor } from './outline'
 
 const ROW = 24
 const KEEP = 4000
-const KEYS = new Set([' ', 'ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft', 'PageDown', 'PageUp', 'Home', 'End'])
+const KEYS = new Set(['ArrowDown', 'ArrowUp', 'ArrowRight', 'ArrowLeft', 'PageDown', 'PageUp', 'Home', 'End'])
 
 interface Summary {
   line: number
@@ -1747,21 +1968,24 @@ export class TreeGrid {
   }
 
   private key(e: KeyboardEvent): void {
+    // A focused child control (a button, checkbox or menu item) and IME composition keep their keys (spec Z51, as Z40).
+    if (e.isComposing || !(e.target as HTMLElement).matches('[role=row]')) return
     const mac = e.metaKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') // Cmd+↑/↓: top/bottom on macOS (brief §7.2)
     const key = mac ? (e.key === 'ArrowUp' ? 'Home' : 'End') : e.key
-    const shiftKey = e.shiftKey
+    // Space doesn't page-scroll Rows, Chromium's own Space scroll included (spec Z51); Page Up/Down page. Shift+Space
+    // selects the row in the product: selection isn't built in the spike.
+    if (key === ' ') return e.preventDefault()
     if (!KEYS.has(key)) return
     e.preventDefault() // Chromium's own scrolling would be a proportional jump in logical mode
-    this.queue = this.queue.then(() => this.act(key, shiftKey)).catch((err: unknown) => console.error('treegrid move failed', err))
+    this.queue = this.queue.then(() => this.act(key)).catch((err: unknown) => console.error('treegrid move failed', err))
   }
 
   /** Keys are applied one at a time, in order, each from the state the previous one left. */
-  private async act(key: string, shift: boolean): Promise<void> {
+  private async act(key: string): Promise<void> {
     const o = this.outline
     const v = o.indexOf(this.focus)
     const page = Math.max(1, Math.floor(this.view.viewHeight / ROW) - 1)
     switch (key) {
-      case ' ': return this.view.moveBy((shift ? -1 : 1) * this.view.viewHeight)
       case 'ArrowDown': return this.goTo(v + 1)
       case 'ArrowUp': return this.goTo(v - 1)
       case 'PageDown': return this.goTo(v + page, page)
@@ -1942,10 +2166,10 @@ const pages = ['index', 'grid', 'treegrid']
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run (`spikes/app`): `npm run build`, then `npx playwright test --project=e2e treegrid`
-Expected: `1 passed`.
+Expected: `2 passed`.
 
 Run: `npm run e2e`
-Expected: `10 passed`.
+Expected: `12 passed`.
 
 - [ ] **Step 6: Read your own work (rule 8), then commit**
 
@@ -1966,7 +2190,8 @@ git commit -m "spike(b): Rows as role=treegrid with inline expansion that keeps 
 - **Consumes:** the Task B1b harness; `percentile` (`perf.ts`); Electron's `app.setAccessibilitySupportEnabled` / `app.isAccessibilitySupportEnabled` and `webContents.sendInputEvent`, called through Playwright's main-process `evaluate`, so main needs no switch.
 - **Produces:** keys in `spikes/results/spike-b1-<host>.json`:
   - from the e2e tests: `G2G3:grid`, `wideGrid`, `G2:treegrid`;
-  - from this runner: `G4:a11y-<off|on>`, `G4:logical:a11y-on`, and `G9:<surface>:a11y-<off|on>:<1|2|3>` for the G9 runs below.
+  - from this runner: `G4:a11y-<off|on>`, `G4:logical:a11y-on`, and `G9:<surface>:a11y-<off|on>:<1|2|3>` for the G9 runs below;
+  - and, gitignored, one diagnostics log per G4 run: `spikes/.fixtures/g4-diag-G4-a11y-off.log`, `g4-diag-G4-a11y-on.log`, `g4-diag-G4-logical-a11y-on.log`.
 
 **Design notes:**
 - **G4 (zero skipped or duplicated positions across 1,000 rows × 100 columns):**
@@ -1978,9 +2203,10 @@ git commit -m "spike(b): Rows as role=treegrid with inline expansion that keeps 
   - A `focusin` recorder logs `[aria-rowindex, aria-colindex, text]` for every focus move.
   - Pass: exactly one focus move per press; every step differs by exactly one position; every focused cell's text equals its expected `r<row>c<col>` (so focus never landed on a placeholder or an empty cell); 100,000 distinct positions.
   - Every 100 rows the focused cell is read from the CDP tree (and the CDP Accessibility domain is released again, so the "off" run stays off), and at the end once from UIA; each must name the expected cell (UIA: also its row and column).
-  - Pass also requires every focused cell to be wholly inside the grid's client box after its move (DOM), and UIA's `IsOffscreen` false at the end-of-run read: a cell parked one row below the view otherwise passes every other criterion.
+  - Pass also requires every focused cell to be wholly inside the grid's client box after its move (DOM), a data cell clear of the sticky header row and row-number column too, and UIA's `IsOffscreen` false at the end-of-run read. A cell parked one row below the view otherwise passes every other criterion, and so does a Left move that leaves 80% of the cell under the row-number column (round-2 review).
   - **Logical scrolling:** a third run snakes 200 rows × 20 columns from row 900,000 of the 1M×20 grid (24M px, logical), accessibility on, with the same criteria (4,000 cells).
-  - UIA is read only at the end: with a UIA read every 100 rows the accessibility-on run exited mid-run in 2 of 4 runs and ran 1.5–2× slower. The same exit was then seen in 2 of 5 runs without them (Global Constraints); if it happens, rerun the test.
+  - UIA is read only at the end: with a UIA read every 100 rows the accessibility-on run exited mid-run in 2 of 4 runs and ran 1.5–2× slower. The same exit was then seen in 2 of 5 runs without them (Global Constraints); if it happens, record it as Global Constraints says, then rerun.
+  - **Every snake run is armed for such an exit** (round-2 review). Electron logs to stderr (`ELECTRON_ENABLE_LOGGING=1`, Step 3), and Crashpad writes under the profile (`crashReporter.start({ uploadToServer: false })`). Main logs child and render process exits, `unresponsive`, the quit sequence, `process` `exit`, `uncaughtException`, and process metrics every 15 s. The test logs the shell's exit code and signal, and Playwright's page `crash`/`close` and app `close` events. All of it is appended to `spikes/.fixtures/g4-diag-<key>.log` (`:` in the key becomes `-`), run after run. A run that throws also logs the error's first line, the shell's exit code and signal, and whether main is still alive, then rethrows. The snake's own lines are unchanged.
 - **G9 (≤ 1% long frames with accessibility on):**
   - 10 s of wheel events, 120 px each, on three surfaces: the 1M×20 grid (vertical, logical), the 5,000-column grid (horizontal, native) and Rows on the JSONL fixture (vertical, logical); each with accessibility support off, then on; three runs of each.
   - One wheel event per Playwright round trip plus 16 ms: the scratch run gave 218–320 events per 10 s.
@@ -1994,6 +2220,8 @@ git commit -m "spike(b): Rows as role=treegrid with inline expansion that keeps 
 `spikes/app/perf/spike-b1.e2e.ts`:
 ```ts
 import { expect, test } from '@playwright/test'
+import { appendFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { type AXFocus, GRID_1M, GRID_WIDE, JSONL, cdpFocus, focusLog, launch, recordFocus, save, uiaByName, waitIndexed } from '../e2e/b1-harness'
 import { percentile } from '../src/renderer/src/perf'
 
@@ -2012,6 +2240,40 @@ const BURST_ROWS = 10
  */
 async function snake(resultKey: string, file: string, a11y: boolean, startRow: number, nRows: number, nCols: number) {
   const { app, win } = await launch('grid', file)
+  // Diagnostics for an exit mid-run (Global Constraints), appended to spikes/.fixtures/g4-diag-<key>.log run after run.
+  const DIAG = resolve(__dirname, '../../.fixtures', `g4-diag-${resultKey.replace(/:/g, '-')}.log`)
+  const t0 = Date.now()
+  const dlog = (s: string) => appendFileSync(DIAG, `${new Date().toISOString()} +${((Date.now() - t0) / 1000).toFixed(1)}s ${s}\n`)
+  const proc = app.process()
+  dlog(`launched shell pid ${proc.pid}`)
+  proc.stdout?.on('data', (d) => dlog('[out] ' + String(d).trimEnd()))
+  proc.stderr?.on('data', (d) => dlog('[err] ' + String(d).trimEnd()))
+  proc.on('exit', (code, signal) => dlog(`[shell exit] code=${code} signal=${signal}`))
+  app.on('close', () => dlog('[playwright app close event]'))
+  win.on('crash', () => dlog('[playwright page crash event]'))
+  win.on('close', () => dlog('[playwright page close event]'))
+  const mainPid = await app.evaluate(({ app: a, BrowserWindow, crashReporter }) => {
+    crashReporter.start({ uploadToServer: false })
+    const w = BrowserWindow.getAllWindows()[0]
+    const L = (s: string) => console.log('DIAG ' + new Date().toISOString() + ' ' + s)
+    a.on('child-process-gone', (_e, d) => L('child-process-gone ' + JSON.stringify(d)))
+    a.on('render-process-gone', (_e, _wc, d) => L('render-process-gone ' + JSON.stringify(d)))
+    a.on('before-quit', () => L('before-quit'))
+    a.on('will-quit', () => L('will-quit'))
+    a.on('quit', (_e, code) => L('quit ' + code))
+    a.on('window-all-closed', () => L('window-all-closed'))
+    w.on('close', () => L('window close'))
+    w.on('closed', () => L('window closed'))
+    w.on('unresponsive', () => L('window unresponsive'))
+    w.on('responsive', () => L('window responsive'))
+    w.webContents.on('destroyed', () => L('webContents destroyed'))
+    process.on('exit', (c) => L('process exit ' + c))
+    process.on('uncaughtException', (e) => L('uncaughtException ' + (e && e.stack)))
+    setInterval(() => L('metrics ' + a.getAppMetrics().map((p) => `${p.type}:${p.pid}:${Math.round(p.memory.workingSetSize / 1024)}MB:${p.cpu.percentCPUUsage.toFixed(0)}%`).join(' ')), 15000)
+    return { pid: process.pid, crashDumps: a.getPath('crashDumps') }
+  })
+  dlog(`electron main ${JSON.stringify(mainPid)}`)
+  try {
   await waitIndexed(win)
   // A harness speed knob, not a product setting: with the PC idle, Chromium otherwise took ~43 ms per injected key.
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.setBackgroundThrottling(false))
@@ -2112,7 +2374,14 @@ async function snake(resultKey: string, file: string, a11y: boolean, startRow: n
     uiaWrong: 0
   })
   await app.close()
+  dlog('snake done')
   return { logical }
+  } catch (e) {
+    let alive = 'unknown'
+    try { process.kill(mainPid.pid, 0); alive = 'alive' } catch (k) { alive = 'gone: ' + (k as Error).message }
+    dlog(`ERROR ${(e as Error).message.split('\n')[0]} | shell exitCode=${proc.exitCode} signalCode=${proc.signalCode} | electron main pid ${mainPid.pid} ${alive}`)
+    throw e
+  }
 }
 
 for (const a11y of [false, true]) {
@@ -2181,7 +2450,7 @@ for (const s of SCROLLS) {
 
 - [ ] **Step 2: Run G9**
 
-Run (`spikes/app`): `npm run build`, then `npx playwright test --project=perf spike-b1 -g G9`
+A qualifying run needs the quiet PC of Task B2e Step 2 (spec Z49). Run (`spikes/app`): `npm run build`, then `npx playwright test --project=perf spike-b1 -g G9`
 Expected: `18 passed` (each run with at least 200 wheel events), and 18 `G9:*` keys in the results file.
 
 The scratch run gave (Zack's PC, shared with other jobs, stand-in JSONL of 6,442,451 lines):
@@ -2197,8 +2466,11 @@ The scratch run gave (Zack's PC, shared with other jobs, stand-in JSONL of 6,442
 
 - [ ] **Step 3: Run G4**
 
-Run (`spikes/app`): `npx playwright test --project=perf spike-b1 -g G4`
-Expected: `3 passed`, and keys `G4:a11y-off` and `G4:a11y-on`, each with `focusMoves: 99999`, `distinct: 100000`, `wrong: 0`, `notOneStep: 0`, `empty: 0`, `offscreen: 0`, `axWrong: 0`, `uiaWrong: 0`; and `G4:logical:a11y-on` with `focusMoves: 3999`, `distinct: 4000`, `logical: true` and the same criteria 0.
+Run (`spikes/app`), with Electron's logging on and no other UIA client or desktop automation on the session:
+- PowerShell: `$env:ELECTRON_ENABLE_LOGGING = '1'; npx playwright test --project=perf spike-b1 -g G4; Remove-Item Env:ELECTRON_ENABLE_LOGGING`
+- Git Bash: `ELECTRON_ENABLE_LOGGING=1 npx playwright test --project=perf spike-b1 -g G4`
+
+Expected: `3 passed`, and keys `G4:a11y-off` and `G4:a11y-on`, each with `focusMoves: 99999`, `distinct: 100000`, `wrong: 0`, `notOneStep: 0`, `empty: 0`, `offscreen: 0`, `axWrong: 0`, `uiaWrong: 0`; and `G4:logical:a11y-on` with `focusMoves: 3999`, `distinct: 4000`, `logical: true` and the same criteria 0. Each run's `spikes/.fixtures/g4-diag-*.log` ends with `snake done`. If a run exits instead, Global Constraints says what to keep.
 
 The scratch run gave (Zack's PC, shared with other jobs, the user away):
 
@@ -2482,7 +2754,7 @@ git commit -m "spike(b): block-model document and transcript fixtures"
 - **Spacers:** one `aria-hidden` `div` per unmounted run, keyed by its first item. A run that didn't change keeps its spacer, so far-off spacers are never touched.
 - **Identity:** a mounted node is never moved or recreated while it stays mounted. New nodes are inserted next to existing ones.
 - **The reading anchor** (the focused item if it's in view, else the first mounted item in view, else the estimated item at the top) is measured before and after every change, and `scrollTop` absorbs the difference. That is how an estimate corrected to a real height never moves what the reader is looking at (spec §5.3).
-- **Position** is the range of items in the viewport. A screen reader that scrolls the element under its cursor into view therefore drives the window with nothing else. Automation can only stand in for that with `scrollIntoView` (Task B2e); whether NVDA, Narrator and VoiceOver actually scroll is what the screen-reader script (Task B4) checks. Focusing an item scrolls it into view too, and a focused item stays mounted wherever the window goes.
+- **Position** is the range of items in the viewport. A screen reader that scrolls the element under its cursor into view therefore drives the window with nothing else. Automation can only stand in for that with `scrollIntoView` (Task B2e); whether NVDA, Narrator and VoiceOver actually scroll is what the screen-reader script (Task B4) would check; it is parked (spec Z39), so this plan doesn't claim it. Focusing an item scrolls it into view too, and a focused item stays mounted wherever the window goes.
 - **Windows:** normal mode = the viewport plus one viewport of overscan each way (spec §5.3), recentered when less than half a viewport remains on a side. Accessibility mode = 500 items, recentered when the position enters an outer quarter (spec §6.2): each recenter shifts it by 126 items.
 - **aria-busy:** the content element is `aria-busy="true"` from the moment a drain will fetch or change items until it has finished (spec §6.1, the feed pattern: busy while articles are added and removed). A scroll that changes nothing never sets it.
 - **Edge controls** (`Continue: previous 500 <noun>` and `Continue: next 500 <noun>`, accessibility mode only, spec §6.2) sit at the window's ends inside the content, unless `edgesOutside`, which puts them just before and after the content: a `role=feed` may contain only articles.
@@ -3414,7 +3686,7 @@ Run (`spikes/app`): `npm run build`, then `npx playwright test --project=e2e doc
 Expected: `4 passed`.
 
 Run: `npm run e2e`
-Expected: `14 passed` (plan A's 3, Task B0's 2, Tasks B1b and B1c's 5, plus these 4).
+Expected: `16 passed` (plan A's 3, Task B0's 2, Tasks B1b and B1c's 7, plus these 4).
 
 - [ ] **Step 7: Read your own work (rule 8), then commit**
 
@@ -3561,7 +3833,7 @@ Run (`spikes/app`): `npm run build`, then `npx playwright test --project=e2e a11
 Expected: `3 passed`.
 
 Run: `npm run e2e`
-Expected: `17 passed`.
+Expected: `19 passed`.
 
 - [ ] **Step 5: Read your own work (rule 8), then commit**
 
@@ -3804,7 +4076,7 @@ Run (`spikes/app`): `npm run build`, then `npx playwright test --project=e2e tra
 Expected: `4 passed` (the `-1` test reports `skipped` instead if plan A's `1g.jsonl` is missing).
 
 Run: `npm test`, then `npm run e2e`
-Expected: `Tests  30 passed (30)` and `21 passed` (plan A's 3, Task B0's 2, Tasks B1b and B1c's 5, then 4 + 3 + 4).
+Expected: `Tests  30 passed (30)` and `23 passed` (plan A's 3, Task B0's 2, Tasks B1b and B1c's 7, then 4 + 3 + 4).
 
 - [ ] **Step 5: Read your own work (rule 8), then commit**
 
@@ -3822,14 +4094,19 @@ git commit -m "spike(b): Transcript feed on the flow window"
 
 **Interfaces:**
 - **Consumes:** everything from Tasks B2a–B2d; `percentile` (`perf.ts`); Chromium's DevTools protocol through Playwright's `newCDPSession` (`DOM`, `Accessibility`, `Runtime` domains).
-- **Produces:** `spikes/results/spike-b2-<hostname>.json` with the keys `G5:doc:scroll`, `G5:transcript:scroll`, `G5:transcript:focus`, `G5:doc:ax`, `G5:transcript:ax`, `G6:headingKey`, `G6:headingKey:controlWithoutPinnedHeadings`, `G6:outline`, `G9:doc`, `G9:transcript`, `AX`.
+- **Produces:** `spikes/results/spike-b2-<hostname>.json` with the keys `G5:doc:scroll`, `G5:transcript:scroll`, `G5:transcript:focus`, `G5:doc:ax`, `G5:transcript:ax`, `G6:headingKey`, `G6:headingKey:controlWithoutPinnedHeadings`, `G6:outline`, `G9:doc`, `G9:transcript`, `G9:jumps:doc`, `G9:jumps:transcript`, `AX`.
 
 **What each gate does:**
 - **G5, the simulated screen reader:** in accessibility mode, it moves a virtual cursor item by item in DOM order, scrolls each item into view (`block: 'nearest'`, the smallest move: the stand-in for a screen reader scrolling its cursor into view) and waits one frame. It covers 2,000 items forward, the same 2,000 back, and 2,000 back from a region never shown before, on the document (inside the heading-free stretches) and on the transcript; then the transcript again with focus following the cursor. Each step asserts that the next item is exactly one position on, that the cursor element is still connected and is the same node `mounted(i)` returns, and that no edge control was crossed; each walk must cross at least 4 recenters, and across every recenter the item under the cursor must move less than 1 px on screen (`maxCursorShift`).
 - **G5 through the AX tree:** the same walk, 600 steps each way, but each next item is taken from the container's AX children (`Accessibility.getChildAXNodes`, ignored nodes dropped): Blink's accessibility tree, from which Chromium builds what IA2/UIA expose to screen readers. Each item is scrolled with `DOM.scrollIntoViewIfNeeded`.
 - **G6, the heading key:** from inside a heading-free stretch it takes the next or previous **heading among the document's AX children** (the search NVDA's H/Shift+H run over the browse-mode buffer), and once the next level-3 heading (NVDA's 3 key) from 3,200, an h3 at 5,520. It checks that each heading lies outside the mounted window, scrolls it into view and checks the result: the same node, connected, in view, with both neighbours mounted, and at least 100 items of window on each side. Control: with `skeleton: false`, the same query finds no heading.
 - **G6, the Outline:** with the rail collapsed, focus an entry and press Enter, for headings outside the window; the heading must end up focused, mounted and in view.
-- **G9:** 10 s of auto-scroll at 2,000 px/s (n=5) and at a stress speed that crosses several recenters (n=2), sampling rAF intervals with `PerfLog`. Electron's accessibility support is toggled in place between runs (on, off, on, …), so drift on a shared machine hits both alike. Gate: with accessibility on, ≤ 1% of frames over 20ms (p50 of the n=5 runs). The 2,000 px/s runs start at the top and never recenter the 500-item window; the stress runs (10,000 px/s doc, 20,000 px/s transcript) do. Each stress run with accessibility on must recenter at least twice, and no recenter may take 16 ms or more (`maxApplyMs`). Accessibility on is Electron's support, not a running screen reader (Global Constraints).
+- **G9:** 10 s of auto-scroll at 2,000 px/s (n=5) and at a stress speed that crosses several recenters (n=2), sampling rAF intervals with `PerfLog`. At 2,000 px/s, Electron's accessibility support is toggled in place between runs (on, off, on, …), so drift on a shared machine hits both alike. Each stress run gets a fresh launch, with accessibility on or off from the start. Re-enabled in place, the renderer serializes a whole new accessibility tree in the run's first frames (60 to 91 ms), which is not recenter cost (Checkpoint items 4 and 5). Gate: with accessibility on, ≤ 1% of frames over 20ms (p50 of the n=5 runs). The 2,000 px/s runs start at the top and never recenter the 500-item window; the stress runs (10,000 px/s doc, 20,000 px/s transcript) do. Each stress run with accessibility on must recenter at least twice, no frame of it may stall over 50 ms (`maxGap`, spec §10.2's "no stall > 50ms"), and no recenter may take 16 ms or more (`maxApplyMs`). The last two are judged on a quiet PC only (Step 2). Accessibility on is Electron's support, not a running screen reader (Global Constraints).
+- **G9 jumps (spec Z52):** a far jump replaces the whole window: a scrollbar jump, an Outline jump, or open-then-scroll. Per surface, four fresh launches, with accessibility off and then on from the start:
+  - 12 s of auto-scroll at 2,000 px/s right after the file opens (the open run);
+  - 12 s of it with five far jumps made during it (the jump run): scrollbar jumps to 50%, 90% and 10% of the content at 2, 4 and 6 s, then `goTo` jumps to the items 75% and 2.5% of the way in at 8 and 10 s, as the Outline makes.
+
+  The measure is G9's stall check, the longest rAF gap (`maxGap`). Gate: with accessibility on, neither run may stall over 50 ms (spec §10.2, Z52). It fails today, a Phase 0 finding (Checkpoint item 5). The bound isn't loosened, and no product code changes to chase it. The control: with accessibility off, the jump run's longest gap must be 50 ms or less, which shows the check can pass. The open run with accessibility off is saved but not asserted, because it stalls too (Checkpoint item 5).
 - **AX findings:** the roles, names and properties Electron 44 exposes for each kind of item, and the collapsed Outline's AX node.
 
 - [ ] **Step 1: Write the gate runner**
@@ -4137,9 +4414,12 @@ test('G6 Outline: activating an entry for a heading outside the window mounts it
   await app.close()
 })
 
-/** G9: 10 s of auto-scroll at `speed` px/s, sampling rAF intervals with PerfLog. */
-function autoScroll(win: Page, speed: number) {
-  return win.evaluate(async (speed) => {
+/**
+ * G9: `ms` (10 s) of auto-scroll at `speed` px/s, sampling rAF intervals with PerfLog. `jumps` (spec Z52) are far jumps
+ * made during it, `at` ms in: a scrollbar jump to `frac` of the content, or an Outline-style jump to item `goTo`.
+ */
+function autoScroll(win: Page, speed: number, jumps: { at: number; frac?: number; goTo?: number }[] = [], ms = 10_000) {
+  return win.evaluate(async ({ speed, jumps, ms }) => {
     const sp = (window as any).__spike
     const s = sp.view.scroller as HTMLElement
     const r0 = sp.view.stats.recenters
@@ -4152,7 +4432,12 @@ function autoScroll(win: Page, speed: number) {
       const tick = (now: number): void => {
         s.scrollTop += (speed * (now - last)) / 1000
         last = now
-        if (now - t0 < 10_000) requestAnimationFrame(tick)
+        while (jumps.length && now - t0 >= jumps[0].at) {
+          const j = jumps.shift()!
+          if (j.goTo === undefined) s.scrollTop = s.scrollHeight * j.frac!
+          else void sp.view.goTo(j.goTo)
+        }
+        if (now - t0 < ms) requestAnimationFrame(tick)
         else done()
       }
       requestAnimationFrame(tick)
@@ -4160,7 +4445,7 @@ function autoScroll(win: Page, speed: number) {
     const f = sp.perf.stopFrames()
     const st = sp.view.stats
     return { ...f, recenters: st.recenters - r0, applies: st.applies - a0, maxApplyMs: st.maxApplyMs, scrolledPx: s.scrollTop }
-  }, speed)
+  }, { speed, jumps: [...jumps], ms })
 }
 
 const RUNS = Number(process.env.RUNS ?? 5)
@@ -4180,15 +4465,25 @@ for (const s of SURFACES) {
       return app.evaluate(({ app }) => app.isAccessibilitySupportEnabled())
     }
     const runs: Record<string, Awaited<ReturnType<typeof autoScroll>>[]> = {}
-    for (const [speed, n] of [
-      [2_000, RUNS],
-      [s.stress, 2]
-    ] as const) {
-      for (let r = 0; r < n; r++) {
-        for (const on of [true, false]) {
-          expect(await setA11y(on)).toBe(on)
-          ;(runs[`${speed}px/s:${on ? 'on' : 'off'}`] ??= []).push(await autoScroll(win, speed))
-        }
+    for (let r = 0; r < RUNS; r++) {
+      for (const on of [true, false]) {
+        expect(await setA11y(on)).toBe(on)
+        ;(runs[`2000px/s:${on ? 'on' : 'off'}`] ??= []).push(await autoScroll(win, 2_000))
+      }
+    }
+    await app.close()
+    // Each stress run gets a fresh launch with accessibility on or off from the start. Re-enabled in place, the renderer
+    // serializes a whole new accessibility tree in the run's first frames (60–90 ms), which is not recenter cost.
+    for (let r = 0; r < 2; r++) {
+      for (const on of [true, false]) {
+        const fresh = await launchPage(s.page, on ? { TYPOSE_A11Y: '1' } : {})
+        await fresh.win.waitForFunction((on) => (window as any).__spike.a11y === on, on, { timeout: 10_000 })
+        await openFixture(fresh.win, s.file)
+        await fresh.win.waitForTimeout(500) // let startup work settle
+        await settle(fresh.win)
+        expect(await fresh.app.evaluate(({ app }) => app.isAccessibilitySupportEnabled())).toBe(on)
+        ;(runs[`${s.stress}px/s:${on ? 'on' : 'off'}`] ??= []).push(await autoScroll(fresh.win, s.stress))
+        await fresh.app.close()
       }
     }
     const summary = Object.fromEntries(
@@ -4214,10 +4509,49 @@ for (const s of SURFACES) {
     )
     save(`G9:${s.page}`, summary)
     expect(summary['2000px/s:on'].longShareP50).toBeLessThanOrEqual(0.01)
+    // No stall over 50 ms in the stress runs with accessibility on (spec §10.2): the longest rAF interval.
+    expect(summary[`${s.stress}px/s:on`].maxGap).toBeLessThanOrEqual(50)
     // The 2,000 px/s runs never recenter the 500-item window; the stress runs do. One recenter must fit in a frame.
     expect(Math.min(...summary[`${s.stress}px/s:on`].recenters)).toBeGreaterThanOrEqual(2)
     expect(summary[`${s.stress}px/s:on`].maxApplyMs).toBeLessThan(16)
-    await app.close()
+  })
+}
+
+// G9 jumps (spec Z52): a far jump replaces the whole window, and with accessibility on the renderer then serializes all of
+// it at once. Fresh launches, accessibility off and then on from the start: auto-scroll right after the file opens, and
+// auto-scroll with three scrollbar jumps and two Outline-style jumps. The measure is the stall check: the longest rAF gap.
+for (const s of SURFACES) {
+  test(`G9 jumps ${s.page}: no stall over 50 ms on far jumps, accessibility on from launch (spec Z52)`, async () => {
+    test.setTimeout(5 * 60_000)
+    const n = s.page === 'doc' ? 20_000 : 5_000
+    const jumps = [
+      { at: 2_000, frac: 0.5 },
+      { at: 4_000, frac: 0.9 },
+      { at: 6_000, frac: 0.1 },
+      { at: 8_000, goTo: Math.round(n * 0.75) },
+      { at: 10_000, goTo: Math.round(n * 0.025) }
+    ]
+    const out: Record<string, { open: number; jumps: number; runs: Awaited<ReturnType<typeof autoScroll>>[] }> = {}
+    for (const on of [false, true]) {
+      const runs: Awaited<ReturnType<typeof autoScroll>>[] = []
+      for (const jumping of [false, true]) {
+        const { app, win } = await launchPage(s.page, on ? { TYPOSE_A11Y: '1' } : {})
+        await win.waitForFunction((on) => (window as any).__spike.a11y === on, on, { timeout: 10_000 })
+        await openFixture(win, s.file)
+        if (jumping) {
+          await win.waitForTimeout(1_000)
+          await settle(win)
+        }
+        runs.push(await autoScroll(win, 2_000, jumping ? jumps : [], 12_000))
+        await app.close()
+      }
+      out[on ? 'on' : 'off'] = { open: runs[0].maxGap, jumps: runs[1].maxGap, runs }
+    }
+    save(`G9:jumps:${s.page}`, out)
+    // The control: with accessibility off the same jumps stay under 50 ms, so the check can pass. Opening isn't part of
+    // it: with accessibility off, the first frames after opening stalled too (Checkpoint item 5). It is saved, not asserted.
+    expect(out.off.jumps, 'accessibility off').toBeLessThanOrEqual(50)
+    expect(Math.max(out.on.open, out.on.jumps), 'accessibility on').toBeLessThanOrEqual(50)
   })
 }
 
@@ -4276,12 +4610,20 @@ test('AX findings: what Electron 44 exposes for the document and the feed', asyn
 
 - [ ] **Step 2: Run the gates**
 
-Close other apps. Run (`spikes/app`): `npm run build`, then `npx playwright test --project=perf spike-b2` (the scratch run took 25.7 minutes on a machine busy with other work). `RUNS` sets G9's n for the 2,000 px/s runs only; the stress runs stay at 2. PowerShell: `$env:RUNS = '3'; npx playwright test --project=perf spike-b2; Remove-Item Env:RUNS`. Git Bash: `RUNS=3 npx playwright test --project=perf spike-b2`.
-Expected: `10 passed`; zoom must be 100% (the launch helper refuses otherwise). The Spike B report takes these from `spikes/results/spike-b2-<hostname>.json`:
+Close other apps and stop other lanes: the CPU must read under 10% for a minute before the run. PowerShell, twelve readings 5 s apart, each under 10: `1..12 | ForEach-Object { (Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average; Start-Sleep -Seconds 5 }`. A run on a loaded PC is not a G9 result: the apply-time bound is the maximum of 6 to 8 wall-clock samples, and on the shared PC it failed in 5 of 8 runs (17.9 to 24.1 ms) and passed in 3 (9.9 to 13.0 ms). Run (`spikes/app`): `npm run build`, then `npx playwright test --project=perf spike-b2` (the scratch run took 25.7 minutes on a machine busy with other work; the jump tests, added later, take about 2 more). `RUNS` sets G9's n for the 2,000 px/s runs only; the stress runs stay at 2. PowerShell: `$env:RUNS = '3'; npx playwright test --project=perf spike-b2; Remove-Item Env:RUNS`. Git Bash: `RUNS=3 npx playwright test --project=perf spike-b2`.
+Expected: `10 passed` and `2 failed` on the quiet PC; zoom must be 100% (the launch helper refuses otherwise). The two failures are the G9 jump tests, each with `Error: accessibility on` and `Expected: <= 50`. Far jumps stall with accessibility on, and spec Z52 records that as a Phase 0 finding (Checkpoint item 5). `Error: accessibility off` is a different failure: the control failed, so the run doesn't show that the check can pass. Rerun it on a quiet PC.
+
+Round 3's Z52 replay printed `10 passed` and `2 failed` in 11.1 minutes, on a shared PC at 30% mean CPU:
+- the jump case with accessibility on: open run 103.3 ms and jump run 66.8 ms on the Document, 103.2 and 103.3 ms on the Transcript;
+- with accessibility off: jump runs 6.9 and 6.3 ms;
+- the G9 stress runs with accessibility on: 24.4 ms on the Document and 18.3 ms on the Transcript (`maxApplyMs` 7.7 and 12.9).
+
+Before each stress run launched fresh, the Transcript's G9 failed its stall check at 60.7 ms (Checkpoint item 4). The Spike B report takes these from `spikes/results/spike-b2-<hostname>.json`:
 - **G5:** for each walk, `steps`, `wrong` (must be `[]`), `lost` (0), `edgeHits` (0), `recenters` (≥ 4), `maxCursorShift` (< 1 px), and the `stats` counters `corrections`, `maxCorrection`, `maxResidual`.
 - **G5 AX:** `steps` (1,200), `wrong`, `lost`, `nonItems`, `recentersFwd`/`recentersBack`, `msPerStep`.
 - **G6:** each jump's `before` window, the `heading` reached (5508, 2988, 11508 and the h3 5520), `after`; the control's two `null`s; the Outline's four jumps.
-- **G9:** per surface and speed, `longShareP50`, `longShareMax`, `framesP50`, `maxGap`, `recenters`, `maxApplyMs`, both with accessibility on and off; the stress runs' `recenters` (each ≥ 2 with accessibility on) and `maxApplyMs` (< 16).
+- **G9:** per surface and speed, `longShareP50`, `longShareMax`, `framesP50`, `maxGap`, `recenters`, `maxApplyMs`, both with accessibility on and off; the stress runs' `recenters` (each ≥ 2 with accessibility on), `maxGap` (≤ 50 ms) and `maxApplyMs` (< 16).
+- **G9 jumps:** per surface, with accessibility `off` and `on`, the open run's and the jump run's `maxGap` (`open`, `jumps`) and both runs' records. With accessibility on they are over 50 ms today (Checkpoint item 5).
 - **AX:** the per-role table and `outlineCollapsed`.
 
 - [ ] **Step 3: Read your own work (rule 8), then commit**
@@ -4301,7 +4643,7 @@ Tasks B3a–B3c build on plan A Tasks 1–10 and Task B0, and use plan A's `Lens
 - React 19 + React Aria own the card frame, the lens switch (`Tabs`, with a `Select` below 400px) and the peek, while a framework-free lens controller owns everything inside the card body.
 - 100 peek open/close cycles lose focus zero times (gate G7).
 - Nothing in the chrome or the open peek is unreachable at 200% zoom, at the default window and at the 720×480 minimum, and nothing on the Grid, Rows, Rendered and Transcript pages opened at 200% (gate G8).
-- axe-core finds nothing serious or critical (and, in the measured run, nothing at all) on the chrome page or with the peek open. It finds nothing at all on the Rendered and Transcript pages in accessibility mode, `heading-order` on the document aside (Task B3c).
+- axe-core finds nothing serious or critical and no heading out of order (and, in the measured run, nothing at all) on the chrome page or with the peek open. It finds nothing at all on the Rendered and Transcript pages in accessibility mode, apart from the document author's own heading levels inside `main#doc` (Task B3c).
 
 **Page contract.** `typose://app/chrome.html?open=<card file>|<peek file>`. `main/index.ts` already forwards one `TYPOSE_OPEN` value as `?open=`, so the two paths are joined with `|` (a Windows path cannot contain it). Launch it with `TYPOSE_PAGE=chrome` and `TYPOSE_OPEN=<card file>|<peek file>`. `tools/chrome-fixtures.mjs` writes two small JSONL files and prints that value.
 
@@ -5171,7 +5513,7 @@ Run (`spikes/app`): `npx playwright test --project=e2e chrome.e2e`
 Expected: `2 passed`.
 
 Run (`spikes/app`, with `chrome-g7`, `chrome-g8` and `chrome-axe` not yet created): `npm run e2e`
-Expected: `23 passed` (the 21 existing tests + 2 new).
+Expected: `25 passed` (the 23 existing tests + 2 new).
 
 - [ ] **Step 8: Look at it**
 
@@ -5209,7 +5551,7 @@ git commit -m "spike(b): React chrome page with the card frame, Tabs lens switch
 - Brief §4.5 puts the `scrim` over the card underneath, says "focus is inside" while it is open, and makes Esc, ✕ and a scrim click close it. A card you cannot reach with the mouse (the scrim takes the click) must not be reachable by Tab or by a screen reader's virtual cursor either. So everything outside the dialog is `inert` (the card, and the title bar, which holds the page heading), the dialog has `aria-modal`, and a React Aria `FocusScope` with `contain` traps Tab.
 - A non-modal `Dialog` was rejected: it would leave the covered card in the tab order and the accessibility tree.
 - **Closing is where focus is lost, and the stock behaviour loses it.** `FocusScope restoreFocus` restores in a `requestAnimationFrame` after the peek unmounts, so for one frame focus is on `<body>`. Measured in G7c: 40 body-focus samples and 20 focus leaks in 20 cycles, 2 and 1 per cycle. So `close()` first commits `closing` with `flushSync` (this lifts `inert` from the card and the title bar, releases the trap with `contain={!closing}`, and leaves the peek on screen to fade), then calls `trigger.focus()`, all in one task. Focus moves from inside the peek straight to the trigger. `restoreFocus` stays on as a backstop for any path that unmounts the peek without `close()`.
-- **Opening** moves focus into the dialog in a layout effect, before the browser's next frame, so it never rests on `<body>` either. Focus goes to the dialog element itself, not to its first button: the screen reader announces the dialog's name and role first (see the peek tasks of the screen-reader script, Task B4), and a stray `Space` key-up cannot press **Open as tab** (a precaution; not measured).
+- **Opening** moves focus into the dialog in a layout effect, before the browser's next frame, so it never rests on `<body>` either. Focus goes to the dialog element itself, not to its first button: a screen reader would then announce the dialog's name and role first (not heard here: the script's peek tasks, Task B4, are parked under spec Z39), and a stray `Space` key-up cannot press **Open as tab** (a precaution; not measured).
 - **The scrim** prevents `mousedown`'s default, because a mouse-down on a non-focusable element moves focus to `<body>` before the click that closes the peek.
 
 - [ ] **Step 1: Append the failing peek test**
@@ -5502,7 +5844,7 @@ Run (`spikes/app`): `npm run build`, then `npx playwright test --project=e2e chr
 Expected: `3 passed`.
 
 Run (`spikes/app`, with `chrome-g7`, `chrome-g8` and `chrome-axe` not yet created): `npm run e2e`
-Expected: `24 passed`.
+Expected: `26 passed`.
 
 Run `npm test`.
 Expected: `Tests  33 passed (33)`.
@@ -5535,7 +5877,11 @@ git commit -m "spike(b): peek as a modal dialog with synchronous focus restore"
 - **G8 on the other pages.** Four more tests open the Grid (`grid-1m-x20.csv`), Rows (`10g.jsonl`), Rendered and Transcript pages with `TYPOSE_ZOOM=2` in a fresh profile (`launchFresh`), as Task B4's S20 does, and Tab through each at a person's pace (a frame and the window's `settled()` between presses) until focus is back on the first stop, or 12 stops on the Transcript, whose every article is a stop. The same checks apply.
 - **Taller than the box.** An element taller than a clipping box (a Transcript turn at 200%) must cover the box, and one taller than the viewport must overlap it: Chromium's focus scroll centers such an element. Sideways there is no allowance.
 - **Zoom stands in for `--px`.** Brief §6.5 scales a `--px` token while the window keeps its size; Chromium page zoom halves the CSS viewport instead. For flow layout the two are equivalent, and the chrome here uses plain px, so zoom is the faithful test.
-- **axe.** Six scans: dark, light, and 200%-compact, each with and without the peek open. The scan runs in axe's legacy mode, because the default run opens a second page for its final merge step and Electron's browser context refuses that. A control test injects an unnamed button and requires the scan to flag it, so that a clean report means something. A third test scans the Rendered and Transcript pages in accessibility mode, window recentered mid-file (so both edge controls are present), and requires zero violations of any impact. On the document it leaves out one rule, `heading-order`: heading levels in rendered Markdown are the document author's, not Typose's, and Task B2a's fixture skips levels on purpose (it follows some h1s with an h3). Every other rule must report nothing on either page.
+- **axe.** Six scans: dark, light, and 200%-compact, each with and without the peek open. The scan runs in axe's legacy mode, because the default run opens a second page for its final merge step and Electron's browser context refuses that. A control test injects an unnamed button and requires the scan to flag it, so that a clean report means something. A third test scans the Rendered and Transcript pages in accessibility mode, window recentered mid-file (so both edge controls are present), and requires zero violations of any impact. On the document it exempts `heading-order` inside `main#doc` only: heading levels in rendered Markdown are the document author's, not Typose's, and Task B2a's fixture skips levels on purpose (it follows some h1s with an h3). Every other rule, and `heading-order` anywhere else, must report nothing on either page.
+  - **`heading-order` blocks on the app's own headings** (packet Part 4). `audit()` counts it as blocking beside serious and critical. So the first test fails on an out-of-order heading on the chrome page or in the peek, and the third on one on the Transcript or anywhere on the Rendered page outside `main#doc`.
+  - On the Rendered page every heading is inside `main#doc`. Its own controls (the status strip, the `Outline` button and links, the edge controls) carry none.
+  - A probe in round 3's replay found `heading-order` passing on the chrome page's `h1`, the open peek's `h2` and the Transcript's 500 mounted turn headings. On the Rendered page, all 35 of its violations are the fixture's own skipped levels inside `main#doc`.
+  - Shown red first: an `h4` added after the chrome page's `h1`, and an `h1` and `h3` added to the Rendered page's status strip. The old test passed both; this one fails each.
 
 - [ ] **Step 1: G7**
 
@@ -5653,7 +5999,7 @@ Expected: `3 passed` (G7 takes about 19 seconds on an idle machine and 0.9 to 1.
 - `G7c` (stock React Aria restore, 20 cycles): `bodySamples` and `leaks` above zero (observed 40 and 20).
 
 **Check that the gate can fail.** In `Peek.tsx`, delete ` onMouseDown={(e) => e.preventDefault()}` from the scrim `div`, rebuild, and run `npx playwright test --project=e2e chrome-g7 -g "G7: 100"`.
-Expected: FAIL: `focus was on <body> at: mutation @...` with `Expected: 0` and `Received: 24`, the 24 scrim-click cycles (and `leaks` 24). Restore the line and rebuild.
+Expected: FAIL: `focus was on <body> at: mutation @...` with `Expected: 0` and `Received: 24`, the 24 scrim-click cycles (and `leaks` 24). `Received` can be a little higher, when a frame samples a scrim-click cycle's loss a second time: the round-3 follow-up's replay printed 25 once, with `leaks` still 24. Restore the line and rebuild.
 
 - [ ] **Step 2: G8**
 
@@ -5898,16 +6244,26 @@ import { expect, test, type Page } from '@playwright/test'
 import { launchChrome, setViewport } from './chrome-launch'
 import { launchPage, openFixture, settle } from './flow-launch'
 
-/** Runs axe-core on the page; returns every violation as `impact id (nodes)` plus the serious/critical subset. */
-async function audit(win: Page): Promise<{ all: string[]; blocking: string[]; passes: number }> {
+/**
+ * Runs axe-core on the page; returns every violation as `impact id (nodes)` and the blocking subset: serious or
+ * critical, and `heading-order` on the app's own headings. Inside `authored`, the document author's content, heading
+ * levels are the author's, not Typose's, so `heading-order` nodes there are left out.
+ */
+async function audit(win: Page, authored?: string): Promise<{ all: string[]; blocking: string[]; passes: number }> {
   // Legacy mode: the default run opens a second page for axe's final merge step, which Electron's browser context refuses.
   const results = await new AxeBuilder({ page: win }).setLegacyMode().analyze()
-  const all = results.violations.map((v) => `${v.impact} ${v.id} (${v.nodes.length}): ${v.nodes.map((n) => n.target.join(' ')).join(' | ')}`)
-  const blocking = results.violations.filter((v) => v.impact === 'serious' || v.impact === 'critical').map((v) => v.id)
+  for (const v of results.violations.filter((v) => authored && v.id === 'heading-order')) {
+    const targets = v.nodes.map((n) => n.target.join(' '))
+    const inside = await win.evaluate(([ts, a]) => ts.map((t) => !!document.querySelector(t)?.closest(a)), [targets, authored!] as const)
+    v.nodes = v.nodes.filter((_, i) => !inside[i])
+  }
+  const violations = results.violations.filter((v) => v.nodes.length)
+  const all = violations.map((v) => `${v.impact} ${v.id} (${v.nodes.length}): ${v.nodes.map((n) => n.target.join(' ')).join(' | ')}`)
+  const blocking = violations.filter((v) => v.impact === 'serious' || v.impact === 'critical' || v.id === 'heading-order').map((v) => v.id)
   return { all, blocking, passes: results.passes.length }
 }
 
-test('axe: no serious or critical violations on the chrome page or with the peek open (dark, light, 200% compact)', async () => {
+test('axe: no serious or critical violations and no heading out of order on the chrome page or with the peek open (dark, light, 200% compact)', async () => {
   const { app, win } = await launchChrome()
   const report: Record<string, { violations: string[]; passes: number }> = {}
   const blocking: string[] = []
@@ -5960,8 +6316,9 @@ test('axe: the Rendered and Transcript pages in accessibility mode, window recen
     await openFixture(win, file)
     await win.evaluate((i) => (window as any).__spike.view.goTo(i), mid) // mid-file: both edge controls are present
     await settle(win)
-    // heading-order judges the document's own levels: the fixture follows some h1s with an h3 (Task B2a), as real files may.
-    report[page] = (await audit(win)).all.filter((v) => !(page === 'doc' && v.includes(' heading-order ')))
+    // Heading levels inside main#doc are the document author's: the fixture follows some h1s with an h3 (Task B2a), as
+    // real files may. Everywhere else heading-order is judged.
+    report[page] = (await audit(win, page === 'doc' ? '#doc' : undefined)).all
     await app.close()
   }
   console.log(JSON.stringify({ gate: 'axe', report }))
@@ -5975,7 +6332,7 @@ Expected: `3 passed`. The printed report has `"violations": []` for all six scan
 - [ ] **Step 4: The whole suite**
 
 Run (`spikes/app`): `npm test`, `npm run build`, `npm run e2e`
-Expected: `Tests  33 passed (33)`; the build succeeds; `36 passed` (21 from plan A and Tasks B0–B2d + 3 in `chrome.e2e.ts` + 3 G7 + 6 G8 + 3 axe).
+Expected: `Tests  33 passed (33)`; the build succeeds; `38 passed` (23 from plan A and Tasks B0–B2d + 3 in `chrome.e2e.ts` + 3 G7 + 6 G8 + 3 axe).
 
 Run (`spikes/core`): `cargo test -p spike-core`
 Expected: `test result: ok. 16 passed; 0 failed; 0 ignored` (plan A's 16, unchanged by this plan).
@@ -5989,7 +6346,9 @@ git commit -m "spike(b): gates G7 (100 peek cycles), G8 (200% zoom) and axe for 
 
 ---
 
-## Task B4: The 20-task screen-reader script
+## Task B4: The 20-task screen-reader script (parked, spec Z39)
+
+**Parked (spec Z39).** Screen-reader validation is parked until after launch, as an expansion opportunity; Z39 supersedes Z35. Phase 0 doesn't run this task: the executor skips Steps 1 to 7, and no gate, coverage claim or Validated line of this plan rests on it. The script and the results template below are kept as the expansion's starting point (spec §6.3), with the round-2 review's open findings against them (Checkpoint items, Parked). Until the expansion runs them, this plan claims what the automated gates show (Tasks B1b to B3c), not screen-reader support.
 
 Each part of this plan was built with its own screen-reader tasks: 8 for the Grid and Rows, 10 for Rendered and the Transcript, 4 for the chrome. They are merged into the 20 below (spec §6.3 fixes the script at 20). The script's "Lane task" column (B1 G1–G8, B2 D1–D10, B3 C1–C4) names where each one came from.
 
@@ -6003,17 +6362,21 @@ Each part of this plan was built with its own screen-reader tasks: 8 for the Gri
   - the pages `grid`, `treegrid` (Tasks B1b, B1c), `doc`, `transcript` (Tasks B2b, B2d) and `chrome` (Tasks B3a, B3b), all listed in `pages` in `spikes/app/electron.vite.config.ts` (`['index', 'grid', 'treegrid', 'doc', 'transcript', 'chrome']`) and built by `npm run build`;
   - main's `TYPOSE_PAGE` (Task B0), `TYPOSE_OPEN` (plan A Task 8) and `TYPOSE_A11Y` (Task B2c), and `TYPOSE_ZOOM` (`webPreferences.zoomFactor`: `TYPOSE_ZOOM` when it is a number in (0, 5], else 1; Task B0);
   - the fixtures `grid-1m-x20.csv` and `grid-1k-x5000.csv` (Task B1a), `doc-20k.jsonl` and `transcript-5k.jsonl` (Task B2a), `10g.jsonl` (plan A Task 2), and `spikes/tools/chrome-fixtures.mjs` (Task B3a).
-- **Produces:** the two files above. The script's gate is the Spike B line "100% completion of the 20-task script" (spec §13.1): all 20 tasks pass on NVDA and Narrator (PC) and on VoiceOver (Mac).
+- **Produces:** the two files above, when the expansion runs this task. The script's gate, parked with it (spec Z39), is the Spike B line "100% completion of the 20-task script" (spec §13.1): all 20 tasks pass on NVDA and Narrator (PC) and on VoiceOver (Mac).
 
-**Open decisions this script depends on (the Grid, Task B1b; not decided here):** Space in the Grid, and screen-reader scroll-into-view in logical scrolling. They are P3 and P4 in the script; both touch S05. Decided since (spec Z31, Z32): the row-number column is ARIA column 1 and shows the record number, 1 for the first data record. S01–S05 expect that.
+**Open decision this script depends on (the Grid, Task B1b; not decided here):** screen-reader scroll-into-view in logical scrolling, P4 in the script; it touches S05. Decided since:
+- the row-number column is ARIA column 1 and shows the record number, 1 for the first data record (spec Z31, Z32), which S01–S05 expect;
+- Space doesn't page the Grid (spec Z40, the script's P3), so S05 scrolls with the wheel.
 
-**Test depth (spec Z35).** Phase 0 runs the full reading test, 2,000 blocks forward and backward (S11, S12), on NVDA, Narrator and VoiceOver. Routine milestones run a shorter one: at least 4 recenters each way, plus heading jumps and focus restoration; the full test is repeated whenever virtualization or screen-reader behaviour changes.
+**Test depth: parked (spec Z35, superseded by Z39).** Z35 had Phase 0 run the full reading test, 2,000 blocks forward and backward (S11, S12), on NVDA, Narrator and VoiceOver, and routine milestones a shorter one. Z39 parks both until after launch, and the expansion sets the depth again. The round-2 review's findings on it are parked with it: on Narrator and VoiceOver the full test has no instrument that can fail it, and the milestone depth is named, not defined (Checkpoint items, Parked).
 
 - [ ] **Step 1: Create the script**
 
 `spikes/results/sr-script.md`:
 ````markdown
 # Spike B screen-reader script: 20 tasks (S01–S20)
+
+**Parked (spec Z39).** Screen-reader validation is parked until after launch. This script is kept for that expansion: it has not been run on any reader, and Phase 0 claims nothing from it.
 
 The fixed 20-task script of spec §6.3 and §13.1 (Spike B). Run it on **NVDA** (IA2) and **Narrator** (UIA) on the PC, and on **VoiceOver** in the Mac batch. Gate: 100% completion, which means all 20 tasks pass on every reader.
 
@@ -6053,7 +6416,7 @@ Not observable by a person, so not in this script: zero skipped or duplicated po
 | S02 | Grid | POS | B1 G2 | |
 | S03 | Grid | END, POS | B1 G3 | |
 | S04 | Grid | POS (5,000 columns) | B1 G4 | |
-| S05 | Grid | focused row kept mounted (§6.1) | B1 G5 | P3, P4 |
+| S05 | Grid | focused row kept mounted (§6.1) | B1 G5 | P4 |
 | S06 | Rows | POS (unknown total, then true total) | B1 G6 | |
 | S07 | Rows | POS (level, position, set size) | B1 G7 | |
 | S08 | Rows | END | B1 G8 | |
@@ -6074,12 +6437,13 @@ Merged: B2 D1 into S09 (D1's element-list checks are the first half of D5's acti
 
 ## Pending decisions that change what is heard
 
-These two are open (Grid lane B1 report, "Decisions for Zack"). The script follows the current build; if a decision flips, the dependent tasks' "Must hear" lines change and the tasks are re-run.
+P4 is open (Grid lane B1 report, "Decisions for Zack"). The script follows the current build; if it flips, S05's "Must hear" lines change and the task is re-run.
 
-- **P3: Space and Shift+Space in the Grid page-scroll and leave focus in place** (Excel uses Shift+Space to select the row). Affects S05.
 - **P4: a screen-reader-driven scroll-into-view on an off-screen focused cell in logical scrolling would read as a proportional jump** (×1.5 at 1M rows, about ×80 at 50M). Untested; S05 is where it would show. Affects S05.
 
-Decided, and what S01–S05 expect:
+Decided, and what S01–S08 expect:
+- **P3, decided by spec Z40: Space doesn't page the Grid.** Page Up/Down page. Shift+Space selects the row and Ctrl+Space the column; the spike doesn't build selection (the Grid milestone's acceptance test, Task B1b). S05 scrolls the view with the mouse wheel instead.
+- **P5, decided by spec Z51: Space doesn't page Rows either.** Page Up/Down page, and Shift+Space selects the row in the product; the spike doesn't build selection (the Rows milestone's acceptance test, Task B1c). S06–S08 don't use Space, so nothing they expect changes.
 - **The row-number column is ARIA column 1 (spec Z32).** Readers say "column 2", with its name, for the first CSV column; the Grid has 21 columns for a 20-column CSV.
 - **It shows the record number (spec Z31):** 1 for the first data record. The header row is still ARIA row 1, so a record's announced row is its number + 1: record 1 is row 2, and the last record, `1000000`, is row 1,000,001. Under sorting the number stays the record's (sorting isn't in this spike); Raw keeps the physical source lines.
 
@@ -6220,11 +6584,11 @@ Each line's number is the block or turn it belongs to; lines of the same block i
 
 ### S05 · Grid: the focused cell survives being scrolled out of view
 - **Launch:** Grid 1M × 20.
-- **Keys:** Ctrl+Home, ↓ ↓, → → → (focus is `r2c3`). Space three times (the view pages down; focus stays), then ↓.
-- **Must hear:** Space: no focus announcement, or the same cell `r2c3` again, never a different cell. ↓: row 4 (row header `3`), `r3c3`, and the view returns to it.
+- **Keys:** Ctrl+Home, ↓ ↓, → → → (focus is `r2c3`). Scroll the view down about three screens with the mouse wheel (focus stays), then ↓.
+- **Must hear:** while scrolling: no focus announcement, or the same cell `r2c3` again, never a different cell. ↓: row 4 (row header `3`), `r3c3`, and the view returns to it.
 - **Pass when:** the focused cell survives being scrolled out of view and the next move continues from it.
 - **Fail when:** the reader loses focus (silence, "document", or the top of the page), or the next move starts somewhere else.
-- **Depends on:** P3, P4. **Decided:** spec Z31, Z32.
+- **Depends on:** P4. **Decided:** spec Z31, Z32, Z40.
 
 ## Rows (`10g.jsonl`, 53,687,092 lines)
 
