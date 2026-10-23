@@ -1,6 +1,7 @@
 // What every perf run records with its figures (Z49): the machine's CPU load and the panel's refresh rate, plus a
-// results file per host. These runs are informational until plan §5's qualification (M1 close).
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+// results log per host. These runs are informational until plan §5's qualification (M1 close).
+import { type TestInfo } from '@playwright/test'
+import { appendFileSync, mkdirSync } from 'node:fs'
 import { cpus, hostname } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -42,11 +43,17 @@ export function summary(samples: number[]) {
   return { n: samples.length, p50: percentile(samples, 50), p95: percentile(samples, 95), max: Math.max(...samples), samples }
 }
 
-/** Writes `value` under `key` in this host's results file (cold keys append across restarts; see startup.perf.ts). */
-export function record(key: string, value: unknown): void {
+/**
+ * Appends one run to this host's results log (`m1-<host>.jsonl`). Nothing is ever overwritten: a failed or invalid run
+ * stays beside its reruns, with its reason (Z49, spec §10.3).
+ */
+export function record(key: string, value: Record<string, unknown>): void {
   mkdirSync(RESULTS, { recursive: true })
-  const file = join(RESULTS, `m1-${hostname()}.json`)
-  const all = existsSync(file) ? (JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>) : {}
-  all[key] = value
-  writeFileSync(file, JSON.stringify(all, null, 2))
+  appendFileSync(join(RESULTS, `m1-${hostname()}.jsonl`), JSON.stringify({ key, at: new Date().toISOString(), ...value }) + '\n')
+}
+
+/** Records a test's run once it has ended, with Playwright's verdict as its status and the failure as its reason. */
+export function recordOutcome(info: TestInfo, key: string, value: Record<string, unknown>): void {
+  const reason = info.errors.map((e) => e.message?.split('\n')[0]).filter(Boolean).join('; ') || undefined
+  record(key, { status: info.status, reason, ...value })
 }

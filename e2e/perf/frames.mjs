@@ -36,19 +36,33 @@ export function presentedFrames(events) {
 
 /**
  * A frame is demanded from an input until the view settles: the first presented frame after the renderer marked the
- * input's target rows painted (or the mark itself, when nothing on screen changed). Demanded intervals that overlap
- * are merged, so a continuous gesture is one interval. Inside a merged interval, every presented frame after the
- * first is judged on its interval from the frame before it: long at ≥ 16.7 ms, a stall over 50 ms. The first frame
- * of a merged interval is judged from the input's own timestamp, as a stall only: that span includes the input
- * pipeline (OS to browser to the rAF-aligned dispatch, then at least one refresh), so it isn't a frame interval. An
- * input whose target isn't painted within 1 s fails as never painted. Each long frame and stall also says when the
- * work behind its opening frame began (`began`): a frame begun before a block can still present during it.
+ * input's target rows painted. Demanded intervals that overlap are merged, so a continuous gesture is one interval.
+ * Every presented frame inside a demanded interval is judged (long at ≥ 16.7 ms):
+ * - a frame after another presented frame of the same interval, on the gap from that frame;
+ * - the frame that opens an interval, on its own production time: from its PipelineReporter slice's start to its
+ *   presentation, except that a slice starting more than one refresh after the input counts from input + one refresh.
+ *   The one refresh is the wait for the next BeginFrame, which no app can avoid; anything later (a handler that blocks
+ *   before the frame starts) is counted.
+ * A stall is a gap over 50 ms, or an input whose first presented frame comes over 50 ms after the input's timestamp.
+ * An input whose target isn't painted within 1 s fails as never painted. An input that changes nothing on screen
+ * (its painted mark repeats the previous one) owes no frame: it's counted, and is a stall if its mark is over 50 ms late.
+ * Each long frame and stall says when the work behind it began (`began`): a frame begun before a block can still
+ * present during it. A trace that can't be judged (no renderer frames, no inputs, nothing judged, a demanded interval
+ * with no presented frame) is `valid: false`, and never passes.
  */
-export function analyzeFrames(events) {
+export function analyzeFrames(events, { hz } = {}) {
+  if (!(hz > 0)) throw new Error('analyzeFrames needs the panel refresh rate: { hz }')
+  const refresh = 1e6 / hz // µs
   const ms = (us) => Math.round(us) / 1000
-  const presented = presentedFrames(events)
+  const none = { inputs: 0, unchanged: 0, demandedMs: 0, frames: 0, longFrames: 0, longShare: 0, long: [], stalls: [], neverPainted: [], inputToPaint: [], raf: { maxGapMs: 0 } }
+  const invalid = (reason) => ({ ...none, valid: false, reason, pass: false })
+  let presented
+  try {
+    presented = presentedFrames(events)
+  } catch (e) {
+    return invalid(e.message)
+  }
   const frames = presented.map((f) => f.at)
-  const began = new Map(presented.map((f) => [f.at, f.began]))
 
   const inputs = []
   const painted = []
@@ -65,15 +79,23 @@ export function analyzeFrames(events) {
   }
   inputs.sort((x, y) => x.seq - y.seq)
   painted.sort((x, y) => x.ts - y.ts)
+  if (inputs.length === 0) return invalid('no input marks: nothing was demanded')
 
   const neverPainted = []
   const inputToPaint = []
   const demanded = []
+  const stalls = []
+  let unchanged = 0
   for (const input of inputs) {
     const i = painted.findIndex((p) => p.seq >= input.seq && p.ts >= input.dispatch)
     const mark = painted[i]
-    const unchanged = mark && i > 0 && painted[i - 1].key === mark.key
-    const settle = !mark ? undefined : unchanged ? mark.ts : frames.find((f) => f > mark.ts)
+    if (mark && i > 0 && painted[i - 1].key === mark.key) {
+      unchanged++
+      const late = mark.ts - input.at
+      if (late > STALL_MS * 1000) stalls.push({ from: ms(input.at), to: ms(mark.ts), ms: ms(late), began: ms(input.at), first: true })
+      continue
+    }
+    const settle = mark && frames.find((f) => f > mark.ts)
     if (settle === undefined || settle - input.at > NEVER_MS * 1000) {
       neverPainted.push({ seq: input.seq, kind: input.kind, at: ms(input.at) })
       continue
@@ -93,21 +115,27 @@ export function analyzeFrames(events) {
 
   let judged = 0
   const long = []
-  const stalls = []
   let demandedUs = 0
   for (const [a, s] of merged) {
     demandedUs += s - a
-    const inside = frames.filter((f) => f > a && f <= s)
-    if (inside.length === 0) continue
-    if (inside[0] - a > STALL_MS * 1000) stalls.push({ from: ms(a), to: ms(inside[0]), ms: ms(inside[0] - a), began: ms(a), first: true })
+    const inside = presented.filter((f) => f.at > a && f.at <= s)
+    if (inside.length === 0) return invalid(`the demanded interval ${ms(a)}..${ms(s)} ms has no presented frame`)
+    // The opening frame: its own production time, with at most one refresh of waiting for its BeginFrame excused.
+    const first = inside[0]
+    const from = Math.min(first.began, a + refresh)
+    judged++
+    if (first.at - from >= LONG_MS * 1000)
+      long.push({ from: ms(from), to: ms(first.at), ms: ms(first.at - from), began: ms(Math.min(first.began, a)), opening: true })
+    if (first.at - a > STALL_MS * 1000) stalls.push({ from: ms(a), to: ms(first.at), ms: ms(first.at - a), began: ms(a), first: true })
     for (let k = 1; k < inside.length; k++) {
-      const gap = inside[k] - inside[k - 1]
-      const span = { from: ms(inside[k - 1]), to: ms(inside[k]), ms: ms(gap), began: ms(began.get(inside[k - 1])) }
+      const gap = inside[k].at - inside[k - 1].at
+      const span = { from: ms(inside[k - 1].at), to: ms(inside[k].at), ms: ms(gap), began: ms(inside[k - 1].began) }
       judged++
       if (gap >= LONG_MS * 1000) long.push(span)
       if (gap > STALL_MS * 1000) stalls.push({ ...span, first: false })
     }
   }
+  if (judged === 0 && neverPainted.length === 0) return invalid('no presented frame was judged')
 
   // rAF intervals on the renderer main thread within the same intervals: printed, never judged.
   const raf = events.filter((e) => e.name === 'FireAnimationFrame').map((e) => e.ts).sort((x, y) => x - y)
@@ -118,7 +146,10 @@ export function analyzeFrames(events) {
   }
 
   return {
+    valid: true,
+    reason: undefined,
     inputs: inputs.length,
+    unchanged,
     demandedMs: ms(demandedUs),
     frames: judged,
     longFrames: long.length,
@@ -128,6 +159,6 @@ export function analyzeFrames(events) {
     neverPainted,
     inputToPaint,
     raf: { maxGapMs: ms(rafMax) },
-    pass: neverPainted.length === 0 && stalls.length === 0 && (judged === 0 || long.length / judged <= 0.01)
+    pass: neverPainted.length === 0 && stalls.length === 0 && judged > 0 && long.length / judged <= 0.01
   }
 }

@@ -1,16 +1,18 @@
 // Plan C8's frame instrument and its controls, on the packaged build over CDP, with accessibility on and off: a
-// 30 ms busy-wait during a scroll is a long frame covering it and no stall; 60 ms is a stall covering it, during a
-// scroll and in the first frame after a scrollbar jump; a control scroll has no stall and passes the frame rule; and
-// a jump whose target never renders fails.  Run: npm run package, then `npm run perf -- -g accessibility`.
+// 30 ms busy-wait during a scroll, and in the handler of one discrete keypress, is a long frame covering it and no
+// stall; 60 ms is a stall covering it, during a scroll and in the first frame after a scrollbar jump; control scrolls
+// and keypresses have no stall and pass the frame rule; and a jump whose target never renders fails.
+//   Run: npm run package, then `npm run perf -- -g accessibility`. Every run is appended to .evidence/m1/perf/.
 import { type CDPSession, type Page, expect } from '@playwright/test'
 import { writeFileSync } from 'node:fs'
 import { fixture, test, waitIndexed, waitOpen } from '../app'
 import { type PackagedLaunch, closePackaged, launchPackaged, waitMarks } from '../packaged'
 import { CATEGORIES, analyzeFrames } from './frames.mjs'
-import { cpuLoad, cpuTimes, record } from './rig'
+import { cpuLoad, cpuTimes, recordOutcome } from './rig'
 
 type Analysis = ReturnType<typeof analyzeFrames>
 type Span = { from: number; to: number }
+type Run = { analysis: Analysis; busy: Span[]; load: number }
 
 // 1M lines × 20 px is past the 16M px native cap, so Raw scrolls logically: every wheel goes through the main thread.
 const LINES = 1_000_000
@@ -20,11 +22,12 @@ test.beforeAll(() => {
 })
 
 /** Traces `drive` (Chromium tracing over CDP, C8's pinned categories) and analyzes it; also returns the busy spans. */
-async function traced(l: PackagedLaunch, drive: (page: Page, cdp: CDPSession) => Promise<void>) {
+async function traced(l: PackagedLaunch, hz: number, drive: (page: Page, cdp: CDPSession) => Promise<void>): Promise<Run> {
   const page = l.page!
   const cdp = await page.context().newCDPSession(page)
   const from = cpuTimes()
   await l.browser!.startTracing(page, { categories: CATEGORIES })
+  await page.waitForTimeout(500) // the first frame after tracing starts can take 120 ms: keep it out of the run
   await drive(page, cdp)
   await page.waitForTimeout(500) // let the last input settle inside the trace
   const trace = await l.browser!.stopTracing()
@@ -33,7 +36,7 @@ async function traced(l: PackagedLaunch, drive: (page: Page, cdp: CDPSession) =>
   const load = cpuLoad(from)
   const at = (m: string) => events.filter((e) => e.name === 'TimeStamp' && e.args?.data?.message === m).map((e) => e.ts / 1000)
   const busy: Span[] = at('typose:busy-start').map((from, i) => ({ from, to: at('typose:busy-end')[i] }))
-  return { analysis: analyzeFrames(events), busy, load }
+  return { analysis: analyzeFrames(events, { hz }), busy, load }
 }
 
 type Busy = Window & { typoseBusy: (ms: number) => void }
@@ -54,20 +57,28 @@ async function scroll(cdp: CDPSession): Promise<void> {
   await cdp.send('Input.synthesizeScrollGesture', { x: 400, y: 400, yDistance: -6000, speed: 3000, gestureSourceType: 'mouse' })
 }
 
-/** Arms a busy-wait in the handler of the `nth` wheel event from now. */
-const busyOnWheel = (page: Page, nth: number, ms: number) =>
+/** Arms a busy-wait in the handler of the `nth` event of `type` from now (capture phase, before the app's handler). */
+const busyOn = (page: Page, type: 'wheel' | 'keydown', nth: number, ms: number) =>
   page.evaluate(
-    ([nth, ms]) => {
+    ([type, nth, ms]) => {
       let n = 0
-      const onWheel = () => {
+      const handler = () => {
         if (++n < nth) return
-        window.removeEventListener('wheel', onWheel, true)
+        window.removeEventListener(type, handler, true)
         ;(window as unknown as Busy).typoseBusy(ms)
       }
-      window.addEventListener('wheel', onWheel, true)
+      window.addEventListener(type, handler, true)
     },
-    [nth, ms] as const
+    [type, nth, ms] as const
   )
+
+/** 21 discrete ArrowDown presses, 100 ms apart: each scrolls one row, so each is answered by one frame. */
+async function keypresses(page: Page): Promise<void> {
+  for (let i = 0; i < 21; i++) {
+    await page.keyboard.press('ArrowDown')
+    await page.waitForTimeout(100)
+  }
+}
 
 /** Drags the scrollbar thumb from the top to near the bottom in one move: a far jump. */
 async function jump(page: Page): Promise<void> {
@@ -85,14 +96,22 @@ for (const a11y of ['on', 'off'] as const) {
   test.describe(`accessibility ${a11y}`, () => {
     let l: PackagedLaunch
     let hz: number
+    let run: { name: string; r: Run } | null = null
     /**
-     * The span covers the injection: it runs past the injection's end, and the frame that opens it began before the
+     * The span covers the injection: it runs past the injection's end, and the work behind it began before the
      * injection did. A frame already in the pipeline when the main thread blocks still presents during the block (seen
      * 3–12 ms in), and nothing begun after the block starts can present until it ends.
      */
     const covers = (span: Span & { began: number }, busy: Span) => span.to >= busy.to && span.began <= busy.from
+    const valid = (r: Run) => expect(r.analysis.valid, `invalid run: ${r.analysis.reason}`).toBe(true)
+    const keep = (name: string, r: Run) => {
+      run = { name, r }
+      const a = r.analysis
+      console.log(name, `a11y ${a11y}`, JSON.stringify({ hz, valid: a.valid, reason: a.reason, frames: a.frames, long: a.long, stalls: a.stalls, never: a.neverPainted?.length, busy: r.busy, raf: a.raf, load: r.load }))
+    }
 
     test.beforeEach(async () => {
+      run = null
       l = await launchPackaged({ cdp: true, file, args: [a11y === 'on' ? '--force-renderer-accessibility' : '--disable-renderer-accessibility'] })
       await waitOpen(l.page!)
       await waitIndexed(l.page!)
@@ -102,16 +121,17 @@ for (const a11y of ['on', 'off'] as const) {
     })
     test.afterEach(async () => {
       await closePackaged(l)
+      // Kept with its status and reason, pass or fail (Z49): nothing overwrites an earlier run.
+      if (run) {
+        const { inputToPaint, ...a } = run.r.analysis
+        recordOutcome(test.info(), `frames:${run.name}:a11y-${a11y}`, { ...a, hz, inputToPaintMaxMs: Math.max(0, ...(inputToPaint ?? []).map((p) => p.ms)), busy: run.r.busy, load: run.r.load })
+      }
     })
-    const keep = (name: string, r: { analysis: Analysis; busy: Span[]; load: number }) => {
-      const { inputToPaint, ...a } = r.analysis
-      record(`frames:${name}:a11y-${a11y}`, { ...a, hz, inputToPaintMaxMs: Math.max(0, ...inputToPaint.map((p) => p.ms)), busy: r.busy, load: r.load })
-      console.log(name, `a11y ${a11y}`, JSON.stringify({ hz, frames: a.frames, long: a.long, stalls: a.stalls, never: a.neverPainted.length, busy: r.busy, raf: a.raf, load: r.load }))
-    }
 
     test('control: a scroll with no injection has no stall and passes the frame rule', async () => {
-      const r = await traced(l, (_page, cdp) => scroll(cdp))
+      const r = await traced(l, hz, (_page, cdp) => scroll(cdp))
       keep('control', r)
+      valid(r)
       expect(r.analysis.frames).toBeGreaterThan(250) // the 2 s gesture is judged as one demanded interval
       expect(r.analysis.stalls).toEqual([])
       expect(r.analysis.neverPainted).toEqual([])
@@ -121,29 +141,53 @@ for (const a11y of ['on', 'off'] as const) {
       expect(r.analysis.longShare).toBeLessThanOrEqual(0.01)
     })
 
+    test('control: discrete keypresses with no injection have no stall, and every response frame is judged', async () => {
+      const r = await traced(l, hz, (page) => keypresses(page))
+      keep('keys', r)
+      valid(r)
+      expect(r.analysis.frames).toBeGreaterThanOrEqual(21)
+      expect(r.analysis.stalls).toEqual([])
+      expect(r.analysis.neverPainted).toEqual([])
+      expect(r.analysis.longShare).toBeLessThanOrEqual(0.01)
+    })
+
     test('a 30 ms busy-wait during a scroll registers a long frame covering it, and no stall', async () => {
-      const r = await traced(l, async (page, cdp) => {
-        await busyOnWheel(page, 20, 30)
+      const r = await traced(l, hz, async (page, cdp) => {
+        await busyOn(page, 'wheel', 20, 30)
         await scroll(cdp)
       })
       keep('busy30', r)
+      valid(r)
+      expect(r.busy).toHaveLength(1)
+      expect(r.analysis.long.some((s) => covers(s, r.busy[0])), JSON.stringify(r)).toBe(true)
+      expect(r.analysis.stalls).toEqual([])
+    })
+
+    test('a 30 ms busy-wait in the handler of one discrete keypress registers a long frame covering it, and no stall', async () => {
+      const r = await traced(l, hz, async (page) => {
+        await busyOn(page, 'keydown', 10, 30)
+        await keypresses(page)
+      })
+      keep('keys-busy30', r)
+      valid(r)
       expect(r.busy).toHaveLength(1)
       expect(r.analysis.long.some((s) => covers(s, r.busy[0])), JSON.stringify(r)).toBe(true)
       expect(r.analysis.stalls).toEqual([])
     })
 
     test('a 60 ms busy-wait during a scroll is detected as a stall covering it', async () => {
-      const r = await traced(l, async (page, cdp) => {
-        await busyOnWheel(page, 20, 60)
+      const r = await traced(l, hz, async (page, cdp) => {
+        await busyOn(page, 'wheel', 20, 60)
         await scroll(cdp)
       })
       keep('busy60', r)
+      valid(r)
       expect(r.busy).toHaveLength(1)
       expect(r.analysis.stalls.some((s) => covers(s, r.busy[0])), JSON.stringify(r)).toBe(true)
     })
 
     test('a 60 ms busy-wait in the first frame after a scrollbar jump is detected as a stall covering it', async () => {
-      const r = await traced(l, async (page) => {
+      const r = await traced(l, hz, async (page) => {
         // The first scroll event of the drag arms one animation frame that blocks.
         await page.evaluate(() => {
           const scroller = document.querySelector('.vl-scroller')!
@@ -152,12 +196,13 @@ for (const a11y of ['on', 'off'] as const) {
         await jump(page)
       })
       keep('jump60', r)
+      valid(r)
       expect(r.busy).toHaveLength(1)
       expect(r.analysis.stalls.some((s) => covers(s, r.busy[0])), JSON.stringify(r)).toBe(true)
     })
 
     test('a jump whose target rows never render fails as never painted', async () => {
-      const r = await traced(l, async (page) => {
+      const r = await traced(l, hz, async (page) => {
         // Suppress the target: page requests never reach the core, so the rows past the jump never get their text.
         await page.evaluate(() => {
           const post = MessagePort.prototype.postMessage
@@ -170,6 +215,7 @@ for (const a11y of ['on', 'off'] as const) {
         await page.waitForTimeout(1500)
       })
       keep('suppressed', r)
+      valid(r)
       expect(r.analysis.neverPainted.length).toBeGreaterThanOrEqual(1)
       expect(r.analysis.pass).toBe(false)
     })
