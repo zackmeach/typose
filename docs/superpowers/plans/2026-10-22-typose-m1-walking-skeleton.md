@@ -262,29 +262,39 @@ The document keeps its explicitly charged state (its floor, checkpoints, hashes,
 
 **Frames (from a Chromium trace taken over CDP's `Tracing` domain on the fused build; amended in PR 3, plan §7):**
 - **Demanded frames:** a frame is demanded from an input (a wheel, a key, a scrollbar drag, a jump, an open) until the view settles, meaning the scroll has stopped and the target rows have painted. Idle time isn't demanded, so an idle tail is never a gap.
-  - Concretely: an input demands frames from its own timestamp until the first presented frame after the renderer marks its target rows painted (or until that mark, when nothing on screen changed). Overlapping demands merge, so a continuous gesture is one demanded interval.
+  - Concretely: an input demands frames from its own timestamp until the first presented frame after the renderer marks its target rows painted. Overlapping demands merge, so a continuous gesture is one demanded interval.
+  - An input that changes nothing on screen (its painted mark repeats the previous one) owes no frame. It's counted, and it's a stall if its mark comes over 50 ms after the input.
 - **Presented frames:** the renderer's `PipelineReporter` slices whose state is `STATE_PRESENTED_ALL`, at their end. A `STATE_PRESENTED_PARTIAL` frame (a compositor-only update, such as the scrollbar thumb moving, shown while the main thread's update is still pending) shows stale rows, so it doesn't end a gap.
 - **Frame rule (ruling OQ-6):** within demanded intervals, a frame passes if its presentation interval is < 16.7 ms. That's §10.2's absolute threshold, at the panel's native refresh (164 Hz on the PC, `snap1/lanes/b2/REPORT.md:60`; Electron reports 165), with the Hz recorded.
-  - **Judged against 16.7 ms:** every presented frame in a merged demanded interval except its first, on its interval from the presented frame before it. In a continuous gesture that's every frame after the gesture's first.
-  - **Not judged against 16.7 ms, only as a stall:** the first presented frame of a merged demanded interval, that is, the first frame after an input that arrived while no earlier input was still unsettled. That span runs from the input's own timestamp, so it holds the input pipeline (OS to browser to the rAF-aligned dispatch, measured at up to 15 ms over CDP, plus at least one refresh). It's input latency, not a frame interval. Any later frame of the same demand is judged, so a page that lands one long interval after a jump's first frame is a long frame.
-- **Stalls:** a stall is any presentation interval over 50 ms inside a demanded interval, including the first frame's span from the input. An open-then-scroll interval starts at the open request.
+  - **Every presented frame inside a demanded interval counts in the ≥ 99% denominator and is judged against 16.7 ms.** Nothing is exempt.
+  - A frame after another presented frame of the same merged interval is judged on the gap from that frame.
+  - The frame that opens a merged interval has no presented frame of the same demand before it. It's judged on its own production time: from its `PipelineReporter` slice's start to its presentation.
+    - One refresh of waiting for the next BeginFrame after the input is excused; no app can avoid it. A slice that starts later than one refresh after the input is counted from input + one refresh, so a handler that blocks before the frame starts is counted.
+    - So, at 165 Hz, a key answered by one frame 45 ms later is a long frame whether the frame started late or took long to produce, and one answered in 10 ms isn't.
+- **Stalls:** a stall is any presentation interval over 50 ms inside a demanded interval, or an input whose first presented frame comes over 50 ms after the input's own timestamp. An open-then-scroll interval starts at the open request. Plan §5's input-latency gate (< 50 ms) stands beside both.
+- **Validity:** a trace that can't be judged is invalid and never passes: no renderer frames, more than one renderer, no input marks, nothing judged, or a demanded interval with no presented frame. Its reason is kept with the run (Z49).
 - **Input → target paint:** for each jump, measured from the input's timestamp to the first presented frame that contains the target rows (a renderer mark when they commit, matched to the next presented frame).
   - A jump whose target never paints within 1 s fails.
   - The first presented frame after each input is checked explicitly.
 - PR 3 pins the trace events to the Electron version: `PipelineReporter` and the renderer's `console.timeStamp` marks (`TimeStamp`) on Electron 44.9.2 (`e2e/perf/frames.mjs`). rAF figures are printed beside them and not judged.
 
-**Startup (amended in PR 3, plan §7):** `shellVisible` is when the title bar reaches the screen: the later of main's `show` event and `titlebarPresented`, the presentation time of the frame that first shows the title-bar text (Element Timing's `renderTime`), both on the wall clock. PR 3's control settled the UNVERIFIED point: on Electron 44, `show` doesn't mark on-screen display. `titlebarPainted` (React's first title-bar commit, then rAF + task) is still recorded, for the cost breakdown.
+**Startup (amended in PR 3, plan §7):** `shellVisible` is when the title bar reaches the screen: its first presentation after main's `show` event, on the wall clock. It's never `show` itself.
+- That's `titlebarPresented` (Element Timing's `renderTime` for the title-bar text) when it comes after `show`.
+- When the title bar was first presented to the still-hidden window, it's `shownPresented`: the presentation of the first frame after the show. Under the TYPOSE_MARKS hook only, main tells the page it has shown, and the page puts in a one-character probe in the background colour, outside React's root, and reads that probe's Element Timing.
+- A run that can't establish a presentation after `show` is invalid, with its reason (Z49).
+- PR 3's control settled the UNVERIFIED point: on Electron 44, `show` doesn't mark on-screen display. `titlebarPainted` (React's first title-bar commit, then rAF + task) is still recorded, for the cost breakdown.
 
 **Acceptance,** with accessibility on and off:
-- An injected 30 ms busy-wait during a scroll registers a long frame covering it, and no stall. A control run registers no stall and passes the ≥ 99% rule, and every long frame it registers is listed. (Amended in PR 3.)
+- An injected 30 ms busy-wait during a scroll, and in the handler of one discrete keypress, registers a long frame covering it, and no stall. Control runs (a scroll, and 21 discrete keypresses) register no stall and pass the ≥ 99% rule, and every long frame they register is listed. (Amended in PR 3.)
 - A 60 ms busy-wait, both during a scroll and in the first frame after a scrollbar jump, is **detected**: at least one stall covers the injection window. The test doesn't require exactly one stall under every scheduling outcome.
   - "Covers": the stall runs past the injection's end, and the frame that opens it began before the injection did. A frame already in the pipeline still presents during the block. (Amended in PR 3.)
 - A jump whose target rendering is suppressed fails as never painted. The test driver drops the page requests over CDP, so no hook is needed. (Amended in PR 3.)
 - Startup controls, on the test-hooks build (amended in PR 3):
-  - in each run that delays `show()` by 300 ms after both `ready-to-show` and `titlebarPainted`, `shellVisible` lands ≥ 300 ms after the later of the two;
+  - every run, delayed or not, is valid: it establishes the title bar's presentation after the show;
+  - in each run that delays `show()` by 300 ms after both `ready-to-show` and `titlebarPainted`, that presentation lands ≥ 300 ms after the later of the two;
   - in each run that delays React's mount by 300 ms, it lands ≥ 300 ms after the bundle's evaluation, where the delay starts;
   - medians against undelayed runs are recorded, not judged;
-  - `titlebarPresented` coincides with one of the window's `Display::FrameDisplayed` frames in a startup trace, to within one refresh.
+  - in startup traces, `titlebarPresented` (the app's own path) and `shownPresented` (with `show()` delayed) each coincide with one of the window's `Display::FrameDisplayed` frames, to within one refresh, after the show.
 
 ### C9 · Crash and lifecycle diagnostics, from PR 1
 
@@ -701,10 +711,11 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 - **`main-macos.yml` also takes `workflow_dispatch`.** *Why:* a macOS fix can be run on its branch before merge. The automatic triggers stay Z60's.
 
 **PR 3's amendments (instrument definitions and test details; no Z-decision, 🔒 requirement or gate threshold changes; the evidence is in PR 3's description):**
-- **`shellVisible` is the title bar's first presentation, not max(`show`, `titlebarPainted`).** It's now the later of `show` and `titlebarPresented` (Element Timing's `renderTime` on the title text). This is stricter: on the packaged build it reads 70–95 ms later than the old definition. *Why:* PR 3's control settled C8's UNVERIFIED point.
+- **`shellVisible` is the title bar's first presentation after `show`, not max(`show`, `titlebarPainted`), and never `show` itself.** This is stricter: on the packaged build it reads 70–95 ms later than the old definition. *Why:* PR 3's control settled C8's UNVERIFIED point.
   - On Electron 44 the OS reports the window visible and uncloaked about 4 ms after `show()` is called, and the `show` event fires about 35–45 ms after that.
   - The title bar reaches the screen 70–95 ms after `show` (packaged build, this PC). Chromium's first contentful paint, the window's `Display::FrameDisplayed` and Element Timing agree to within a refresh.
   - The old definition under-read on-screen time by those 70–95 ms.
+  - A frame can be presented to the still-hidden window: with `show()` delayed, Element Timing put the title bar's presentation 317–319 ms before `show` in 2 of 5 of the review's runs, and max(`show`, it) silently returned `show`. So when the title bar's presentation precedes `show`, a probe gives the first presentation after the show (`shownPresented`). A run that can't establish one is invalid with its reason, never `show`. The probe goes in only under the TYPOSE_MARKS hook, and a startup trace shows it lands on one of the window's displayed frames.
 - **The startup controls are judged within each run; cross-run rises are recorded.** The control is ≥ 300 ms after the instant the delay starts from: max(`ready-to-show`, `titlebarPainted`) for `show()`, and `bundleEvaluated` for the mount. *Why:* each delay overlaps waiting that's already on the critical path, so the median rise across runs is below 300 ms even when the instrument is right.
   - The renderer's first frame comes about 175 ms after the bundle evaluates, whether or not React has mounted (React's own render and commit take about 15 ms of it). A 300 ms mount delay raised the median by 14–55 ms (three batches of five).
   - The first presentation after the window becomes visible takes 70–95 ms, so a 300 ms `show()` delay raised the median by 62–238 ms (three batches of five).
@@ -716,13 +727,27 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
   - Electron's `contentTracing` is a main-process API, which the fused build doesn't expose; CDP's `Tracing` drives the same Chromium tracing.
   - During a scrollbar jump, the compositor presents thumb-only frames with stale rows while the main thread is blocked. A `Display::FrameDisplayed` 6 ms into a 60 ms block split the stall.
   - The renderer's frame reporter marks those frames `STATE_PRESENTED_PARTIAL`; excluding them is stricter. A negative control that counts partial frames fails the analyzer's tests.
-- **The first presented frame of a merged demanded interval is judged as a stall only (> 50 ms from the input), not against 16.7 ms.** Every later frame of the interval is judged against both. C8 lists exactly which frames count.
-  - *Why:* that span runs from the input's own timestamp. It holds the input pipeline (OS to browser to the rAF-aligned dispatch, measured at up to 15 ms over CDP, plus at least one refresh), so it's latency, not a frame interval. Held to 16.7 ms, a normal response to almost every input would fail.
-  - *What this exempts:* only a response, after a pause in input, that's 16.7–50 ms late. That stays under the 50 ms stall rule and plan §5's "input latency while indexing < 50 ms" gate.
-  - A continuous gesture merges into one interval: the frame tests judged 316–329 frames in a 2 s scroll at 165 Hz (about 330 refreshes). Jank inside a gesture, or after a jump's first frame, is judged in full.
-- **The frame control is held to no stall and the ≥ 99% rule, not to 0 long frames. The injections must register a long frame or stall covering the injected window.** *Why:* on the loaded PC, each control scroll registered one or two long frames among about 325–329: 18.2–18.4 ms, and once 36.4 ms. The inspected 18.2 ms trace shows frames presented a refresh late: slices that began 6 ms apart, the next presented 18.2 ms after the previous one. That's the instrument detecting a real missed refresh, not a false positive. The §10.2 gate is unchanged, and a stray long frame can't satisfy the coverage check.
+- **Every presented frame in a demanded interval is judged against 16.7 ms; the frame that opens an interval is judged on its own production time.** That's its `PipelineReporter` slice's start to its presentation, counted from input + one refresh if the slice starts later than that. Nothing is exempt. Stalls stay > 50 ms on gaps and on input-to-first-frame, beside plan §5's input-latency gate. (This replaces PR 3's first version, which judged opening frames as stalls only; the review rejected it, ruling "don't exempt, measure correctly".)
+  - *Why:* the opening frame has no presented frame of the same demand before it, so it has no gap to judge. Its span from the input's own timestamp holds the input pipeline (OS to browser to the rAF-aligned dispatch, measured at up to 15 ms over CDP), which isn't the app's frame time.
+    - Its own production time is the app's.
+    - The one excused refresh is the wait for the next BeginFrame, which no app can avoid.
+    - A handler that blocks before the frame starts is counted. In the live trace, a 30 ms keydown handler ran *before* the response frame's slice began, so slice-start-to-present alone would read about 6 ms.
+  - The first version left discrete input unjudged. With keypresses, or wheel notches slower than the panel, every frame opened its own interval, and the review's synthetic 21 keypresses answered 45 ms late were judged 0 times and passed.
+  - The tests:
+    - the same synthetic 21 keypresses now fail (21 long frames), and answered in 10 ms they pass;
+    - the live control, 21 ArrowDown presses on the packaged build, registers no long frame;
+    - a 30 ms busy-wait in one keypress's handler registers a long frame covering it.
+  - A continuous gesture still merges into one interval: 316–331 judged frames per 2 s scroll at 165 Hz.
+- **A run that can't be judged is invalid and never passes.** That's no renderer frames, more than one renderer, no input marks, nothing judged, or a demanded interval with no presented frame. *Why:* the first version passed a trace with no inputs, or with 0 judged frames. The review's empty and input-less traces now return `valid: false` with a reason.
+- **Perf results are appended, never overwritten.** Each run goes to `.evidence/m1/perf/<host>.jsonl` with its status and reason, after the test's verdict. *Why:* Z49 and §10.3 keep every failed or invalid run "with its reason, never replaced by a clean rerun"; the first version rewrote a key on every run.
+- **The frame control is held to no stall and the ≥ 99% rule, not to 0 long frames. The injections must register a long frame or stall covering the injected window.** *Why:* on the loaded PC, each control scroll registered one or two long frames among about 325–331: mostly 18.2–18.4 ms, once 36.4 ms and once 42.5 ms. The inspected 18.2 ms trace shows frames presented a refresh late: slices that began 6 ms apart, the next presented 18.2 ms after the previous one. That's the instrument detecting a real missed refresh, not a false positive. The §10.2 gate is unchanged, and a stray long frame can't satisfy the coverage check.
 - **"Covers" means the stall runs past the injection's end and is opened by a frame that began before the injection did; it may start after the injection starts.** *Why:* a frame already in the pipeline when the main thread blocks still presents during the block (seen 3–12 ms in). No frame begun after the block starts can present until the block ends. The span is still the whole time nothing new reached the screen.
 - **Target suppression needs no `test-hooks` hook.** The test driver drops the renderer's page requests over CDP. *Why:* CDP already reaches the page on the fused build; a hook would add behaviour-changing code to the app for nothing.
+
+**Carried requirement from PR 3's review (§7.3 🔒, owner M4's Rendered lens):** a `<link rel="preconnect">` or `<link rel="dns-prefetch">` inserted into the page bypasses both the CSP and `session.webRequest`. The review planted one, and the NetLog showed DNS resolver events.
+- It isn't reachable in M1, because Raw renders text only, never markup.
+- Before any lens renders document-controlled markup (Rendered, M4), Typose must block it, and the NetLog assertion must cover a planted preconnect and dns-prefetch.
+- Candidate mechanisms: the sanitizer refuses `link` elements, plus a network-context setting that turns off preconnect and DNS prefetching. They're chosen and tested in M4.
 
 **Implementer proposals Zack may veto (one place):**
 1. **Memory-refused open state** (C1), shown in the card: "Can't open `<file>` · Typose's memory budget is full. Close a file, then Retry." Brief §7.9 has no such state yet.
