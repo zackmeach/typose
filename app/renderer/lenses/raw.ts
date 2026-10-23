@@ -1,5 +1,6 @@
 import type { Limits, Opened } from '../../shared/protocol'
 import type { CoreClient } from '../core'
+import { inputMark, markPainted, setPaintProbe } from '../perf'
 import { VirtualList } from '../virtual/virtual-list'
 import { PageCache } from './page-cache'
 
@@ -31,6 +32,11 @@ export class RawLens {
     this.list = new VirtualList(host, ROW_HEIGHT, (i, el) => this.paint(i, el), (r) => this.want(r))
     Object.assign(this.list.element, { role: 'region', ariaLabel: `${label}, Raw` })
     this.setLineCount(opened.lines)
+    // Plan C8: every input that can move the view demands frames until its target rows paint.
+    for (const type of ['wheel', 'keydown', 'pointerdown', 'scroll'] as const)
+      this.list.element.addEventListener(type, (e) => inputMark(type, e.timeStamp), { passive: true })
+    setPaintProbe(() => this.paintedKey())
+    markPainted('rawUsable') // the first bounded piece is on screen and scrollable (Z37)
   }
 
   /** Lines known so far: the index's count, but never fewer than the first page already showed (Z37). */
@@ -40,6 +46,7 @@ export class RawLens {
 
   dispose(): void {
     this.disposed = true
+    setPaintProbe(null)
     this.list.dispose()
   }
 
@@ -87,6 +94,14 @@ export class RawLens {
         this.inflight--
         this.pump()
       })
+  }
+
+  /** The scroll position, once every row in the viewport (not the overscan) has its text; else null. */
+  private paintedKey(): string | null {
+    const { top, geometry } = this.list.state
+    const last = Math.min(geometry.total, top + geometry.viewport) / ROW_HEIGHT
+    for (let i = Math.floor(top / ROW_HEIGHT); i < last; i++) if (!this.cache.has(i)) return null
+    return `${top},${this.list.element.scrollLeft}`
   }
 
   private paint(i: number, el: HTMLDivElement): void {

@@ -1,13 +1,24 @@
-import { BrowserWindow, MessageChannelMain, app, crashReporter, dialog, ipcMain, protocol, session, utilityProcess } from 'electron'
-import type { IpcMainInvokeEvent } from 'electron'
+import { BrowserWindow, MessageChannelMain, app, crashReporter, dialog, ipcMain, protocol, screen, session, utilityProcess } from 'electron'
+import type { IpcMainEvent, IpcMainInvokeEvent } from 'electron'
+import { once } from 'node:events'
 import { readFile } from 'node:fs/promises'
 import { extname, join, resolve, sep } from 'node:path'
 import coreHostPath from '../core-host/index?modulePath'
 import { startLifecycle } from './lifecycle'
+import { delayHook, isMark, marksHook } from './marks'
 
 // Plan C9: armed before anything else. Minidumps stay on this machine (spec §7.3).
 crashReporter.start({ uploadToServer: false })
 const log = startLifecycle()
+const hook = marksHook(process.env.TYPOSE_MARKS)
+if (hook && 'refused' in hook) log('hook-refused', { reason: hook.refused })
+const mark = typeof hook === 'function' ? hook : undefined
+mark?.('mainStart')
+// Plan C8's startup controls, compiled only into the test-hooks build: show() a set delay after both
+// ready-to-show and the title bar's paint, or delay React's mount.
+const showDelay = __TEST_HOOKS__ ? delayHook('TYPOSE_TEST_DELAY_SHOW', process.env.TYPOSE_TEST_DELAY_SHOW) : 0
+const mountDelay = __TEST_HOOKS__ ? delayHook('TYPOSE_TEST_DELAY_MOUNT', process.env.TYPOSE_TEST_DELAY_MOUNT) : 0
+let titlebarPainted: () => void = () => {}
 
 // No proxy resolution at all: with Windows' "Automatically detect settings" on, Chromium otherwise runs WPAD
 // (a DNS lookup for "wpad") at startup in every network context, though Typose requests nothing (spec §7.3).
@@ -96,25 +107,45 @@ function createWindow(): BrowserWindow {
   })
   win.webContents.on('will-navigate', (e) => e.preventDefault())
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-  win.once('ready-to-show', () => win.show())
-  win.on('show', () => log('window-shown'))
+  win.once('ready-to-show', () => {
+    mark?.('readyToShow')
+    if (!showDelay) win.show()
+  })
+  win.on('show', () => {
+    log('window-shown')
+    // Plan C8: shellVisible is the later of this and the title bar's paint; every run records the refresh rate.
+    mark?.('show', { hz: screen.getDisplayMatching(win.getBounds()).displayFrequency })
+  })
   win.on('unresponsive', () => log('unresponsive'))
   win.on('responsive', () => log('responsive'))
   return win
 }
 
+const fromApp = (win: BrowserWindow, event: IpcMainEvent | IpcMainInvokeEvent): boolean =>
+  event.sender === win.webContents && !!event.senderFrame?.url.startsWith(`${ORIGIN}/`)
+
 /** Calls from the preload: only from this window's app page, and with no arguments (plan C4). */
 function handle(win: BrowserWindow, channel: string, fn: () => unknown): void {
   ipcMain.handle(channel, (event: IpcMainInvokeEvent, ...args: unknown[]) => {
-    const fromApp = event.sender === win.webContents && event.senderFrame?.url.startsWith(`${ORIGIN}/`)
-    if (!fromApp || args.length > 0) throw new Error(`refused ${channel}`)
+    if (!fromApp(win, event) || args.length > 0) throw new Error(`refused ${channel}`)
     return fn()
   })
 }
 
 void app.whenReady().then(() => {
+  mark?.('ready')
   serveApp()
   const win = createWindow()
+  // The renderer's startup marks (plan C8): a known name and a whole-ms time, from this window's app page (C4).
+  ipcMain.on('mark', (event, name: unknown, t: unknown) => {
+    if (!fromApp(win, event) || !isMark(name, t)) return
+    mark?.(name, { t })
+    if (name === 'titlebarPainted') titlebarPainted()
+  })
+  if (showDelay) {
+    const painted = new Promise<void>((ok) => (titlebarPainted = ok))
+    void Promise.all([once(win, 'ready-to-show'), painted]).then(() => setTimeout(() => win.show(), showDelay))
+  }
   const loaded = new Promise<void>((ok) => win.webContents.once('did-finish-load', () => ok()))
   spawnCore(win, loaded) // in parallel with the page load (spec §2.1)
   const initial = launchPath()
@@ -123,7 +154,7 @@ void app.whenReady().then(() => {
     const r = await dialog.showOpenDialog(win, { properties: ['openFile'] })
     return r.canceled ? null : (r.filePaths[0] ?? null)
   })
-  void win.loadURL(`${ORIGIN}/index.html`)
+  void win.loadURL(`${ORIGIN}/index.html${mountDelay ? `?delayMount=${mountDelay}` : ''}`)
 })
 
 app.on('window-all-closed', () => app.quit())

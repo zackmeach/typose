@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Button } from 'react-aria-components'
 import type { Limits, Opened } from '../shared/protocol'
 import { type CoreClient, CoreCallError } from './core'
 import { ROW_HEIGHT, RawLens } from './lenses/raw'
+import { inputMark, markNow, markPainted } from './perf'
 
 type Card =
   | { kind: 'connecting' }
@@ -28,6 +29,9 @@ export function App({ core }: { core: CoreClient }) {
     document.title = title
   }, [title])
 
+  // Plan C8's shellVisible: React's first commit of the title bar, once that frame is produced.
+  useLayoutEffect(() => markPainted('titlebarPainted'), [])
+
   useEffect(() => {
     const offGone = core.onGone(() => setCard((c) => ({ kind: 'gone', path: 'path' in c ? c.path : undefined })))
     // Subscribed before any open, so no event is missed between the open reply and the lens mounting.
@@ -52,6 +56,8 @@ export function App({ core }: { core: CoreClient }) {
   }, [core])
 
   async function open(path: string, l: Limits): Promise<void> {
+    markNow('openRequested')
+    inputMark('open', performance.now()) // an open-then-scroll interval starts here (plan C8)
     setCard({ kind: 'opening', path })
     // Enough lines for the first screen and its overscan (Z37); the rest follow as pages.
     const count = Math.min(l.maxItems, 3 * Math.ceil(window.innerHeight / ROW_HEIGHT) + 1)
@@ -75,7 +81,10 @@ export function App({ core }: { core: CoreClient }) {
         <span className="glyph" aria-hidden="true">
           ▣
         </span>
-        <span className="title">{title}</span>
+        {/* Element Timing: shellVisible is when this text reaches the screen (plan C8). */}
+        <span className="title" {...{ elementtiming: 'titlebar' }}>
+          {title}
+        </span>
       </header>
       <main className="card">
         <div className="card-header">
