@@ -1,4 +1,4 @@
-//! Typose's core: the byte store, documents, decoding, the line index and Raw pages.
+//! Typose's core: the byte store, documents, decoding, the line index, Raw pages and Rendered Markdown.
 //! See docs/superpowers/specs/2026-10-20-typose-tech-design.md §3.
 
 // `len` here is a file or table size; nothing is a container that could be empty-checked.
@@ -12,8 +12,10 @@ pub mod encoding;
 pub mod hooks;
 pub mod index;
 pub mod limits;
+pub mod md;
 pub mod pages;
 pub mod raw;
+pub mod sanitize;
 pub mod store;
 
 #[cfg(test)]
