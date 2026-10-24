@@ -90,13 +90,14 @@ export interface Methods {
   debugStats: { params: Record<string, never>; result: DebugStats }
 }
 
-/** The test-hooks build's debug stats (plan C5, C6): the core's live jobs, tasks and file handles, the documents the
- *  core host holds, and how its cancels went: `cancels` found a read running, `cancelled` reads ended `Cancelled`,
- *  at most `cancelMs` after their cancel. */
+/** The test-hooks build's debug stats (plan C5, C6): the core's live jobs, tasks and file handles, the longest a chunk
+ *  read's delay actually waited (`delayMs`), the documents the core host holds, and how its cancels went: `cancels`
+ *  found a read running, `cancelled` reads ended `Cancelled`, at most `cancelMs` after their cancel. */
 export interface DebugStats {
   jobs: number
   tasks: number
   handles: number
+  delayMs: number
   docs: number
   cancels: number
   cancelled: number

@@ -24,8 +24,8 @@ export interface Addon {
   openDoc(path: string): Doc
   /** A new cancel flag, for one page read or one index job (plan C5, C6). */
   cancelFlag(): Cancel
-  /** The test-hooks addon's live jobs, tasks and file handles (plan m8). */
-  debugStats?(): Pick<DebugStats, 'jobs' | 'tasks' | 'handles'>
+  /** The test-hooks addon's live jobs, tasks and file handles, and its slowest read delay (plan m8). */
+  debugStats?(): Pick<DebugStats, 'jobs' | 'tasks' | 'handles' | 'delayMs'>
 }
 
 class Refusal extends Error {
