@@ -2,8 +2,9 @@ import { BrowserWindow, MessageChannelMain, app, crashReporter, dialog, ipcMain,
 import type { IpcMainEvent, IpcMainInvokeEvent } from 'electron'
 import { once } from 'node:events'
 import { readFile } from 'node:fs/promises'
-import { extname, join, resolve, sep } from 'node:path'
+import { extname, join, sep } from 'node:path'
 import coreHostPath from '../core-host/index?modulePath'
+import { handoff, launchPath } from './launch'
 import { startLifecycle } from './lifecycle'
 import { delayHook, isMark, marksHook } from './marks'
 
@@ -51,21 +52,8 @@ const MIME: Record<string, string> = {
 const CSP =
   "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
-/**
- * The file a launch names (spec §8.1): its last path, resolved against its cwd. Every argument after the first `--`
- * is a path, whatever it looks like; before it, switches aren't. It's a path, never a URL: what it names is opened
- * like any other, so the core's checks and refusals apply (plan C4, spec §3.3).
- */
-function launchPath(argv: string[], cwd: string): string | null {
-  const end = argv.indexOf('--', 1)
-  const plain = argv.slice(1, end < 0 ? undefined : end).filter((a) => !a.startsWith('-'))
-  const paths = [...(process.defaultApp ? plain.slice(1) : plain), ...(end < 0 ? [] : argv.slice(end + 1))] // `electron <app> <file>` in development
-  const file = paths.filter(Boolean).at(-1)
-  return file ? resolve(cwd, file) : null
-}
-
 /** The newest file named: by this launch, a second one, or macOS's open-file. M1's one card shows it. */
-let newest = launchPath(process.argv, process.cwd())
+let newest = launchPath(process.argv, process.cwd(), !!process.defaultApp)
 /** Until the page asks for its first file, a newer one replaces it; after, main sends each to the page. */
 let deliver = (path: string) => void (newest = path)
 // macOS names files through open-file, not argv: before ready for the file a launch opens, and after.
@@ -206,11 +194,11 @@ void app.whenReady().then(() => {
   }
   const loaded = new Promise<void>((ok) => win.webContents.once('did-finish-load', () => ok()))
   spawnCore(win, loaded) // in parallel with the page load (spec §2.1)
-  // Emitted only after ready. What a second instance sends is untrusted: anything of another shape names nothing.
+  // Emitted only after ready. What a second instance sends is untrusted: anything of another shape or size names nothing.
   app.on('second-instance', (_event, _argv, _cwd, data) => {
     if (win.isDestroyed()) return // quitting
-    const { argv, cwd } = (data ?? {}) as { argv?: unknown; cwd?: unknown }
-    const path = Array.isArray(argv) && argv.every((a) => typeof a === 'string') && typeof cwd === 'string' ? launchPath(argv, cwd) : null
+    const sent = handoff(data)
+    const path = sent && launchPath(sent.argv, sent.cwd, !!process.defaultApp)
     if (path) deliver(path)
     if (win.isMinimized()) win.restore()
     if (win.isVisible()) win.focus() // focus() would show a window that isn't shown yet, ahead of plan C8's show

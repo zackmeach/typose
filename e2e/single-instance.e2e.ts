@@ -25,6 +25,16 @@ async function second(userData: string, args: string[]): Promise<Exit> {
   throw new Error(`a second launch with ${JSON.stringify(args)} was still running after 15 s, and was killed`)
 }
 
+/** Whether a process this test didn't spawn is still running. */
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
 /** The page's title, and its card's text: the first row of a one-line file, or the card's message. */
 const card = async (page: Page) => ({
   title: await page.title(),
@@ -107,14 +117,14 @@ test('the typose launchers ship beside the app, and hand Typose every argument a
   const shipped = join(dirname(PACKAGED.asar), 'bin', name)
   expect(existsSync(shipped)).toBe(true)
   if (!win) expect(statSync(shipped).mode & 0o111).not.toBe(0) // executable
-  // A stand-in for Typose that records its cwd and argv, two folders up from the launcher as in the package.
+  // A stand-in for Typose that records its pid, cwd and argv, two folders up from the launcher as in the package.
   const root = mkdtempSync(join(FIXTURES, 'launcher-')) // beside node_modules, so the hard links below stay on one drive
   const out = join(root, 'argv.json')
   const bin = join(root, 'resources', 'bin')
   const launcher = join(bin, name)
   mkdirSync(bin, { recursive: true })
   copyFileSync(join(APP_DIR, 'bin', name), launcher)
-  const record = "require('fs').writeFileSync(process.env.STUB_OUT, JSON.stringify([process.cwd(), ...process.argv.slice(1)]))"
+  const record = "require('fs').writeFileSync(process.env.STUB_OUT, JSON.stringify([process.pid, process.cwd(), ...process.argv.slice(1)]))"
   if (win) {
     // Electron itself as Typose.exe, running a stub app from resources\app that exits before ready: no window.
     const link = (from: string, to: string): void => {
@@ -146,16 +156,18 @@ test('the typose launchers ship beside the app, and hand Typose every argument a
         ? spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/v:off', '/c', `""${launcher}" ${line}"`], { cwd, env, windowsVerbatimArguments: true, windowsHide: true })
         : spawn(launcher, line, { cwd, env })
     expect(await new Promise((ok) => proc.once('exit', ok)), String(line)).toBe(0)
-    const got = (): string[] | null => {
+    const got = (): [number, string, ...string[]] | null => {
       try {
-        return JSON.parse(readFileSync(out, 'utf8')) as string[]
+        return JSON.parse(readFileSync(out, 'utf8')) as [number, string, ...string[]]
       } catch {
         return null // not written yet: the launcher doesn't wait for Typose
       }
     }
     await expect.poll(got, { timeout: 15_000 }).not.toBeNull()
-    const [at, ...argv] = got()!
+    const [pid, at, ...argv] = got()!
     expect(realpathSync(at)).toBe(realpathSync(cwd)) // the user's cwd, which relative paths are resolved against
+    // Detached, it may still hold that cwd, and its binary, after it wrote the file: the next run, or the cleanup, waits.
+    await expect.poll(() => alive(pid), { timeout: 15_000 }).toBe(false)
     return argv
   }
   // [the arguments as typed, what Typose gets after its --]
@@ -178,8 +190,8 @@ test('the typose launchers ship beside the app, and hand Typose every argument a
     // Unquoted, with cmd.exe's own escapes: the launcher gets a&b^c.txt, and passes on just that.
     if (win) expect(await run('a^&b^^c.txt')).toEqual(['--', 'a&b^c.txt'])
   } finally {
-    rmSync(root, { recursive: true, force: true })
-    rmSync(cwd, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) // in case a stand-in outlived a failure
+    rmSync(cwd, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
   }
 })
 
