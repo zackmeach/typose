@@ -146,8 +146,7 @@ function createWindow(): BrowserWindow {
   })
   win.webContents.on('will-navigate', (e) => e.preventDefault())
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-  // Never once a quit has begun. On macOS, a window shown as it closes can get its visibility event after it's
-  // destroyed: Electron's own listener then throws, and the app never exits (main-macos run 40070774628).
+  // Not once a quit has begun: the window would only flash up as it closes.
   win.once('ready-to-show', () => {
     mark?.('readyToShow')
     if (!showDelay && !quitting) win.show()
@@ -162,6 +161,10 @@ function createWindow(): BrowserWindow {
   })
   win.on('unresponsive', () => log('unresponsive'))
   win.on('responsive', () => log('responsive'))
+  // A closed window keeps no listeners. On macOS, one shown just before its quit can get its visibility event after
+  // it's destroyed, and Electron's own visibility listener then throws on it, so the app never exits (main-macos runs
+  // 40070774628 and 40072219356).
+  win.once('closed', () => win.removeAllListeners())
   return win
 }
 
