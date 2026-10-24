@@ -7,12 +7,33 @@
   "main": "out/main/index.js",
   "scripts": {
     "build": "electron-vite build",
-    "start": "electron-vite preview"
+    "build:hooks": "electron-vite build --mode test-hooks",
+    "start": "electron-vite preview",
+    "package": "install-electron && electron-builder --dir --publish never"
   },
   "dependencies": {
+    "typose-node": "0.0.0"
+  },
+  "devDependencies": {
     "react": "19.3.1",
     "react-aria-components": "1.22.1",
-    "react-dom": "19.3.1",
-    "typose-node": "0.0.0"
+    "react-dom": "19.3.1"
+  },
+  "build": {
+    "appId": "dev.typose.app",
+    "files": ["out/**"],
+    "asarUnpack": ["**/*.node"],
+    "electronDist": "../node_modules/electron/dist",
+    "npmRebuild": false,
+    "win": { "target": "dir", "signAndEditExecutable": false },
+    "mac": { "identity": null },
+    "electronFuses": {
+      "resetAdHocDarwinSignature": true,
+      "runAsNode": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "onlyLoadAppFromAsar": true,
+      "enableEmbeddedAsarIntegrityValidation": true
+    }
   }
 }

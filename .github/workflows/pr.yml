@@ -108,14 +108,18 @@ jobs:
         name: npm run build
         if: ${{ !cancelled() && steps.napi.outcome == 'success' }}
         run: npm run build
+      - id: package
+        name: Package the fused --dir build (packaged.e2e.ts drives it)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: npm run package
       - name: e2e and the NetLog assertion (Linux, under xvfb, with the sandbox on)
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.electron.outcome == 'success' && runner.os == 'Linux' }}
+        if: ${{ !cancelled() && steps.package.outcome == 'success' && steps.electron.outcome == 'success' && runner.os == 'Linux' }}
         timeout-minutes: 12 # past the longest test's own limit (10 min, large and long-line; the config's is 5)
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           xvfb-run -a npm run e2e
       - name: e2e and the NetLog assertion (Windows)
-        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.electron.outcome == 'success' && runner.os == 'Windows' }}
+        if: ${{ !cancelled() && steps.package.outcome == 'success' && steps.electron.outcome == 'success' && runner.os == 'Windows' }}
         timeout-minutes: 12 # past the longest test's own limit (10 min, large and long-line; the config's is 5)
         run: npm run e2e
       # Failure evidence (plan C9): kept 5 days, for the orchestrator to copy into .evidence/m1/ci/ before it expires.
