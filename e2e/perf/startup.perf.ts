@@ -8,16 +8,18 @@
 //              batches name their file: FILE=.fixtures/10gib.jsonl (batch A) or FILE=.fixtures/1gib.jsonl (batch B).
 // Every run is appended to .evidence/m1/perf/, valid or not.
 import { expect } from '@playwright/test'
+import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
-import { hostname } from 'node:os'
+import { hostname, uptime } from 'node:os'
 import { join, resolve } from 'node:path'
 import { APP_DIR, FIXTURES, fixture, test } from '../app'
-import { type LaunchOptions, closePackaged, launchPackaged, readMarks, unrequested, waitMarks } from '../packaged'
+import { type LaunchOptions, PACKAGED, closePackaged, launchPackaged, readMarks, unrequested, waitMarks } from '../packaged'
 import { coldVerdict } from './cold.mjs'
 import { RESULTS, cpuLoad, cpuTimes, idleLoad, percentile, recordOutcome, summary } from './rig'
 
 const RUNS = Number(process.env.RUNS ?? 30)
 const COLD = process.env.COLD === '1'
+const sha256 = (file: string) => createHash('sha256').update(readFileSync(file)).digest('hex')
 
 let outcome: { key: string; value: Record<string, unknown> } | null = null
 test.beforeEach(() => void (outcome = null))
@@ -162,12 +164,14 @@ test(`warm startup on the packaged build, n = ${RUNS} (informational)`, async ()
     loadDuring: cpuLoad(from),
     loadPerRun: samples.map((s) => s.load),
     samples,
-    file: file.replace(FIXTURES, '.fixtures')
+    file: file.replace(FIXTURES, '.fixtures'),
+    // A cold batch is one build's restarts, one record per boot (cold.mjs).
+    ...(COLD ? { build: { exe: sha256(PACKAGED.exe), asar: sha256(PACKAGED.asar) }, boot: new Date(Date.now() - uptime() * 1000).toISOString() } : {})
   }
   // A cold run is one restart of a batch: its verdict reads the batch's earlier restarts back from the log (cold.mjs).
   const log = join(RESULTS, `m1-${hostname()}.jsonl`)
   const earlier = COLD && existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line) as { key: string; file?: string }) : []
-  const batch = COLD ? coldVerdict([...earlier.filter((r) => r.key === 'cold:startup' && r.file === result.file), { key: 'cold:startup', samples }]) : undefined
+  const batch = COLD ? coldVerdict([...earlier.filter((r) => r.key === 'cold:startup' && r.file === result.file), { key: 'cold:startup', samples, build: result.build, boot: result.boot }]) : undefined
   outcome = { key: COLD ? 'cold:startup' : 'warm:startup', value: { ...result, batch } }
   const brief = (s?: { n: number; p50: number; p95: number; max: number }) => s && { n: s.n, p50: s.p50, p95: s.p95, max: s.max }
   const { samples: _all, ...shown } = result
