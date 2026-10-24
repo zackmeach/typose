@@ -39,6 +39,22 @@ test('jump far every frame for 2 s: ≤ 2 requests out, superseded reads end Can
   await waitOpen(win)
   expect(await waitIndexed(win)).toBe(LINES)
 
+  // The 2 s of jumps are 2 s of frames. On Linux CI under xvfb an idle page can go seconds without one: in run
+  // 40064294325 the loop's first frame came 2.7 s in, with no long task. So first wait for frames to come steadily.
+  const steadyAfter = await win.evaluate(
+    () =>
+      new Promise<number>((done) => {
+        const t0 = performance.now()
+        let [last, steady] = [t0, 0]
+        const frame = (now: number) => {
+          steady = now - last < 100 ? steady + 1 : 0
+          last = now
+          if (steady >= 3) done(performance.now() - t0)
+          else requestAnimationFrame(frame)
+        }
+        requestAnimationFrame(frame)
+      })
+  )
   const frames = await win.evaluate(async () => {
     const el = document.querySelector<HTMLElement>('.vl-scroller')!
     const max = el.scrollHeight - el.clientHeight
@@ -67,7 +83,7 @@ test('jump far every frame for 2 s: ≤ 2 requests out, superseded reads end Can
   const stats = await debugStats(win)
   const { maxPendingPages, aborts } = await client(win)
   console.log(
-    `${frames} jumps: at most ${maxPendingPages} page requests out; ${aborts} cancelled by the lens, ${stats.cancels} found their read ` +
+    `frames came steadily ${steadyAfter.toFixed(0)} ms after the index was done; ${frames} jumps: at most ${maxPendingPages} page requests out; ${aborts} cancelled by the lens, ${stats.cancels} found their read ` +
       `running, ${stats.cancelled} of those ended Cancelled, the slowest ${stats.cancelMs.toFixed(1)} ms after its cancel ` +
       `(a chunk read waits ${DELAY} ms); ${aborts - stats.cancels} had answered already`
   )
