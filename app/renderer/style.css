@@ -254,3 +254,151 @@ body {
 .card-state .open-button {
   margin: 0 4px;
 }
+
+/* Markdown's Raw/Rendered switch (brief §5, §9): a tablist. The active segment is the raised fill with an accent label. */
+.card-tabs {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.lens-switch {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  -webkit-app-region: no-drag;
+}
+.lens-tab {
+  font: inherit;
+  color: var(--text2);
+  background: none;
+  border: none;
+  border-radius: 6px;
+  padding: 0;
+}
+.lens-tab-tip {
+  display: block;
+  padding: 2px 10px;
+}
+.lens-tab[data-selected] {
+  background: var(--surface-raised);
+  color: var(--accent);
+}
+.lens-tab[data-disabled] {
+  color: var(--text2);
+}
+.lens-tab[data-focus-visible] {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.lens-panel {
+  height: 100%;
+  outline: none;
+}
+.lens-panel[hidden] {
+  display: none;
+}
+.rendered-host {
+  position: absolute;
+  inset: 0;
+}
+
+/* Rendered (brief §5.2, plan §2.2). The column is 70ch. Everything wraps. Code is the one filled block (brief §3.5).
+   Offscreen blocks stay in the tree and skip their paint. The new lens fades in over 90 ms (brief §6.6); the slice
+   fades only the lens coming in. */
+.md-scroller {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+}
+.md-scroller:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.md-in {
+  animation: md-fade 90ms ease-out;
+}
+@keyframes md-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .md-in {
+    animation: none;
+  }
+}
+.md-column {
+  max-width: 70ch;
+  margin: 0 auto;
+  padding: 16px 16px 48px;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+.md-block {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 24px;
+}
+/* Chromium's content-visibility: auto leaves skipped boxes out of the accessibility tree (measured: 28 of 2,000
+   headings). A block that holds a heading stays in the tree, so heading navigation works without scrolling (brief §9,
+   plan §2.2). Other blocks still skip their paint. */
+.md-block:has(h1, h2, h3, h4, h5, h6) {
+  content-visibility: visible;
+}
+.md-column :where(pre, code) {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.md-column pre {
+  background: var(--surface-raised);
+  border-radius: 8px;
+  padding: 12px;
+}
+.md-column :where(h1, h2, h3, h4, h5, h6) {
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+.md-column :where(ul, ol) {
+  padding-left: 1.5em;
+}
+.md-column a {
+  color: var(--accent);
+}
+.md-column a:focus-visible,
+.md-note:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.md-column table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+.md-column :where(th, td) {
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.md-column blockquote {
+  margin-left: 0;
+  padding-left: 12px;
+  border-left: 2px solid var(--border);
+}
+.md-note {
+  font: inherit;
+  color: var(--text2);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+.md-column .tp-img {
+  color: var(--text2);
+}

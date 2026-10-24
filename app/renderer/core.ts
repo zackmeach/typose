@@ -40,7 +40,11 @@ export const testHooks = {
   /** What arrived from another session, or after its core's death, and was dropped: an event or a response. */
   dropped: [] as ('event' | 'response')[],
   /** Plan C1: the mounted Raw lens's page cache: its charged bytes, its cap, and what the core holds reserved. */
-  cache: null as (() => { charged: number; cap: number; reserved: number }) | null
+  cache: null as (() => { charged: number; cap: number; reserved: number }) | null,
+  /** The mounted Rendered lens: what it reserved, and how much of the build is appended. */
+  rendered: null as
+    | (() => { units: number; htmlBytes: number; reserved: number; blocks: number; appended: number })
+    | null
 }
 
 /**

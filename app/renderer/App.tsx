@@ -1,8 +1,9 @@
-import { type RefObject, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Button } from 'react-aria-components'
-import type { Command, Limits, Opened } from '../shared/protocol'
+import { type ReactNode, type RefObject, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Button, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
+import type { Command, Limits, MdBuild, Opened } from '../shared/protocol'
 import { type Action, type Card, fileName, view } from './card'
 import { type CoreClient, CoreCallError } from './core'
+import { RenderedLens, renderedCharge } from './lenses/rendered'
 import { ROW_HEIGHT, RawLens, viewportCap } from './lenses/raw'
 import { AppMenu, LINUX } from './menu'
 import { inputMark, markNow, markPainted } from './perf'
@@ -27,9 +28,25 @@ const failed = (path: string, e: unknown): Card => ({
   message: e instanceof Error ? e.message : String(e)
 })
 
+/** What App asks of the lens on screen. Raw and Rendered both answer. */
+interface ShownLens {
+  topLine(): number
+  readerMoved(): boolean
+  floorBytes(): number
+  focus(): void
+  element: HTMLElement
+  setLineCount(lines: number): void
+  indexDone(): void
+  freeze(): void
+  yieldReservation(): void
+  resumeReservation(): void
+  dispose(release?: boolean): void
+}
+
 /**
- * The M1 chrome (brief §3.1): the title bar region and one card. React renders the frame; the Raw lens is a
- * framework-free controller mounted into the card body (spec §5.1, Z26).
+ * The M1 chrome (brief §3.1): the title bar region and one card. React renders the frame; a lens is a
+ * framework-free controller mounted into the card body (spec §5.1, Z26). Markdown's switch is React Aria's
+ * tablist (brief §9).
  */
 export function App({ core }: { core: CoreClient }) {
   const [card, setCard] = useState<Card>({ kind: 'connecting' })
@@ -42,8 +59,18 @@ export function App({ core }: { core: CoreClient }) {
   const reloading = useRef(false)
   /** The document and generation on screen, set as soon as its reply arrives (progress events can't wait for React). */
   const live = useRef<{ doc: number; gen: number } | null>(null)
-  /** The Raw lens on screen, if any: where Reopen goes back to after a core death (plan C7). */
-  const lens = useRef<RawLens | null>(null)
+  /** The lens on screen, if any: where Reopen goes back to after a core death (plan C7). */
+  const lens = useRef<ShownLens | null>(null)
+  /** The lens the reader chose. Null until they use the switch: a move in Raw then keeps Raw (plan §2.2). */
+  const picked = useRef<'raw' | 'rendered' | null>(null)
+  /** A note's "Show in Raw" jump, read when the lens unmounts. */
+  const jumpTo = useRef<number | undefined>(undefined)
+  /** The line the lens that just unmounted was at. It lives here: the switch mounts a new host. */
+  const place = useRef<number | undefined>(undefined)
+  /** Whether that lens had the focus, so the next one takes it (plan PR 7). */
+  const hadFocus = useRef(false)
+  /** One reservation for Rendered at a time. */
+  const holding = useRef(false)
   /** A file chosen before the core first came up: it's opened then, ahead of the command line's. */
   const waiting = useRef<string | null>(null)
   /** Plan C1: the next lens's viewport-only cache cap, reserved with the open's floor: the shown lens's height, else the
@@ -52,6 +79,7 @@ export function App({ core }: { core: CoreClient }) {
   const path = 'path' in card ? card.path : undefined
   const title = path ? `${fileName(path)} — Typose` : 'Typose'
   const shown = view(card)
+  const openedNow = card.kind === 'open' ? card.opened : null
 
   useEffect(() => {
     document.title = title
@@ -124,6 +152,104 @@ export function App({ core }: { core: CoreClient }) {
     }
   }, [core])
 
+  // Plan §2.2: `open` has already returned Raw's first page. `render` runs at once. Within 50 ms, Rendered mounts
+  // with no "Rendering…". After that, Raw says "Rendering…" and switches when the build fits, unless the reader moved.
+  useEffect(() => {
+    if (!openedNow || openedNow.format !== 'markdown' || openedNow.blank) return
+    const opened = openedNow
+    picked.current = null
+    const ac = new AbortController()
+    let alive = true
+    const slow = window.setTimeout(() => {
+      setCard((c) => (c.kind === 'open' && c.opened === opened && !c.build && !c.renderedOff ? { ...c, rendering: true } : c))
+    }, 50)
+    void (async () => {
+      try {
+        const build = await core.call('render', { doc: opened.doc, gen: opened.gen }, ac.signal)
+        if (!alive) return
+        const moved = lens.current?.readerMoved() ?? false
+        const go = picked.current === 'rendered' || (picked.current !== 'raw' && !moved)
+        if (!go) {
+          setCard((c) => (c.kind === 'open' && c.opened === opened ? { ...c, build, rendering: false } : c))
+          return
+        }
+        const held = await holdRendered(opened, build)
+        if (!alive || held === 'stale') return
+        // They chose Raw while the reservation was in flight: give it back and stay.
+        if (picked.current === 'raw') {
+          lens.current?.resumeReservation()
+          setCard((c) => (c.kind === 'open' && c.opened === opened ? { ...c, build, rendering: false, lens: 'raw' } : c))
+          return
+        }
+        setCard((c) =>
+          c.kind === 'open' && c.opened === opened
+            ? held === 'memory'
+              ? { ...c, build, rendering: false, renderedOff: 'memory', lens: 'raw' }
+              : { ...c, build, rendering: false, lens: 'rendered' }
+            : c
+        )
+      } catch (e) {
+        if (!alive) return
+        const off = e instanceof CoreCallError && e.code === 'Refused' ? 'ceiling' : e instanceof CoreCallError && e.code === 'Memory' ? 'memory' : undefined
+        setCard((c) => (c.kind === 'open' && c.opened === opened ? { ...c, rendering: false, renderedOff: off ?? c.renderedOff, lens: 'raw' } : c))
+        if (!off && !(e instanceof CoreCallError && (e.code === 'Cancelled' || e.code === 'Stale' || e.code === 'CoreGone' || e.code === 'Frozen')))
+          console.error('render failed', e)
+      }
+    })()
+    return () => {
+      alive = false
+      ac.abort()
+      window.clearTimeout(slow)
+    }
+  }, [openedNow, core])
+
+  /**
+   * Reserve Rendered's charge on the one lens holder (plan §2.2) before any block is appended. Refused, the caller
+   * keeps Raw. `stale` when this document was replaced while the call was out.
+   */
+  async function holdRendered(opened: Opened, build: MdBuild): Promise<'ok' | 'memory' | 'stale'> {
+    if (holding.current) return 'stale'
+    holding.current = true
+    const before = lens.current
+    before?.yieldReservation()
+    let ok = false
+    try {
+      ok = await core.call('reserve', { doc: opened.doc, gen: opened.gen, bytes: renderedCharge(build.units, build.htmlBytes) })
+    } catch {
+      ok = false
+    } finally {
+      holding.current = false
+    }
+    const now = latest.current.card
+    if (now.kind !== 'open' || now.opened !== opened) return 'stale'
+    if (!ok) {
+      if (lens.current === before) before?.resumeReservation()
+      return 'memory'
+    }
+    return 'ok'
+  }
+
+  /** The switch. Rendered before its build exists is remembered; the effect mounts it when the build fits. */
+  function onLens(key: string | number): void {
+    if (key !== 'raw' && key !== 'rendered') return
+    const c = latest.current.card
+    if (c.kind !== 'open' || (c.lens ?? 'raw') === key) return
+    picked.current = key
+    if (key === 'raw') {
+      setCard((d) => (d.kind === 'open' && d.opened === c.opened ? { ...d, lens: 'raw' } : d))
+      return
+    }
+    if (c.renderedOff || !c.build) return
+    const build = c.build
+    void holdRendered(c.opened, build).then((held) => {
+      if (held === 'stale') return
+      setCard((d) => {
+        if (d.kind !== 'open' || d.opened !== c.opened) return d
+        return held === 'memory' ? { ...d, renderedOff: 'memory', lens: 'raw' } : { ...d, lens: 'rendered' }
+      })
+    })
+  }
+
   /** Opens `path`; Reopen passes the line to go back to. */
   async function open(path: string, atLine?: number): Promise<void> {
     const l = latest.current.limits
@@ -157,7 +283,7 @@ export function App({ core }: { core: CoreClient }) {
     reloading.current = true
     try {
       const opened = await core.call('reload', { doc: c.opened.doc, count: firstCount(l), bytes: floorBytes(l) })
-      if (attempt.current === mine) show(c.path, opened)
+      if (attempt.current === mine) show(c.path, opened, lens.current?.topLine() ?? c.atLine)
     } catch (e) {
       if (attempt.current !== mine || (e instanceof CoreCallError && e.code === 'CoreGone')) return // onGone shows that
       // Plan C1: the ledger refused it. The lens stays at its generation, under a banner offering Retry (Z34's "keeps Raw").
@@ -170,7 +296,8 @@ export function App({ core }: { core: CoreClient }) {
 
   function show(path: string, opened: Opened, atLine?: number): void {
     live.current = { doc: opened.doc, gen: opened.gen }
-    setCard({ kind: 'open', path, opened, lines: opened.lines, bytes: 0, indexed: opened.indexed, atLine })
+    // Raw's first page is already in the reply (Z37). Markdown switches to Rendered once `render` fits.
+    setCard({ kind: 'open', path, opened, lines: opened.lines, bytes: 0, indexed: opened.indexed, atLine, lens: 'raw' })
   }
 
   async function pick(): Promise<void> {
@@ -211,6 +338,106 @@ export function App({ core }: { core: CoreClient }) {
   }
   const frozen = card.kind === 'open' ? card.frozen : undefined
 
+  const header = (
+    <div className="card-header">
+      <span className="card-name">{path ? fileName(path) : 'No file open'}</span>
+      <span className="card-status">{shown.status}</span>
+      {shown.lenses ? (
+        <TabList aria-label="Lens" className="lens-switch">
+          <Tab id="rendered" className="lens-tab" isDisabled={!!shown.lenses.renderedOff}>
+            {/* `Tab` doesn't take a DOM `title`. The span carries the reason, which is the tooltip (Z71, Z34). */}
+            <span className="lens-tab-tip" title={shown.lenses.renderedOff}>
+              Rendered
+            </span>
+          </Tab>
+          <Tab id="raw" className="lens-tab">
+            Raw
+          </Tab>
+        </TabList>
+      ) : null}
+      {card.kind === 'open' || card.kind === 'failed' ? (
+        <Button className="open-button" onPress={() => void pick()}>
+          Open file…
+        </Button>
+      ) : null}
+    </div>
+  )
+  const progress = shown.progress === null ? null : <ProgressLine value={shown.progress} />
+  const banner = shown.banner ? (
+    <div className="banner" role="status" title={frozen}>
+      {`${shown.banner.text} · `}
+      <Button
+        className="banner-button"
+        onPress={() => {
+          lens.current?.focus() // so Reload's new lens takes it, as from Ctrl+R in Raw
+          void reload()
+        }}
+      >
+        {shown.banner.action}
+      </Button>
+    </div>
+  ) : null
+  const message = (
+    <div className="card-message">
+      <div className="card-state">
+        {'message' in shown.body && shown.body.message ? <p>{shown.body.message}</p> : null}
+        {'actions' in shown.body
+          ? shown.body.actions.map((a) => (
+              <Button key={a} className="open-button" onPress={actions[a]}>
+                {a}
+              </Button>
+            ))
+          : null}
+      </div>
+    </div>
+  )
+
+  const body =
+    card.kind === 'open' && limits && 'raw' in shown.body ? (
+      <LensHost
+        core={core}
+        lens={lens}
+        jumpTo={jumpTo}
+        place={place}
+        hadFocus={hadFocus}
+        atLine={card.atLine}
+        opened={card.opened}
+        name={fileName(card.path)}
+        lines={card.lines}
+        indexed={card.indexed}
+        limits={limits}
+        frozen={frozen !== undefined}
+        mode="raw"
+        onFrozen={(why) => setCard((c) => (c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c))}
+        onShowRaw={() => {}}
+      />
+    ) : card.kind === 'open' && limits && 'rendered' in shown.body && card.build ? (
+      <LensHost
+        core={core}
+        lens={lens}
+        jumpTo={jumpTo}
+        place={place}
+        hadFocus={hadFocus}
+        atLine={card.atLine}
+        opened={card.opened}
+        name={fileName(card.path)}
+        lines={card.lines}
+        indexed={card.indexed}
+        limits={limits}
+        frozen={frozen !== undefined}
+        mode="rendered"
+        build={card.build}
+        onFrozen={(why) => setCard((c) => (c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c))}
+        onShowRaw={(line) => {
+          jumpTo.current = line
+          picked.current = 'raw'
+          setCard((c) => (c.kind === 'open' && c.opened === card.opened ? { ...c, lens: 'raw' } : c))
+        }}
+      />
+    ) : (
+      message
+    )
+
   return (
     <>
       <header className={MAC ? 'titlebar mac' : 'titlebar'}>
@@ -228,59 +455,39 @@ export function App({ core }: { core: CoreClient }) {
         </span>
       </header>
       <main className="card">
-        <div className="card-header">
-          <span className="card-name">{path ? fileName(path) : 'No file open'}</span>
-          <span className="card-status">{shown.status}</span>
-          {card.kind === 'open' || card.kind === 'failed' ? (
-            <Button className="open-button" onPress={() => void pick()}>
-              Open file…
-            </Button>
-          ) : null}
-        </div>
-        {shown.progress === null ? null : <ProgressLine value={shown.progress} />}
-        {shown.banner ? (
-          <div className="banner" role="status" title={frozen}>
-            {`${shown.banner.text} · `}
-            <Button
-              className="banner-button"
-              onPress={() => {
-                lens.current?.list.element.focus() // so Reload's new lens takes it, as from Ctrl+R in Raw
-                void reload()
-              }}
-            >
-              {shown.banner.action}
-            </Button>
-          </div>
-        ) : null}
-        <div className="card-body">
-          {'raw' in shown.body && card.kind === 'open' && limits ? (
-            <RawHost
-              core={core}
-              lens={lens}
-              atLine={card.atLine}
-              opened={card.opened}
-              name={fileName(card.path)}
-              lines={card.lines}
-              indexed={card.indexed}
-              limits={limits}
-              frozen={frozen !== undefined}
-              onFrozen={(why) => setCard((c) => (c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c))}
-            />
-          ) : (
-            <div className="card-message">
-              <div className="card-state">
-                {'message' in shown.body && shown.body.message ? <p>{shown.body.message}</p> : null}
-                {'actions' in shown.body
-                  ? shown.body.actions.map((a) => (
-                      <Button key={a} className="open-button" onPress={actions[a]}>
-                        {a}
-                      </Button>
-                    ))
-                  : null}
-              </div>
-            </div>
-          )}
-        </div>
+        {card.kind === 'open' ? (
+          <DocLifetime doc={card.opened.doc} core={core} lens={lens}>
+            {shown.lenses ? (
+              <Tabs className="card-tabs" selectedKey={shown.lenses.showing} onSelectionChange={onLens}>
+                {header}
+                {progress}
+                {banner}
+                <div className="card-body">
+                  <TabPanel id="rendered" className="lens-panel">
+                    {shown.lenses.showing === 'rendered' ? body : null}
+                  </TabPanel>
+                  <TabPanel id="raw" className="lens-panel">
+                    {shown.lenses.showing === 'raw' ? body : null}
+                  </TabPanel>
+                </div>
+              </Tabs>
+            ) : (
+              <>
+                {header}
+                {progress}
+                {banner}
+                <div className="card-body">{body}</div>
+              </>
+            )}
+          </DocLifetime>
+        ) : (
+          <>
+            {header}
+            {progress}
+            {banner}
+            <div className="card-body">{message}</div>
+          </>
+        )}
       </main>
     </>
   )
@@ -301,10 +508,28 @@ function ProgressLine({ value }: { value: number | 'indeterminate' }) {
   )
 }
 
-interface RawHostProps {
+/** Closes the document when the card stops showing it. A lens switch stays inside, so it doesn't close (plan C6). */
+function DocLifetime({ doc, core, lens, children }: { doc: number; core: CoreClient; lens: RefObject<ShownLens | null>; children: ReactNode }) {
+  useEffect(
+    () => () => {
+      lens.current = null
+      void core.call('close', { doc }).catch(() => {})
+    },
+    [core, doc, lens]
+  )
+  return children
+}
+
+interface LensHostProps {
   core: CoreClient
   /** The lens on screen, for App: null while none is. */
-  lens: RefObject<RawLens | null>
+  lens: RefObject<ShownLens | null>
+  /** A line to open at, set just before a switch (a note's "Show in Raw"). */
+  jumpTo: RefObject<number | undefined>
+  /** The previous lens's top line, shared across the switch's two hosts. */
+  place: RefObject<number | undefined>
+  /** Whether that lens had the focus. */
+  hadFocus: RefObject<boolean>
   /** The line to open at (Reopen, plan C7). */
   atLine: number | undefined
   opened: Opened
@@ -313,35 +538,38 @@ interface RawHostProps {
   indexed: boolean
   limits: Limits
   frozen: boolean
+  mode: 'raw' | 'rendered'
+  build?: MdBuild
   onFrozen(why: string): void
+  onShowRaw(line: number): void
 }
 
-/** Mounts the Raw controller into the card body, and passes it the index's line count as it grows. */
-function RawHost({ core, lens, atLine, opened, name, lines, indexed, limits, frozen, onFrozen }: RawHostProps) {
+/** Mounts Raw or Rendered into the card body. The reading position is the previous lens's top line. */
+function LensHost({ core, lens, jumpTo, place, hadFocus, atLine, opened, name, lines, indexed, limits, frozen, mode, build, onFrozen, onShowRaw }: LensHostProps) {
   const host = useRef<HTMLDivElement>(null)
   const onFrozenNow = useRef(onFrozen)
   onFrozenNow.current = onFrozen
-  /** Whether the lens Reload just replaced had the focus, which the new one then takes (plan PR 7's focus gate). */
-  const hadFocus = useRef(false)
-  const doc = opened.doc
-  // The document closes when the card stops showing it, not when Reload replaces its generation.
-  useEffect(
-    () => () => {
-      lens.current = null
-      void core.call('close', { doc }).catch(() => {})
-    },
-    [core, doc, lens]
-  )
+  const onShowRawNow = useRef(onShowRaw)
+  onShowRawNow.current = onShowRaw
   useEffect(() => {
-    // Reload keeps the reading position; a new lens starts where it's told to.
-    const raw = new RawLens(host.current!, core, opened, name, limits, { onFrozen: (why) => onFrozenNow.current(why), atLine: lens.current?.topLine() ?? atLine })
-    lens.current = raw
-    if (hadFocus.current) raw.list.element.focus()
+    const at = place.current ?? jumpTo.current ?? atLine
+    place.current = undefined
+    jumpTo.current = undefined
+    const onFrozenHere = (why: string) => onFrozenNow.current(why)
+    const view: ShownLens =
+      mode === 'rendered' && build
+        ? new RenderedLens(host.current!, core, opened, build, limits, { onFrozen: onFrozenHere, atLine: at, onShowRaw: (line) => onShowRawNow.current(line) })
+        : new RawLens(host.current!, core, opened, name, limits, { onFrozen: onFrozenHere, atLine: at })
+    lens.current = view
+    if (hadFocus.current) view.focus()
     return () => {
-      hadFocus.current = raw.list.element.contains(document.activeElement)
-      raw.dispose()
+      hadFocus.current = view.element.contains(document.activeElement)
+      place.current = jumpTo.current ?? view.topLine()
+      jumpTo.current = undefined
+      if (lens.current === view) lens.current = null
+      view.dispose(false) // the next lens holds the reservation; close() releases it with the document
     }
-  }, [core, opened, name, limits, lens, atLine])
+  }, [core, opened, name, limits, lens, atLine, mode, build, jumpTo, place, hadFocus])
   useEffect(() => lens.current?.setLineCount(lines), [lines])
   useEffect(() => {
     if (indexed) lens.current?.indexDone()
@@ -349,5 +577,5 @@ function RawHost({ core, lens, atLine, opened, name, lines, indexed, limits, fro
   useEffect(() => {
     if (frozen) lens.current?.freeze()
   }, [frozen])
-  return <div className="raw-host" ref={host} data-gen={opened.gen} />
+  return <div className={mode === 'rendered' ? 'rendered-host' : 'raw-host'} ref={host} data-gen={opened.gen} data-lens={mode} />
 }

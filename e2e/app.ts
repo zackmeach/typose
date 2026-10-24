@@ -225,6 +225,8 @@ export interface TestHooks {
     aborts: number
     gone: { at: number; rejected: number } | null
     dropped: ('event' | 'response')[]
+    /** The mounted Rendered lens, when one is. */
+    rendered: (() => { units: number; htmlBytes: number; reserved: number; blocks: number; appended: number }) | null
   }
   app: { close?: () => void }
 }

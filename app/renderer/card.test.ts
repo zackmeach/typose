@@ -2,7 +2,7 @@
 // covers them all, the slow open and the memory refusal (plan §7 proposal 1, triggered from PR 6) included.
 import { expect, it } from 'vitest'
 import type { Opened } from '../shared/protocol'
-import { type Card, view } from './card'
+import { type Card, RENDERED_OFF, view } from './card'
 
 const PATH = 'C:\\logs\\run.jsonl'
 const opened = (over: Partial<Opened> = {}): Opened => ({
@@ -18,7 +18,7 @@ const opened = (over: Partial<Opened> = {}): Opened => ({
   reserved: 0,
   ...over
 })
-const open = (over: Partial<Extract<Card, { kind: 'open' }>> = {}): Card => ({
+const open = (over: Partial<Extract<Card, { kind: 'open' }>> = {}): Extract<Card, { kind: 'open' }> => ({
   kind: 'open',
   path: PATH,
   opened: opened(),
@@ -65,4 +65,16 @@ it('shows each file state', () => {
     ['core stopped with no file, a new one up', { kind: 'gone', ready: true }, { body: { message: "Typose's core stopped", actions: ['Open file…'] } }]
   ]
   for (const [state, card, want] of rows) expect(view(card), state).toMatchObject(want)
+})
+
+it('gives Markdown its switch, and the reasons Rendered stays off', () => {
+  const md = open({ opened: opened({ format: 'markdown' }), indexed: true, lens: 'raw' })
+  expect(view(md).lenses).toEqual({ showing: 'raw', renderedOff: undefined })
+  expect(view({ ...md, lens: 'rendered' }).body).toEqual({ rendered: true })
+  expect(view({ ...md, rendering: true }).status).toBe('Rendering…')
+  expect(view({ ...md, renderedOff: 'ceiling' }).lenses).toEqual({ showing: 'raw', renderedOff: RENDERED_OFF.ceiling })
+  expect(view({ ...md, renderedOff: 'memory' }).lenses).toEqual({ showing: 'raw', renderedOff: RENDERED_OFF.memory })
+  expect(view(open({ indexed: true })).lenses).toBeNull()
+  const empty = open({ opened: opened({ format: 'markdown', blank: true, size: 0 }), lines: 0, indexed: true })
+  expect(view(empty)).toMatchObject({ body: { message: 'Empty file', actions: [] }, lenses: null })
 })
