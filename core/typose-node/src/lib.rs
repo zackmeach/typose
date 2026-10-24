@@ -405,18 +405,21 @@ impl Doc {
 pub mod test_hooks {
     use super::*;
 
-    /// What's alive in this core (plan C6's "0 jobs, 0 tasks and 0 handles").
+    /// What's alive in this core (plan C6's "0 jobs, 0 tasks and 0 handles"), and the longest a chunk read's delay
+    /// has actually waited since the delay was set (`delay_ms`, plan C5).
     #[napi(object)]
     pub struct DebugStats {
         pub jobs: u32,
         pub tasks: u32,
         pub handles: u32,
+        pub delay_ms: f64,
     }
 
     #[napi]
     pub fn debug_stats() -> DebugStats {
         let count = |c| hooks::count(c) as u32;
-        DebugStats { jobs: count(&hooks::JOBS), tasks: count(&hooks::TASKS), handles: count(&hooks::HANDLES) }
+        let delay_ms = hooks::slowest_delay_ms();
+        DebugStats { jobs: count(&hooks::JOBS), tasks: count(&hooks::TASKS), handles: count(&hooks::HANDLES), delay_ms }
     }
 
     /// Plan C5's per-read delay: every chunk read from disk waits `ms` first.

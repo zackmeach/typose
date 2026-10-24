@@ -5,82 +5,13 @@ import { execFileSync } from 'node:child_process'
 import { closeSync, openSync, readSync, rmSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { FIXTURES, finish, launch, test, waitIndexed, waitOpen } from './app'
+import { FIRST_FRAME, MARKS, type Marks, outcome, scanGate, scanMarks, vetoControls } from './z37'
 
 const ONE_LINE = join(FIXTURES, '1gib-one-line.jsonl')
-/**
- * The page's own first frame (Z64): the renderer marks it in a rAF scheduled when its bundle evaluates. Paint
- * timing's `first-paint` isn't used: it comes with the window's first presentation, here 150–200 ms after the page's
- * frames had begun, which would excuse ordinary runs.
- */
-const FIRST_FRAME = 'typose:first-frame'
-const MARKS = ['typose:open-start', FIRST_FRAME, 'typose:first-screen', 'typose:line-scan', 'typose:index-done'] as const
-type Marks = Partial<Record<(typeof MARKS)[number], number>>
-/** Z37's first-screen budget: PC 50 ms, Mac 100 ms (plan §5). */
-const BUDGET_MS = process.platform === 'darwin' ? 100 : 50
-/** How long the marks may take to arrive: a late mark is judged as late, and only one that never comes is missing. */
-const MARKS_TIMEOUT_MS = 10_000
 /** Brief §8.2's indexing indicator, "Indexing N lines…", with N as the card writes it (compact: "1.2M"). */
 const INDEXING = /^Indexing [\d.]+[KMBT]? lines?…$/
 
 test.afterAll(() => rmSync(ONE_LINE, { force: true })) // generated fixtures are deleted when done
-
-/** Z64: Z37's clock starts at the later of the open and the page's first frame. */
-const clockStart = (m: Marks) => Math.max(m['typose:open-start']!, m[FIRST_FRAME]!)
-
-type Verdict = { verdict: 'pass' | 'fail' | 'not judged'; reasons: string[] }
-const ms = (t: number) => t.toFixed(1)
-
-/**
- * Plan A's veto (`afc58f9`) on Z37's gate: a missing, invalid or misordered mark fails it, never passes it or reads
- * as "not judged". The page's first frame is one of the required marks. Then the gate itself: the first piece shows
- * before the scan passes the line's end. A scan that finishes inside the first-screen budget can't tell a lens that
- * waits for the line's end apart, so that run is not judged. The budget's clock starts at the later of the open and
- * the page's first frame (Z64): a page that can't paint yet is a startup problem (Z59's gates), not the lens's.
- */
-function scanGate(m: Marks): Verdict {
-  const [open, frame, first, scan, done] = MARKS.map((name) => m[name])
-  if (![open, frame, first, scan, done].every((t) => typeof t === 'number' && Number.isFinite(t))) return { verdict: 'fail', reasons: [`missing or invalid marks: ${JSON.stringify(m)}`] }
-  const [o, f, s, d] = [open!, first!, scan!, done!]
-  const start = clockStart(m)
-  const failures: string[] = []
-  if (!(f > o)) failures.push(`first screen ${f} isn't after the open ${o}`)
-  if (!(s > o && s <= d)) failures.push(`line scan ${s} isn't after the open ${o} and no later than index done ${d}`)
-  if (failures.length) return { verdict: 'fail', reasons: failures }
-  const from = start === o ? 'the open' : "the page's first frame"
-  if (s - start <= BUDGET_MS) {
-    const when = s < start ? `${ms(start - s)} ms before` : `${ms(s - start)} ms after`
-    return { verdict: 'not judged', reasons: [`the scan ended ${when} the clock start (${from}), inside the ${BUDGET_MS} ms budget`] }
-  }
-  if (!(f < s)) return { verdict: 'fail', reasons: [`the first screen (${ms(f - start)} ms) waited for the line's end (${ms(s - start)} ms), from ${from}`] }
-  return { verdict: 'pass', reasons: [`the first screen (${ms(f - start)} ms) came before the line's end (${ms(s - start)} ms), from ${from}`] }
-}
-
-/**
- * What a verdict means for the test on `platform`. Windows and macOS gate (Z28), so a run there must be decisive: not
- * judged fails, and the fixture must grow if that ever happens. Linux is smoke-only (Z28): not judged is logged, and
- * passes.
- */
-function outcome(v: Verdict, platform: NodeJS.Platform): { fails: boolean; line: string } {
-  const why = v.reasons.join('; ')
-  if (v.verdict !== 'not judged') return { fails: v.verdict === 'fail', line: `${v.verdict.toUpperCase()}: ${why}` }
-  if (platform === 'linux') return { fails: false, line: `NOT JUDGED (Linux smoke, Z28): ${why}` }
-  return { fails: true, line: `NOT JUDGED, which fails on ${platform}, a gating platform (Z28): ${why}` }
-}
-
-/** The veto's negative controls: a run's marks with the scan-completion mark or the first frame missing, the scan
- *  mark after index done, or the scan before the first screen. The last is placed past the budget from the clock's
- *  start, so it's judged, and fails, however fast the first screen was and wherever the first frame came. The gate
- *  must fail each, on every platform. */
-function vetoControls(m: Marks): [control: string, marks: Marks][] {
-  const start = clockStart(m)
-  const late = { 'typose:line-scan': start + BUDGET_MS + 2, 'typose:first-screen': start + BUDGET_MS + 3 }
-  return [
-    ['line-scan missing', { ...m, 'typose:line-scan': undefined }],
-    ['first frame missing', { ...m, [FIRST_FRAME]: undefined }],
-    ['line-scan after index-done', { ...m, 'typose:line-scan': m['typose:index-done']! + 1 }],
-    ['line-scan before first-screen', { ...m, ...late, 'typose:index-done': Math.max(m['typose:index-done']!, start + BUDGET_MS + 2) }]
-  ]
-}
 
 test("the veto's controls fail the gate wherever the first screen and the page's first frame land", () => {
   // The open at 1000 and the scan at 1231; the page's first frame before the open, after it, and after the scan.
@@ -167,19 +98,7 @@ test("1 GiB on one line: the first piece shows before the scan passes the line's
   await test.step("Z37's gate on the scan marks, with the veto's negative control", async () => {
     // Waits for every mark, up to a bound: one that arrives late is judged as late, and only one that never comes is
     // missing (it then fails the gate).
-    const marks: Marks = await win.evaluate(
-      async ({ names, timeout }) => {
-        const read = () => Object.fromEntries(names.map((n) => [n, performance.getEntriesByName(n)[0]?.startTime]))
-        const since = performance.now()
-        let m = read()
-        while (Object.values(m).some((t) => t === undefined) && performance.now() - since < timeout) {
-          await new Promise((ok) => setTimeout(ok, 20))
-          m = read()
-        }
-        return m
-      },
-      { names: [...MARKS], timeout: MARKS_TIMEOUT_MS }
-    )
+    const marks: Marks = await scanMarks(win)
     console.log(`scan marks (ms after open): ${MARKS.map((n) => `${n} ${((marks[n] ?? NaN) - marks['typose:open-start']!).toFixed(1)}`).join(', ')}`)
     const { fails, line } = outcome(scanGate(marks), process.platform)
     console.log(`scan gate: ${line}`)

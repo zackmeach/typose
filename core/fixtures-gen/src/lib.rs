@@ -94,22 +94,30 @@ pub fn json_doc<W: Write>(w: &mut W, shape: &str, target_bytes: u64) -> io::Resu
 const WORDS: [&str; 5] = ["alpha", "bravo", "charlie", "delta", "echo"];
 
 /// CSV with a header row `c0,c1,…` and typed columns (integer, decimal, word, date), until `rows` records or
-/// `target_bytes`, whichever comes first. About `quoted_per_mille`‰ of fields are quoted and hold a comma,
-/// doubled quotes and an embedded newline. Returns the record count, header excluded.
-pub fn csv<W: Write>(w: &mut W, target_bytes: u64, rows: u64, cols: usize, quoted_per_mille: u64) -> io::Result<u64> {
+/// `target_bytes`, whichever comes first. About `quoted_per_mille`‰ of fields are quoted and hold the separator,
+/// doubled quotes and an embedded newline. `sep` is `,`, or a tab for TSV in Z45's CSV-style quoting. Returns the
+/// record count, header excluded.
+pub fn csv<W: Write>(
+    w: &mut W,
+    target_bytes: u64,
+    rows: u64,
+    cols: usize,
+    quoted_per_mille: u64,
+    sep: char,
+) -> io::Result<u64> {
     use std::fmt::Write as _;
-    let mut line = (0..cols).map(|j| format!("c{j}")).collect::<Vec<_>>().join(",") + "\n";
+    let mut line = (0..cols).map(|j| format!("c{j}")).collect::<Vec<_>>().join(&sep.to_string()) + "\n";
     w.write_all(line.as_bytes())?;
     let (mut written, mut n) = (line.len() as u64, 0u64);
     while n < rows && written < target_bytes {
         line.clear();
         for j in 0..cols as u64 {
             if j > 0 {
-                line.push(',');
+                line.push(sep);
             }
             let k = n * cols as u64 + j;
             let _ = if (k.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32) % 1000 < quoted_per_mille {
-                write!(line, "\"row {n} note, with \"\"quotes\"\"\nand a second line\"")
+                write!(line, "\"row {n} note{sep} with \"\"quotes\"\"\nand a second line\"")
             } else {
                 match j % 4 {
                     0 => write!(line, "{}", k % 1_000_003),
@@ -122,6 +130,54 @@ pub fn csv<W: Write>(w: &mut W, target_bytes: u64, rows: u64, cols: usize, quote
         line.push('\n');
         w.write_all(line.as_bytes())?;
         written += line.len() as u64;
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// A YAML sequence of records until `target_bytes`, with a comment every 100th and a block scalar every 50th.
+/// Returns the record count.
+pub fn yaml<W: Write>(w: &mut W, target_bytes: u64) -> io::Result<u64> {
+    let (mut written, mut n) = (0u64, 0u64);
+    while written < target_bytes {
+        let mut item = String::new();
+        if n % 100 == 0 {
+            item += &format!("# records {n} to {}\n", n + 99);
+        }
+        item += &format!(
+            "- id: {n}\n  ts: \"2026-10-20T12:{:02}:{:02}.{:03}Z\"\n  type: {}\n  msg: \"line {n:010}\"\n  tags: [{}, {}]\n",
+            (n / 60_000) % 60,
+            (n / 1000) % 60,
+            n % 1000,
+            TYPES[(n % 4) as usize],
+            WORDS[(n % 5) as usize],
+            WORDS[((n + 2) % 5) as usize]
+        );
+        if n % 50 == 0 {
+            item += "  note: |\n    a block scalar,\n    over two lines\n";
+        }
+        w.write_all(item.as_bytes())?;
+        written += item.len() as u64;
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Markdown sections until `target_bytes`: a heading, a paragraph with inline markup and a link, a list, a code
+/// fence and a table. Returns the section count.
+pub fn markdown<W: Write>(w: &mut W, target_bytes: u64) -> io::Result<u64> {
+    let (mut written, mut n) = (0u64, 0u64);
+    while written < target_bytes {
+        let word = WORDS[(n % 5) as usize];
+        let section = format!(
+            "## Section {n}\n\nParagraph {n} has *emphasis*, **strong** text, `code` and a [link](#section-{}). \
+             It runs on for a while, as prose does, about {word}.\n\n- item one of {n}\n- item two, {word}\n  \
+             - a nested item\n\n```rust\nfn section_{n}() -> u64 {{\n    {n}\n}}\n```\n\n\
+             | key | value |\n|---|---|\n| n | {n} |\n| word | {word} |\n\n",
+            n.saturating_sub(1)
+        );
+        w.write_all(section.as_bytes())?;
+        written += section.len() as u64;
         n += 1;
     }
     Ok(n)
@@ -170,7 +226,7 @@ mod tests {
     #[test]
     fn csv_has_a_header_typed_columns_and_quoted_newlines() {
         let mut out = Vec::new();
-        assert_eq!(csv(&mut out, u64::MAX, 2_000, 20, 10).unwrap(), 2_000);
+        assert_eq!(csv(&mut out, u64::MAX, 2_000, 20, 10, ',').unwrap(), 2_000);
         let s = String::from_utf8(out).unwrap();
         assert!(s.starts_with("c0,c1,c2,c3,"), "{}", &s[..40]);
         let quoted = s.matches(" note, with \"\"quotes\"\"\nand a second line\"").count();
@@ -181,8 +237,33 @@ mod tests {
     #[test]
     fn csv_stops_at_the_byte_target() {
         let mut out = Vec::new();
-        let n = csv(&mut out, 100_000, u64::MAX, 20, 10).unwrap();
+        let n = csv(&mut out, 100_000, u64::MAX, 20, 10, ',').unwrap();
         assert!(out.len() >= 100_000 && out.len() < 102_000, "{}", out.len());
         assert!(n > 500, "{n}");
+    }
+
+    #[test]
+    fn tsv_separates_with_tabs_and_quotes_like_csv() {
+        let mut out = Vec::new();
+        assert_eq!(csv(&mut out, u64::MAX, 2_000, 20, 10, '\t').unwrap(), 2_000);
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.starts_with("c0\tc1\tc2\t") && !s.contains(','), "{}", &s[..40]);
+        assert!(s.contains(" note\t with \"\"quotes\"\"\nand a second line\""));
+    }
+
+    #[test]
+    fn yaml_and_markdown_reach_the_target_and_count_what_they_wrote() {
+        let mut out = Vec::new();
+        let n = yaml(&mut out, 100_000).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.len() >= 100_000 && s.starts_with("# records 0 to 99\n- id: 0\n"), "{}", &s[..40]);
+        assert_eq!(s.matches("\n- id: ").count() as u64, n);
+        assert_eq!(s.matches("  note: |\n").count() as u64, n.div_ceil(50));
+        let mut out = Vec::new();
+        let n = markdown(&mut out, 100_000).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.len() >= 100_000 && s.starts_with("## Section 0\n\n"), "{}", &s[..40]);
+        assert_eq!(s.matches("## Section ").count() as u64, n);
+        assert_eq!(s.matches("```").count() as u64, 2 * n);
     }
 }

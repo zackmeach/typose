@@ -7,7 +7,7 @@ declare const __TEST_HOOKS__: boolean
 
 /** What only the test-hooks addon has (plan m8): its index.d.ts is generated with it, after the typecheck runs. */
 interface Hooks {
-  debugStats(): { jobs: number; tasks: number; handles: number }
+  debugStats(): { jobs: number; tasks: number; handles: number; delayMs: number }
   setReadDelay(ms: number): void
 }
 

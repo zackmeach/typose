@@ -85,12 +85,14 @@ test('jump far every frame for 2 s: ≤ 2 requests out, superseded reads end Can
   console.log(
     `frames came steadily ${steadyAfter.toFixed(0)} ms after the index was done; ${frames} jumps: at most ${maxPendingPages} page requests out; ${aborts} cancelled by the lens, ${stats.cancels} found their read ` +
       `running, ${stats.cancelled} of those ended Cancelled, the slowest ${stats.cancelMs.toFixed(1)} ms after its cancel ` +
-      `(a chunk read waits ${DELAY} ms); ${aborts - stats.cancels} had answered already`
+      `(a chunk read waits ${DELAY} ms, the slowest waited ${stats.delayMs.toFixed(1)}); ${aborts - stats.cancels} had answered already`
   )
   expect(maxPendingPages).toBeLessThanOrEqual(2)
   expect(stats.cancels).toBeGreaterThanOrEqual(5) // the run superseded reads mid-flight
   expect(stats.cancelled).toBe(stats.cancels)
-  expect(stats.cancelMs).toBeLessThan(DELAY + 50) // within the chunk read under way, not after another
+  // Within the chunk read under way, not after another: as long as a chunk read took here, since a sleep can overrun.
+  // On the macOS runner every 100 ms wait, the test runner's own too, took up to about 250 ms (plan §7).
+  expect(stats.cancelMs).toBeLessThan(stats.delayMs + 50)
   expect(stats).toMatchObject({ jobs: 0, tasks: 0, docs: 1 })
   expect(l.pageErrors).toEqual([])
   await finish(l)

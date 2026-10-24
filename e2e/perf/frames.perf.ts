@@ -2,20 +2,16 @@
 // cadence and responsiveness are judged apart): a 30 ms busy-wait during a scroll is a long frame covering it and no
 // cadence stall; 60 ms is a stall covering it, during a scroll, in the handler of one discrete keypress, and in the first frame
 // after a scrollbar jump; a control scroll has no stall and passes cadence; control keypresses pass responsiveness and
-// report cadence as not applicable; and a jump whose target never renders fails. Then, once: expanding a long line
-// and a freeze are each answered by the view they show.
+// report cadence as not applicable; an uninjected jump is n/a or pass; and a jump whose target never renders fails.
+// Then, once: expanding a long line and a freeze are each answered by the view they show.
 //   Run: npm run package, then `npm run perf -- -g accessibility`, and the keypress control 10 times over with
 //   `npm run perf -- -g "keypresses with no injection" --repeat-each=10`. Every run is appended to .evidence/m1/perf/.
-import { type CDPSession, type Page, expect } from '@playwright/test'
-import { closeSync, openSync, writeFileSync, writeSync } from 'node:fs'
+import { type Page, expect } from '@playwright/test'
+import { closeSync, openSync, writeSync } from 'node:fs'
 import { fixture, test, waitIndexed, waitOpen } from '../app'
 import { type PackagedLaunch, closePackaged, launchPackaged, waitMarks } from '../packaged'
-import { CATEGORIES, analyzeFrames } from './frames.mjs'
-import { cpuLoad, cpuTimes, recordOutcome } from './rig'
-
-type Analysis = ReturnType<typeof analyzeFrames>
-type Span = { from: number; to: number }
-type Run = { analysis: Analysis; busy: Span[]; load: number }
+import { type Run, type Span, jump, keypresses, scroll, traced } from './drive'
+import { recordOutcome } from './rig'
 
 // 1M lines × 20 px is past the 16M px native cap, so Raw scrolls logically: every wheel goes through the main thread.
 const LINES = 1_000_000
@@ -23,24 +19,6 @@ let file: string
 test.beforeAll(() => {
   file = fixture('frames.txt', Array.from({ length: LINES }, (_, i) => `${i} ${'frame '.repeat(i % 12)}`).join('\n'))
 })
-
-/** Traces `drive` (Chromium tracing over CDP, C8's pinned categories) and analyzes it; also returns the busy spans. */
-async function traced(l: PackagedLaunch, drive: (page: Page, cdp: CDPSession) => Promise<void>): Promise<Run> {
-  const page = l.page!
-  const cdp = await page.context().newCDPSession(page)
-  const from = cpuTimes()
-  await l.browser!.startTracing(page, { categories: CATEGORIES })
-  await page.waitForTimeout(500) // the first frame after tracing starts can take 120 ms: keep it out of the run
-  await drive(page, cdp)
-  await page.waitForTimeout(500) // let the last input settle inside the trace
-  const trace = await l.browser!.stopTracing()
-  writeFileSync(test.info().outputPath('trace.json'), trace) // the evidence, beside the run's lifecycle log
-  const events = JSON.parse(trace.toString()).traceEvents as { name: string; ts: number; args?: { data?: { message?: string } } }[]
-  const load = cpuLoad(from)
-  const at = (m: string) => events.filter((e) => e.name === 'TimeStamp' && e.args?.data?.message === m).map((e) => e.ts / 1000)
-  const busy: Span[] = at('typose:busy-start').map((from, i) => ({ from, to: at('typose:busy-end')[i] }))
-  return { analysis: analyzeFrames(events), busy, load }
-}
 
 type Busy = Window & { typoseBusy: (ms: number) => void }
 
@@ -54,11 +32,6 @@ const installBusy = (page: Page) =>
       console.timeStamp('typose:busy-end')
     }
   })
-
-/** A smooth mouse-wheel scroll down, synthesized by the browser at the display's rate. */
-async function scroll(cdp: CDPSession): Promise<void> {
-  await cdp.send('Input.synthesizeScrollGesture', { x: 400, y: 400, yDistance: -6000, speed: 3000, gestureSourceType: 'mouse' })
-}
 
 /** Arms a busy-wait in the handler of the `nth` event of `type` from now (capture phase, before the app's handler). */
 const busyOn = (page: Page, type: 'wheel' | 'keydown', nth: number, ms: number) =>
@@ -75,31 +48,11 @@ const busyOn = (page: Page, type: 'wheel' | 'keydown', nth: number, ms: number) 
     [type, nth, ms] as const
   )
 
-/** 21 discrete ArrowDown presses, 100 ms apart: each scrolls one row, so each is answered by one frame. */
-async function keypresses(page: Page): Promise<void> {
-  for (let i = 0; i < 21; i++) {
-    await page.keyboard.press('ArrowDown')
-    await page.waitForTimeout(100)
-  }
-}
-
-/** Drags the scrollbar thumb from the top to near the bottom in one move: a far jump. */
-async function jump(page: Page): Promise<void> {
-  const box = (await page.locator('.vl-scroller').boundingBox())!
-  // The thumb starts just below the up-arrow button, which is as tall as the scrollbar is wide.
-  const bar = await page.locator('.vl-scroller').evaluate((el) => (el as HTMLElement).offsetWidth - el.clientWidth)
-  const x = box.x + box.width - bar / 2
-  await page.mouse.move(x, box.y + bar + 8)
-  await page.mouse.down()
-  await page.mouse.move(x, box.y + box.height * 0.8)
-  await page.mouse.up()
-}
-
 for (const a11y of ['on', 'off'] as const) {
   test.describe(`accessibility ${a11y}`, () => {
     let l: PackagedLaunch
     let hz: number
-    let run: { name: string; r: Run } | null = null
+    let run: { name: string; r: Run; extra?: Record<string, unknown> } | null = null
     /**
      * The span covers the injection: it runs past the injection's end, and the work behind it began before the
      * injection did. A frame already in the pipeline when the main thread blocks still presents during the block (seen
@@ -107,8 +60,19 @@ for (const a11y of ['on', 'off'] as const) {
      */
     const covers = (span: Span & { began: number }, busy: Span) => span.to >= busy.to && span.began <= busy.from
     const valid = (r: Run) => expect(r.analysis.valid, `invalid run: ${r.analysis.reason}`).toBe(true)
-    const keep = (name: string, r: Run) => {
-      run = { name, r }
+    /**
+     * The scroll control's delivery precondition (the coordinator's ruling B, PR 9): a gesture the driver delivered
+     * thinly can't be judged. It needs ≥ 200 wheels, with every gap between consecutive wheel inputs under 60 ms (Chromium's
+     * gesture generator pauses for longer as the rig is loaded); otherwise the run is invalid, with the counts as its reason.
+     */
+    const delivered = (r: Run): Run => {
+      const { n, maxGapMs } = r.analysis.wheels
+      if (n >= 200 && maxGapMs < 60) return r
+      const reason = `the driver delivered ${n} wheels (needs ≥ 200), the largest gap between them ${maxGapMs} ms (needs < 60)`
+      return { ...r, analysis: { ...r.analysis, valid: false, reason, cadence: 'invalid', responsiveness: 'invalid' } as Run['analysis'] }
+    }
+    const keep = (name: string, r: Run, extra?: Record<string, unknown>) => {
+      run = { name, r, extra }
       const a = r.analysis
       console.log(name, `a11y ${a11y}`, JSON.stringify({ hz, valid: a.valid, reason: a.reason, cadence: a.cadence, responsiveness: a.responsiveness, frames: a.frames, firstFrame: a.firstFrame, unanswered: a.unanswered, long: a.long, stalls: a.stalls, never: a.neverPainted?.length, busy: r.busy, raf: a.raf, load: r.load }))
     }
@@ -127,16 +91,18 @@ for (const a11y of ['on', 'off'] as const) {
       // Kept with its status and reason, pass or fail (Z49), and when the app fails to exit: nothing overwrites an earlier run.
       if (run) {
         const { inputToPaint, ...a } = run.r.analysis
-        recordOutcome(test.info(), `frames:${run.name}:a11y-${a11y}`, { ...a, hz, inputToPaintMaxMs: Math.max(0, ...(inputToPaint ?? []).map((p) => p.ms)), busy: run.r.busy, load: run.r.load, closeError: closed?.message })
+        recordOutcome(test.info(), `frames:${run.name}:a11y-${a11y}`, { ...a, hz, inputToPaintMaxMs: Math.max(0, ...(inputToPaint ?? []).map((p) => p.ms)), busy: run.r.busy, load: run.r.load, closeError: closed?.message, ...run.extra })
       }
       if (closed) throw closed
     })
 
     test('control: a scroll with no injection has no stall and passes cadence and responsiveness', async () => {
-      const r = await traced(l, (_page, cdp) => scroll(cdp))
+      const r = delivered(await traced(l, (_page, cdp) => scroll(cdp)))
       keep('control', r)
       valid(r)
-      expect(r.analysis.frames).toBeGreaterThan(250) // the 2 s gesture is judged as one demanded interval
+      // Integrity (ruling B): the 2 s gesture is judged whole, as one demanded interval. Every present in it is judged
+      // but the first answer and at most one frame before it.
+      expect(r.analysis.frames, `${r.analysis.frames} judged of ${r.analysis.presents} presents`).toBeGreaterThanOrEqual(r.analysis.presents - 2)
       expect(r.analysis.stalls).toEqual([])
       expect(r.analysis.neverPainted).toEqual([])
       // Plan C8 as amended: a loaded rig can miss a real refresh (its slice is in the trace), so the control is held
@@ -209,6 +175,22 @@ for (const a11y of ['on', 'off'] as const) {
       valid(r)
       expect(r.busy).toHaveLength(1)
       expect(r.analysis.stalls.some((s) => covers(s, r.busy[0])), JSON.stringify(r)).toBe(true)
+    })
+
+    test('control: an uninjected scrollbar jump reports cadence n/a or pass, in 10 of 10 runs', async () => {
+      // The coordinator's Z62 clarification (PR 9): a frame already in the pipeline at the pointerdown isn't judged on
+      // cadence against the jump's answer. Ten jumps from the top, each traced on its own.
+      const runs: { cadence: string; frames: number; long: number[]; answers: number[] }[] = []
+      let last: Run | undefined
+      for (let n = 0; n < 10; n++) {
+        await l.page!.keyboard.press('Control+Home')
+        await l.page!.waitForTimeout(300)
+        last = await traced(l, (page) => jump(page), `trace-jump-${n}`)
+        valid(last)
+        runs.push({ cadence: last.analysis.cadence, frames: last.analysis.frames, long: last.analysis.long.map((s) => s.ms), answers: last.analysis.inputToPaint.map((p) => p.ms) })
+      }
+      keep('jump-control', last!, { runs })
+      expect(runs.map((r) => r.cadence).filter((c) => c !== 'n/a' && c !== 'pass'), JSON.stringify(runs)).toEqual([])
     })
 
     test('a jump whose target rows never render fails as never painted', async () => {

@@ -7,7 +7,7 @@ import { type ChildProcess, spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { type Exit, cleanups, keepEvidence } from './app'
+import { type Exit, cleanups, keepEvidence, test } from './app'
 
 const DIST = resolve(__dirname, '../app/dist')
 
@@ -139,4 +139,32 @@ export async function closePackaged(l: PackagedLaunch, keep = false): Promise<Ex
   keepEvidence(l.userData, l.pid, exit, keep)
   if (!closed) throw new Error(`pid ${l.pid} didn't exit within 15 s of its close, and was killed`)
   return exit
+}
+
+/**
+ * What a closed launch did that its test didn't ask for (plan §5's exit integrity, C9), from its exit status and the
+ * lifecycle log `closePackaged` kept: an unclean exit, a renderer or child process gone, an uncaught exception in main,
+ * or the core host exiting before the quit. Each is a failure to explain (Z56), never an invalid run.
+ */
+export function unrequested(l: PackagedLaunch, exit: Exit): string[] {
+  const problems: string[] = []
+  if (exit.code !== 0 || exit.signal !== null) problems.push(`pid ${l.pid} quit with ${JSON.stringify(exit)}`)
+  const records = ['lifecycle.1.jsonl', 'lifecycle.jsonl'].flatMap((name) => {
+    const log = test.info().outputPath(`${l.pid}-${name}`)
+    return existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean) : []
+  })
+  let quitting = false
+  for (const line of records) {
+    let r: { event?: string }
+    try {
+      r = JSON.parse(line) as { event?: string }
+    } catch {
+      problems.push(`pid ${l.pid}: an unreadable lifecycle line: ${line.slice(0, 200)}`)
+      continue
+    }
+    if (r.event === 'before-quit') quitting = true
+    if (r.event === 'render-process-gone' || r.event === 'child-process-gone' || r.event === 'uncaughtException') problems.push(`pid ${l.pid}: ${line}`)
+    else if (r.event === 'utility-exit' && !quitting) problems.push(`pid ${l.pid}: the core host exited before the quit: ${line}`)
+  }
+  return problems
 }
