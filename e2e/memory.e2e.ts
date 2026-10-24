@@ -157,9 +157,12 @@ test('under a budget that holds only the viewport, Raw mounts only the viewport,
     // Room again: a resize that keeps the row count reserves the overscan and the elastic part, and mounts them.
     await debugStats(win, { limit: 8 * GIB })
     await resize(l, 1200, 800)
-    const host = await win.evaluate(() => document.querySelector('.raw-host')!.clientHeight)
-    const full = (3 * Math.ceil(host / 20) + 1) * ROW + (16 << 20)
-    await expect.poll(async () => (await cacheStats(win))?.reserved, { timeout: 30_000 }).toBe(full)
+    // Raw's height read with the reservation, not once after the resize: on macOS the window settles after setSize
+    // returns (main-macos run 40097653559 read 509 px, then the lens reserved for a host of 581-600 px).
+    const raw = () => win.evaluate(() => document.querySelector('.raw-host')!.clientHeight)
+    const full = (host: number) => (3 * Math.ceil(host / 20) + 1) * ROW + (16 << 20)
+    await expect.poll(async () => (await cacheStats(win))?.reserved === full(await raw()), { timeout: 30_000 }).toBe(true)
+    const host = await raw()
     await expect.poll(() => win.evaluate(() => document.querySelectorAll('.vl-row').length)).toBeGreaterThan(Math.ceil(host / 20) + 1)
     expect(l.pageErrors).toEqual([])
     await finish(l)
