@@ -110,11 +110,10 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     settled = lens === null ? null : { lens, bytes: held }
     if (lens === null) hold(0)
   }
-  /** A failed Reload of document `id`, holding the reservation as `key`, gives it back to the last lens it was handed
-   *  to, if that's this document's; else to nobody. Never more than it holds, so this can't be refused. */
-  const giveBack = (key: string, id: number): void => {
+  /** A failed Reload, holding the reservation as `key`, gives it back to the last lens it was handed to, which is still
+   *  mounted, whatever document it shows. Never more than it holds, so this can't be refused. */
+  const giveBack = (key: string): void => {
     if (holder !== key) return // a newer one has taken it
-    settled = settled?.lens.startsWith(`${id}:`) ? settled : null
     holder = settled?.lens ?? null
     if ((settled?.bytes ?? 0) !== held) hold(settled?.bytes ?? 0)
   }
@@ -230,7 +229,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         settle(pending, `${id}:${gen}`)
         return { ...begin(id, doc, firstPage), reserved: held }
       } catch (e) {
-        if (docs.get(id) === doc) giveBack(pending, id)
+        if (docs.get(id) === doc) giveBack(pending)
         else settle(pending, null) // closed meanwhile: its lens is gone
         throw e
       }
