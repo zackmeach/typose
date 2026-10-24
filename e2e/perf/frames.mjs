@@ -56,7 +56,8 @@ const percentile = (values, p) => {
 /**
  * Z62: the 16.7 ms / ≥ 99% frame gate judges cadence, and the first frame after an input is judged by responsiveness.
  * - A frame is demanded from an input until the view settles: the first presented frame after the renderer marked the
- *   input's target rows painted. Demanded intervals that overlap merge, so a continuous gesture is one interval.
+ *   input's target rows painted. Demanded intervals that overlap merge, so a continuous gesture is one interval. Only
+ *   an input that changes the view opens one: an input whose first mark is a later input's is folded into it (`folded`).
  * - Cadence: a present belongs to a merged interval only if it began at or after the interval's first input (the
  *   coordinator's Z62 clarification, PR 9): a frame already in the pipeline can't contain the input. A present reported
  *   by two slices belongs if either began then (`lastBegan`). Every such present after the first is judged on its gap
@@ -107,6 +108,7 @@ export function analyzeFrames(events) {
   const unanswered = []
   const demanded = []
   const stalls = []
+  let folded = 0
   for (const input of inputs) {
     const i = painted.findIndex((p) => p.seq >= input.seq && p.ts >= input.dispatch)
     const mark = painted[i]
@@ -125,7 +127,12 @@ export function analyzeFrames(events) {
     // Responsiveness: the input is answered by the first present after its target painted (plan §5's input latency).
     const latency = settle - input.at
     inputToPaint.push({ seq: input.seq, kind: input.kind, ms: ms(latency) })
-    demanded.push([input.at, settle])
+    // Only an input that changes the view opens a demanded interval (the coordinator's clarification of Z62). An input
+    // whose first mark is a later input's had nothing of its own on screen before that input came (a scrollbar
+    // pointerdown before the drag's scroll, or Control before End): it's folded into the later input, timed to the
+    // same answer, and doesn't open or anchor the interval.
+    if (mark.seq === input.seq) demanded.push([input.at, settle])
+    else folded++
     if (latency > STALL_MS * 1000) stalls.push({ from: ms(input.at), to: ms(settle), ms: ms(latency), began: ms(input.at), first: true })
   }
   if (demanded.length === 0 && neverPainted.length === 0) return invalid('nothing was demanded: every input changed nothing')
@@ -173,6 +180,7 @@ export function analyzeFrames(events) {
     valid: true,
     reason: undefined,
     inputs: inputs.length,
+    folded,
     unanswered: { n: unanswered.length, max: unanswered.length ? Math.max(...unanswered) : undefined },
     demandedMs: ms(demandedUs),
     frames: judged,

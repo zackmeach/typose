@@ -176,6 +176,29 @@ test("a present reported by two slices belongs to the interval if either slice b
   assert.equal(r.cadence, 'fail')
 })
 
+test("a pointerdown folded into the drag's scroll doesn't anchor the interval: the thumb frame between them isn't judged", () => {
+  // The coordinator's anchoring ruling (PR 9). The pointerdown at 0 has no mark of its own: the drag's scroll at 7 came
+  // first. A frame begun at 5 presents the thumb at 12; the rows' frame (begun 20) presents at 40.
+  const r = analyze(input(0, null, 'x', 1, 'pointerdown'), input(7, 21, 'k', 1, 'scroll'), frame(12, { began: 5 }), frame(40, { began: 20 }))
+  assert.equal(r.folded, 1)
+  assert.equal(r.frames, 0)
+  assert.deepEqual(r.long, [])
+  assert.equal(r.cadence, 'n/a')
+  // Both are still timed to the rows' frame: the pointerdown 40 ms, the scroll 33 ms.
+  assert.deepEqual(r.inputToPaint.map((p) => [p.kind, p.ms]), [['pointerdown', 40], ['scroll', 33]])
+  // Control before End (Ctrl+End) folds the same way, and a discrete keypress stays n/a.
+  const key = analyze(input(100, null, 'y', 1, 'keydown'), input(101, 104, 'end', 1, 'keydown'), frame(108, { began: 102 }))
+  assert.deepEqual([key.folded, key.frames, key.cadence], [1, 0, 'n/a'])
+})
+
+test("a real long frame after the scroll's answer still fails cadence", () => {
+  // The scroll at 7 is answered at 15; a second scroll at 14 overlaps it, and its rows' frame comes 25 ms later.
+  const r = analyze(input(0, null, 'x', 1, 'pointerdown'), input(7, 13, 'k1', 1, 'scroll'), input(14, 34, 'k2', 1, 'scroll'), frame(15, { began: 8 }), frame(40, { began: 30 }))
+  assert.equal(r.folded, 1)
+  assert.deepEqual(r.long, [{ from: 15, to: 40, ms: 25, began: 8 }])
+  assert.equal(r.cadence, 'fail')
+})
+
 test('idle time is never demanded: a frame long after the view settled is not a gap', () => {
   const r = analyze(input(0, 3), frame(6), frame(500), input(600, 603), frame(606))
   assert.equal(r.longFrames, 0)
