@@ -137,9 +137,11 @@ function createWindow(): BrowserWindow {
   })
   win.webContents.on('will-navigate', (e) => e.preventDefault())
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  // Never once a quit has begun. On macOS, a window shown as it closes can get its visibility event after it's
+  // destroyed: Electron's own listener then throws, and the app never exits (main-macos run 40070774628).
   win.once('ready-to-show', () => {
     mark?.('readyToShow')
-    if (!showDelay) win.show()
+    if (!showDelay && !quitting) win.show()
   })
   win.on('show', () => {
     log('window-shown')
@@ -182,7 +184,7 @@ void app.whenReady().then(() => {
   })
   if (showDelay) {
     const painted = new Promise<void>((ok) => (titlebarPainted = ok))
-    void Promise.all([once(win, 'ready-to-show'), painted]).then(() => setTimeout(() => win.show(), showDelay))
+    void Promise.all([once(win, 'ready-to-show'), painted]).then(() => setTimeout(() => quitting || win.show(), showDelay))
   }
   const loaded = new Promise<void>((ok) => win.webContents.once('did-finish-load', () => ok()))
   spawnCore(win, loaded) // in parallel with the page load (spec §2.1)
