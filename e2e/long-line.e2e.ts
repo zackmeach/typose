@@ -82,6 +82,24 @@ test("1 GiB on one line: the first piece shows before the scan passes the line's
       [...MARKS]
     )
     console.log(`scan marks (ms after open): ${MARKS.map((n) => `${n} ${((marks[n] ?? NaN) - marks['typose:open-start']!).toFixed(1)}`).join(', ')}`)
+    // DIAGNOSTIC, to be reverted: what the page looks like when the first-screen mark is missing on Linux CI.
+    const diag = await win.evaluate(async () => {
+      const t0 = performance.now()
+      const visibility = document.visibilityState
+      while (performance.getEntriesByName('typose:first-screen').length === 0 && performance.now() - t0 < 5000) await new Promise((r) => setTimeout(r, 10))
+      const frame = await Promise.race([new Promise<number>((r) => requestAnimationFrame(() => r(performance.now()))), new Promise<string>((r) => setTimeout(() => r('no frame in 1 s'), 1000))])
+      const loaf = await new Promise<unknown[]>((resolve) => {
+        try {
+          const o = new PerformanceObserver((list) => resolve(list.getEntries().map((e) => { const f = e as PerformanceEntry & { renderStart: number; styleAndLayoutStart: number; blockingDuration: number; scripts: { invoker: string; duration: number; sourceURL: string }[] }; return { start: f.startTime.toFixed(1), dur: f.duration.toFixed(1), render: f.renderStart?.toFixed(1), layout: f.styleAndLayoutStart?.toFixed(1), scripts: f.scripts?.map((s) => `${s.invoker} ${s.duration.toFixed(1)}`) } })))
+          o.observe({ type: 'long-animation-frame', buffered: true })
+          setTimeout(() => resolve(['no long-animation-frame entries']), 500)
+        } catch (e) {
+          resolve([String(e)])
+        }
+      })
+      return { readAt: t0.toFixed(1), visibility, firstAfterWait: performance.getEntriesByName('typose:first-screen')[0]?.startTime, waited: (performance.now() - t0).toFixed(1), frame, marks: performance.getEntriesByType('mark').map((m) => `${m.name}@${m.startTime.toFixed(1)}`), rows: document.querySelectorAll('.vl-row').length, gen: document.querySelector('.raw-host')?.getAttribute('data-gen'), loaf }
+    })
+    console.log('DIAG', JSON.stringify(diag))
     expect(scanGate(marks)).toEqual([])
     // The negative control: without the scan-completion mark, or with it out of order, the same run fails the gate.
     for (const [control, m] of vetoControls(marks)) expect(scanGate(m), control).not.toEqual([])
