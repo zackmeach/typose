@@ -261,7 +261,7 @@ The document keeps its explicitly charged state (its floor, checkpoints, hashes,
 **The mismatch:** the spike judged rAF intervals over 20 ms (`spike/a perf.ts:16`; plan A:3613). §10.2 requires "≥ 99% of frames < 16.7ms, no stall > 50ms," and §10.3 names Chromium tracing. `trace-frames.mjs` (snap2) is diagnostic only: it reads `FireAnimationFrame` gaps on the renderer main thread (`:39-49`), not presentation. C8 is new code.
 
 **Frames (from a Chromium trace taken over CDP's `Tracing` domain on the fused build; amended in PR 3, plan §7):**
-- **Demanded frames:** a frame is demanded from an input (a wheel, a key, a scrollbar drag, a jump, an open) until the view settles, meaning the scroll has stopped and the target rows have painted. Idle time isn't demanded, so an idle tail is never a gap.
+- **Demanded frames:** a frame is demanded from an input (a wheel, a key, a scrollbar drag, a jump, an open, a click that expands a long line) until the view settles, meaning the scroll has stopped and the target rows have painted. Idle time isn't demanded, so an idle tail is never a gap.
   - Concretely: an input demands frames from its own timestamp until the first presented frame after the renderer marks its target rows painted. Overlapping demands merge, so a continuous gesture is one demanded interval.
   - An input that changes nothing on screen (its painted mark repeats the previous one) owes no frame. It's timed to its mark and reported apart (`unanswered`), outside the latency figure, and it's a stall if its mark comes over 50 ms after the input.
 - **Presented frames:** the renderer's `PipelineReporter` slices whose state is `STATE_PRESENTED_ALL`, at their end. A `STATE_PRESENTED_PARTIAL` frame (a compositor-only update, such as the scrollbar thumb moving, shown while the main thread's update is still pending) shows stale rows, so it doesn't end a gap.
@@ -284,6 +284,7 @@ The document keeps its explicitly charged state (its floor, checkpoints, hashes,
 - **Input → target paint:** for each input that changes the view, a jump included, measured from the input's timestamp to the first presented frame that contains the target rows (a renderer mark when they commit, matched to the next presented frame).
   - An input whose target never paints within 1 s fails.
   - It's the responsiveness latency above.
+  - Raw's painted mark keys the view by its scroll position and row count, which grows as a long line's pieces expand (C3). It comes once every row in the viewport has its text, whether that's a line's first piece or a further one. Once a freeze's banner is up, the view is settled as it stands, and rows that never got their text stay blank.
 - PR 3 pins the trace events to the Electron version: `PipelineReporter` and the renderer's `console.timeStamp` marks (`TimeStamp`) on Electron 44.9.2 (`e2e/perf/frames.mjs`). rAF figures are printed beside them and not judged.
 
 **Startup (amended in PR 3, plan §7):** `shellVisible` is when the title bar reaches the screen: its first presentation after main's `show` event, on the wall clock. It's never `show` itself.
@@ -301,6 +302,7 @@ The document keeps its explicitly charged state (its floor, checkpoints, hashes,
   - The test doesn't require exactly one stall under every scheduling outcome.
   - "Covers": the stall runs past the injection's end, and the work behind it began before the injection did. That's the frame that opens a gap, or the input whose first frame is late (Z62). A frame already in the pipeline still presents during the block. (Amended in PR 3.)
 - A jump whose target rendering is suppressed fails as never painted. The test driver drops the page requests over CDP, so no hook is needed. (Amended in PR 3.)
+- Expanding a long line is an input answered when its further pieces show, and a freeze is answered by its banner. Neither is judged a no-change or left unpainted. (Added in PR 3's merge with PR 4.)
 - Startup controls, on the test-hooks build (amended in PR 3):
   - every run, delayed or not, is valid: it establishes the title bar's presentation after the show;
   - in each run that delays `show()` by 300 ms after both `ready-to-show` and `titlebarPainted`, that presentation lands ≥ 300 ms after the later of the two;
@@ -786,6 +788,13 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
   - The 60 ms control must register a cadence stall covering its injection, so the 30 ms assertion still fails once the injection grows to 60 ms. The uninjected control scroll keeps asserting no stall of either kind: there, a late answer is the app's.
 - **"Covers" means the stall runs past the injection's end, and the work behind it began before the injection did; it may start after the injection starts.** That work is the frame that opens a gap, or the input whose first frame is late (Z62). *Why:* a frame already in the pipeline when the main thread blocks still presents during the block (seen 3–12 ms in). No frame begun after the block starts can present until the block ends. The span is still the whole time nothing new reached the screen.
 - **Target suppression needs no `test-hooks` hook.** The test driver drops the renderer's page requests over CDP. *Why:* CDP already reaches the page on the fused build; a hook would add behaviour-changing code to the app for nothing.
+- **Raw's paint probe follows PR 4's rows (PR 3's merge with PR 4).**
+  - The probe checks each viewport row's slot key: a line, or a line's further piece. Its view key adds the row count. A click is a marked input. Once the freeze's banner is up, the frozen view counts as settled.
+  - *Why:* the merge state shows the failures, on two traced controls on the packaged build.
+    - Expanding a 300 KB line left its `pointerdown` and the scroll it caused never painted. The probe asked the cache for lines 2–4 by row number, where the line's pieces now sit.
+    - A freeze left the Ctrl+End `keydown` never painted, waiting for rows that would never load.
+  - With the fix, the expansion's click is answered when its four further pieces show (74.7 ms in the first run), and the freeze's keydown when the banner shows (20.2 ms).
+  - The pieces' latency is reported, not judged: each piece's token comes from the piece before, so they're fetched one after another.
 
 **Carried requirement from PR 3's review (§7.3 🔒, owner M4's Rendered lens):** a `<link rel="preconnect">` or `<link rel="dns-prefetch">` inserted into the page bypasses both the CSP and `session.webRequest`. The review planted one, and the NetLog showed DNS resolver events.
 - It isn't reachable in M1, because Raw renders text only, never markup.

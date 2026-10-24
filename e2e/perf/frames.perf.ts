@@ -1,12 +1,13 @@
 // Plan C8's frame instrument and its controls, on the packaged build over CDP, with accessibility on and off (Z62:
 // cadence and responsiveness are judged apart): a 30 ms busy-wait during a scroll is a long frame covering it and no
-// stall; 60 ms is a stall covering it, during a scroll, in the handler of one discrete keypress, and in the first frame
+// cadence stall; 60 ms is a stall covering it, during a scroll, in the handler of one discrete keypress, and in the first frame
 // after a scrollbar jump; a control scroll has no stall and passes cadence; control keypresses pass responsiveness and
-// report cadence as not applicable; and a jump whose target never renders fails.
+// report cadence as not applicable; and a jump whose target never renders fails. Then, once: expanding a long line
+// and a freeze are each answered by the view they show.
 //   Run: npm run package, then `npm run perf -- -g accessibility`, and the keypress control 10 times over with
 //   `npm run perf -- -g "keypresses with no injection" --repeat-each=10`. Every run is appended to .evidence/m1/perf/.
 import { type CDPSession, type Page, expect } from '@playwright/test'
-import { writeFileSync } from 'node:fs'
+import { closeSync, openSync, writeFileSync, writeSync } from 'node:fs'
 import { fixture, test, waitIndexed, waitOpen } from '../app'
 import { type PackagedLaunch, closePackaged, launchPackaged, waitMarks } from '../packaged'
 import { CATEGORIES, analyzeFrames } from './frames.mjs'
@@ -230,3 +231,65 @@ for (const a11y of ['on', 'off'] as const) {
     })
   })
 }
+
+// The paint probe on PR 4's views (plan C8): expanding a long line and a freeze each change what Raw shows, so the
+// input behind each is answered by the present that shows it, never judged a no-change or left unpainted.
+test.describe('the paint probe on long lines and the freeze', () => {
+  let l: PackagedLaunch | undefined
+  let run: { name: string; r: Run } | null = null
+  const answered = (r: Run, kind: string) => r.analysis.inputToPaint.filter((p) => p.kind === kind)
+  test.beforeEach(() => void (run = null))
+  test.afterEach(async () => {
+    const closed = l ? await closePackaged(l).then(() => undefined, (e: Error) => e) : undefined
+    l = undefined
+    if (run) {
+      const { inputToPaint, ...a } = run.r.analysis
+      recordOutcome(test.info(), `frames:probe-${run.name}`, { ...a, inputToPaint, busy: run.r.busy, load: run.r.load, closeError: closed?.message })
+    }
+    if (closed) throw closed
+  })
+
+  test('expanding a long line is an input, answered when its further pieces show', async () => {
+    // One 300,000-byte line: five 64 KiB pieces, so its first row ends in "↪ more".
+    l = await launchPackaged({ cdp: true, file: fixture('probe-long-line.txt', `${'x'.repeat(300_000)}\nend\n`) })
+    const page = l.page!
+    await waitOpen(page)
+    await waitIndexed(page)
+    const r = await traced(l, async (p) => {
+      // A key that moves nothing first, so the expansion is judged against a painted view, not the trace's first mark.
+      await p.locator('.vl-scroller').focus()
+      await p.keyboard.press('ArrowUp')
+      await p.waitForTimeout(200)
+      await p.getByRole('button', { name: 'Show more of line 1' }).click()
+      await expect(p.locator('.vl-row[data-line="0"]')).toHaveCount(5)
+    })
+    run = { name: 'expand', r }
+    console.log('probe expand', JSON.stringify({ valid: r.analysis.valid, unanswered: r.analysis.unanswered, never: r.analysis.neverPainted, answered: r.analysis.inputToPaint }))
+    expect(r.analysis.valid, r.analysis.reason).toBe(true)
+    expect(answered(r, 'click'), JSON.stringify(r.analysis.inputToPaint)).toHaveLength(1)
+    expect(r.analysis.neverPainted).toEqual([])
+  })
+
+  test('a freeze is answered by its banner, not left unpainted', async () => {
+    // states.e2e.ts's freeze: 60,000 lines of 64 bytes, and a same-size write near the end, where nothing was read.
+    const line = (n: number) => `line ${n}`.padEnd(63, '.')
+    const file = fixture('probe-freeze.txt', Array.from({ length: 60_000 }, (_, n) => `${line(n)}\n`).join(''))
+    l = await launchPackaged({ cdp: true, file })
+    const page = l.page!
+    await waitOpen(page)
+    await waitIndexed(page)
+    const fd = openSync(file, 'r+')
+    writeSync(fd, 'CHANGED'.padEnd(63, '!'), 59_990 * 64)
+    closeSync(fd)
+    await page.locator('.vl-scroller').focus()
+    const r = await traced(l, async (p) => {
+      await p.keyboard.press('Control+End')
+      await expect(p.locator('.banner')).toBeVisible()
+    })
+    run = { name: 'freeze', r }
+    console.log('probe freeze', JSON.stringify({ valid: r.analysis.valid, unanswered: r.analysis.unanswered, never: r.analysis.neverPainted, answered: r.analysis.inputToPaint }))
+    expect(r.analysis.valid, r.analysis.reason).toBe(true)
+    expect(r.analysis.neverPainted, JSON.stringify(r.analysis.inputToPaint)).toEqual([])
+    expect(answered(r, 'keydown')).toHaveLength(1)
+  })
+})
