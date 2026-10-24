@@ -250,7 +250,8 @@ test('Ctrl+Q quits on Linux (brief §7.2), as ☰’s Quit does; on Windows it d
   test.skip(MAC, 'Cmd+Q is the native app menu’s Quit')
   const l = await launch()
   await expect(l.win.locator('.open-button')).toBeVisible()
-  await l.win.keyboard.press('Control+Q')
+  // On Linux the page closes on the keydown, before Playwright sends the keyup (PR CI run 40098228365).
+  await l.win.keyboard.press('Control+Q').catch(() => {})
   if (process.platform === 'linux') await quitCleanly(l)
   else {
     await l.win.waitForTimeout(1000)
