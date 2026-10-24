@@ -865,3 +865,4 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 - §10.2 reports warm p50 and p95 without saying which is judged. M1 keeps plan A's p95 rule.
 - §13.1's cold first-screen gate (< 150ms) has no Mac value, so Mac cold is reported (plan §5).
 - §8.1's launcher is "installed by the installers". It ships in M1 and is installed in M7.
+
