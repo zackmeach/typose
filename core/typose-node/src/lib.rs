@@ -406,7 +406,7 @@ pub mod test_hooks {
     use super::*;
 
     /// What's alive in this core (plan C6's "0 jobs, 0 tasks and 0 handles"), and the longest a chunk read's delay
-    /// has actually waited (`delay_ms`, plan C5).
+    /// has actually waited since the delay was set (`delay_ms`, plan C5).
     #[napi(object)]
     pub struct DebugStats {
         pub jobs: u32,

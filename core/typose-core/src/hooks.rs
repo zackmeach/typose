@@ -11,8 +11,9 @@ pub static JOBS: AtomicUsize = AtomicUsize::new(0);
 pub static TASKS: AtomicUsize = AtomicUsize::new(0);
 
 static READ_DELAY_MS: AtomicU64 = AtomicU64::new(0);
-/// The longest any delay has actually waited, in µs. A sleep can overrun: on the macOS runner, a 100 ms one took up
-/// to 247 ms (plan §7), so "within one chunk read" (C5) is judged against this, not against the delay asked for.
+/// The longest any delay has actually waited since the delay was last set, in µs. A sleep can overrun: on the macOS
+/// runner, a 100 ms one took up to 247 ms (plan §7), so "within one chunk read" (C5) is judged against this, not
+/// against the delay asked for.
 static SLOWEST_DELAY_US: AtomicU64 = AtomicU64::new(0);
 
 /// Counts one of something in `counter` for as long as it lives.
@@ -35,9 +36,11 @@ pub fn count(counter: &AtomicUsize) -> usize {
     counter.load(Ordering::Relaxed)
 }
 
-/// Sets the delay before each chunk read from disk. Plan C4: a whole number of ms in [0, 10000], never clamped.
+/// Sets the delay before each chunk read from disk. Plan C4: a whole number of ms in [0, 10000], never clamped. The
+/// slowest delay starts over, so an earlier outlier can't loosen what's judged against it.
 pub fn set_read_delay(ms: f64) -> Result<(), String> {
     READ_DELAY_MS.store(delay_ms(ms)?, Ordering::Relaxed);
+    SLOWEST_DELAY_US.store(0, Ordering::Relaxed);
     Ok(())
 }
 
@@ -57,7 +60,7 @@ pub(crate) fn read_delay() {
     }
 }
 
-/// The longest any chunk read's delay has actually waited, in ms.
+/// The longest any chunk read's delay has actually waited since the delay was last set, in ms.
 pub fn slowest_delay_ms() -> f64 {
     SLOWEST_DELAY_US.load(Ordering::Relaxed) as f64 / 1000.0
 }

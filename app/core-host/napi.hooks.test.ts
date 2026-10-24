@@ -72,21 +72,22 @@ it('plan C5: a cancelled read stops within the chunk read under way, and reads n
     }
     const code = await ended
     const end = performance.now()
+    const { delayMs } = core.debugStats() // this read's own slowest: setReadDelay, above and just below, starts it over
     core.setReadDelay(0)
     doc.close()
-    return { code, total: end - start, afterCancel: end - cancelled }
+    return { code, total: end - start, afterCancel: end - cancelled, delayMs }
   }
   const whole = await read()
   expect(whole.code).toBe('resolved')
   expect(whole.total).toBeGreaterThanOrEqual(4 * DELAY - 20) // four chunk reads (Windows' timers run a little early)
   // The stats keep the slowest single delay: at least the one asked for, and less than the page's four.
-  expect(core.debugStats().delayMs).toBeGreaterThanOrEqual(DELAY - 20)
-  expect(core.debugStats().delayMs).toBeLessThan(whole.total)
+  expect(whole.delayMs).toBeGreaterThanOrEqual(DELAY - 20)
+  expect(whole.delayMs).toBeLessThan(whole.total)
   const cut = await read(1.5 * DELAY) // during the second
-  const { delayMs } = core.debugStats()
-  console.log(`a page of four chunk reads: ${whole.total.toFixed(0)} ms; cancelled during the second, it ended ${cut.afterCancel.toFixed(0)} ms later (the slowest delay ${delayMs.toFixed(0)} ms)`)
+  console.log(`a page of four chunk reads: ${whole.total.toFixed(0)} ms; cancelled during the second, it ended ${cut.afterCancel.toFixed(0)} ms later (its slowest delay ${cut.delayMs.toFixed(0)} ms)`)
   expect(cut.code).toBe('Cancelled')
-  // The rest of the read under way, and no other: under one delay, as long as the slowest took here. On the macOS
-  // runner four 200 ms delays took 903-1086 ms, and in run 40072658390 this came 197 ms after the cancel (plan §7).
-  expect(cut.afterCancel).toBeLessThan(delayMs)
+  // The rest of the read under way, and no other: under one of its delays, as long as its slowest took here, plus the
+  // e2e test's 50 ms for the read, hash and resolve after the sleep. On the macOS runner four 200 ms delays took
+  // 903-1086 ms, and in run 40072658390 this came 197 ms after the cancel (plan §7).
+  expect(cut.afterCancel).toBeLessThan(cut.delayMs + 50)
 })
