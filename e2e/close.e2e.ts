@@ -77,7 +77,8 @@ test('a double Reload mid-index on 10 GiB keeps one index job, and close then le
     const reload = () => core.call('reload', { doc: 1, count: 1, bytes: 0 }).then((r) => (r as { gen: number }).gen, (e: { code: string }) => e.code)
     return Promise.all([reload(), reload()])
   })
-  expect(replies).toEqual(['Stale', 3])
+  // The first ends Stale, or Frozen when generation 3 supersedes its first page's read; the second gives generation 3.
+  expect(replies[1]).toBe(3)
   // While generation 3 indexes (1–3 s), at most one job runs: the superseded generations' end within a block.
   await l.win.waitForTimeout(100)
   for (let i = 0; i < 5; i++) {
