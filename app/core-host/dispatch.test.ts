@@ -11,10 +11,27 @@ import { HOSTILE, isValid } from './numbers'
 const item = () => ({ gen: 1, line: 0, offset: 0, text: 'x', more: true, next: { gen: 1, line: 0, offset: 1 } })
 const page = vi.fn(async (_gen: number, _start: number, _count: number, _cancel: Cancel) => ({ items: [item()] }) as unknown as Page)
 const piece = vi.fn(async (_gen: number, _line: number, _offset: number, _cancel: Cancel) => ({ items: [item()] }) as unknown as Page)
+const render = vi.fn(async (_gen: number, _cancel: Cancel) => ({ blocks: 1, units: 1, htmlBytes: 8 }))
+const mdPage = vi.fn(async (_gen: number, _start: number, _count: number, _cancel: Cancel) => ({ items: [] }))
 const reload = vi.fn()
 const close = vi.fn()
 const startIndex = vi.fn((_cancel: Cancel, _onProgress: (p: IndexProgress) => void) => {})
-const doc = { generation: 1, size: 3, encoding: 'UTF-8', lines: 0, indexed: false, blank: false, page, piece, reload, close, startIndex } as unknown as Doc
+const doc = {
+  generation: 1,
+  format: 'text',
+  size: 3,
+  encoding: 'UTF-8',
+  lines: 0,
+  indexed: false,
+  blank: false,
+  page,
+  piece,
+  render,
+  mdPage,
+  reload,
+  close,
+  startIndex
+} as unknown as Doc
 const openDoc = vi.fn(() => doc)
 const reserveCache = vi.fn((_bytes: number) => true)
 /** Every cancel flag the dispatcher made, in order. */
@@ -54,6 +71,12 @@ const TABLE: [method: string, field: string, base: Record<string, unknown>][] = 
   ['page', 'continuation.gen', { doc: 1, lens: 'raw', continuation: token }],
   ['page', 'continuation.line', { doc: 1, lens: 'raw', continuation: token }],
   ['page', 'continuation.offset', { doc: 1, lens: 'raw', continuation: token }],
+  ['page', 'doc', { lens: 'rendered', gen: 1, start: 0, count: 1 }],
+  ['page', 'gen', { doc: 1, lens: 'rendered', start: 0, count: 1 }],
+  ['page', 'start', { doc: 1, lens: 'rendered', gen: 1, count: 1 }],
+  ['page', 'count', { doc: 1, lens: 'rendered', gen: 1, start: 0 }],
+  ['render', 'doc', { gen: 1 }],
+  ['render', 'gen', { doc: 1 }],
   ['reload', 'doc', { count: 1, bytes: 0 }],
   ['reload', 'count', { doc: 1, bytes: 0 }],
   ['reload', 'bytes', { doc: 1, count: 1 }],
@@ -78,7 +101,7 @@ describe('every numeric parameter takes only integers in its range', () => {
   for (const [method, field, base] of TABLE) {
     const { min, max } = range(field.replace('continuation.', ''))
     for (const value of [...HOSTILE, min, max, max + 1]) {
-      it(`${method}.${field} = ${String(value)}`, async () => {
+      it(`${method}${base.lens === 'rendered' ? ' (rendered)' : ''}.${field} = ${String(value)}`, async () => {
         const response = await call(method, withValue(base, field, value))
         if (isValid(value, min, max)) {
           // In range: not refused for its range (a token of another document is still refused, as such).
@@ -86,7 +109,7 @@ describe('every numeric parameter takes only integers in its range', () => {
           return
         }
         expect(response).toMatchObject({ id: nextId - 1, session: 7, error: { code: 'InvalidParams', field } })
-        for (const spy of [openDoc, page, piece, reload, close, startIndex, reserveCache]) expect(spy).not.toHaveBeenCalled()
+        for (const spy of [openDoc, page, piece, render, mdPage, reload, close, startIndex, reserveCache]) expect(spy).not.toHaveBeenCalled()
         // No state change: document 1 is still open, and the next open is document 2.
         expect(await call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 })).toHaveProperty('result')
         expect(await call('open', { path: 'c.txt', count: 1, bytes: 0 })).toMatchObject({ result: { doc: 2 } })
@@ -162,6 +185,61 @@ it('a lens other than raw, a bad path and an unknown document are typed errors',
   expect(await call('page', { doc: 9, lens: 'raw', gen: 1, start: 0, count: 1 })).toMatchObject({ error: { code: 'NoDocument' } })
   expect(await call('hello', { protocol: 2 })).toMatchObject({ error: { code: 'Unsupported' } })
   expect(openDoc).not.toHaveBeenCalled()
+})
+
+describe('rendered Markdown (plan: Rendered Markdown slice §2.1)', () => {
+  it("open and reload report the file's format, as the core decides it", async () => {
+    const d = doc as unknown as { format: string }
+    d.format = 'markdown'
+    try {
+      expect(await call('open', { path: 'b.md', count: 1, bytes: 0 })).toMatchObject({ result: { doc: 2, format: 'markdown' } })
+      expect(await call('reload', { doc: 2, count: 1, bytes: 0 })).toMatchObject({ result: { doc: 2, format: 'markdown' } })
+    } finally {
+      d.format = 'text'
+    }
+  })
+
+  it('render builds the generation asked, and a rendered page reads blocks of it', async () => {
+    expect(await call('render', { doc: 1, gen: 1 })).toMatchObject({ result: { blocks: 1, units: 1, htmlBytes: 8 } })
+    expect(render).toHaveBeenCalledWith(1, expect.anything())
+    expect(await call('page', { doc: 1, lens: 'rendered', gen: 1, start: 2, count: 3 })).toMatchObject({ result: { items: [] } })
+    expect(mdPage).toHaveBeenCalledWith(1, 2, 3, expect.anything())
+    expect(page).not.toHaveBeenCalled()
+  })
+
+  it('a rendered page takes no continuation, and an unknown document is NoDocument', async () => {
+    expect(await call('page', { doc: 1, lens: 'rendered', continuation: token })).toMatchObject({ error: { code: 'InvalidParams', field: 'continuation' } })
+    expect(await call('render', { doc: 9, gen: 1 })).toMatchObject({ error: { code: 'NoDocument' } })
+    expect(await call('page', { doc: 9, lens: 'rendered', gen: 1, start: 0, count: 1 })).toMatchObject({ error: { code: 'NoDocument' } })
+    for (const spy of [piece, mdPage, render]) expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('a build stops as a read does: cancel and close set its flag (plan C5, C6), and its freeze cancels the reads', async () => {
+    let fail = (_e: unknown) => {}
+    render.mockImplementationOnce(() => new Promise((_ok, f) => (fail = f)))
+    const building = dispatch({ id: 30, method: 'render', params: { doc: 1, gen: 1 } })
+    const flag = flags.at(-1)!
+    expect(await call('cancel', { id: 30 })).toMatchObject({ result: true })
+    expect(flag.cancel).toHaveBeenCalledOnce()
+    fail(cancelled())
+    expect(await building).toMatchObject({ id: 30, error: { code: 'Cancelled' } })
+    // A freeze the build finds cancels the document's other reads.
+    const other = pendingRead()
+    void dispatch({ id: 31, method: 'page', params: { doc: 1, lens: 'raw', gen: 1, start: 9, count: 1 } })
+    const otherFlag = flags.at(-1)!
+    render.mockImplementationOnce(async () => {
+      throw Object.assign(new Error('frozen: changed on disk'), { code: 'Frozen' })
+    })
+    expect(await call('render', { doc: 1, gen: 1 })).toMatchObject({ error: { code: 'Frozen' } })
+    expect(otherFlag.cancel).toHaveBeenCalledOnce()
+    other.fail(cancelled())
+    // Close cancels a build under way.
+    render.mockImplementationOnce(() => new Promise(() => {}))
+    void dispatch({ id: 32, method: 'render', params: { doc: 1, gen: 1 } })
+    const last = flags.at(-1)!
+    expect(await call('close', { doc: 1 })).toMatchObject({ result: true })
+    expect(last.cancel).toHaveBeenCalledOnce()
+  })
 })
 
 it('an addon error keeps its typed code, and anything else is Internal', async () => {

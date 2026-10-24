@@ -8,6 +8,7 @@ use crate::budget::{self, NoSlot, Reservation, Work};
 use crate::doc::{Charges, DocError, Document};
 use crate::encoding::{Sniffed, sniff};
 use crate::index::{IndexConfig, LineIndex, Progress, build};
+use crate::md;
 use crate::pages::{self, Caps, LinePiece, MAX_PATH_BYTES};
 use crate::store::{CHUNK, cancelled};
 
@@ -67,6 +68,13 @@ impl Raw {
 
     pub fn document(&self) -> &Document {
         &self.doc
+    }
+
+    /// Generation `generation` as Markdown blocks, from one verified read in Raw's encoding (`md::build`). The store's
+    /// cancel flag (`store::cancellable`) stops it.
+    pub fn render(&self, generation: u32) -> Result<md::Rendered, DocError> {
+        let encoding = self.index.read().unwrap().encoding; // not held while it builds: the index publishes meanwhile
+        md::build(&self.doc, encoding, generation, &cancelled)
     }
 
     /// Brief §7.9's empty file: 0 bytes, or only whitespace. Judged on the first chunk, so only for a file that

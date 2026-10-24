@@ -46,10 +46,14 @@ describe('Doc.page and Doc.piece refuse every number that is not an integer in r
     count: (v: unknown) => doc.page(1, 0, v as number, new Cancel()),
     'piece gen': (v: unknown) => doc.piece(v as number, 0, 2, new Cancel()),
     line: (v: unknown) => doc.piece(1, v as number, 2, new Cancel()),
-    offset: (v: unknown) => doc.piece(1, 0, v as number, new Cancel())
+    offset: (v: unknown) => doc.piece(1, 0, v as number, new Cancel()),
+    'render gen': (v: unknown) => doc.render(v as number, new Cancel()),
+    'mdPage gen': (v: unknown) => doc.mdPage(v as number, 0, 1, new Cancel()),
+    'mdPage start': (v: unknown) => doc.mdPage(1, v as number, 1, new Cancel()),
+    'mdPage count': (v: unknown) => doc.mdPage(1, 0, v as number, new Cancel())
   }
   for (const [name, call] of Object.entries(params)) {
-    const field = name.replace('piece ', '')
+    const field = name.split(' ').at(-1)!
     const { min, max } = range(field)
     for (const value of [...HOSTILE, min, max, max + 1]) {
       it(`${name} = ${String(value)}`, async () => {
@@ -150,7 +154,58 @@ it('a cancel flag must be a Cancel', () => {
 it('plan C6: a closed document refuses everything with NoDocument', async () => {
   const doc = Doc.open(path)
   doc.close()
-  for (const call of [() => doc.generation, () => doc.lines, () => doc.page(1, 0, 1, new Cancel()), () => doc.startIndex(new Cancel(), () => {}), () => doc.reload()])
-    expect(thrown(call)).toMatchObject({ code: 'NoDocument' })
+  const calls = [
+    () => doc.generation,
+    () => doc.lines,
+    () => doc.format,
+    () => doc.page(1, 0, 1, new Cancel()),
+    () => doc.startIndex(new Cancel(), () => {}),
+    () => doc.reload(),
+    () => doc.render(1, new Cancel()),
+    () => doc.mdPage(1, 0, 1, new Cancel())
+  ]
+  for (const call of calls) expect(thrown(call)).toMatchObject({ code: 'NoDocument' })
   doc.close() // twice is fine
+})
+
+describe('plan (Rendered Markdown slice) §2.1: render builds the blocks, and mdPage pages them', () => {
+  const mdPath = join(dir, 'doc.MD')
+  writeFileSync(mdPath, '# Title\n\nSee [x](javascript:alert(1)), [y](other.md) and <script>s</script>.\n\n- a\n- b\n')
+
+  it("the format is the extension's", () => {
+    expect([Doc.open(mdPath).format, Doc.open(path).format]).toEqual(['markdown', 'text'])
+  })
+
+  it('every block, sanitized, with its lines, slug and index', async () => {
+    const doc = Doc.open(mdPath)
+    expect(await doc.render(1, new Cancel())).toEqual({ blocks: 3, units: 45, htmlBytes: 153 })
+    expect((await doc.mdPage(1, 0, 10, new Cancel())).items).toEqual([
+      { block: 0, line: 0, lines: 1, html: '<h1>Title</h1>\n', slug: 'title' },
+      { block: 1, line: 2, lines: 1, html: '<p>See <a href="#">x</a>, <a href="#" data-href="other.md">y</a> and &lt;script&gt;s&lt;/script&gt;.</p>\n' },
+      { block: 2, line: 4, lines: 2, html: '<ul>\n<li>a</li>\n<li>b</li>\n</ul>\n' }
+    ])
+    expect((await doc.mdPage(1, 2, 10, new Cancel())).items.map((i) => i.block)).toEqual([2])
+    expect((await doc.mdPage(1, 3, 10, new Cancel())).items).toEqual([])
+  })
+
+  it('a page before any build is InvalidParams, an old generation Stale, and over 8 MiB is Refused', async () => {
+    const doc = Doc.open(mdPath)
+    expect(await refused(() => doc.mdPage(1, 0, 1, new Cancel()))).toMatchObject({ code: 'InvalidParams', message: expect.stringContaining('render it first') })
+    await doc.render(1, new Cancel())
+    doc.reload()
+    expect(await refused(() => doc.mdPage(1, 0, 1, new Cancel()))).toMatchObject({ code: 'Stale' })
+    expect(await refused(() => doc.render(1, new Cancel()))).toMatchObject({ code: 'Stale' })
+    expect(await refused(() => doc.mdPage(2, 0, 1, new Cancel()))).toMatchObject({ code: 'InvalidParams' }) // Reload dropped the build
+    const big = join(dir, 'big.md')
+    writeFileSync(big, Buffer.alloc((8 << 20) + 1, 'x'))
+    expect(await refused(() => Doc.open(big).render(1, new Cancel()))).toMatchObject({ code: 'Refused', message: expect.stringContaining('over 8 MiB') })
+  })
+
+  it('a cancelled build rejects with Cancelled, and keeps nothing', async () => {
+    const doc = Doc.open(mdPath)
+    const cancel = new Cancel()
+    cancel.cancel()
+    expect(await refused(() => doc.render(1, cancel))).toMatchObject({ code: 'Cancelled' })
+    expect(await refused(() => doc.mdPage(1, 0, 1, new Cancel()))).toMatchObject({ code: 'InvalidParams' })
+  })
 })

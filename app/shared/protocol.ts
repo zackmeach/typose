@@ -2,9 +2,9 @@
 // `WireMap`, `Limits`) are defined in Rust and exported by napi-rs's typegen as `typose-node`'s index.d.ts, so
 // both sides typecheck against the core's own definitions. This file adds the envelope around them, and the
 // session the core host stamps into continuation tokens.
-import type { Continuation, Limits, PageItem as CorePageItem } from 'typose-node'
+import type { Continuation, Limits, MdBuild, MdPage, PageItem as CorePageItem } from 'typose-node'
 
-export type { Limits, WireMap } from 'typose-node'
+export type { Limits, MdBuild, MdItem, MdPage, WireMap } from 'typose-node'
 
 /** A continuation token (plan C3): the core issues it and checks it when it comes back; the renderer only echoes it. */
 export interface Token extends Continuation {
@@ -63,6 +63,8 @@ export interface Hello {
 export interface Opened {
   doc: number
   gen: number
+  /** Spec §4.1, by the file's extension: `markdown` for `.md` and `.markdown`. */
+  format: 'markdown' | 'text'
   size: number
   encoding: string
   /** Lines the index has found so far; `firstPage` doesn't wait for it (Z37). */
@@ -79,11 +81,18 @@ export interface Methods {
   hello: { params: { protocol: number }; result: Hello }
   /** `bytes`: the lens's viewport-only cache cap, reserved with the document's floor (plan C1); refused, `Memory`. */
   open: { params: { path: string; count: number; bytes: number }; result: Opened }
-  /** A window of lines of generation `gen`, or the one piece a continuation token names (plan C3). Cancellable. */
+  /** A window of lines of generation `gen`, or the one piece a continuation token names (plan C3). Rendered: a window of
+   *  blocks of the generation's Markdown build (`render`). Cancellable. */
   page: {
-    params: { doc: number; lens: 'raw'; gen: number; start: number; count: number } | { doc: number; lens: 'raw'; continuation: Token }
-    result: Page
+    params:
+      | { doc: number; lens: 'raw'; gen: number; start: number; count: number }
+      | { doc: number; lens: 'raw'; continuation: Token }
+      | { doc: number; lens: 'rendered'; gen: number; start: number; count: number }
+    result: Page | MdPage
   }
+  /** Plan (Rendered Markdown slice) §2.1: builds generation `gen` as Markdown blocks, up to 8 MiB of source, for rendered
+   *  pages. `Refused` over 8 MiB, `Memory` when the budget can't hold it. Cancellable. */
+  render: { params: { doc: number; gen: number }; result: MdBuild }
   /** Ctrl+R (spec §3.1): the document's next generation, opened again, with its first page. `bytes` as for `open`. */
   reload: { params: { doc: number; count: number; bytes: number }; result: Opened }
   /** Plan C6: cancels the document's index and page reads, and releases it. */
@@ -133,6 +142,9 @@ export interface Charges {
 }
 
 export type Method = keyof Methods
+
+/** What a call resolves to: a page's shape follows its lens. */
+export type Result<M extends Method, P> = M extends 'page' ? (P extends { lens: 'rendered' } ? MdPage : Page) : Methods[M]['result']
 
 export interface Request<M extends Method = Method> {
   id: number
