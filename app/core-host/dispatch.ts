@@ -90,27 +90,33 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
    */
   let holder: string | null = null
   let held = 0
+  /** The lens the reservation was last handed to, and its bytes since; null once released. A failed Reload gives it
+   *  back. It's never a request: requests only take the reservation, and the takes only grow it. */
+  let settled: { lens: string; bytes: number } | null = null
   const hold = (bytes: number): boolean => {
     if (!addon.reserveCache(bytes)) return false
     held = bytes
     return true
   }
-  /**
-   * Request `req` takes the reservation for the lens it opens; refused, it's `Memory` and nothing has changed. Returns
-   * its key, and who held it before with how much: a failed Reload gives it back to them.
-   */
-  const take = (req: number, bytes: number): { key: string; holder: string | null; held: number } => {
-    const before = { holder, held }
+  /** Request `req` takes the reservation for the lens it opens; refused, it's `Memory` and nothing has changed. */
+  const take = (req: number, bytes: number): string => {
     if (!hold(Math.max(held, bytes))) throw new Refusal('Memory', `the memory budget can't hold the view's ${bytes} bytes`)
-    holder = `#${req}`
-    return { key: holder, ...before }
+    return (holder = `#${req}`)
   }
-  /** The open or Reload holding the reservation as `key` hands it on: to its lens, or, failed, to nobody (released) or
-   *  back to the lens it would have replaced, with `bytes`. */
-  const settle = (key: string, to: string | null, bytes = to === null ? 0 : held): void => {
+  /** The open or Reload holding the reservation as `key` hands it on: to its lens, `doc:gen`, or, failed, to nobody. */
+  const settle = (key: string, lens: string | null): void => {
     if (holder !== key) return // a newer one has taken it
-    holder = to
-    if (bytes !== held) hold(bytes) // never more than it holds: this can't be refused
+    holder = lens
+    settled = lens === null ? null : { lens, bytes: held }
+    if (lens === null) hold(0)
+  }
+  /** A failed Reload of document `id`, holding the reservation as `key`, gives it back to the last lens it was handed
+   *  to, if that's this document's; else to nobody. Never more than it holds, so this can't be refused. */
+  const giveBack = (key: string, id: number): void => {
+    if (holder !== key) return // a newer one has taken it
+    settled = settled?.lens.startsWith(`${id}:`) ? settled : null
+    holder = settled?.lens ?? null
+    if ((settled?.bytes ?? 0) !== held) hold(settled?.bytes ?? 0)
   }
   /** Plan C6: close and a freeze cancel the document's page reads in flight. */
   const cancelReads = (doc: number) => {
@@ -170,7 +176,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const [count, bytes] = [int(p, 'count'), int(p, 'bytes')]
       if (typeof p.path !== 'string' || p.path.length === 0 || p.path.length > 32_767 || p.path.includes('\0'))
         throw new Refusal('InvalidParams', 'path must be a non-empty string of at most 32,767 characters, without NUL', 'path')
-      const pending = take(req, bytes).key
+      const pending = take(req, bytes)
       let doc: Doc
       try {
         doc = addon.openDoc(p.path)
@@ -210,22 +216,22 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       return read(req, id, (cancel) => doc.page(gen, start, count, cancel))
     },
     // A failed reload (the file is gone, say) leaves the document at its old generation, and gives the renderer cache's
-    // reservation back to that generation's lens (Z34's "keeps Raw"). A reload that another Reload, or close, overtakes
+    // reservation back to the document's lens (Z34's "keeps Raw"). A reload that another Reload, or close, overtakes
     // while its first page is read is Stale, and starts nothing: the newer one indexes.
     reload: async (p, req): Promise<Opened> => {
       const [id, count, bytes] = [int(p, 'doc'), int(p, 'count'), int(p, 'bytes')]
       const doc = getDoc(id)
-      const taken = take(req, bytes)
+      const pending = take(req, bytes)
       try {
         doc.reload()
         const gen = doc.generation
         const firstPage = await doc.page(gen, 0, count, addon.cancelFlag())
         if (docs.get(id) !== doc || doc.generation !== gen) throw new Refusal('Stale', `generation ${gen} was replaced while it opened`)
-        settle(taken.key, `${id}:${gen}`)
+        settle(pending, `${id}:${gen}`)
         return { ...begin(id, doc, firstPage), reserved: held }
       } catch (e) {
-        if (docs.get(id) === doc) settle(taken.key, taken.holder, taken.held)
-        else settle(taken.key, null) // closed meanwhile: its lens is gone
+        if (docs.get(id) === doc) giveBack(pending, id)
+        else settle(pending, null) // closed meanwhile: its lens is gone
         throw e
       }
     },
@@ -240,6 +246,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       if (__TEST_HOOKS__) closed.push(doc)
       jobs.delete(id)
       if (holder?.startsWith(`${id}:`)) settle(holder, null) // its lens is gone
+      if (settled?.lens.startsWith(`${id}:`)) settled = null
       return docs.delete(id)
     },
     cancel: (p) => {
@@ -255,7 +262,9 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     // Plan C1: the renderer's page cache, reserved in the ledger before the cache may grow into it.
     reserve: (p) => {
       const [doc, gen, bytes] = [int(p, 'doc'), int(p, 'gen'), int(p, 'bytes')]
-      return holder === `${doc}:${gen}` && hold(bytes)
+      if (holder !== `${doc}:${gen}` || !hold(bytes)) return false
+      settled = { lens: holder, bytes }
+      return true
     },
     ...(__TEST_HOOKS__
       ? {

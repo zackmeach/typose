@@ -168,6 +168,12 @@ test('under a budget that holds only the viewport, Raw mounts only the viewport,
   }
 })
 
+/** The lens on screen has its reservation settled, and the core holds exactly that for it. */
+async function holdsItsReservation(win: Page): Promise<boolean> {
+  const [s, { ledger }] = [await cacheStats(win), await debugStats(win)]
+  return s !== null && s.reserved > 0 && s.reserved === ledger.rendererCache
+}
+
 /**
  * Z34's "keeps Raw" and Z47 (plan C1): a Reload the ledger can't hold is refused and leaves the document, its lens and
  * the lens's reservation at their generation, under a banner offering Retry. With room again, Retry reloads.
@@ -179,11 +185,7 @@ test('a Reload the ledger refuses keeps Raw at its generation, with a banner, an
     const { win } = l
     await waitOpen(win)
     await waitIndexed(win)
-    const settled = async () => {
-      const [s, { ledger }] = [await cacheStats(win), await debugStats(win)]
-      return s !== null && s.reserved > 0 && s.reserved === ledger.rendererCache
-    }
-    await expect.poll(settled).toBe(true)
+    await expect.poll(() => holdsItsReservation(win)).toBe(true)
     const { ledger } = await debugStats(win)
     await debugStats(win, { limit: ledger.used + (1 << 20) }) // no room for the next generation's floor
     await win.locator('.vl-scroller').focus()
@@ -203,6 +205,41 @@ test('a Reload the ledger refuses keeps Raw at its generation, with a banner, an
     await win.locator('.banner-button').click()
     await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '2')
     await expect(win.locator('.banner')).toHaveCount(0)
+    expect(l.pageErrors).toEqual([])
+    await finish(l)
+  } finally {
+    rmSync(path, { force: true })
+  }
+})
+
+/**
+ * Plan C1: Reloads never overlap at the core. A second F5 while a Reload is under way starts none: overlapping ones
+ * could leave the renderer cache's reservation with the wrong lens.
+ */
+test('a second F5 while a Reload is under way starts no second Reload', async () => {
+  const path = fixture('reload-twice.txt', HEAD)
+  try {
+    const l = await launch({ hooks: true, file: path })
+    const { win } = l
+    await waitOpen(win)
+    // Every `reload` the page sends is counted, and the first reaches the core 1 s late: the second F5 lands meanwhile.
+    await win.evaluate(() => {
+      const w = window as unknown as { reloads: number }
+      w.reloads = 0
+      const post = MessagePort.prototype.postMessage
+      MessagePort.prototype.postMessage = function (this: MessagePort, message: unknown, ...rest: never[]) {
+        if ((message as { method?: string })?.method !== 'reload') return post.call(this, message, ...rest)
+        if (w.reloads++ > 0) return post.call(this, message, ...rest)
+        setTimeout(() => post.call(this, message, ...rest), 1000)
+      } as typeof post
+    })
+    await win.locator('.vl-scroller').focus()
+    await win.keyboard.press('F5')
+    await win.waitForTimeout(200)
+    await win.keyboard.press('F5')
+    await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '2')
+    expect(await win.evaluate(() => (window as unknown as { reloads: number }).reloads)).toBe(1)
+    await expect.poll(() => holdsItsReservation(win)).toBe(true) // the new lens's
     expect(l.pageErrors).toEqual([])
     await finish(l)
   } finally {

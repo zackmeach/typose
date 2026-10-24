@@ -232,6 +232,46 @@ describe("the renderer cache's reservation (plan C1)", () => {
     expect(reserved()).toEqual([300, 500, 300, 200, 900, 100])
   })
 
+  /** Two Reloads of `id` whose first pages wait: the first ends Stale, then the second fails (`Frozen`, say). */
+  async function overlapping(id: number): Promise<void> {
+    const d = doc as unknown as { generation: number }
+    reload.mockImplementation(() => void d.generation++)
+    try {
+      const [first, second] = [pendingRead(), pendingRead()]
+      const r1 = dispatch({ id: 70, method: 'reload', params: { doc: id, count: 1, bytes: 100 } })
+      const r2 = dispatch({ id: 71, method: 'reload', params: { doc: id, count: 1, bytes: 100 } })
+      first.end({ items: [item()] })
+      expect(await r1).toMatchObject({ id: 70, error: { code: 'Stale' } })
+      second.fail(Object.assign(new Error('frozen: changed while reading'), { code: 'Frozen' }))
+      expect(await r2).toMatchObject({ id: 71, error: { code: 'Frozen' } })
+    } finally {
+      d.generation = 1
+      reload.mockImplementation(() => {})
+    }
+  }
+
+  it("overlapping Reloads that end Stale, then failed, give it back to the document's lens, not to a finished request", async () => {
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 300 })).toMatchObject({ result: true })
+    await overlapping(1)
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 200 })).toMatchObject({ result: true })
+    expect(await call('close', { doc: 1 })).toMatchObject({ result: true })
+    expect(reserved()).toEqual([300, 300, 300, 200, 0])
+  })
+
+  it('…the same with a second document open, its read keeping theirs waiting (G1)', async () => {
+    dispatch = makeDispatcher(addon, 7, () => {})
+    expect(await call('open', { path: 'b.txt', count: 1, bytes: 0 })).toMatchObject({ result: { doc: 1 } }) // the second
+    expect(await call('open', { path: 'a.txt', count: 1, bytes: 300 })).toMatchObject({ result: { doc: 2 } }) // the shown one
+    const other = pendingRead()
+    const reading = dispatch({ id: 60, method: 'page', params: { doc: 1, lens: 'raw', gen: 1, start: 9, count: 1 } })
+    await overlapping(2)
+    expect(await call('reserve', { doc: 2, gen: 1, bytes: 200 })).toMatchObject({ result: true })
+    expect(await call('close', { doc: 2 })).toMatchObject({ result: true })
+    other.end({ items: [item()] })
+    expect(await reading).toHaveProperty('result')
+    expect(reserved()).toEqual([0, 300, 300, 300, 200, 0])
+  })
+
   it('a Reload whose document closed meanwhile releases it', async () => {
     expect(await call('reserve', { doc: 1, gen: 1, bytes: 300 })).toMatchObject({ result: true })
     const read = pendingRead()
