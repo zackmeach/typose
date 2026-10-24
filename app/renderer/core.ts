@@ -114,7 +114,8 @@ export class CoreClient {
   }
 
   private attach(session: number, port: MessagePort): void {
-    if (this.port) this.port.onmessage = null // a dead session's: `coreGone` closed it
+    // A newer session means the last one died, even if its core-gone, a separate IPC message, hasn't come yet.
+    if (this.port && !this.gone) this.coreGone()
     this.session = session
     this.port = port
     this.gone = false

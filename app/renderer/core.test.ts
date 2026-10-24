@@ -123,3 +123,20 @@ it('aborting a pending call cancels it in the core; aborting after its answer se
   await new Promise((r) => setTimeout(r, 50))
   expect(requests).toHaveLength(4)
 })
+
+it("a newer session's port that comes before the old one's core-gone still fails the old session's calls (plan C7)", async () => {
+  const client = await connected()
+  const gone: number[] = []
+  client.onGone(() => gone.push(1))
+  const pending = client.call('close', { doc: 1 })
+  await expect.poll(() => requests.length).toBe(2)
+  const next = coreFor(4)
+  post({ type: 'core-port', session: 4 }, { ports: [next.port] }) // core-gone for 3 is a separate IPC message
+  await expect(pending).rejects.toMatchObject({ code: 'CoreGone' })
+  expect(gone).toEqual([1])
+  post({ type: 'core-gone', session: 3 }) // late: changes nothing
+  void client.call('close', { doc: 1 }).catch(() => {}) // the new session serves calls
+  await expect.poll(() => next.requests.map((r) => r.method)).toEqual(['hello', 'close'])
+  expect(gone).toEqual([1])
+  next.close()
+})

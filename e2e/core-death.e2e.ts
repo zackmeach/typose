@@ -28,6 +28,7 @@ function killCore(l: Launched): { session: number; at: number } {
 async function diedWithin1s(l: Launched, { session, at }: { session: number; at: number }): Promise<number> {
   await expect(l.win.locator('.card-message p')).toHaveText("Typose's core stopped")
   const gone = (await hooks(l.win)).gone!
+  console.log(`session ${session}: CoreGone ${gone.at - at} ms after the kill, rejecting ${gone.rejected} pending call(s)`)
   expect(gone.at - at).toBeLessThan(1000)
   expect(await l.app.evaluate(() => process.pid)).toBe(l.pid)
   await expect.poll(() => lifecycle(l.userData).find((r) => r.event === 'utility-exit' && r.session === session)).toMatchObject({ code: expect.any(Number) })
