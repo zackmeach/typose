@@ -1,9 +1,10 @@
 // The core host's side of protocol v1. Every request is validated before anything acts on it (plan C4):
 // numbers against the core's own range table, methods by own property only, and no addon call on a refusal.
-import type { Doc, IndexProgress, Limits, Page as CorePage, PageItem as CorePageItem } from 'typose-node'
+import type { Cancel, Doc, IndexProgress, Limits, Page as CorePage, PageItem as CorePageItem } from 'typose-node'
 import {
   PROTOCOL,
   type CoreError,
+  type DebugStats,
   type ErrorCode,
   type Hello,
   type Opened,
@@ -14,11 +15,17 @@ import {
 } from '../shared/protocol'
 import { isValid } from './numbers'
 
+declare const __TEST_HOOKS__: boolean
+
 /** The slice of `typose-node` the core host calls; tests pass a spy. */
 export interface Addon {
   coreVersion(): string
   limits(): Limits
   openDoc(path: string): Doc
+  /** A new cancel flag, for one page read or one index job (plan C5, C6). */
+  cancelFlag(): Cancel
+  /** The test-hooks addon's live jobs, tasks and file handles (plan m8). */
+  debugStats?(): Pick<DebugStats, 'jobs' | 'tasks' | 'handles'>
 }
 
 class Refusal extends Error {
@@ -32,12 +39,13 @@ class Refusal extends Error {
 }
 
 /** The addon's own codes (`typose-node`'s `Code`), passed through; anything else thrown is `Internal`. */
-const ADDON_CODES = new Set<string>(['InvalidParams', 'NotFound', 'PermissionDenied', 'Refused', 'Binary', 'Frozen', 'Stale', 'Io'])
+const ADDON_CODES = new Set<string>(['InvalidParams', 'NotFound', 'PermissionDenied', 'Refused', 'Binary', 'Frozen', 'Stale', 'Io', 'Cancelled', 'NoDocument'])
 
 type Params = Record<string, unknown>
 const isRecord = (v: unknown): v is Params => typeof v === 'object' && v !== null && !Array.isArray(v)
+const codeOf = (e: unknown): unknown => (e as { code?: unknown } | null)?.code
 
-export function makeDispatcher(addon: Addon, session: number, emit: (event: ProgressEvent) => void): (data: unknown) => Response {
+export function makeDispatcher(addon: Addon, session: number, emit: (event: ProgressEvent) => void): (data: unknown) => Promise<Response> {
   const limits = addon.limits()
   const ranges = new Map(limits.ranges.map((r) => [r.field, r]))
   /** `params[field]`, checked against the core's range for `field`; `name` is how the error names it. */
@@ -48,11 +56,23 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     return value
   }
   const docs = new Map<number, Doc>()
+  /** Each document's index job (plan C6). */
+  const jobs = new Map<number, Cancel>()
+  /** Page reads in flight, by request id (plan C5). `cancelledAt` is the test-hooks build's. */
+  const reads = new Map<number, { doc: number; cancel: Cancel; cancelledAt?: number }>()
+  /** The test-hooks build's account of cancels (plan C5's acceptance). */
+  const cancels = { cancels: 0, cancelled: 0, cancelMs: 0 }
+  /** The test-hooks build keeps closed documents referenced, so only `Doc.close()`, never GC, can release them (C6). */
+  const closed: Doc[] = []
   let nextDoc = 1
   const getDoc = (id: number): Doc => {
     const doc = docs.get(id)
     if (!doc) throw new Refusal('NoDocument', `no document ${id}`)
     return doc
+  }
+  /** Plan C6: close and a freeze cancel the document's page reads in flight. */
+  const cancelReads = (doc: number) => {
+    for (const read of reads.values()) if (read.doc === doc) read.cancel.cancel()
   }
   // Continuation tokens leave with this session and their document in them, and are refused for any other
   // (plan C3; C7: every token carries `{session, doc, gen}`).
@@ -64,10 +84,32 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     for (const item of page.items) stamp(doc, item)
     return page as Page
   }
+  /** Request `id`'s page read of document `doc`, which `cancel` can stop while it runs (plan C5). */
+  const read = async (id: number, doc: number, start: (cancel: Cancel) => Promise<CorePage>): Promise<Page> => {
+    const entry: { doc: number; cancel: Cancel; cancelledAt?: number } = { doc, cancel: addon.cancelFlag() }
+    reads.set(id, entry)
+    try {
+      return stampPage(doc, await start(entry.cancel))
+    } catch (e) {
+      if (codeOf(e) === 'Frozen') cancelReads(doc) // a freeze ends the document's other reads too (plan C6)
+      if (__TEST_HOOKS__ && codeOf(e) === 'Cancelled' && entry.cancelledAt !== undefined) {
+        cancels.cancelled++
+        cancels.cancelMs = Math.max(cancels.cancelMs, performance.now() - entry.cancelledAt)
+      }
+      throw e
+    } finally {
+      reads.delete(id)
+    }
+  }
   /** Starts indexing a document's current generation, and describes it with its first page. */
   const begin = (id: number, doc: Doc, firstPage: CorePage): Opened => {
     const gen = doc.generation
-    doc.startIndex((e: IndexProgress) => {
+    const cancel = addon.cancelFlag()
+    jobs.get(id)?.cancel() // the previous generation's job, if it still runs (plan C6)
+    jobs.set(id, cancel)
+    doc.startIndex(cancel, (e: IndexProgress) => {
+      // An index error froze the document (plan C6). An older generation's ends with Reload's freeze, not this one's.
+      if (e.error !== undefined && jobs.get(id) === cancel) cancelReads(id)
       const event: ProgressEvent = { event: 'progress', session, doc: id, gen, lines: e.lines, bytes: e.bytes, done: e.done }
       if (e.error !== undefined) event.error = e.error
       emit(event)
@@ -76,25 +118,31 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     return { doc: id, gen, size, encoding, lines, indexed, blank, firstPage: stampPage(id, firstPage) }
   }
 
-  // Each handler checks all of its parameters before it calls the addon or changes state.
-  const handlers: Record<string, (params: Params) => unknown> = {
+  // Each handler checks all of its parameters before it calls the addon or changes state. `id` is the request's.
+  const handlers: Record<string, (params: Params, id: number) => unknown> = {
     hello: (p): Hello => {
       if (int(p, 'protocol') !== PROTOCOL) throw new Refusal('Unsupported', `protocol ${String(p.protocol)}; this core speaks ${PROTOCOL}`)
       return { protocol: PROTOCOL, core: addon.coreVersion(), session, limits }
     },
-    open: (p): Opened => {
+    open: async (p): Promise<Opened> => {
       const count = int(p, 'count')
       if (typeof p.path !== 'string' || p.path.length === 0 || p.path.length > 32_767 || p.path.includes('\0'))
         throw new Refusal('InvalidParams', 'path must be a non-empty string of at most 32,767 characters, without NUL', 'path')
       const doc = addon.openDoc(p.path)
       // The first page reads from byte 0, so it doesn't wait for the index (Z37). It's read before the document is
-      // registered, so a failure leaves nothing behind.
-      const firstPage = doc.page(doc.generation, 0, count)
+      // registered, and a failure closes it, so nothing is left behind.
+      let firstPage: CorePage
+      try {
+        firstPage = await doc.page(doc.generation, 0, count, addon.cancelFlag())
+      } catch (e) {
+        doc.close()
+        throw e
+      }
       const id = nextDoc++
       docs.set(id, doc)
       return begin(id, doc, firstPage)
     },
-    page: (p): Page => {
+    page: (p, req): Promise<Page> => {
       const id = int(p, 'doc')
       if (p.lens !== 'raw') throw new Refusal('InvalidParams', "lens must be 'raw'", 'lens')
       if (Object.hasOwn(p, 'continuation')) {
@@ -104,23 +152,49 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         const doc = getDoc(id)
         if (tokenSession !== session) throw new Refusal('Stale', `a token of session ${tokenSession}; this is session ${session}`)
         if (tokenDoc !== id) throw new Refusal('InvalidParams', `a token of document ${tokenDoc}, not ${id}`, 'continuation.doc')
-        return { items: [stamp(id, doc.piece(gen, line, offset))] }
+        return read(req, id, (cancel) => doc.piece(gen, line, offset, cancel))
       }
       const [gen, start, count] = [int(p, 'gen'), int(p, 'start'), int(p, 'count')]
-      return stampPage(id, getDoc(id).page(gen, start, count))
+      const doc = getDoc(id)
+      return read(req, id, (cancel) => doc.page(gen, start, count, cancel))
     },
-    // A failed reload (the file is gone, say) leaves the document at its old generation.
-    reload: (p): Opened => {
+    // A failed reload (the file is gone, say) leaves the document at its old generation. A reload that another
+    // Reload, or close, overtakes while its first page is read is Stale, and starts nothing: the newer one indexes.
+    reload: async (p): Promise<Opened> => {
       const [id, count] = [int(p, 'doc'), int(p, 'count')]
       const doc = getDoc(id)
       doc.reload()
-      return begin(id, doc, doc.page(doc.generation, 0, count))
+      const gen = doc.generation
+      const firstPage = await doc.page(gen, 0, count, addon.cancelFlag())
+      if (docs.get(id) !== doc || doc.generation !== gen) throw new Refusal('Stale', `generation ${gen} was replaced while it opened`)
+      return begin(id, doc, firstPage)
     },
-    // PR 5 (plan C6) makes close cancel the index and release the handle; here it forgets the document.
-    close: (p) => docs.delete(int(p, 'doc'))
+    // Plan C6: the index job and the page reads stop, and the document's handle closes once they have.
+    close: (p) => {
+      const id = int(p, 'doc')
+      const doc = docs.get(id)
+      if (!doc) return false
+      jobs.get(id)?.cancel()
+      cancelReads(id)
+      doc.close()
+      if (__TEST_HOOKS__) closed.push(doc)
+      jobs.delete(id)
+      return docs.delete(id)
+    },
+    cancel: (p) => {
+      const running = reads.get(int(p, 'id'))
+      if (!running) return false
+      running.cancel.cancel()
+      if (__TEST_HOOKS__) {
+        cancels.cancels++
+        running.cancelledAt ??= performance.now()
+      }
+      return true
+    },
+    ...(__TEST_HOOKS__ ? { debugStats: (): DebugStats => ({ ...addon.debugStats!(), docs: docs.size, ...cancels }) } : {})
   }
 
-  return (data) => {
+  return async (data) => {
     const fail = (id: number | null, error: CoreError): Response => ({ id, session, error })
     if (!isRecord(data)) return fail(null, { code: 'InvalidParams', message: 'a request is an object', field: 'request' })
     const idRange = ranges.get('id')!
@@ -133,10 +207,10 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       return fail(id, { code: 'UnknownMethod', message: `unknown method ${String(method).slice(0, 64)}` })
     if (!isRecord(data.params)) return fail(id, { code: 'InvalidParams', message: 'params must be an object', field: 'params' })
     try {
-      return { id, session, result: handlers[method](data.params) }
+      return { id, session, result: await handlers[method](data.params, id) }
     } catch (e) {
       if (e instanceof Refusal) return fail(id, { code: e.code, message: e.message, ...(e.field ? { field: e.field } : {}) })
-      const code = (e as { code?: unknown }).code
+      const code = codeOf(e)
       const message = e instanceof Error ? e.message : String(e)
       return fail(id, { code: typeof code === 'string' && ADDON_CODES.has(code) ? (code as ErrorCode) : 'Internal', message })
     }

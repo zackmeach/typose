@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { serialize } from 'node:v8'
 import { afterAll, expect, it } from 'vitest'
-import { Doc, type IndexProgress, limits } from 'typose-node'
+import { Cancel, Doc, type IndexProgress, limits } from 'typose-node'
 
 const { pageWireMax, itemWireFixed, maxItems } = limits()
 const dir = mkdtempSync(join(tmpdir(), 'typose-wire-'))
@@ -31,7 +31,7 @@ const SHAPES: Record<string, Buffer> = {
 
 function indexed(doc: Doc): Promise<number> {
   return new Promise((ok, fail) =>
-    doc.startIndex((p: IndexProgress) => (p.error ? fail(new Error(p.error)) : p.done && ok(p.lines)))
+    doc.startIndex(new Cancel(), (p: IndexProgress) => (p.error ? fail(new Error(p.error)) : p.done && ok(p.lines)))
   )
 }
 
@@ -56,7 +56,7 @@ for (const [shape, bytes] of Object.entries(SHAPES)) {
     const total = await indexed(doc)
     let [largest, most, start, pages] = [0, 0, 0, 0]
     while (start < total) {
-      const page = doc.page(doc.generation, start, maxItems)
+      const page = await doc.page(doc.generation, start, maxItems, new Cancel())
       for (const item of page.items) if (item.next) Object.assign(item.next, { session: Number.MAX_SAFE_INTEGER, doc: Number.MAX_SAFE_INTEGER }) // as the core host sends it
       const size = serialize(page).byteLength
       expect(size).toBeLessThanOrEqual(pageWireMax)

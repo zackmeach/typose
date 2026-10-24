@@ -70,3 +70,73 @@ it('a core that died before its port arrived fails the handshake with CoreGone',
   post({ type: 'core-port', session: 4 }, { ports: [channel.port1] })
   await expect(hello).rejects.toMatchObject({ code: 'CoreGone' })
 })
+
+/** A core host for `session` on a channel of its own: it answers hello, records the rest, and can send anything. */
+function coreFor(session: number) {
+  const ch = new MessageChannel()
+  const requests: { id: number; method: string; params: unknown }[] = []
+  ch.port2.onmessage = (e: MessageEvent) => {
+    requests.push(e.data)
+    if (e.data.method === 'hello') ch.port2.postMessage({ id: e.data.id, session, result: { protocol: 1, session } })
+  }
+  return { port: ch.port1, requests, send: (data: unknown) => ch.port2.postMessage(data), close: () => (ch.port1.close(), ch.port2.close()) }
+}
+
+it('after a death, takes the next session from this window only, never an older one, and tells onReady (plan C7)', async () => {
+  const client = await connected()
+  const ready: number[] = []
+  client.onReady((hello) => ready.push(hello.session))
+  post({ type: 'core-gone', session: 3 })
+  const [old, next, spoof] = [coreFor(2), coreFor(4), coreFor(5)]
+  post({ type: 'core-port', session: 2 }, { ports: [old.port] }) // older than the dead one: refused
+  post({ type: 'core-port', session: 5 }, { source: {}, ports: [spoof.port] }) // another window's: refused
+  post({ type: 'core-port', session: 4 }, { ports: [next.port] })
+  await expect.poll(() => ready).toEqual([4])
+  expect([old.requests, spoof.requests]).toEqual([[], []])
+  // The new session serves calls. An answer stamped with the dead session, to the same id, is dropped.
+  const call = client.call('close', { doc: 1 })
+  await expect.poll(() => next.requests.length).toBe(2)
+  const id = next.requests[1].id
+  const events: unknown[] = []
+  client.onProgress((e) => events.push(e))
+  next.send({ id, session: 3, result: 'from the dead session' })
+  next.send({ event: 'progress', session: 3, doc: 1, gen: 1, lines: 9, bytes: 9, done: false })
+  next.send({ id, session: 4, result: true })
+  await expect(call).resolves.toBe(true)
+  expect(events).toEqual([])
+  for (const c of [old, next, spoof]) c.close()
+})
+
+it('aborting a pending call cancels it in the core; aborting after its answer sends nothing (plan C5)', async () => {
+  const client = await connected()
+  const abort = new AbortController()
+  void client.call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 }, abort.signal).catch(() => {})
+  await expect.poll(() => requests.length).toBe(2)
+  abort.abort()
+  await expect.poll(() => requests.at(-1)).toMatchObject({ method: 'cancel', params: { id: requests[1].id } })
+  const answered = new AbortController()
+  const done = client.call('close', { doc: 1 }, answered.signal)
+  await expect.poll(() => requests.length).toBe(4)
+  channel.port2.postMessage({ id: requests[3].id, session: 3, result: true })
+  await expect(done).resolves.toBe(true)
+  answered.abort()
+  await new Promise((r) => setTimeout(r, 50))
+  expect(requests).toHaveLength(4)
+})
+
+it("a newer session's port that comes before the old one's core-gone still fails the old session's calls (plan C7)", async () => {
+  const client = await connected()
+  const gone: number[] = []
+  client.onGone(() => gone.push(1))
+  const pending = client.call('close', { doc: 1 })
+  await expect.poll(() => requests.length).toBe(2)
+  const next = coreFor(4)
+  post({ type: 'core-port', session: 4 }, { ports: [next.port] }) // core-gone for 3 is a separate IPC message
+  await expect(pending).rejects.toMatchObject({ code: 'CoreGone' })
+  expect(gone).toEqual([1])
+  post({ type: 'core-gone', session: 3 }) // late: changes nothing
+  void client.call('close', { doc: 1 }).catch(() => {}) // the new session serves calls
+  await expect.poll(() => next.requests.map((r) => r.method)).toEqual(['hello', 'close'])
+  expect(gone).toEqual([1])
+  next.close()
+})

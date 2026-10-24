@@ -51,7 +51,10 @@ it('shows each file state', () => {
       { body: { message: "Can't open run.jsonl · Typose's memory budget is full. Close a file, then Retry.", actions: ['Retry', 'Close'] } }
     ],
     ['any other failure', failed('Refused', 'refused: a device path'), { body: { message: `Can't open ${PATH} · refused: a device path`, actions: ['Close'] } }],
-    ['core gone', { kind: 'gone', path: PATH }, { body: { message: "Typose's core stopped", actions: [] } }]
+    // Plan C7: Reopen once a new core is up; until then (60 s after a second death) the stopped state.
+    ['core stopped', { kind: 'gone', path: PATH, line: 40, ready: false }, { body: { message: "Typose's core stopped", actions: [] } }],
+    ['core stopped, a new one up', { kind: 'gone', path: PATH, line: 40, ready: true }, { body: { message: "Typose's core stopped", actions: ['Reopen'] } }],
+    ['core stopped with no file, a new one up', { kind: 'gone', ready: true }, { body: { message: "Typose's core stopped", actions: ['Open file…'] } }]
   ]
   for (const [state, card, want] of rows) expect(view(card), state).toMatchObject(want)
 })

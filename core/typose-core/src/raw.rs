@@ -100,14 +100,14 @@ impl Raw {
     /// reopened from the document's, not from the path (plan PR 4). Its chunk hashes are the document's: a chunk
     /// either one reads first is verified when the other reads it (§3.1).
     ///
-    /// Plan C6's freeze half: a failed read or chunk check freezes the document and ends the index with the
+    /// Plan C6: after each block, the index goes on only while `on_progress` says to (close cancels it there) and
+    /// the document isn't frozen. A failed read or chunk check freezes the document and ends the index with the
     /// reason; a freeze found by a page (or Reload) ends it at its next block. What's indexed so far stays.
-    pub fn index(&self, mut on_progress: impl FnMut(Progress)) -> Result<(), String> {
+    pub fn index(&self, mut on_progress: impl FnMut(Progress) -> bool) -> Result<(), String> {
         let store = self.doc.store();
         let built = store.reopen().map_err(crate::store::StoreError::Io).and_then(|file| {
             build(&file, store.len(), IndexConfig::default(), &store.hashes(), &self.index, |p| {
-                on_progress(p);
-                self.doc.frozen().is_none()
+                on_progress(p) && self.doc.frozen().is_none()
             })
         });
         if let Err(e) = built {
@@ -156,7 +156,7 @@ mod tests {
         let first = raw.page(1, 0, 10).unwrap();
         assert_eq!(first.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(), ["one", "two", "three"]);
         assert_eq!(raw.lines_known(), (0, false));
-        raw.index(|_| {}).unwrap();
+        raw.index(|_| true).unwrap();
         assert_eq!(raw.lines_known(), (3, true));
         assert_eq!(raw.page(1, 2, 10).unwrap()[0].text, "three");
     }
@@ -203,6 +203,7 @@ mod tests {
             if fresh.is_none() {
                 fresh = Some(raw.reload().unwrap()); // after the first 4 MiB block of four
             }
+            true
         });
         assert_eq!(indexed, Err("frozen: reloaded".into()));
         assert!(!raw.lines_known().1);
@@ -227,6 +228,7 @@ mod tests {
             if blocks == 1 {
                 OpenOptions::new().write(true).open(&path).unwrap().set_len(6 << 20).unwrap();
             }
+            true
         });
         assert_eq!(indexed, Err("frozen: changed on disk (chunk 4)".into()));
         assert_eq!((blocks, raw.lines_known()), (1, (1 << 18, false))); // the first 4 MiB stay indexed
@@ -245,8 +247,48 @@ mod tests {
                 OpenOptions::new().append(true).open(&path).unwrap().write_all(b"appended\n").unwrap();
                 assert!(matches!(raw.page(1, 0, 1), Err(DocError::Frozen(_))));
             }
+            true
         });
         assert_eq!((indexed, blocks), (Err("frozen: changed on disk".into()), 1));
+    }
+
+    /// Plan C6: close cancels the index through its progress callback, which stops it at the end of that block.
+    /// The document isn't frozen: what's indexed stays, and pages still read.
+    #[test]
+    fn a_cancelled_index_stops_at_its_next_block_without_freezing() {
+        let path = temp_file("raw-cancel-index", &b"0123456789abcde\n".repeat(12 << 16));
+        let raw = Raw::open(&path).unwrap();
+        let mut blocks = 0;
+        let indexed = raw.index(|_| {
+            blocks += 1;
+            false
+        });
+        assert_eq!((indexed, blocks), (Ok(()), 1));
+        assert_eq!(raw.lines_known(), (1 << 18, false)); // the first 4 MiB block
+        assert_eq!(raw.document().frozen(), None);
+        assert_eq!(raw.page(1, 1000, 1).unwrap()[0].text, "0123456789abcde");
+    }
+
+    /// Plan C5: a page read whose cancel flag is set stops at its next chunk with `Cancelled`, and the document reads
+    /// on: a cancel isn't a change on disk.
+    #[test]
+    fn a_cancelled_page_stops_with_cancelled_and_the_document_reads_on() {
+        use crate::store::cancellable;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let path = temp_file("raw-cancel-page", &b"0123456789abcde\n".repeat(12 << 16));
+        let raw = Raw::open(&path).unwrap();
+        raw.index(|_| true).unwrap();
+        let cancel = Arc::new(AtomicBool::new(true));
+        let far = 10 << 16; // line 655,360, in chunk 10: not read yet
+        assert!(matches!(cancellable(&cancel, || raw.page(1, far, 4)), Err(DocError::Cancelled)));
+        assert!(matches!(cancellable(&cancel, || raw.piece(1, 0, 1)), Err(DocError::Cancelled)));
+        assert_eq!(raw.document().frozen(), None);
+        cancel.store(false, Ordering::Relaxed);
+        assert_eq!(cancellable(&cancel, || raw.page(1, far, 4)).unwrap().len(), 4);
+        // The flag is the read's, not the thread's: outside `cancellable` nothing is checked.
+        cancel.store(true, Ordering::Relaxed);
+        assert_eq!(raw.page(1, far, 4).unwrap().len(), 4);
     }
 
     /// Spec §13.1 Spike C's mutation race, through Raw's pages: an in-place, same-size write just before the read,
@@ -263,7 +305,7 @@ mod tests {
             let line = chunk * per_chunk + (run * 7919) % (per_chunk - 1);
             let at = line * LINE as u64;
             let raw = Raw::open_with(&path, 1, 1).unwrap();
-            raw.index(|_| {}).unwrap();
+            raw.index(|_| true).unwrap();
             raw.page(1, line, 1).unwrap(); // reads `chunk`, already hashed by the index
             let other = ((chunk + 2) % 4) * per_chunk;
             raw.page(1, other, 1).unwrap(); // evicts it from the one-chunk cache

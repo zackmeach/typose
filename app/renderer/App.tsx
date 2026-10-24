@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { type RefObject, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Button } from 'react-aria-components'
 import type { Limits, Opened } from '../shared/protocol'
 import { type Action, type Card, fileName, view } from './card'
@@ -12,6 +12,9 @@ const markOnce = (name: string) => performance.getEntriesByName(name).length ===
 
 /** Enough lines for the first screen and its overscan (Z37); the rest follow as pages. */
 const firstCount = (l: Limits) => Math.min(l.maxItems, 3 * Math.ceil(window.innerHeight / ROW_HEIGHT) + 1)
+
+/** The test-hooks build's way in for the e2e tests (plan m8): App's own close, as the empty card's would do it. */
+export const appHooks: { close?: () => void } = {}
 
 const failed = (path: string, e: unknown): Card => ({
   kind: 'failed',
@@ -33,6 +36,8 @@ export function App({ core }: { core: CoreClient }) {
   const attempt = useRef(0)
   /** The document and generation on screen, set as soon as its reply arrives (progress events can't wait for React). */
   const live = useRef<{ doc: number; gen: number } | null>(null)
+  /** The Raw lens on screen, if any: where Reopen goes back to after a core death (plan C7). */
+  const lens = useRef<RawLens | null>(null)
   const path = 'path' in card ? card.path : undefined
   const title = path ? `${fileName(path)} — Typose` : 'Typose'
   const shown = view(card)
@@ -45,7 +50,17 @@ export function App({ core }: { core: CoreClient }) {
   useLayoutEffect(() => markPainted('titlebarPainted'), [])
 
   useEffect(() => {
-    const offGone = core.onGone(() => setCard((c) => ({ kind: 'gone', path: 'path' in c ? c.path : undefined })))
+    // Plan C7: the card says the core stopped, and offers Reopen at the same line once a new core is up.
+    // Without a lens on screen (a Reopen still opening, say), the line is the one the card was going back to.
+    const offGone = core.onGone(() => {
+      const top = lens.current?.topLine()
+      setCard((c) => ({ kind: 'gone', path: 'path' in c ? c.path : undefined, line: top ?? ('atLine' in c ? c.atLine : 'line' in c ? c.line : undefined), ready: false }))
+    })
+    const offReady = core.onReady((hello) => {
+      latest.current.limits = hello.limits
+      setLimits(hello.limits)
+      setCard((c) => (c.kind === 'gone' ? { ...c, ready: true } : c))
+    })
     // Subscribed before any open, so no event is missed between the open reply and the lens mounting.
     const offProgress = core.onProgress((e) => {
       if (live.current?.doc !== e.doc || live.current.gen !== e.gen) return // another document's, or an old generation's
@@ -76,16 +91,22 @@ export function App({ core }: { core: CoreClient }) {
         if (initial) void open(initial)
         else setCard({ kind: 'empty' })
       },
-      () => setCard({ kind: 'gone' })
+      async () => {
+        // The first core died before its handshake: keep the file named on the command line, for Reopen.
+        const initial = (await window.typose.launchPath()) ?? undefined
+        setCard((c) => (c.kind === 'gone' ? { ...c, path: c.path ?? initial } : { kind: 'gone', path: initial, ready: false }))
+      }
     )
     return () => {
       offGone()
+      offReady()
       offProgress()
       window.removeEventListener('keydown', onKey)
     }
   }, [core])
 
-  async function open(path: string): Promise<void> {
+  /** Opens `path`; Reopen passes the line to go back to. */
+  async function open(path: string, atLine?: number): Promise<void> {
     const l = latest.current.limits
     if (!l) return
     const mine = ++attempt.current
@@ -94,13 +115,13 @@ export function App({ core }: { core: CoreClient }) {
     performance.mark('typose:open-start')
     markNow('openRequested')
     inputMark('open', performance.now()) // an open-then-scroll interval starts here (plan C8)
-    setCard({ kind: 'opening', path, slow: false })
+    setCard({ kind: 'opening', path, slow: false, atLine })
     // Brief §7.9's slow open: "Opening…" only once 300 ms pass without a first screen.
     const slow = setTimeout(() => setCard((c) => (c.kind === 'opening' && attempt.current === mine ? { ...c, slow: true } : c)), 300)
     try {
       const opened = await core.call('open', { path, count: firstCount(l) })
       if (attempt.current !== mine) return void core.call('close', { doc: opened.doc }).catch(() => {}) // closed meanwhile
-      show(path, opened)
+      show(path, opened, atLine)
     } catch (e) {
       if (attempt.current === mine && !(e instanceof CoreCallError && e.code === 'CoreGone')) setCard(failed(path, e)) // onGone shows that
     } finally {
@@ -123,9 +144,9 @@ export function App({ core }: { core: CoreClient }) {
     }
   }
 
-  function show(path: string, opened: Opened): void {
+  function show(path: string, opened: Opened, atLine?: number): void {
     live.current = { doc: opened.doc, gen: opened.gen }
-    setCard({ kind: 'open', path, opened, lines: opened.lines, bytes: 0, indexed: opened.indexed })
+    setCard({ kind: 'open', path, opened, lines: opened.lines, bytes: 0, indexed: opened.indexed, atLine })
   }
 
   async function pick(): Promise<void> {
@@ -139,12 +160,14 @@ export function App({ core }: { core: CoreClient }) {
     live.current = null
     setCard({ kind: 'empty' })
   }
+  if (__TEST_HOOKS__) appHooks.close = close
 
   const actions: Record<Action, () => void> = {
     'Open file…': () => void pick(),
     'Locate…': () => void pick(),
     Retry: () => path && void open(path),
-    Close: close
+    Close: close,
+    Reopen: () => card.kind === 'gone' && card.path && void open(card.path, card.line)
   }
   const frozen = card.kind === 'open' ? card.frozen : undefined
 
@@ -182,6 +205,8 @@ export function App({ core }: { core: CoreClient }) {
           {'raw' in shown.body && card.kind === 'open' && limits ? (
             <RawHost
               core={core}
+              lens={lens}
+              atLine={card.atLine}
               opened={card.opened}
               name={fileName(card.path)}
               lines={card.lines}
@@ -227,6 +252,10 @@ function ProgressLine({ value }: { value: number | 'indeterminate' }) {
 
 interface RawHostProps {
   core: CoreClient
+  /** The lens on screen, for App: null while none is. */
+  lens: RefObject<RawLens | null>
+  /** The line to open at (Reopen, plan C7). */
+  atLine: number | undefined
   opened: Opened
   name: string
   lines: number
@@ -237,20 +266,25 @@ interface RawHostProps {
 }
 
 /** Mounts the Raw controller into the card body, and passes it the index's line count as it grows. */
-function RawHost({ core, opened, name, lines, indexed, limits, frozen, onFrozen }: RawHostProps) {
+function RawHost({ core, lens, atLine, opened, name, lines, indexed, limits, frozen, onFrozen }: RawHostProps) {
   const host = useRef<HTMLDivElement>(null)
-  const lens = useRef<RawLens | null>(null)
   const onFrozenNow = useRef(onFrozen)
   onFrozenNow.current = onFrozen
   const doc = opened.doc
   // The document closes when the card stops showing it, not when Reload replaces its generation.
-  useEffect(() => () => void core.call('close', { doc }).catch(() => {}), [core, doc])
+  useEffect(
+    () => () => {
+      lens.current = null
+      void core.call('close', { doc }).catch(() => {})
+    },
+    [core, doc, lens]
+  )
   useEffect(() => {
-    const atLine = lens.current?.topLine() // Reload keeps the reading position
-    const raw = new RawLens(host.current!, core, opened, name, limits, { onFrozen: (why) => onFrozenNow.current(why), atLine })
+    // Reload keeps the reading position; a new lens starts where it's told to.
+    const raw = new RawLens(host.current!, core, opened, name, limits, { onFrozen: (why) => onFrozenNow.current(why), atLine: lens.current?.topLine() ?? atLine })
     lens.current = raw
     return () => raw.dispose()
-  }, [core, opened, name, limits])
+  }, [core, opened, name, limits, lens, atLine])
   useEffect(() => lens.current?.setLineCount(lines), [lines])
   useEffect(() => {
     if (indexed) lens.current?.indexDone()

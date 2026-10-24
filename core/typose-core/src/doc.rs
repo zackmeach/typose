@@ -59,6 +59,8 @@ pub enum DocError {
     Binary,
     /// A caller's value the core couldn't have issued: a forged continuation (plan C3).
     Invalid(String),
+    /// The read was cancelled (plan C5). Nothing changed: the document reads on.
+    Cancelled,
 }
 
 impl std::fmt::Display for DocError {
@@ -70,6 +72,7 @@ impl std::fmt::Display for DocError {
             DocError::Refused(why) => write!(f, "refused: {why}"),
             DocError::Binary => write!(f, "binary file"),
             DocError::Invalid(why) => f.write_str(why),
+            DocError::Cancelled => f.write_str("cancelled"),
         }
     }
 }
@@ -174,11 +177,13 @@ impl Document {
         Ok(out)
     }
 
-    /// A failed read freezes the document: a chunk that no longer matches, or an I/O error (plan C6).
+    /// A failed read freezes the document: a chunk that no longer matches, or an I/O error (plan C6). A cancelled
+    /// one doesn't: it read nothing wrong.
     pub(crate) fn fail(&self, e: StoreError) -> DocError {
         match e {
             StoreError::Changed { chunk } => self.freeze(format!("changed on disk (chunk {chunk})")),
             StoreError::Io(e) => self.freeze(format!("read failed: {e}")),
+            StoreError::Cancelled => DocError::Cancelled,
         }
     }
 
@@ -667,7 +672,7 @@ mod tests {
                 }
             };
             let page = raw.page(1, 0, 1).map(|_| ()).map_err(|e| e.to_string());
-            let index = raw.index(|_| {});
+            let index = raw.index(|_| true);
             let connected = server.connected();
             if connected || !page.as_ref().is_err_and(|e| e.starts_with("frozen: changed on disk")) {
                 failures.push(format!("{route}: client connected: {connected}; page {page:?}; index {index:?}"));

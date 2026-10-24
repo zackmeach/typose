@@ -204,11 +204,11 @@ The spike trusted the caller's offset and clamped negatives to 0 (`spike/a spike
 
 **Mechanics:** `page` runs as an async napi task with its own cancel flag, checked before each chunk read and between items. The core host's JS thread stays free, so `cancel(id)` arrives while the task runs. The spike's calls were synchronous (`spike/a core-host.ts:28-37`) and never cancelled (plan A:3616).
 
-**Renderer (`DocHandle`):** keeps ≤ 2 outstanding requests per lens, coalesced to one per frame (port `lens-view.ts:47-61`). It cancels the oldest request whose range no longer meets the wanted range, and ignores late results.
+**Renderer (`DocHandle`):** keeps ≤ 2 outstanding requests per lens, coalesced to one per frame (port `lens-view.ts:47-61`). It cancels the oldest request whose range no longer meets the wanted range, and ignores late results. *(Amended in PR 5: it cancels every such request, and the lens's own request loop is the `DocHandle` until a second lens needs one; plan §7.)*
 
 **Acceptance:** with the `test-hooks` per-read delay (m8), jump far every frame for 2 s.
 - Outstanding requests stay ≤ 2 per lens throughout (debug stats).
-- Every superseded request ends `Cancelled` within one chunk read of its cancel.
+- Every superseded request ends `Cancelled` within one chunk read of its cancel. *(Amended in PR 5: superseded means cancelled while its read runs; plan §7.)*
 - The final viewport's page arrives, and 0 tasks are running after the view settles.
 
 ### C6 · Close, freeze and failure: what each releases
@@ -229,7 +229,7 @@ The spike trusted the caller's offset and clamped negatives to 0 (`spike/a spike
 The document keeps its explicitly charged state (its floor, checkpoints, hashes, cache and metadata) until close or Reload, as the ported `Document` keeps its store and frozen reason (`spike/c doc.rs:74-81,139-153`). Raw keeps showing what it has.
 
 **Acceptance:**
-- Close mid-index on the 10 GiB fixture: the job stops within 50 ms (proposal, from Spike C's cancel gate, §13.1). The ledger returns to baseline, with 0 jobs, 0 tasks and 0 handles for that document.
+- Close mid-index on the 10 GiB fixture: the job stops within 50 ms (proposal, from Spike C's cancel gate, §13.1). The ledger returns to baseline, with 0 jobs, 0 tasks and 0 handles for that document. *(Amended in PR 5: the ledger clauses here are checked from PR 6, which builds the ledger; plan §7.)*
 - Truncate a file mid-index: the error event arrives, the document freezes, and 0 jobs and 0 tasks remain.
   - The ledger equals the baseline plus exactly that document's retained charges, as debug stats itemize them.
   - A later close returns it to baseline.
@@ -248,13 +248,13 @@ The document keeps its explicitly charged state (its floor, checkpoints, hashes,
 
 **Reopen:**
 - Reopen opens the path again in the new session, as a new document at generation 1, at the same line. There's no automatic reopen in M1.
-- After a second death within 60 s, the core isn't respawned and the app shows the stopped state. Once 60 s have passed, Reopen respawns the core (proposal, plan §7).
+- After a second death within 60 s, the core isn't respawned and the app shows the stopped state. Once 60 s have passed, Reopen respawns the core (proposal, plan §7). *(Amended in PR 5: main respawns it then, and the card offers Reopen; plan §7.)*
 
 **Acceptance:** kill the core host by its pid while idle, during a pending page, and mid-index on 10 GiB.
 - Every pending promise rejects with `CoreGone` within 1 s, with no unhandled rejection.
 - Main stays alive, and the log records the exit code and reason.
 - Reopen restores the line. A second kill within 60 s leaves the app in the stopped state.
-- A page and a progress event from the old session, delayed (`test-hooks`) until after Reopen, are rejected, and the reopened view is unchanged.
+- A page and a progress event from the old session, delayed (`test-hooks`) until after Reopen, are rejected, and the reopened view is unchanged. *(PR 5: the hook holds them on their way into the renderer's client; plan §7.)*
 
 ### C8 · The perf instruments, reconciled with §10.2
 
@@ -442,9 +442,9 @@ Each PR's tests land in that PR, and every PR extends C4's table to what it adds
 - **Triggers [Z60]:** unchanged from PR 1. A macOS-only break surfaces after merge. PR 3's macOS package and the macOS checks in PRs 7 and 8 run in that job, and a red macOS run is fixed in the next PR.
 - **Minutes [Z61]:** GitHub Free's included minutes, with the $0 spending limit. Windows minutes count 2× and macOS 10×.
   - Caches for cargo, npm and the Electron binary.
-  - `paths-ignore` for docs-only changes (`docs/**`, `*.md`).
-  - `concurrency` with `cancel-in-progress: true` per ref.
-  - Platform-independent steps (fmt and lint) run on Linux only. (PR 1 dropped the range staleness check: there's no generated table.)
+  - `paths-ignore` for docs-only changes (`docs/**`, `*.md`). *(Amended in PR 2: `*.md` is root-level, and a PR is judged on its whole diff; plan §7.)*
+  - `concurrency` with `cancel-in-progress: true` per ref. *(Amended in PR 2: not for pushes to `main`, which keep one macOS run each; plan §7.)*
+  - Platform-independent steps (fmt and lint) run on Linux only. (PR 1 dropped the range staleness check: there's no generated table.) *(PR 2 adds clippy for the Windows target there, plan §7.)*
   - **If the quota runs out,** the $0 limit pauses CI, and gated merges wait until it resets or Zack changes the policy. There's no automatic downgrade of the macOS job.
 - **Artifacts and storage [Z61]:**
   - GitHub Free includes 500 MB of artifact storage plus a separate cache allowance (`reply3.md:61`, citing GitHub's docs; not re-fetched here).
@@ -453,10 +453,13 @@ Each PR's tests land in that PR, and every PR extends C4's table to what it adds
   - Caches are keyed per lockfile and pruned.
   - Before an artifact expires, the orchestrator copies the failure evidence into `.evidence/m1/ci/` with `gh run download`.
 - **Stopping budget:** Zack verifies that the $0 limit stops billing rather than only alerting, or that free capacity is verified. The `gh` token has no `user` scope, so this is unverified here. It doesn't block local development, but hosted CI can't run until it's verified (PR 1).
-- **Minutes estimate (proposal; PR 2 replaces it with measured figures from its first runs):**
-  - With warm caches, a PR run takes about 12 min on Windows (24 billed) and 8 on Linux (8 billed): about 32 billed minutes, or about 100 at ~3 runs per PR.
-  - A macOS merge run takes about 15 min (150 billed).
-  - So a merged PR costs about 250 billed minutes, or about 8 merged PRs a month on the 2,000-minute quota (`reply3.md:61`).
+- **Measured minutes (PR 2's runs on 2026-10-23, replacing the estimate).** Billed means each job rounded up to the whole minute, then Windows ×2, Linux ×1 and macOS ×10.
+  - **A PR's first run, with cold caches** (pr run 39981985343): Windows 5m46s (12 billed), Linux 3m02s (4) and lint 1m06s (2), so 18 billed.
+  - **A later push to the same PR, with warm caches** (pr run 39983589063, which ran every step): Windows 3m03s (8 billed), Linux 2m12s (3) and lint 54s (1), so 12 billed. The warm cache cut Windows' napi build from 84 s to 22 s and its `cargo test` from 91 s to 37 s.
+  - **A macOS merge run** took 1m37s and 1m24s, the job times of main-macos runs 39977019396 and 39979583756, before PR 2's caches. So 20 billed each.
+  - So a merged PR with ~3 runs costs about 18 + 12 + 12 + 20 ≈ 62 billed minutes, or about 32 merged PRs a month on the 2,000-minute quota (`reply3.md:61`). The estimate said 250 and 8.
+  - Manual `workflow_dispatch` macOS runs aren't in that figure: about 20 billed each, and there were three on 2026-10-23.
+  - A PR's first run is always cold: `main` runs only macOS, so Windows and Linux caches are saved on each PR's own ref, which other PRs can't read.
 - **Additions to the steps:**
   - `cargo fmt --check` and `clippy -D warnings`;
   - lint on Linux, with a linter that doesn't need the TS compiler API (proposal: oxlint). TS 7.0.2 ships no `createSourceFile` (`m1rev` P4); typescript-eslint is used only if it's first verified on TS 7;
@@ -466,7 +469,7 @@ Each PR's tests land in that PR, and every PR extends C4's table to what it adds
 **Acceptance:**
 - The Windows and Linux jobs are green on the PR, and the macOS job is green on the merge.
 - A planted fmt error, a clippy warning, a type error and a test-only external request (caught by NetLog) each fail their job.
-- A docs-only change triggers no run, and a second push cancels the first push's run.
+- A docs-only change triggers no run, and a second push cancels the first push's run. *(A docs-only PR, or a docs-only push to `main`; amended in PR 2, plan §7.)*
 - A failing run uploads its evidence with the retention set.
 
 ### PR 3 · Packaged build, fuses and the minimal instruments (large, high: security and instrument validity)
@@ -738,6 +741,18 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 - **C9's `forcefullyCrashRenderer()` case** expects `crashed` on Windows and Linux and `killed` on macOS. *Why:* Electron reports the forced crash as `killed` on macOS. The gate is unchanged: the four controlled failures stay told apart by the log and exit status alone.
 - **`main-macos.yml` also takes `workflow_dispatch`.** *Why:* a macOS fix can be run on its branch before merge. The automatic triggers stay Z60's.
 
+**PR 2's amendments (mechanisms only; no Z-decision, 🔒 requirement or gate changes):**
+- **"A docs-only change triggers no run" means a docs-only PR, or a docs-only push to `main`.** GitHub applies a `pull_request` path filter to the PR's whole diff against its base, so a docs-only push to a PR that changes code still runs, as it should: the head moved. *Why:* that's GitHub's rule, not a choice. PR 2 shows the push case on `main-macos.yml`'s filter (a reverted probe commit, its job skipped); the first docs-only PR after PR 2 shows the PR case.
+- **`*.md` matches root-level Markdown only** (GitHub's `*` doesn't cross `/`); `docs/**` covers the docs tree. *Why:* Typose's own tests will carry Markdown inputs under `app/`, `core/` and `e2e/`, and `**/*.md` would let a fixture-only PR skip CI.
+- **Clippy also checks `x86_64-pc-windows-msvc`, from Linux.** *Why:* clippy runs on Linux only, so `cfg(windows)` code, such as §3.3's pipe and device refusals in `store.rs`, would never be linted. The cross-check lints it at Linux's rate.
+- **Within a job, a step runs when what it needs succeeded,** not only when every earlier step did; the job still fails. *Why:* one run reports every failure (fmt, both clippies and oxlint; `cargo test`, `check` and the e2e) instead of one per push.
+- **Every job is time-boxed** (`timeout-minutes`: lint 15, test 25, macOS 20, and 12 for the e2e step). *Why:* GitHub's default is 360 minutes, so one hung macOS job would bill 3,600 of the 2,000 included minutes. The e2e step's 12 is past the longest test's own limit (10 minutes in `large.e2e.ts` and `long-line.e2e.ts`; the config's is 5) and leaves room in each job's limit, so a hung e2e fails its own step and its evidence still uploads (a job timeout cancels the job, skipping the upload).
+- **Rust is pinned in a root `rust-toolchain.toml`** (1.96.0, minimal profile, with rustfmt and clippy), which rustup reads locally and in CI. *Why:* one place; at the root it also covers `npm run fixtures`, which runs cargo from the root.
+- **The Electron binary is fetched in its own step** (`npx --no install-electron`), from a cache keyed per lockfile and OS. *Why:* Electron 44 installs no binary at `npm ci`; the first `require('electron')` downloads it, which would otherwise land inside the e2e step.
+- **`main-macos.yml` keeps one run per merge.** A push to `main` gets a concurrency group of its own (its sha), so a later merge neither cancels it nor replaces it while it waits. Only `workflow_dispatch` runs on one branch cancel each other. *Why:* a red macOS run must name its merge, since Z60's macOS break is fixed in the next PR, and a cancelled or replaced run leaves that merge with no verdict. It costs at most one more macOS run per overlapping merge, about 20 billed minutes.
+- **Z57's green CI, for a docs-only PR.** `paths-ignore` gives a PR whose files are all under `docs/**` or root-level `*.md` no checks at all. Its CI counts as green when its file list shows nothing else, which the review confirms. Z57 itself is unchanged.
+- **Failure evidence is capped by stored size** (deflated at level 9, as the artifact zip stores it): 16 MiB a file and 32 MiB in all. *Why:* a raw-byte cap dropped C9's 35 MB Windows main-process dump (pr run 39983589063), which stores at about 180 KB (kept in pr run 40047349718).
+
 **PR 3's amendments (instrument definitions and test details; the frame gate's scope follows Zack's Z62; no other Z-decision, 🔒 requirement or gate threshold changes; the evidence is in PR 3's description):**
 - **`shellVisible` is the title bar's first presentation after `show`, not max(`show`, `titlebarPainted`), and never `show` itself.** This is stricter: on the packaged build it reads 70–95 ms later than the old definition. *Why:* PR 3's control settled C8's UNVERIFIED point.
   - On Electron 44 the OS reports the window visible and uncloaked about 4 ms after `show()` is called, and the `show` event fires about 35–45 ms after that.
@@ -839,6 +854,16 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 - **The index reads through a handle reopened from the document's** (`ReOpenFile` on Windows, `dup` on Unix), not through the path. *Why:* the same swap would otherwise connect the index's own open, and the reopened handle indexes the file the document actually has open.
 - **Stopping an index:** `index::build`'s progress callback returns whether to go on, once per block. The freeze half stops through it: when a page finds a change, or Reload supersedes the generation, the job ends at its next block. *For PR 5:* C6's cancel flag can return through the same callback, with no new parameter.
 
+**PR 5's amendments (mechanisms and test details; no Z-decision, 🔒 requirement or gate changes):**
+- **C6's ledger clauses are checked from PR 6.** PR 5 checks the rest of C6 by the test-hooks build's debug stats: after close, 0 jobs, 0 tasks, 0 handles and 0 documents; after a truncation, 0 jobs and 0 tasks, the document's handle kept, and none after close. *Why:* the ledger is PR 6's (C1), so PR 5 has no ledger to compare with a baseline. C1's exhaustion test already cancels an index mid-run, truncates another and closes all, against the byte-exact baseline, so Z47's "releases on close, cancellation and failure" stays tested in M1.
+- **C5: the lens cancels every request the wanted range no longer meets, not only the oldest.** A cancelled request keeps its place among the 2 until it ends, within one chunk read, so the core never runs more than 2 reads for a lens. *Why:* §3.4 🔒 says "stale requests are cancelled"; cancelling only the oldest would leave a stale read running while a wanted one waits. In one PR 5 run, 328 jumps in 2 s gave 38 cancels, with at most 2 requests out.
+- **C5's `DocHandle` is the lens's own request loop for now:** each frame it cancels stale requests (an `AbortSignal` per call, which `CoreClient` turns into `cancel(id)`), then sends at most one request. *Why:* M1 has one lens and the rules are per lens; a shared class with one user would only move the loop. It's extracted when M3's second lens needs it.
+- **C5: "superseded" means cancelled while its read runs.** The core host answers `cancel(id)` with whether the read was still running, and from then on it never resolves: a cancel that lands after the reads, while the result is on its way to JS, still rejects it with `Cancelled`. A request whose answer had already left the core host when the renderer cancelled it can't end `Cancelled`; the lens ignores it as a late result. The test checks that every cancel that found its read running ended it `Cancelled`, the slowest within one chunk read (97 ms with a 100 ms delay per read, in that run), and reports the late ones (0 of 38 there). *Why:* the race is inherent: the answer and the cancel cross on the port.
+- **C7's delayed old-session events are held on their way into the renderer's client.** The test hook holds everything one session's port delivers, from before the kill until the test releases it after Reopen. *Why:* a killed core host sends nothing late. The only place an old session's page or progress event can arrive late is between its port and the client: a message already queued or in delivery when the death is reported. Released there, a progress event of the old session's document 1 at generation 1 would match the reopened document (ids and generations restart), so only the session check stops it; removing that check changes the reopened card's status (PR 5's negative control).
+- **Proposal 2 (C7): once 60 s have passed since the last respawn, main respawns the core itself, and the card then offers Reopen.** Until then, the stopped state offers nothing. *Why:* the same outcome as Reopen respawning the core, without a renderer-to-main restart call or a "try again in N s" state for a click that comes too early. Main still respawns at most once per 60 s, and there's still no automatic reopen.
+- **C7's port teardown:** on a death, main closes its handles to both ends of the session's channel and removes the utility process's listeners. Both ends were transferred: the core host's died with it, and the renderer detaches and closes its own when it hears `core-gone`. The renderer takes a port only from its own window and only for a newer session than the last.
+- **C6's debug stats count:** `handles`, the documents' open byte stores (each one file handle); `jobs`, index threads not yet ended (a job's own reopened handle closes before its thread ends); `tasks`, page reads not yet settled. They exist only in the `test-hooks` addon, with the per-read delay.
+
 **Implementer calls in PR 4 (brief gaps):**
 - Brief §5.1's "1MB" per line is 1 MiB: 16 pieces of 64 KiB, in C2's source bytes. A continuation is issued only while at least 4 bytes (the longest element) are left before the line's first MiB ends, so no piece is ever empty.
 - "Further pieces mount on demand": the first piece ends in a "↪ more" button. Activating it gives the line one row per piece, each fetched when it comes into view. Expanding every long line on its own would shift every row below whenever a page revealed one. Until it's expanded, a long line shows its first 64 KiB, where brief §5.1 says lines over 1MB "show their first 1MB" (Zack may veto).
@@ -909,7 +934,7 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 
 **Implementer proposals Zack may veto (one place):**
 1. **Memory-refused open state** (C1), shown in the card: "Can't open `<file>` · Typose's memory budget is full. Close a file, then Retry." Brief §7.9 has no such state yet.
-2. **After a second core death within 60 s,** Reopen respawns the core once 60 s have passed (C7).
+2. **After a second core death within 60 s,** the core is respawned once 60 s have passed, and Reopen is offered then (C7; amended in PR 5, above).
 3. **Raw wrapping** (brief §5.1's wrap rules) is deferred to M4, with horizontal scrolling meanwhile (plan §6).
 4. **Raw's accessibility pattern:** a labelled, focusable region with an `aria-hidden` gutter (PR 1, checked in PR 7). Neither §6.1 nor brief §9 defines one. If Zack accepts it, it becomes a row in §6.1's 🔒 table.
 

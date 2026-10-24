@@ -38,7 +38,7 @@ test('a core kill (C7): main logs the exit and lives on, and the card shows the 
   await waitOpen(l.win)
   const spawned = lifecycle(l.userData).find((r) => r.event === 'utility-spawn')!
   process.kill(spawned.utilityPid as number)
-  await expect(l.win.locator('.card-message')).toHaveText("Typose's core stopped")
+  await expect(l.win.locator('.card-message p')).toHaveText("Typose's core stopped") // then Reopen (core-death.e2e.ts)
   const log = lifecycle(l.userData)
   expect(log.find((r) => r.event === 'utility-exit')).toMatchObject({ session: 1 })
   expect(log.find((r) => r.event === 'child-process-gone')).toMatchObject({ type: 'Utility', name: 'typose-core' })
