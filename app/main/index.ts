@@ -6,7 +6,7 @@ import { extname, join, sep } from 'node:path'
 import coreHostPath from '../core-host/index?modulePath'
 import { handoff, launchPath } from './launch'
 import { startLifecycle } from './lifecycle'
-import { delayHook, isMark, marksHook } from './marks'
+import { bytesHook, delayHook, isMark, marksHook } from './marks'
 
 const mainStart = Date.now() // plan C8's first startup mark: read now, written once the hook is set up below
 
@@ -23,6 +23,8 @@ const showDelay = __TEST_HOOKS__ ? delayHook('TYPOSE_TEST_DELAY_SHOW', process.e
 const mountDelay = __TEST_HOOKS__ ? delayHook('TYPOSE_TEST_DELAY_MOUNT', process.env.TYPOSE_TEST_DELAY_MOUNT) : 0
 // Plan C5's per-read delay, for the test-hooks addon: every chunk the core reads from disk waits this long first.
 const readDelay = __TEST_HOOKS__ ? delayHook('TYPOSE_TEST_READ_DELAY', process.env.TYPOSE_TEST_READ_DELAY) : 0
+// Plan C1's budget override, for the test-hooks addon: the ledger's limit in bytes, in place of a quarter of RAM.
+const budget = __TEST_HOOKS__ ? bytesHook('TYPOSE_TEST_BUDGET', process.env.TYPOSE_TEST_BUDGET) : 0
 let titlebarPainted: () => void = () => {}
 
 // No proxy resolution at all: with Windows' "Automatically detect settings" on, Chromium otherwise runs WPAD
@@ -104,7 +106,7 @@ function spawnCore(win: BrowserWindow, loaded: Promise<void>): void {
   const id = ++sessions
   const core = utilityProcess.fork(coreHostPath, [], { serviceName: 'typose-core' })
   const { port1, port2 } = new MessageChannelMain()
-  core.postMessage(__TEST_HOOKS__ ? { session: id, readDelay } : { session: id }, [port1])
+  core.postMessage(__TEST_HOOKS__ ? { session: id, readDelay, budget } : { session: id }, [port1])
   let exited = false
   void loaded.then(() => {
     if (!exited && !win.isDestroyed()) win.webContents.postMessage('core-port', { session: id }, [port2])

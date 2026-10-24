@@ -31,11 +31,21 @@ pub struct MapBuilder {
     unit_bytes: Option<u32>,
     pairs: Vec<u32>,
     points: Vec<(u32, u64)>,
+    /// The most source bytes the map will cover, when known: its lists are sized from it once (plan C1).
+    most: Option<usize>,
 }
 
 impl MapBuilder {
     pub fn new(start: u64) -> Self {
-        MapBuilder { start, units: 0, bytes: 0, uniform: true, unit_bytes: None, pairs: Vec::new(), points: Vec::new() }
+        let (pairs, points) = (Vec::new(), Vec::new());
+        MapBuilder { start, units: 0, bytes: 0, uniform: true, unit_bytes: None, pairs, points, most: None }
+    }
+
+    /// A builder for at most `most` source bytes of a Raw decode, whose elements are a char or one U+FFFD. Its lists
+    /// are allocated once, when first needed, at their most for that many bytes: a pair (2 units) takes 4 bytes, and
+    /// the densest breakpoints are pairs too, 3 per 4 bytes, after the first.
+    pub fn with_capacity(start: u64, most: usize) -> Self {
+        MapBuilder { most: Some(most), ..MapBuilder::new(start) }
     }
 
     /// Append one display element: `units` UTF-16 units that came from `bytes` source bytes
@@ -50,6 +60,9 @@ impl MapBuilder {
                 Some(k) if (units == 1 || units == 2) && bytes == u64::from(units) * u64::from(k) => {
                     self.unit_bytes = Some(k);
                     if units == 2 {
+                        if let (Some(most), 0) = (self.most, self.pairs.capacity()) {
+                            self.pairs.reserve_exact(most / 4);
+                        }
                         self.pairs.push(self.units);
                     }
                     self.units += units;
@@ -81,7 +94,9 @@ impl MapBuilder {
     fn switch_to_points(&mut self) {
         let k = u64::from(self.unit_bytes.unwrap_or(1));
         let (total, pairs) = (self.units, std::mem::take(&mut self.pairs));
-        (self.uniform, self.units, self.bytes, self.points) = (false, 0, 0, vec![(0, self.start)]);
+        let mut points = Vec::with_capacity(self.most.map_or(1, |most| 1 + 3 * most / 4));
+        points.push((0, self.start));
+        (self.uniform, self.units, self.bytes, self.points) = (false, 0, 0, points);
         let mut pairs = pairs.into_iter().peekable();
         while self.units < total {
             let n = if pairs.next_if_eq(&self.units).is_some() { 2 } else { 1 };
@@ -180,7 +195,11 @@ impl ByteMap {
                 end: end.1,
                 units: end.0,
                 unit_bytes: 0,
-                points: points.iter().flat_map(|&(u, b)| [u, (b - points[0].1) as u32]).collect(),
+                points: {
+                    let mut wire = Vec::with_capacity(2 * points.len()); // plan C1: sized once
+                    wire.extend(points.iter().flat_map(|&(u, b)| [u, (b - points[0].1) as u32]));
+                    wire
+                },
             },
         }
     }

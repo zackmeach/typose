@@ -21,11 +21,13 @@ export class VirtualList {
   /** The widest row painted so far: the horizontal scroll extent only grows, so it doesn't jump while reading. */
   private contentWidth = 0
 
+  /** `maxRows` is the most rows mounted at once (`setMaxRows`). */
   constructor(
     parent: HTMLElement,
     private readonly rowHeight: number,
     private readonly paint: (i: number, el: HTMLDivElement) => void,
-    private readonly onRange: (r: { first: number; last: number }) => void
+    private readonly onRange: (r: { first: number; last: number }) => void,
+    private maxRows = Infinity
   ) {
     this.element = Object.assign(document.createElement('div'), { className: 'vl-scroller', tabIndex: 0 })
     this.layer = Object.assign(document.createElement('div'), { className: 'vl-layer' })
@@ -89,10 +91,24 @@ export class VirtualList {
     this.apply(this.state.moveTo(i * this.rowHeight))
   }
 
-  /** The mounted row range: the viewport plus one viewport of overscan each way (spec §5.3). */
+  /**
+   * Sets the most rows mounted at once (plan C1: what a lens's reservation covers), then mounts and unmounts rows to
+   * match. The overscan, one viewport each way (spec §5.3), shrinks to fit, down to none; past that, the viewport's
+   * last rows stay unmounted.
+   */
+  setMaxRows(n: number): void {
+    this.maxRows = n
+    this.render()
+  }
+
+  /** The mounted row range: the viewport, and its overscan each way as far as `maxRows` allows. */
   visibleRange(): { first: number; last: number } {
     const vp = this.state.geometry.viewport
-    return visibleRows(this.state.top, vp, this.rowHeight, this.rowCount, Math.ceil(vp / this.rowHeight))
+    const view = Math.ceil(vp / this.rowHeight)
+    // A scrolled viewport spans `view + 1` rows; what's left of `maxRows` is split each way.
+    const overscan = Math.max(0, Math.min(view, Math.floor((this.maxRows - view - 1) / 2)))
+    const r = visibleRows(this.state.top, vp, this.rowHeight, this.rowCount, overscan)
+    return { first: r.first, last: Math.min(r.last, r.first + this.maxRows) }
   }
 
   private readonly release = (): void => {

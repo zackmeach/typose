@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
+use crate::budget::{OverBudget, Reservation};
 use crate::store::{ByteStore, NotRegular, StoreError, refusal, route_refusal};
 
 /// What change detection compares, taken from the path (never the open handle, spec §3.3).
@@ -61,6 +62,8 @@ pub enum DocError {
     Invalid(String),
     /// The read was cancelled (plan C5). Nothing changed: the document reads on.
     Cancelled,
+    /// Plan C1: the memory budget can't hold what this needs. Nothing stays charged.
+    Memory(OverBudget),
 }
 
 impl std::fmt::Display for DocError {
@@ -73,6 +76,7 @@ impl std::fmt::Display for DocError {
             DocError::Binary => write!(f, "binary file"),
             DocError::Invalid(why) => f.write_str(why),
             DocError::Cancelled => f.write_str("cancelled"),
+            DocError::Memory(e) => write!(f, "{e}"),
         }
     }
 }
@@ -87,11 +91,38 @@ fn check_len(len: u64) -> Result<(), DocError> {
     }
 }
 
-/// An I/O error, or `Refused` when the handle turned out not to be a regular file (`store::open_regular`).
+/// An I/O error, `Refused` when the handle turned out not to be a regular file (`store::open_regular`), or `Memory`
+/// when the ledger refused the store's floor.
 fn io_error(e: io::Error) -> DocError {
     match e.get_ref() {
         Some(inner) if inner.is::<NotRegular>() => DocError::Refused(e.to_string()),
+        Some(inner) if let Some(over) = inner.downcast_ref::<OverBudget>() => DocError::Memory(*over),
         _ => DocError::Io(e),
+    }
+}
+
+/// A freeze reason is kept to this many bytes, reserved with the document (plan C1's metadata).
+pub const REASON_MAX: usize = 256;
+/// The document's own structures, with the `Raw` around it and the `Arc` napi keeps that in (plan C1's metadata).
+pub const STRUCT_BYTES: u64 = 2048;
+
+/// What a document's metadata charges: its path, the longest freeze reason kept, and its structures.
+pub fn metadata_bytes(path: &Path) -> u64 {
+    path.as_os_str().len() as u64 + REASON_MAX as u64 + STRUCT_BYTES
+}
+
+/// What a document has charged, itemized (plan C1, C6's debug stats).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Charges {
+    pub hashes: u64,
+    pub checkpoints: u64,
+    pub cache: u64,
+    pub metadata: u64,
+}
+
+impl Charges {
+    pub fn total(&self) -> u64 {
+        self.hashes + self.checkpoints + self.cache + self.metadata
     }
 }
 
@@ -102,6 +133,8 @@ pub struct Document {
     generation: u32,
     cache_chunks: usize,
     frozen: Mutex<Option<String>>,
+    /// Pays for the path, the freeze reason and the structures. Declared last, so it's released after them.
+    metadata: Reservation,
 }
 
 impl Document {
@@ -114,12 +147,20 @@ impl Document {
             return Err(DocError::Refused(why.into())); // before FileId::of, which opens the path on Windows
         }
         let id = FileId::of(path).map_err(DocError::Io)?;
+        check_len(id.size)?; // before the store charges for its length
         let store = ByteStore::open_with(path, cache_chunks).map_err(io_error)?;
         if store.len() != id.size {
             return Err(DocError::Frozen("changed while opening".into()));
         }
         check_len(store.len())?;
-        Ok(Document { path: path.to_owned(), store, id, generation, cache_chunks, frozen: Mutex::new(None) })
+        let metadata = Reservation::new(metadata_bytes(path)).map_err(DocError::Memory)?;
+        Ok(Document { path: path.to_owned(), store, id, generation, cache_chunks, frozen: Mutex::new(None), metadata })
+    }
+
+    /// What this document's store and metadata have charged; `Raw` adds its checkpoints.
+    pub fn charges(&self) -> Charges {
+        let (hashes, cache) = self.store.charges();
+        Charges { hashes, checkpoints: 0, cache, metadata: self.metadata.bytes() }
     }
 
     pub fn generation(&self) -> u32 {
@@ -218,7 +259,11 @@ impl Document {
     /// Freezes the document (spec §3.1): nothing more is read until Reload. Also how Raw stops a superseded
     /// generation's index (`Raw::reload`) and records an index failure (plan C6).
     pub(crate) fn freeze(&self, why: String) -> DocError {
-        *self.frozen.lock().unwrap() = Some(why.clone());
+        let mut end = why.len().min(REASON_MAX); // what the metadata's charge holds
+        while !why.is_char_boundary(end) {
+            end -= 1;
+        }
+        *self.frozen.lock().unwrap() = Some(why[..end].to_owned());
         DocError::Frozen(why)
     }
 }

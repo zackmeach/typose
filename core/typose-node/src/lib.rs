@@ -1,20 +1,21 @@
 //! napi-rs bindings for `typose-core` (spec §2.2: thin, no logic). Every caller-controlled number arrives as an
 //! `f64` and goes through `limits::int` before any conversion (plan C4).
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{JsError, Task};
 use napi_derive::napi;
+use typose_core::budget::{self, NoSlot, Reservation, Slot, Work};
 use typose_core::doc::DocError;
 #[cfg(feature = "test-hooks")]
 use typose_core::hooks;
 use typose_core::limits::{self, RANGES};
 use typose_core::pages::{self, LinePiece};
 use typose_core::raw::Raw;
-use typose_core::store::cancellable;
+use typose_core::store::{self, cancellable};
 
 /// Progress is throttled to 10 Hz, except while a first screen of lines is still filling (spec §3.4).
 const FIRST_SCREEN_LINES: u64 = 256;
@@ -31,6 +32,7 @@ pub enum Code {
     Io,
     Cancelled,
     NoDocument,
+    Memory,
 }
 
 impl AsRef<str> for Code {
@@ -46,6 +48,7 @@ impl AsRef<str> for Code {
             Code::Io => "Io",
             Code::Cancelled => "Cancelled",
             Code::NoDocument => "NoDocument",
+            Code::Memory => "Memory",
         }
     }
 }
@@ -61,6 +64,7 @@ fn doc_error(e: DocError) -> Error<Code> {
         DocError::Binary => Code::Binary,
         DocError::Invalid(_) => Code::InvalidParams,
         DocError::Cancelled => Code::Cancelled,
+        DocError::Memory(_) => Code::Memory,
     };
     Error::new(code, e.to_string())
 }
@@ -72,6 +76,33 @@ fn int(field: &str, x: f64) -> std::result::Result<u64, Error<Code>> {
 #[napi]
 pub fn core_version() -> String {
     typose_core::version().to_string()
+}
+
+/// Plan C1: sets the ledger's limit to a quarter of `totalmem` (Z34), the core host's `os.totalmem()`, and reserves
+/// the pool of transient slots. Nothing opens until it's set.
+#[napi]
+pub fn set_budget(totalmem: f64) -> std::result::Result<(), Error<Code>> {
+    let totalmem = int("totalmem", totalmem)?;
+    budget::set_limit(totalmem / 4).map_err(|e| Error::new(Code::Memory, e.to_string()))
+}
+
+/// The renderer's page cache, reserved for it in the ledger (plan C1, spec §3.6's "renderer-side caches the core is
+/// told about"). One renderer talks to a core host.
+static RENDERER_CACHE: Mutex<Reservation> = Mutex::new(Reservation::none());
+
+/// Plan C1: sets the renderer cache's reservation to `bytes`, growing or shrinking it. False when the ledger refuses
+/// the growth; the reservation is then unchanged.
+#[napi]
+pub fn reserve_cache(bytes: f64) -> std::result::Result<bool, Error<Code>> {
+    let bytes = int("bytes", bytes)?;
+    let mut held = RENDERER_CACHE.lock().unwrap();
+    let now = held.bytes();
+    if bytes < now {
+        held.shrink(now - bytes);
+    } else if held.grow(bytes - now).is_err() {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 #[napi(object)]
@@ -90,6 +121,9 @@ pub struct Limits {
     pub map_max: u32,
     pub item_wire_fixed: u32,
     pub page_wire_max: u32,
+    /// Plan C1: one page read's temporaries in Rust, and an open's.
+    pub page_temp: u32,
+    pub open_temp: u32,
     pub ranges: Vec<Range>,
 }
 
@@ -102,6 +136,8 @@ pub fn limits() -> Limits {
         map_max: pages::MAP_MAX as u32,
         item_wire_fixed: pages::ITEM_WIRE_FIXED as u32,
         page_wire_max: pages::PAGE_WIRE_MAX as u32,
+        page_temp: pages::PAGE_TEMP as u32,
+        open_temp: typose_core::raw::OPEN_TEMP as u32,
         ranges: RANGES
             .iter()
             .map(|&(field, min, max)| Range { field: field.into(), min: min as f64, max: max as f64 })
@@ -208,11 +244,15 @@ enum Want {
 
 /// A page read as an async task (plan C5): it runs on libuv's thread pool, so the core host's JS thread stays free
 /// to take `cancel`, and stops at its cancel flag before its next chunk read.
+///
+/// Plan C1: its temporaries take a page slot, which it waits for on the pool's thread, and keeps until the task drops,
+/// after `resolve` has made its JS page from them.
 pub struct Read {
     raw: Arc<Raw>,
     generation: u32,
     want: Want,
     cancel: Arc<AtomicBool>,
+    slot: Option<Slot>,
     #[cfg(feature = "test-hooks")]
     _task: hooks::Live,
 }
@@ -224,6 +264,7 @@ impl Read {
             generation,
             want,
             cancel: cancel.flag.clone(),
+            slot: None,
             #[cfg(feature = "test-hooks")]
             _task: hooks::Live::new(&hooks::TASKS),
         })
@@ -236,9 +277,15 @@ impl Task for Read {
 
     fn compute(&mut self) -> Result<Self::Output> {
         let (raw, generation) = (&self.raw, self.generation);
-        Ok(cancellable(&self.cancel, || match self.want {
-            Want::Lines { start, count } => raw.page(generation, start, count),
-            Want::Piece { line, offset } => raw.piece(generation, line, offset).map(|p| vec![p]),
+        Ok(cancellable(&self.cancel, || {
+            self.slot = Some(budget::slot(Work::Page, &store::cancelled).map_err(|e| match e {
+                NoSlot::Cancelled => DocError::Cancelled,
+                NoSlot::Budget(over) => DocError::Memory(over),
+            })?);
+            match self.want {
+                Want::Lines { start, count } => raw.page(generation, start, count),
+                Want::Piece { line, offset } => raw.piece(generation, line, offset).map(|p| vec![p]),
+            }
         }))
     }
 
@@ -265,8 +312,10 @@ pub struct Doc {
 impl Doc {
     #[napi(factory)]
     pub fn open(path: String) -> std::result::Result<Doc, Error<Code>> {
-        if path.is_empty() || path.contains('\0') {
-            return Err(Error::new(Code::InvalidParams, "path must be a non-empty string without NUL"));
+        if path.is_empty() || path.contains('\0') || path.len() > pages::MAX_PATH_BYTES {
+            let why =
+                format!("path must be a non-empty string of at most {} bytes, without NUL", pages::MAX_PATH_BYTES);
+            return Err(Error::new(Code::InvalidParams, why));
         }
         Ok(Doc { raw: Some(Arc::new(Raw::open(std::path::Path::new(&path)).map_err(doc_error)?)) })
     }
@@ -341,21 +390,26 @@ impl Doc {
             let raw = raw;
             let mut last: Option<Instant> = None;
             let mut sent_lines = 0u64;
-            let result = raw.index(|p| {
-                let filling_first_screen = sent_lines < FIRST_SCREEN_LINES && p.lines > sent_lines;
-                if p.done || filling_first_screen || last.is_none_or(|t| t.elapsed() >= Duration::from_millis(100)) {
-                    last = Some(Instant::now());
-                    sent_lines = p.lines;
-                    let progress = IndexProgress {
-                        lines: p.lines as f64,
-                        bytes: p.bytes as f64,
-                        done: p.done,
-                        elapsed_ms: p.elapsed_ms as f64,
-                        error: None,
-                    };
-                    on_progress.call(progress, ThreadsafeFunctionCallMode::NonBlocking);
-                }
-                !cancel.load(Ordering::Relaxed)
+            // The flag also ends the wait for an index slot (plan C1), if the pool has none free.
+            let flag = cancel.clone();
+            let result = cancellable(&flag, || {
+                raw.index(|p| {
+                    let filling_first_screen = sent_lines < FIRST_SCREEN_LINES && p.lines > sent_lines;
+                    if p.done || filling_first_screen || last.is_none_or(|t| t.elapsed() >= Duration::from_millis(100))
+                    {
+                        last = Some(Instant::now());
+                        sent_lines = p.lines;
+                        let progress = IndexProgress {
+                            lines: p.lines as f64,
+                            bytes: p.bytes as f64,
+                            done: p.done,
+                            elapsed_ms: p.elapsed_ms as f64,
+                            error: None,
+                        };
+                        on_progress.call(progress, ThreadsafeFunctionCallMode::NonBlocking);
+                    }
+                    !cancel.load(Ordering::Relaxed)
+                })
             });
             if let Err(e) = result {
                 let progress = IndexProgress {
@@ -405,21 +459,79 @@ impl Doc {
 pub mod test_hooks {
     use super::*;
 
-    /// What's alive in this core (plan C6's "0 jobs, 0 tasks and 0 handles"), and the longest a chunk read's delay
-    /// has actually waited since the delay was set (`delay_ms`, plan C5).
+    /// The ledger (plan C1): its limit, what's charged now and at most, the pool's share, the renderer cache's.
+    #[napi(object)]
+    pub struct Ledger {
+        pub limit: f64,
+        pub used: f64,
+        pub high: f64,
+        pub pool: f64,
+        pub renderer_cache: f64,
+    }
+
+    /// What's alive in this core (plan C6's "0 jobs, 0 tasks and 0 handles"), the longest a chunk read's delay has
+    /// actually waited since the delay was set (`delay_ms`, plan C5), and the ledger.
     #[napi(object)]
     pub struct DebugStats {
         pub jobs: u32,
         pub tasks: u32,
         pub handles: u32,
         pub delay_ms: f64,
+        pub ledger: Ledger,
     }
 
     #[napi]
     pub fn debug_stats() -> DebugStats {
         let count = |c| hooks::count(c) as u32;
         let delay_ms = hooks::slowest_delay_ms();
-        DebugStats { jobs: count(&hooks::JOBS), tasks: count(&hooks::TASKS), handles: count(&hooks::HANDLES), delay_ms }
+        let t = budget::totals();
+        let renderer_cache = RENDERER_CACHE.lock().unwrap().bytes() as f64;
+        let ledger = Ledger {
+            limit: t.limit as f64,
+            used: t.used as f64,
+            high: t.high as f64,
+            pool: t.pool as f64,
+            renderer_cache,
+        };
+        DebugStats {
+            jobs: count(&hooks::JOBS),
+            tasks: count(&hooks::TASKS),
+            handles: count(&hooks::HANDLES),
+            delay_ms,
+            ledger,
+        }
+    }
+
+    /// One document's charges, itemized (plan C1, C6), and whether its line checkpoints stopped at the limit.
+    #[napi(object)]
+    pub struct Charges {
+        pub hashes: f64,
+        pub checkpoints: f64,
+        pub cache: f64,
+        pub metadata: f64,
+        pub total: f64,
+        pub lines_stopped: bool,
+    }
+
+    #[napi]
+    pub fn doc_charges(doc: &Doc) -> std::result::Result<Charges, Error<Code>> {
+        let raw = doc.raw()?;
+        let c = raw.charges();
+        let [hashes, checkpoints, cache, metadata, total] =
+            [c.hashes, c.checkpoints, c.cache, c.metadata, c.total()].map(|n| n as f64);
+        Ok(Charges { hashes, checkpoints, cache, metadata, total, lines_stopped: raw.lines_stopped() })
+    }
+
+    /// Starts the ledger's high-water mark again from what's charged now (plan C1's exhaustion test, per cycle).
+    #[napi]
+    pub fn reset_high() {
+        budget::reset_high();
+    }
+
+    /// The test-hooks build's budget override (plan C1's exhaustion test): the ledger's limit, in bytes.
+    #[napi]
+    pub fn set_limit(bytes: f64) -> std::result::Result<(), Error<Code>> {
+        budget::set_limit(int("bytes", bytes)?).map_err(|e| Error::new(Code::Memory, e.to_string()))
     }
 
     /// Plan C5's per-read delay: every chunk read from disk waits `ms` first.

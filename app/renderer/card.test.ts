@@ -14,6 +14,7 @@ const opened = (over: Partial<Opened> = {}): Opened => ({
   indexed: false,
   blank: false,
   firstPage: { items: [] },
+  reserved: 0,
   ...over
 })
 const open = (over: Partial<Extract<Card, { kind: 'open' }>> = {}): Card => ({
@@ -36,7 +37,13 @@ it('shows each file state', () => {
     ['indexed', open({ indexed: true }), { status: '1,234,567 lines · UTF-8', progress: null, banner: null }],
     ['one line, indexing', open({ lines: 1 }), { status: 'Indexing 1 line…' }],
     ['empty file', open({ opened: opened({ size: 0, blank: true }), lines: 0, indexed: true }), { body: { message: 'Empty file', actions: [] } }],
-    ['changed on disk', open({ indexed: true, frozen: 'changed on disk' }), { banner: 'Changed on disk', body: { raw: true } }],
+    ['changed on disk', open({ indexed: true, frozen: 'changed on disk' }), { banner: { text: 'Changed on disk', action: 'Reload (Ctrl+R)' }, body: { raw: true } }],
+    // Plan C1: a Reload the ledger refused keeps Raw at its generation (Z34), even a frozen one's.
+    [
+      'reload refused',
+      open({ indexed: true, frozen: 'changed on disk', refused: true }),
+      { banner: { text: "Can't reload: Typose's memory budget is full", action: 'Retry (Ctrl+R)' }, body: { raw: true } }
+    ],
     ['changed on disk mid-index', open({ frozen: 'changed on disk (chunk 3)' }), { status: 'Indexing stopped at 1,234,567 lines', progress: null }],
     ['binary', failed('Binary', 'binary file'), { body: { message: 'Binary file · not shown', actions: [] } }],
     ['missing', failed('NotFound', 'io: not found'), { body: { message: `File not found at ${PATH}`, actions: ['Locate…', 'Close'] } }],

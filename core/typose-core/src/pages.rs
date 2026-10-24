@@ -46,6 +46,30 @@ pub const PAGE_WIRE_MAX: usize = 64 + MAX_ITEMS * (ITEM_WIRE_FIXED + 8) + PAGE_B
 /// newline is at most 2 more: reading this far past a piece shows where it can end.
 const LOOKAHEAD: usize = 8;
 
+/// The longest path the core opens, in bytes: Windows' 32,767 UTF-16 units, at most 3 bytes each as UTF-8.
+pub const MAX_PATH_BYTES: usize = 3 * 32_767;
+
+/// Plan C1's temporaries of one page read in Rust, (a) and (b), which its page slot reserves (`budget::Work::Page`):
+/// - (a) its reads at once: a continuation's read of its line's shown part (`piece`), a piece's own read (`cut`), a
+///   line search's chunk (`locate_line`) and a chunk read from disk on its way into the cache;
+/// - (b) the pieces of a page's source bytes, plus the piece that didn't fit: text at most 3 bytes per source byte (a
+///   U+FFFD for one malformed byte), a map at most 13 (`MapBuilder`'s pair list, n / 4 `u32`s, then its breakpoints,
+///   3 of 16 bytes per 4 bytes), and the wire map napi makes from it, 6; with the item arrays, Rust's and napi's;
+/// - the identity check's copies of the path (`Document::verified`), and the decoder's scratch.
+///
+/// The counting-allocator test (`tests/ledger.rs`) checks a sum, at every allocation: the heap's live bytes past its
+/// baseline, page reads' included, never pass what the ledger has charged, less the pool's free slots
+/// (`budget::in_use`). It doesn't attribute memory to one read, so it doesn't check this bound on its own.
+pub const PAGE_TEMP: usize = {
+    let reads = (LINE_SHOWN + LOOKAHEAD) + (PIECE_BYTES + LOOKAHEAD) + 2 * crate::store::CHUNK;
+    let source = PAGE_BYTES + PIECE_BYTES + (MAX_ELEMENT - 1) * (MAX_ITEMS + 1);
+    let items = (MAX_ITEMS + 1) * (size_of::<LinePiece>() + ITEM_NAPI);
+    reads + (3 + 13 + 6) * source + 16 * (MAX_ITEMS + 1) + items + 16 * MAX_PATH_BYTES + 64 * 1024
+};
+
+/// napi's `PageItem` for one item, beside the `LinePiece` it's made from: its struct and its map's wrapper.
+const ITEM_NAPI: usize = 256;
+
 /// The page bounds and the shown part of a line. Tests shrink them; everything else uses `Caps::DEFAULT`.
 #[derive(Debug, Clone, Copy)]
 pub struct Caps {
@@ -139,7 +163,7 @@ pub fn lines_with(
     count: usize,
     caps: Caps,
 ) -> Result<Vec<LinePiece>, StoreError> {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(count.min(caps.items)); // plan C1: sized once, never grown
     // Line 0 starts at byte 0, so the first page needs no index: `open` returns it at once (Z37).
     let first = if start == 0 { Some(0) } else { locate_line(store, index, start)? };
     let Some(mut offset) = first else { return Ok(out) };
@@ -266,7 +290,7 @@ mod tests {
     fn open(name: &str, bytes: &[u8]) -> (ByteStore, LineIndex) {
         let path = temp_file(name, bytes);
         let store = ByteStore::open(&path).unwrap();
-        let shared = RwLock::new(LineIndex::default());
+        let shared = RwLock::new(LineIndex::new(store.len(), &IndexConfig::default(), encoding_rs::UTF_8).unwrap());
         build(&File::open(&path).unwrap(), store.len(), IndexConfig::default(), &store.hashes(), &shared, |_| true)
             .unwrap();
         (store, shared.into_inner().unwrap())
@@ -311,8 +335,8 @@ mod tests {
         bytes.extend_from_slice(b"\nshort\n");
         let path = temp_file("mid-index", &bytes);
         let store = ByteStore::open(&path).unwrap();
-        let shared = RwLock::new(LineIndex::default());
         let cfg = IndexConfig { block: 1 << 20, ..IndexConfig::default() };
+        let shared = RwLock::new(LineIndex::new(store.len(), &cfg, encoding_rs::UTF_8).unwrap());
         let mut first = None;
         build(&File::open(&path).unwrap(), store.len(), cfg, &store.hashes(), &shared, |p| {
             if first.is_none() {
@@ -365,7 +389,7 @@ mod tests {
     fn open_encoded(name: &str, bytes: &[u8], encoding: &'static Encoding) -> (ByteStore, LineIndex) {
         let path = temp_file(name, bytes);
         let store = ByteStore::open(&path).unwrap();
-        let shared = RwLock::new(LineIndex { encoding, ..LineIndex::default() });
+        let shared = RwLock::new(LineIndex::new(store.len(), &IndexConfig::default(), encoding).unwrap());
         build(&File::open(&path).unwrap(), store.len(), IndexConfig::default(), &store.hashes(), &shared, |_| true)
             .unwrap();
         (store, shared.into_inner().unwrap())
