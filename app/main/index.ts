@@ -28,6 +28,15 @@ app.commandLine.appendSwitch('no-proxy-server')
 const mark = marksHook(process.env.TYPOSE_MARKS, log)
 mark?.('mainStart', { t: mainStart })
 
+// TEMP diagnostics (to be reverted): AppKit's will-finish-launching, and Electron's own ready, which Playwright's loader
+// holds back from the app until it has attached (the app's `ready` below is the one it lets through).
+app.on('will-finish-launching', () => log('will-finish-launching'))
+const emit = app.emit.bind(app)
+app.emit = (event: string | symbol, ...args: unknown[]) => {
+  if (event === 'ready') log('ready-native')
+  return emit(event, ...args)
+}
+
 protocol.registerSchemesAsPrivileged([
   { scheme: 'typose', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, codeCache: true } }
 ])
@@ -166,6 +175,7 @@ function handle(win: BrowserWindow, channel: string, fn: () => unknown): void {
 }
 
 void app.whenReady().then(() => {
+  log('ready') // TEMP diagnostics
   mark?.('ready')
   // Chromium's hunspell (Linux, and Windows for languages it lacks) loads its dictionaries even with spellcheck off,
   // and downloads a missing one through a loader the network guard never sees. Point those downloads at our own
@@ -184,6 +194,7 @@ void app.whenReady().then(() => {
     const painted = new Promise<void>((ok) => (titlebarPainted = ok))
     void Promise.all([once(win, 'ready-to-show'), painted]).then(() => setTimeout(() => win.show(), showDelay))
   }
+  win.webContents.once('did-finish-load', () => log('did-finish-load')) // TEMP diagnostics
   const loaded = new Promise<void>((ok) => win.webContents.once('did-finish-load', () => ok()))
   spawnCore(win, loaded) // in parallel with the page load (spec §2.1)
   const initial = launchPath()
