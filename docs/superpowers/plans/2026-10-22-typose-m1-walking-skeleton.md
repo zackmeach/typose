@@ -1118,6 +1118,11 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 - **`rowBreaks`'s 32 units of context can mispair a run of regional indicators longer than that** (a flag's two halves), at a break.
 - **The page pump fills the overscan above the viewport before the rows on screen.** Under slow layout, the viewport is the last part to fill.
 - **End goes to the widest mounted row's end.** A wrapped line ends on its last row, which may be below the viewport.
+- **Text drawing on many distinct CJK ideographs holds the renderer for seconds.** Z66's gate's CJK fixture draws on all 20,901 CJK Unified Ideographs.
+  - There, 23 of 25 of the 1st, 3rd, 5th, 7th and 9th PageDowns (five runs) held the renderer 3.7–7.3 s before the scroll took. The others took at most 54 ms.
+  - Drawn from 500 or 3,000 ideographs, the same text took at most 33 ms a PageDown, and emoji's at most 161 ms. The other scripts weren't timed.
+  - It's not a memory miss: the rise stayed within its bound. The cause isn't known; the number of distinct ideographs is the measured factor. Carried to the frame gates (PR 10+).
+  - The gate's PageDown wait is 60 s for it, as its fill wait is. With 5 s, one full run of 75 failed.
 
 **Implementer proposals Zack may veto (one place):**
 1. **Memory-refused open state** (C1), shown in the card: "Can't open `<file>` · Typose's memory budget is full. Close a file, then Retry." Brief §7.9 has no such state yet.
