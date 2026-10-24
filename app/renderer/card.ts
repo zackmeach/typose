@@ -6,12 +6,14 @@ export type Card =
   | { kind: 'empty' }
   /** `slow`: no first screen after 300 ms (brief §7.9's slow open). */
   | { kind: 'opening'; path: string; slow: boolean }
-  /** `frozen`: why the document stopped reading (spec §3.1); nothing new shows until Reload. */
-  | { kind: 'open'; path: string; opened: Opened; lines: number; bytes: number; indexed: boolean; frozen?: string }
+  /** `frozen`: why the document stopped reading (spec §3.1); nothing new shows until Reload. `atLine`: where
+   *  Reopen puts the view (plan C7). */
+  | { kind: 'open'; path: string; opened: Opened; lines: number; bytes: number; indexed: boolean; frozen?: string; atLine?: number }
   | { kind: 'failed'; path: string; code: ErrorCode; message: string }
-  | { kind: 'gone'; path?: string }
+  /** Plan C7: the core died. `line` is where its view was; `ready` once a new core is up to Reopen it in. */
+  | { kind: 'gone'; path?: string; line?: number; ready: boolean }
 
-export type Action = 'Open file…' | 'Locate…' | 'Retry' | 'Close'
+export type Action = 'Open file…' | 'Locate…' | 'Retry' | 'Close' | 'Reopen'
 
 export interface CardView {
   /** The header's status text. */
@@ -66,6 +68,9 @@ export function view(card: Card): CardView {
           return say(`Can't open ${card.path} · ${card.message}`, 'Close')
       }
     case 'gone':
-      return say("Typose's core stopped") // Reopen arrives with respawn (PR 5)
+      // Plan C7: the cached text died with the core. Until a new core is up (60 s after a second death), the stopped
+      // state offers nothing.
+      if (!card.ready) return say("Typose's core stopped")
+      return say("Typose's core stopped", card.path ? 'Reopen' : 'Open file…')
   }
 }

@@ -7,6 +7,7 @@ core/target/
 core/typose-node/*.node
 core/typose-node/index.js
 core/typose-node/index.d.ts
+core/typose-node/hooks/
 test-results/
 playwright-report/
 

@@ -1,9 +1,11 @@
 //! File-backed byte store (spec §3.1, §3.3): positional reads only, never mmap.
 //! Every 1MiB chunk is hashed the first time it's read and verified on every later read.
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use xxhash_rust::xxh3::xxh3_64;
@@ -18,6 +20,8 @@ pub enum StoreError {
     Changed {
         chunk: u64,
     },
+    /// The read's cancel flag was set (plan C5, `cancellable`): it stopped before its next chunk.
+    Cancelled,
 }
 
 #[derive(Default)]
@@ -42,8 +46,34 @@ impl std::fmt::Display for StoreError {
         match self {
             StoreError::Io(e) => write!(f, "io: {e}"),
             StoreError::Changed { chunk } => write!(f, "changed on disk (chunk {chunk})"),
+            StoreError::Cancelled => f.write_str("cancelled"),
         }
     }
+}
+
+thread_local! {
+    /// The cancel flag of the read running on this thread, while `cancellable` runs it.
+    static CANCEL: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+
+/// Runs `reads` on this thread with `cancel` as its cancel flag (plan C5): every chunk it touches checks the flag
+/// first and fails with `Cancelled` once it's set. A page touches a chunk at least once per item, so a cancelled read
+/// stops within the chunk read it's in, between items at the latest. It's a thread's, not a parameter, so every read
+/// path through the store (`pages`, `locate_line`) honours it without carrying it.
+pub fn cancellable<T>(cancel: &Arc<AtomicBool>, reads: impl FnOnce() -> T) -> T {
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            CANCEL.with(|c| *c.borrow_mut() = None);
+        }
+    }
+    CANCEL.with(|c| *c.borrow_mut() = Some(cancel.clone()));
+    let _clear = Clear;
+    reads()
+}
+
+fn cancelled() -> bool {
+    CANCEL.with(|c| c.borrow().as_ref().is_some_and(|flag| flag.load(Ordering::Relaxed)))
 }
 
 /// Spec §3.3 🔒: device and special files are refused before anything opens them. Opening a named pipe, or on
@@ -370,6 +400,8 @@ impl ByteStore {
     pub fn open_with(path: &Path, cache_chunks: usize) -> io::Result<ByteStore> {
         let file = open_regular(path)?;
         let len = file.metadata()?.len();
+        #[cfg(feature = "test-hooks")]
+        crate::hooks::HANDLES.fetch_add(1, Ordering::Relaxed); // until `drop` below
         Ok(ByteStore {
             file,
             len,
@@ -412,9 +444,14 @@ impl ByteStore {
     }
 
     pub fn chunk(&self, idx: u64) -> Result<Arc<Vec<u8>>, StoreError> {
+        if cancelled() {
+            return Err(StoreError::Cancelled);
+        }
         if let Some((_, hit)) = self.cache.lock().unwrap().iter().find(|(i, _)| *i == idx) {
             return Ok(hit.clone());
         }
+        #[cfg(feature = "test-hooks")]
+        crate::hooks::read_delay();
         let start = idx * CHUNK as u64;
         let size = self.len.saturating_sub(start).min(CHUNK as u64) as usize;
         let mut buf = vec![0u8; size];
@@ -449,6 +486,13 @@ impl ByteStore {
             pos += take as u64;
         }
         Ok(out)
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+impl Drop for ByteStore {
+    fn drop(&mut self) {
+        crate::hooks::HANDLES.fetch_sub(1, Ordering::Relaxed); // the file closes with it
     }
 }
 

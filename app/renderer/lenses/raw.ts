@@ -12,6 +12,12 @@ interface Expansion {
   tokens: Token[]
 }
 
+/** A page request in flight (plan C5): the keys it fetches, and how to cancel it. */
+interface Request {
+  keys: Key[]
+  abort: AbortController
+}
+
 /** What a row shows: a line's first piece (`piece` 0) or one of its further pieces. */
 interface Slot {
   line: number
@@ -44,9 +50,12 @@ export class RawLens {
   private lineCount = 0
   private atLine: number | undefined
   private wanted: { first: number; last: number } | null = null
+  /** The keys of the wanted range's rows: a request for none of them is stale. */
+  private wantedKeys = new Set<Key>()
   /** Keys with a request in flight. */
   private readonly requested = new Set<Key>()
-  private inflight = 0
+  /** At most 2 (spec §3.4). A cancelled request keeps its place until it ends, a chunk read later at most. */
+  private readonly inflight = new Set<Request>()
   private scheduled = false
   /** Disposed, or frozen: nothing new is asked for or shown. */
   private stopped = false
@@ -111,6 +120,7 @@ export class RawLens {
 
   dispose(): void {
     this.stopped = true
+    for (const q of this.inflight) q.abort.abort()
     setPaintProbe(null)
     this.list.dispose()
   }
@@ -136,13 +146,18 @@ export class RawLens {
     return { line: row - extra, piece: 0, key: row - extra }
   }
 
-  /** Coalesces viewport requests to one per animation frame (spec §3.4). */
   private want(r: { first: number; last: number }): void {
     this.sizeCache()
     const keys: Key[] = []
     for (let row = r.first; row < r.last; row++) keys.push(this.slot(row).key)
     this.cache.setMounted(keys)
     this.wanted = r
+    this.wantedKeys = new Set(keys)
+    this.schedule()
+  }
+
+  /** Coalesces viewport requests to one per animation frame (spec §3.4). */
+  private schedule(): void {
     if (this.scheduled) return
     this.scheduled = true
     requestAnimationFrame(() => {
@@ -156,25 +171,31 @@ export class RawLens {
     this.cache.setMountedRows(3 * Math.ceil(this.host.clientHeight / ROW_HEIGHT) + 1)
   }
 
-  /** Fetches the first missing row of the wanted range, at most 2 requests in flight (spec §3.4). */
+  /**
+   * Once a frame: cancels every request the wanted range no longer meets (plan C5), then fetches the range's first
+   * missing row, with at most 2 requests in flight (spec §3.4).
+   */
   private pump(): void {
     const r = this.wanted
-    if (!r || this.inflight >= 2 || this.stopped) return
+    if (!r || this.stopped) return
+    for (const q of this.inflight) if (!q.keys.some((key) => this.wantedKeys.has(key))) q.abort.abort()
+    if (this.inflight.size >= 2) return
     let missing: Slot | null = null
     for (let row = r.first; row < r.last && !missing; row++) {
       const s = this.slot(row)
       if (!this.cache.has(s.key) && !this.requested.has(s.key)) missing = s
     }
     if (!missing) return
-    this.inflight++
-    const fetched = missing.piece > 0 ? this.fetchPiece(missing) : this.fetchLines(missing.line, this.slot(r.last - 1).line + 1)
+    const q: Request = { keys: [], abort: new AbortController() }
+    this.inflight.add(q)
+    const fetched = missing.piece > 0 ? this.fetchPiece(missing, q) : this.fetchLines(missing.line, this.slot(r.last - 1).line + 1, q)
     void fetched
       .catch((err: unknown) => this.failed(err))
       .finally(() => {
-        this.inflight--
-        this.pump()
+        this.inflight.delete(q)
+        this.schedule()
       })
-    this.pump()
+    this.schedule() // the next frame may send the second
   }
 
   /**
@@ -192,14 +213,14 @@ export class RawLens {
     return view
   }
 
-  private async fetchLines(start: number, end: number): Promise<void> {
+  private async fetchLines(start: number, end: number, q: Request): Promise<void> {
     const count = Math.min(Math.max(1, end - start), this.limits.maxItems)
-    const keys = Array.from({ length: count }, (_, k) => start + k)
+    const keys = (q.keys = Array.from({ length: count }, (_, k) => start + k))
     for (const key of keys) this.requested.add(key)
     try {
       const { doc, gen } = this.opened
-      const page = await this.core.call('page', { doc, lens: 'raw', gen, start, count })
-      if (this.stopped) return
+      const page = await this.core.call('page', { doc, lens: 'raw', gen, start, count }, q.abort.signal)
+      if (this.stopped || q.abort.signal.aborted) return // a result that came after its cancel: ignored (plan C5)
       // A page stops at 256 KiB, so some of the range may still be missing: the next pump asks for the rest. An
       // empty page means there's nothing more there yet; the next scroll asks again.
       if (page.items.length === 0) this.wanted = null
@@ -210,13 +231,14 @@ export class RawLens {
     }
   }
 
-  private async fetchPiece(s: Slot): Promise<void> {
+  private async fetchPiece(s: Slot, q: Request): Promise<void> {
     const expansion = this.expanded.get(s.line)!
+    q.keys = [s.key]
     this.requested.add(s.key)
     try {
-      const page = await this.core.call('page', { doc: this.opened.doc, lens: 'raw', continuation: expansion.tokens[s.piece - 1] })
+      const page = await this.core.call('page', { doc: this.opened.doc, lens: 'raw', continuation: expansion.tokens[s.piece - 1] }, q.abort.signal)
       const item = page.items[0]
-      if (this.stopped || !item || item.gen !== this.opened.gen) return
+      if (this.stopped || q.abort.signal.aborted || !item || item.gen !== this.opened.gen) return
       this.cache.addPiece(String(s.key), item)
       if (item.next && expansion.tokens.length === s.piece) {
         expansion.tokens.push(item.next) // the line goes on: one more row below this one
@@ -229,9 +251,10 @@ export class RawLens {
   }
 
   /** A refused request stops the lens rather than asking again: the document froze, the lens shows a generation
-   *  Reload has replaced (`Stale`, dropped), or the request was a bug. A core that's gone is App's to show. */
+   *  Reload has replaced (`Stale`, dropped), or the request was a bug. A core that's gone is App's to show, and a
+   *  cancelled request is one the lens no longer wanted. */
   private failed(err: unknown): void {
-    if (err instanceof CoreCallError && err.code === 'CoreGone') return
+    if (err instanceof CoreCallError && (err.code === 'CoreGone' || err.code === 'Cancelled')) return
     this.stopped = true
     if (err instanceof CoreCallError && err.code === 'Frozen') this.options.onFrozen(err.message)
     else if (!(err instanceof CoreCallError && err.code === 'Stale')) console.error('page fetch failed', err)

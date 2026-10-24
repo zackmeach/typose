@@ -1,17 +1,25 @@
 // Plan PR 3 on the packaged, fused build (`npm run package` first): its fuses, what ships in its asar, driving it
 // over CDP, the measurement hook's refusal, and the NetLog.
 import { expect } from '@playwright/test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { assertNetLog, fixture, lifecycle, test, visibleRows, waitIndexed, waitOpen } from './app'
 import { PACKAGED, closePackaged, launchPackaged } from './packaged'
 
-test('no test-hooks code ships: the asar holds none of its names', () => {
+test('no test-hooks code ships: the asar holds none of its names, and the addon is the release one', () => {
   // The asar stores its files uncompressed, so a byte search sees every bundle in it.
   const asar = readFileSync(PACKAGED.asar)
   expect(asar.includes('TYPOSE_MARKS')).toBe(true) // the search works: the read-only hook's name is there
-  for (const name of ['TYPOSE_TEST', 'delayMount', '__TEST_HOOKS__']) expect(asar.includes(name), name).toBe(false)
+  for (const name of ['TYPOSE_TEST', 'delayMount', '__TEST_HOOKS__', 'typoseTest', 'debugStats', 'typose-node/hooks'])
+    expect(asar.includes(name), name).toBe(false)
+  // The addon is unpacked beside the asar (plan m8): the release build, without the test-hooks addon's calls, and
+  // without the test-hooks addon itself.
+  const addon = join(`${PACKAGED.asar}.unpacked`, 'node_modules', 'typose-node')
+  const binary = readFileSync(join(addon, readdirSync(addon).find((f) => f.endsWith('.node'))!))
+  expect(binary.includes('coreVersion')).toBe(true) // the search works: an export's name is there
+  for (const name of ['debugStats', 'setReadDelay']) expect(binary.includes(name), name).toBe(false)
+  expect(existsSync(join(addon, 'hooks'))).toBe(false)
 })
 
 /** The fuse wire, read straight from the binary rather than through @electron/fuses, which wrote it. */

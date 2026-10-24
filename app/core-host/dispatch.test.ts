@@ -1,7 +1,7 @@
 // Plan C4 at the core host: every numeric parameter against the hostile table, with a spy addon that must not be
-// called (and no state change) when a request is refused.
+// called (and no state change) when a request is refused. And plan C5 and C6's cancels, against the same spy.
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Doc } from 'typose-node'
+import type { Cancel, Doc, IndexProgress, Page } from 'typose-node'
 import { limits } from 'typose-node'
 import type { Response } from '../shared/protocol'
 import { type Addon, makeDispatcher } from './dispatch'
@@ -9,22 +9,31 @@ import { HOSTILE, isValid } from './numbers'
 
 // An item whose line goes on, so its token shows the session stamped on the way out.
 const item = () => ({ gen: 1, line: 0, offset: 0, text: 'x', more: true, next: { gen: 1, line: 0, offset: 1 } })
-const page = vi.fn(() => ({ items: [item()] }))
-const piece = vi.fn(item)
+const page = vi.fn(async (_gen: number, _start: number, _count: number, _cancel: Cancel) => ({ items: [item()] }) as unknown as Page)
+const piece = vi.fn(async (_gen: number, _line: number, _offset: number, _cancel: Cancel) => ({ items: [item()] }) as unknown as Page)
 const reload = vi.fn()
-const startIndex = vi.fn()
-const doc = { generation: 1, size: 3, encoding: 'UTF-8', lines: 0, indexed: false, blank: false, page, piece, reload, startIndex } as unknown as Doc
+const close = vi.fn()
+const startIndex = vi.fn((_cancel: Cancel, _onProgress: (p: IndexProgress) => void) => {})
+const doc = { generation: 1, size: 3, encoding: 'UTF-8', lines: 0, indexed: false, blank: false, page, piece, reload, close, startIndex } as unknown as Doc
 const openDoc = vi.fn(() => doc)
-const addon: Addon = { coreVersion: () => '0.0.0', limits, openDoc }
+/** Every cancel flag the dispatcher made, in order. */
+let flags: { cancel: ReturnType<typeof vi.fn> }[]
+const cancelFlag = () => {
+  const flag = { cancel: vi.fn() }
+  flags.push(flag)
+  return flag as unknown as Cancel
+}
+const addon: Addon = { coreVersion: () => '0.0.0', limits, openDoc, cancelFlag }
 const range = (field: string) => limits().ranges.find((r) => r.field === field)!
 
-let dispatch: (data: unknown) => Response
+let dispatch: (data: unknown) => Promise<Response>
 let nextId: number
 const call = (method: string, params: Record<string, unknown>) => dispatch({ id: nextId++, method, params })
-beforeEach(() => {
+beforeEach(async () => {
+  flags = []
   dispatch = makeDispatcher(addon, 7, () => {})
   nextId = 1
-  expect(call('open', { path: 'a.txt', count: 1 })).toMatchObject({ result: { doc: 1 } }) // document 1 exists
+  expect(await call('open', { path: 'a.txt', count: 1 })).toMatchObject({ result: { doc: 1 } }) // document 1 exists
   vi.clearAllMocks()
 })
 
@@ -45,7 +54,8 @@ const TABLE: [method: string, field: string, base: Record<string, unknown>][] = 
   ['page', 'continuation.offset', { doc: 1, lens: 'raw', continuation: token }],
   ['reload', 'doc', { count: 1 }],
   ['reload', 'count', { doc: 1 }],
-  ['close', 'doc', {}]
+  ['close', 'doc', {}],
+  ['cancel', 'id', {}]
 ]
 
 /** `base` with `field` (a token's, for `continuation.x`) set to `value`, or missing for `undefined`. */
@@ -62,99 +72,168 @@ describe('every numeric parameter takes only integers in its range', () => {
   for (const [method, field, base] of TABLE) {
     const { min, max } = range(field.replace('continuation.', ''))
     for (const value of [...HOSTILE, min, max, max + 1]) {
-      it(`${method}.${field} = ${String(value)}`, () => {
-        const response = call(method, withValue(base, field, value))
+      it(`${method}.${field} = ${String(value)}`, async () => {
+        const response = await call(method, withValue(base, field, value))
         if (isValid(value, min, max)) {
           // In range: not refused for its range (a token of another document is still refused, as such).
           expect(response).not.toMatchObject({ error: { code: 'InvalidParams', field, message: expect.stringContaining('must be an integer') } })
           return
         }
         expect(response).toMatchObject({ id: nextId - 1, session: 7, error: { code: 'InvalidParams', field } })
-        for (const spy of [openDoc, page, piece, reload, startIndex]) expect(spy).not.toHaveBeenCalled()
+        for (const spy of [openDoc, page, piece, reload, close, startIndex]) expect(spy).not.toHaveBeenCalled()
         // No state change: document 1 is still open, and the next open is document 2.
-        expect(call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 })).toHaveProperty('result')
-        expect(call('open', { path: 'c.txt', count: 1 })).toMatchObject({ result: { doc: 2 } })
+        expect(await call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 })).toHaveProperty('result')
+        expect(await call('open', { path: 'c.txt', count: 1 })).toMatchObject({ result: { doc: 2 } })
       })
     }
   }
 })
 
 describe('continuation tokens (plan C3)', () => {
-  it('leave stamped with this session and their document, from a window and from a piece', () => {
+  it('leave stamped with this session and their document, from a window and from a piece', async () => {
     const stamped = { result: { items: [{ next: { session: 7, doc: 1 } }] } }
-    expect(call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 })).toMatchObject(stamped)
-    expect(call('page', { doc: 1, lens: 'raw', continuation: token })).toMatchObject(stamped)
-    expect(piece).toHaveBeenCalledWith(1, 0, 1)
+    expect(await call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 })).toMatchObject(stamped)
+    expect(await call('page', { doc: 1, lens: 'raw', continuation: token })).toMatchObject(stamped)
+    expect(piece).toHaveBeenCalledWith(1, 0, 1, expect.anything())
   })
 
-  it("from another session are Stale, and the addon isn't asked", () => {
-    expect(call('page', { doc: 1, lens: 'raw', continuation: { ...token, session: 6 } })).toMatchObject({ error: { code: 'Stale' } })
+  it("from another session are Stale, and the addon isn't asked", async () => {
+    expect(await call('page', { doc: 1, lens: 'raw', continuation: { ...token, session: 6 } })).toMatchObject({ error: { code: 'Stale' } })
     expect(piece).not.toHaveBeenCalled()
   })
 
-  it("from another document are refused, and the addon isn't asked (plan C7: tokens carry their doc)", () => {
-    expect(call('open', { path: 'b.txt', count: 1 })).toMatchObject({ result: { doc: 2 } })
+  it("from another document are refused, and the addon isn't asked (plan C7: tokens carry their doc)", async () => {
+    expect(await call('open', { path: 'b.txt', count: 1 })).toMatchObject({ result: { doc: 2 } })
     vi.clearAllMocks()
     for (const [doc, tokenDoc] of [
       [2, 1],
       [1, 2]
     ])
-      expect(call('page', { doc, lens: 'raw', continuation: { ...token, doc: tokenDoc } })).toMatchObject({
+      expect(await call('page', { doc, lens: 'raw', continuation: { ...token, doc: tokenDoc } })).toMatchObject({
         error: { code: 'InvalidParams', field: 'continuation.doc' }
       })
     expect(piece).not.toHaveBeenCalled()
   })
 
-  it('must be an object', () => {
+  it('must be an object', async () => {
     for (const continuation of [null, 7, 'token', [1, 2]])
-      expect(call('page', { doc: 1, lens: 'raw', continuation })).toMatchObject({ error: { code: 'InvalidParams', field: 'continuation' } })
+      expect(await call('page', { doc: 1, lens: 'raw', continuation })).toMatchObject({ error: { code: 'InvalidParams', field: 'continuation' } })
     expect(piece).not.toHaveBeenCalled()
   })
 })
 
-it('reload opens the next generation, starts its index and returns its first page', () => {
-  expect(call('reload', { doc: 1, count: 5 })).toMatchObject({ result: { doc: 1, gen: 1, blank: false, firstPage: { items: [{ next: { session: 7 } }] } } })
+it('reload opens the next generation, starts its index and returns its first page', async () => {
+  expect(await call('reload', { doc: 1, count: 5 })).toMatchObject({ result: { doc: 1, gen: 1, blank: false, firstPage: { items: [{ next: { session: 7 } }] } } })
   expect(reload).toHaveBeenCalledOnce()
-  expect(page).toHaveBeenCalledWith(1, 0, 5)
+  expect(page).toHaveBeenCalledWith(1, 0, 5, expect.anything())
   expect(startIndex).toHaveBeenCalledOnce()
   reload.mockImplementationOnce(() => {
     throw Object.assign(new Error('io: not found'), { code: 'NotFound' })
   })
-  expect(call('reload', { doc: 1, count: 5 })).toMatchObject({ error: { code: 'NotFound' } })
-  expect(call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 })).toHaveProperty('result') // still open
+  expect(await call('reload', { doc: 1, count: 5 })).toMatchObject({ error: { code: 'NotFound' } })
+  expect(await call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 })).toHaveProperty('result') // still open
 })
 
-it('a request id is validated too, and the reply then carries id null', () => {
+it('a request id is validated too, and the reply then carries id null', async () => {
   const { min, max } = range('id')
   for (const id of [...HOSTILE, min, max, max + 1]) {
-    const response = dispatch({ id, method: 'close', params: { doc: 9 } })
+    const response = await dispatch({ id, method: 'close', params: { doc: 9 } })
     if (isValid(id, min, max)) expect(response).toMatchObject({ id, result: false })
     else expect(response).toMatchObject({ id: null, error: { code: 'InvalidParams', field: 'id' } })
   }
 })
 
-it('methods resolve by own property only', () => {
-  for (const method of ['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'valueOf', 'nope', 42])
-    expect(dispatch({ id: 1, method, params: {} })).toMatchObject({ error: { code: 'UnknownMethod' } })
+it('methods resolve by own property only, and debugStats is the test-hooks build\'s', async () => {
+  for (const method of ['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'valueOf', 'nope', 42, 'debugStats'])
+    expect(await dispatch({ id: 1, method, params: {} })).toMatchObject({ error: { code: 'UnknownMethod' } })
   expect(openDoc).not.toHaveBeenCalled()
 })
 
-it('a lens other than raw, a bad path and an unknown document are typed errors', () => {
-  expect(call('page', { doc: 1, lens: 'rows', start: 0, count: 1 })).toMatchObject({ error: { code: 'InvalidParams', field: 'lens' } })
+it('a lens other than raw, a bad path and an unknown document are typed errors', async () => {
+  expect(await call('page', { doc: 1, lens: 'rows', start: 0, count: 1 })).toMatchObject({ error: { code: 'InvalidParams', field: 'lens' } })
   for (const path of ['', 'a\0b', 7, null, 'x'.repeat(32_768)])
-    expect(call('open', { path, count: 1 })).toMatchObject({ error: { code: 'InvalidParams', field: 'path' } })
-  expect(call('page', { doc: 9, lens: 'raw', gen: 1, start: 0, count: 1 })).toMatchObject({ error: { code: 'NoDocument' } })
-  expect(call('hello', { protocol: 2 })).toMatchObject({ error: { code: 'Unsupported' } })
+    expect(await call('open', { path, count: 1 })).toMatchObject({ error: { code: 'InvalidParams', field: 'path' } })
+  expect(await call('page', { doc: 9, lens: 'raw', gen: 1, start: 0, count: 1 })).toMatchObject({ error: { code: 'NoDocument' } })
+  expect(await call('hello', { protocol: 2 })).toMatchObject({ error: { code: 'Unsupported' } })
   expect(openDoc).not.toHaveBeenCalled()
 })
 
-it('an addon error keeps its typed code, and anything else is Internal', () => {
+it('an addon error keeps its typed code, and anything else is Internal', async () => {
   openDoc.mockImplementationOnce(() => {
     throw Object.assign(new Error('refused: a device path'), { code: 'Refused' })
   })
-  expect(call('open', { path: '\\\\.\\NUL', count: 1 })).toMatchObject({ error: { code: 'Refused', message: 'refused: a device path' } })
+  expect(await call('open', { path: '\\\\.\\NUL', count: 1 })).toMatchObject({ error: { code: 'Refused', message: 'refused: a device path' } })
   openDoc.mockImplementationOnce(() => {
     throw Object.assign(new Error('boom'), { code: 'GenericFailure' })
   })
-  expect(call('open', { path: 'x', count: 1 })).toMatchObject({ error: { code: 'Internal' } })
+  expect(await call('open', { path: 'x', count: 1 })).toMatchObject({ error: { code: 'Internal' } })
 })
+
+/** A page read that runs until the test ends it: its promise, and its cancel flag. */
+function pendingRead(): { end: (r: unknown) => void; fail: (e: unknown) => void } {
+  const ends = {} as { end: (r: unknown) => void; fail: (e: unknown) => void }
+  page.mockImplementationOnce(() => new Promise<Page>((ok, fail) => Object.assign(ends, { end: ok, fail })))
+  return ends
+}
+const cancelled = () => Object.assign(new Error('cancelled'), { code: 'Cancelled' })
+
+describe('cancels (plan C5, C6)', () => {
+  it("cancel sets a running read's flag and says so; the read's Cancelled reaches the renderer", async () => {
+    const read = pendingRead()
+    const reply = dispatch({ id: 40, method: 'page', params: { doc: 1, lens: 'raw', gen: 1, start: 9, count: 1 } })
+    const flag = flags.at(-1)!
+    expect(await call('cancel', { id: 40 })).toMatchObject({ result: true })
+    expect(flag.cancel).toHaveBeenCalledOnce()
+    read.fail(cancelled())
+    expect(await reply).toMatchObject({ id: 40, error: { code: 'Cancelled' } })
+    expect(await call('cancel', { id: 40 })).toMatchObject({ result: false }) // ended: nothing to cancel
+    expect(await call('cancel', { id: 41 })).toMatchObject({ result: false }) // never sent
+  })
+
+  it("close cancels the document's index job and its reads, closes it, and forgets it", async () => {
+    const job = flags.length // the index job's flag is made first, at open
+    expect(await call('open', { path: 'b.txt', count: 1 })).toMatchObject({ result: { doc: 2 } })
+    const [ownJob, otherJob] = [flags[job + 1], flags[job - 1]] // doc 2's (after its first page's), and doc 1's
+    void pendingRead()
+    void dispatch({ id: 50, method: 'page', params: { doc: 2, lens: 'raw', gen: 1, start: 9, count: 1 } })
+    const read = flags.at(-1)!
+    vi.clearAllMocks()
+    expect(await call('close', { doc: 2 })).toMatchObject({ result: true })
+    expect([ownJob.cancel, read.cancel, close].map((f) => f.mock.calls.length)).toEqual([1, 1, 1])
+    expect(otherJob?.cancel).not.toHaveBeenCalled()
+    expect(await call('page', { doc: 2, lens: 'raw', gen: 1, start: 0, count: 1 })).toMatchObject({ error: { code: 'NoDocument' } })
+    expect(await call('close', { doc: 2 })).toMatchObject({ result: false })
+  })
+
+  it("a freeze, from a read or the index, cancels the document's other reads", async () => {
+    const [frozen, other] = [pendingRead(), pendingRead()]
+    void dispatch({ id: 60, method: 'page', params: { doc: 1, lens: 'raw', gen: 1, start: 9, count: 1 } })
+    void dispatch({ id: 61, method: 'page', params: { doc: 1, lens: 'raw', gen: 1, start: 99, count: 1 } })
+    const otherFlag = flags.at(-1)!
+    frozen.fail(Object.assign(new Error('frozen: changed on disk'), { code: 'Frozen' }))
+    await expect.poll(() => otherFlag.cancel.mock.calls.length).toBe(1)
+    other.fail(cancelled())
+    // The index: its error event, from the current job.
+    const onProgress = (await reopen()).onProgress
+    void pendingRead()
+    void dispatch({ id: 62, method: 'page', params: { doc: 1, lens: 'raw', gen: 1, start: 9, count: 1 } })
+    const next = flags.at(-1)!
+    onProgress({ lines: 3, bytes: 0, done: false, elapsedMs: 0, error: 'frozen: changed on disk (chunk 2)' })
+    expect(next.cancel).toHaveBeenCalledOnce()
+  })
+
+  it('a first page that fails closes the document it opened, which never gets an id', async () => {
+    page.mockImplementationOnce(async () => {
+      throw Object.assign(new Error('frozen: changed while reading'), { code: 'Frozen' })
+    })
+    expect(await call('open', { path: 'b.txt', count: 1 })).toMatchObject({ error: { code: 'Frozen' } })
+    expect(close).toHaveBeenCalledOnce()
+    expect(await call('open', { path: 'c.txt', count: 1 })).toMatchObject({ result: { doc: 2 } })
+  })
+})
+
+/** Reloads document 1 and returns its new index job's progress callback. */
+async function reopen(): Promise<{ onProgress: (p: IndexProgress) => void }> {
+  await call('reload', { doc: 1, count: 1 })
+  return { onProgress: startIndex.mock.calls.at(-1)![1] }
+}

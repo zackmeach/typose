@@ -8,6 +8,7 @@
   "napi": { "binaryName": "typose-node" },
   "scripts": {
     "build": "napi build --platform --release",
+    "build:hooks": "napi build --platform --release --features test-hooks --output-dir hooks",
     "build:debug": "napi build --platform"
   },
   "devDependencies": { "@napi-rs/cli": "3.10.8" }

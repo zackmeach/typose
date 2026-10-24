@@ -16,6 +16,8 @@ const log = startLifecycle()
 // ready-to-show and the title bar's paint, or delay React's mount.
 const showDelay = __TEST_HOOKS__ ? delayHook('TYPOSE_TEST_DELAY_SHOW', process.env.TYPOSE_TEST_DELAY_SHOW) : 0
 const mountDelay = __TEST_HOOKS__ ? delayHook('TYPOSE_TEST_DELAY_MOUNT', process.env.TYPOSE_TEST_DELAY_MOUNT) : 0
+// Plan C5's per-read delay, for the test-hooks addon: every chunk the core reads from disk waits this long first.
+const readDelay = __TEST_HOOKS__ ? delayHook('TYPOSE_TEST_READ_DELAY', process.env.TYPOSE_TEST_READ_DELAY) : 0
 let titlebarPainted: () => void = () => {}
 
 // No proxy resolution at all: with Windows' "Automatically detect settings" on, Chromium otherwise runs WPAD
@@ -71,20 +73,46 @@ function serveApp(): void {
   })
 }
 
+/** Plan C7: the core host is respawned at most once in this long. */
+const RESPAWN_EVERY = 60_000
 let sessions = 0
+let respawned = -Infinity
+let quitting = false
+app.on('before-quit', () => (quitting = true))
 
-/** Spawns the core host as a new session (plan C7) and hands one end of a fresh channel to each side. */
+/**
+ * Spawns the core host as a new session (plan C7) and hands one end of a fresh channel to each side. When it dies,
+ * the renderer is told (it fails every pending call with CoreGone), the session's port and listeners are torn
+ * down, and a new session is spawned: at once, or, after a second death within 60 s, once 60 s have passed since
+ * the last respawn. Until then the app shows the stopped state.
+ */
 function spawnCore(win: BrowserWindow, loaded: Promise<void>): void {
   const id = ++sessions
   const core = utilityProcess.fork(coreHostPath, [], { serviceName: 'typose-core' })
   const { port1, port2 } = new MessageChannelMain()
-  core.postMessage({ session: id }, [port1])
-  void loaded.then(() => win.webContents.postMessage('core-port', { session: id }, [port2]))
+  core.postMessage(__TEST_HOOKS__ ? { session: id, readDelay } : { session: id }, [port1])
+  let exited = false
+  void loaded.then(() => {
+    if (!exited && !win.isDestroyed()) win.webContents.postMessage('core-port', { session: id }, [port2])
+  })
   core.once('spawn', () => log('utility-spawn', { session: id, utilityPid: core.pid }))
   core.once('exit', (code) => {
+    exited = true
     log('utility-exit', { session: id, code })
-    // C7's rejection path: the renderer fails every pending call with CoreGone. Respawn arrives in PR 5.
-    if (!win.isDestroyed()) win.webContents.send('core-gone', { session: id })
+    port1.close()
+    port2.close()
+    core.removeAllListeners()
+    if (quitting || win.isDestroyed()) return
+    void loaded.then(() => {
+      if (!win.isDestroyed()) win.webContents.send('core-gone', { session: id })
+    })
+    const wait = Math.max(0, respawned + RESPAWN_EVERY - Date.now())
+    if (wait > 0) log('core-stopped', { session: id, respawnInMs: wait })
+    setTimeout(() => {
+      if (quitting || win.isDestroyed()) return
+      respawned = Date.now()
+      spawnCore(win, loaded)
+    }, wait)
   })
 }
 
