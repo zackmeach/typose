@@ -808,6 +808,7 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
     - `first-paint` comes with the window's first presentation. Locally it came 265–349 ms after the open, 150–200 ms after the page's frames had begun (`typose:first-screen`, itself a rAF, at 119–141 ms).
     - As the clock start, it would have excused ordinary runs: in 2 of 4, the scan finished within 9–15 ms of it, inside the 50 ms budget.
     - The rAF mark came 72 ms before the open or 113–133 ms after it, 4–5 ms before the first screen.
+- **PR 4's 1 GiB one-line test asserts the indexing indicator at any count, not "Indexing 1 line…" (PR 3's merge with PR 4).** *Why:* the line's last progress event and the done event come back to back and can render as one update, so on Linux CI (run 40054430687) the status went from "Indexing 0 lines…" straight to "1 line · UTF-8". Brief §8.2 asks for the indicator while the scan runs, not a given count.
 
 **Carried requirement from PR 3's review (§7.3 🔒, owner M4's Rendered lens):** a `<link rel="preconnect">` or `<link rel="dns-prefetch">` inserted into the page bypasses both the CSP and `session.webRequest`. The review planted one, and the NetLog showed DNS resolver events.
 - It isn't reachable in M1, because Raw renders text only, never markup.

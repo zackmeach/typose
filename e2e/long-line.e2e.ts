@@ -19,6 +19,8 @@ type Marks = Partial<Record<(typeof MARKS)[number], number>>
 const BUDGET_MS = process.platform === 'darwin' ? 100 : 50
 /** How long the marks may take to arrive: a late mark is judged as late, and only one that never comes is missing. */
 const MARKS_TIMEOUT_MS = 10_000
+/** Brief §8.2's indexing indicator, "Indexing N lines…", with N as the card writes it (compact: "1.2M"). */
+const INDEXING = /^Indexing [\d.]+[KMBT]? lines?…$/
 
 test.afterAll(() => rmSync(ONE_LINE, { force: true })) // generated fixtures are deleted when done
 
@@ -86,6 +88,11 @@ test("Z64: the clock starts at the later of the open and the page's first frame"
     expect(scanGate({ ...base, [FIRST_FRAME]: frame, 'typose:first-screen': 1040 })[0], String(frame)).toMatch(/^missing or invalid marks/)
 })
 
+test('the indexing indicator matches at any count, and no other status does', () => {
+  for (const s of ['Indexing 0 lines…', 'Indexing 1 line…', 'Indexing 1.2M lines…']) expect(s).toMatch(INDEXING)
+  for (const s of ['', '1 line · UTF-8', 'Indexing stopped at 5 lines']) expect(s).not.toMatch(INDEXING)
+})
+
 test("1 GiB on one line: the first piece shows before the scan passes the line's end, and more loads on demand", async () => {
   test.setTimeout(10 * 60_000)
   // One JSON record of 1 GiB: a 54-byte head, the payload, then `"}` and a newline.
@@ -108,7 +115,9 @@ test("1 GiB on one line: the first piece shows before the scan passes the line's
   await waitOpen(win)
   await waitIndexed(win)
   const seen = await win.evaluate(() => (window as unknown as { statusSeen: string[] }).statusSeen)
-  expect(seen).toContain('Indexing 1 line…') // brief §8.2's indicator, while the scan was on
+  // Brief §8.2's indicator, while the scan was on, at any count: the last progress event and the done event can come
+  // back to back and render once, so "Indexing 1 line…" may never show (Linux CI saw only "Indexing 0 lines…").
+  expect(seen.some((s) => INDEXING.test(s)), `statuses seen: ${JSON.stringify(seen)}`).toBe(true)
 
   await test.step("Z37's gate on the scan marks, with the veto's negative control", async () => {
     // Waits for every mark, up to a bound: one that arrives late is judged as late, and only one that never comes is
