@@ -127,7 +127,9 @@ async function layoutGate(s: (typeof SCRIPTS)[number]): Promise<void> {
     for (let i = 0; i < 10; i++) {
       const was = await top()
       await win.keyboard.press('PageDown')
-      await expect.poll(top).toBeGreaterThan(was)
+      // The CJK fixture draws on all 20,901 ideographs, and every other PageDown holds the renderer about 4–7 s here;
+      // drawn from 500 or 3,000 of them, at most 33 ms (plan §7, PR 6b).
+      await expect.poll(top, { timeout: 60_000 }).toBeGreaterThan(was)
       reserved = await settled('1')
       scrolled = Math.max(scrolled, (await renderer())! - base)
     }
