@@ -168,6 +168,7 @@ function handle(win: BrowserWindow, channel: string, fn: () => unknown): void {
 }
 
 void app.whenReady().then(() => {
+  log('ready') // with did-finish-load below, how far a launch whose window never came got (plan C9)
   mark?.('ready')
   // Chromium's hunspell (Linux, and Windows for languages it lacks) loads its dictionaries even with spellcheck off,
   // and downloads a missing one through a loader the network guard never sees. Point those downloads at our own
@@ -186,7 +187,12 @@ void app.whenReady().then(() => {
     const painted = new Promise<void>((ok) => (titlebarPainted = ok))
     void Promise.all([once(win, 'ready-to-show'), painted]).then(() => setTimeout(() => quitting || win.show(), showDelay))
   }
-  const loaded = new Promise<void>((ok) => win.webContents.once('did-finish-load', () => ok()))
+  const loaded = new Promise<void>((ok) =>
+    win.webContents.once('did-finish-load', () => {
+      log('did-finish-load')
+      ok()
+    })
+  )
   spawnCore(win, loaded) // in parallel with the page load (spec §2.1)
   const initial = launchPath()
   handle(win, 'launch-path', () => initial)
