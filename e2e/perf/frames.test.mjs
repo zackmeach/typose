@@ -39,9 +39,24 @@ test('a steady scroll at 164 Hz has no long frame and no stall, and nearly every
   assert.ok(r.frames > 50)
   assert.equal(r.cadence, 'pass')
   assert.equal(r.responsiveness, 'pass')
-  // Every input's first frame is a responsiveness sample: the next frame, at most one 6.1 ms refresh away.
+  // Every input is answered by the first frame after its rows paint: 4 ms after it, plus at most one 6.1 ms refresh.
   assert.equal(r.firstFrame.n, 101)
-  assert.ok(r.firstFrame.max <= 6.1)
+  assert.ok(r.firstFrame.max > 4 && r.firstFrame.max <= 10.1)
+})
+
+test('responsiveness times the answer, not the next frame: frames flow every refresh, the target paints 40 ms late', () => {
+  // A frame every 6 ms throughout; the input at 50 has its rows painted at 89, so the frame at 90 answers it.
+  const r = analyze(frames(6, 300, 6), input(50, 89))
+  assert.deepEqual(r.firstFrame, { n: 1, p50: 40, p95: 40, max: 40 })
+  assert.deepEqual(r.stalls, [])
+  assert.equal(r.responsiveness, 'pass')
+})
+
+test('an answer 60 ms after the input is a stall while frames flow every refresh', () => {
+  const r = analyze(frames(6, 300, 6), input(48, 107))
+  assert.deepEqual(r.firstFrame, { n: 1, p50: 60, p95: 60, max: 60 })
+  assert.deepEqual(r.stalls, [{ from: 48, to: 108, ms: 60, began: 48, first: true }])
+  assert.equal(r.responsiveness, 'fail')
 })
 
 test('a 30 ms hole in presentation during the scroll is one long frame and no stall', () => {
@@ -99,8 +114,8 @@ test('discrete keypresses each answered by one frame: cadence is not applicable,
   assert.equal(slow.responsiveness, 'fail')
 })
 
-test('a present reported by two slices (a forked frame and the next) is one frame, begun when the earlier began', () => {
-  // As seen on keypresses: the frame begun 5 ms before the key forks, and presents with the key's own frame at 13.
+test('a present reported by two slices (two frame sequences, one display frame) is one frame, begun when the earlier began', () => {
+  // As seen on keypresses: a slice begun 5 ms before the key and the key's own slice both end at the present at 13.
   const r = analyze(input(0, 1, 'x', 1, 'keydown'), frame(13, { began: -5 }), frame(13, { began: 8 }))
   assert.equal(r.frames, 0)
   assert.equal(r.cadence, 'n/a')
@@ -145,13 +160,20 @@ test('a target that never paints fails, and so does one painted after 1 s', () =
   assert.equal(late.responsiveness, 'fail')
 })
 
-test('an input that changes nothing owes no frame, unless its mark is over 50 ms late', () => {
-  const r = analyze(input(0, 2, 'k'), frame(5), input(100, 102, 'k'))
-  assert.equal(r.unchanged, 1)
+test('an input that changes nothing owes no frame: timed to its mark, apart from the latency figure', () => {
+  // The view is idle after it: the next present comes 500 ms later, which isn't the input's latency.
+  const r = analyze(input(0, 2, 'k'), frame(5), input(100, 102, 'k'), frame(600))
+  assert.deepEqual(r.unanswered, { n: 1, max: 2 })
+  assert.deepEqual(r.firstFrame, { n: 1, p50: 5, p95: 5, max: 5 })
   assert.deepEqual(r.neverPainted, [])
   assert.deepEqual(r.stalls, [])
+  assert.equal(r.responsiveness, 'pass')
+  // Its mark over 50 ms late is a stall, and fails responsiveness, still outside the latency figure.
   const late = analyze(input(0, 2, 'k'), frame(5), input(100, 170, 'k'))
+  assert.deepEqual(late.unanswered, { n: 1, max: 70 })
+  assert.equal(late.firstFrame.n, 1)
   assert.deepEqual(late.stalls, [{ from: 100, to: 170, ms: 70, began: 100, first: true }])
+  assert.equal(late.responsiveness, 'fail')
 })
 
 test('the input timestamp maps onto the trace clock through its dispatch mark', () => {

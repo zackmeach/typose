@@ -109,7 +109,7 @@ for (const a11y of ['on', 'off'] as const) {
     const keep = (name: string, r: Run) => {
       run = { name, r }
       const a = r.analysis
-      console.log(name, `a11y ${a11y}`, JSON.stringify({ hz, valid: a.valid, reason: a.reason, cadence: a.cadence, responsiveness: a.responsiveness, frames: a.frames, firstFrame: a.firstFrame, long: a.long, stalls: a.stalls, never: a.neverPainted?.length, busy: r.busy, raf: a.raf, load: r.load }))
+      console.log(name, `a11y ${a11y}`, JSON.stringify({ hz, valid: a.valid, reason: a.reason, cadence: a.cadence, responsiveness: a.responsiveness, frames: a.frames, firstFrame: a.firstFrame, unanswered: a.unanswered, long: a.long, stalls: a.stalls, never: a.neverPainted?.length, busy: r.busy, raf: a.raf, load: r.load }))
     }
 
     test.beforeEach(async () => {
@@ -150,7 +150,7 @@ for (const a11y of ['on', 'off'] as const) {
       const r = await traced(l, (page) => keypresses(page))
       keep('keys', r)
       valid(r)
-      expect(r.analysis.firstFrame.n).toBeGreaterThanOrEqual(21) // every key's first frame is judged on input to present
+      expect(r.analysis.firstFrame.n).toBeGreaterThanOrEqual(21) // every key is answered: input to the present showing its row
       expect(r.analysis.stalls).toEqual([])
       expect(r.analysis.neverPainted).toEqual([])
       expect(r.analysis.responsiveness).toBe('pass')

@@ -4,9 +4,10 @@
 //   slice per frame, from its BeginFrame to its presentation, with `frame_reporter.state` on the begin event. A frame
 //   counts as presented at its slice's end when its state is STATE_PRESENTED_ALL. STATE_PRESENTED_PARTIAL frames are
 //   compositor-only updates (a scrollbar thumb moving) shown while the main thread's update was still pending: they
-//   show stale rows, so they don't end a gap. These ends coincide with viz's Display::FrameDisplayed. A frame whose
-//   main-thread part was forked off (a STATE_DROPPED slice of type FORKED) presents with the next frame, and both
-//   slices end at that present's exact ts: one present is one frame, begun when its earliest slice began.
+//   show stale rows, so they don't end a gap. These ends coincide with viz's Display::FrameDisplayed. Two
+//   STATE_PRESENTED_ALL slices, for different frame_sequences, can end at the same ts; the earlier sequence often also
+//   has a FORKED slice. Why Chromium reports one present twice is unverified. One present is one frame, begun when its
+//   earliest slice began.
 // - TimeStamp (devtools.timeline): the renderer's console.timeStamp() marks from app/renderer/perf.ts:
 //   `typose:input <seq> <kind> <inputMs> <dispatchMs>` and `typose:painted <seq> <key>`, both in performance.now() ms.
 // - FireAnimationFrame (devtools.timeline): rAF callbacks, printed beside the judged figures and never judged.
@@ -56,10 +57,12 @@ const percentile = (values, p) => {
  * - Cadence: every presented frame after the first in a merged interval is judged on its gap from the presented frame
  *   before it: long at ≥ 16.7 ms, a stall over 50 ms. A run where no interval has a second frame (discrete keypresses,
  *   each answered by one frame) reports cadence as 'n/a', never as passed.
- * - Responsiveness: each demanding input's first presented frame is judged on input → present, a stall over 50 ms; the
- *   distribution is reported (`firstFrame`). An input whose target isn't painted within 1 s fails as never painted. An
- *   input that changes nothing on screen (its painted mark repeats the previous one) owes no frame: it's counted, and
- *   is a stall if its mark is over 50 ms late.
+ * - Responsiveness: each input that changes the view is answered by the first present after its target rows painted,
+ *   and judged on input → that present, a stall over 50 ms (plan §5's input latency, `inputToPaint`). The distribution
+ *   of these answered inputs is reported (`firstFrame`). The next present after an input isn't its answer: while frames
+ *   flow, it comes within a refresh whatever it shows. An input whose target isn't painted within 1 s fails as never
+ *   painted. An input that changes nothing on screen (its painted mark repeats the previous one) owes no frame: it's
+ *   timed to its mark and reported apart (`unanswered`), and is a stall if the mark is over 50 ms late.
  * - Each long frame and stall says when the work behind it began (`began`): a frame begun before a block can still
  *   present during it.
  * - A trace that can't be judged (no renderer frames, more than one renderer, no inputs, nothing demanded, a demanded
@@ -67,7 +70,7 @@ const percentile = (values, p) => {
  */
 export function analyzeFrames(events) {
   const ms = (us) => Math.round(us) / 1000
-  const none = { inputs: 0, unchanged: 0, demandedMs: 0, frames: 0, longFrames: 0, longShare: 0, long: [], stalls: [], neverPainted: [], inputToPaint: [], firstFrame: { n: 0 }, raf: { maxGapMs: 0 } }
+  const none = { inputs: 0, unanswered: { n: 0 }, demandedMs: 0, frames: 0, longFrames: 0, longShare: 0, long: [], stalls: [], neverPainted: [], inputToPaint: [], firstFrame: { n: 0 }, raf: { maxGapMs: 0 } }
   const invalid = (reason) => ({ ...none, valid: false, reason, cadence: 'invalid', responsiveness: 'invalid' })
   let presented
   try {
@@ -96,16 +99,16 @@ export function analyzeFrames(events) {
 
   const neverPainted = []
   const inputToPaint = []
-  const firstFrameMs = []
+  const unanswered = []
   const demanded = []
   const stalls = []
-  let unchanged = 0
   for (const input of inputs) {
     const i = painted.findIndex((p) => p.seq >= input.seq && p.ts >= input.dispatch)
     const mark = painted[i]
     if (mark && i > 0 && painted[i - 1].key === mark.key) {
-      unchanged++
+      // Changes nothing, so no frame answers it: timed to its mark, and kept out of the latency figure.
       const late = mark.ts - input.at
+      unanswered.push(ms(late))
       if (late > STALL_MS * 1000) stalls.push({ from: ms(input.at), to: ms(mark.ts), ms: ms(late), began: ms(input.at), first: true })
       continue
     }
@@ -114,12 +117,11 @@ export function analyzeFrames(events) {
       neverPainted.push({ seq: input.seq, kind: input.kind, at: ms(input.at) })
       continue
     }
-    inputToPaint.push({ seq: input.seq, kind: input.kind, ms: ms(settle - input.at) })
+    // Responsiveness: the input is answered by the first present after its target painted (plan §5's input latency).
+    const latency = settle - input.at
+    inputToPaint.push({ seq: input.seq, kind: input.kind, ms: ms(latency) })
     demanded.push([input.at, settle])
-    // Responsiveness: this input's first presented frame (the settle frame at the latest).
-    const first = frames.find((f) => f > input.at)
-    firstFrameMs.push(ms(first - input.at))
-    if (first - input.at > STALL_MS * 1000) stalls.push({ from: ms(input.at), to: ms(first), ms: ms(first - input.at), began: ms(input.at), first: true })
+    if (latency > STALL_MS * 1000) stalls.push({ from: ms(input.at), to: ms(settle), ms: ms(latency), began: ms(input.at), first: true })
   }
   if (demanded.length === 0 && neverPainted.length === 0) return invalid('nothing was demanded: every input changed nothing')
 
@@ -159,18 +161,19 @@ export function analyzeFrames(events) {
 
   const longShare = judged ? long.length / judged : 0
   const cadenceStalls = stalls.some((s) => !s.first)
+  const latencies = inputToPaint.map((p) => p.ms)
   return {
     valid: true,
     reason: undefined,
     inputs: inputs.length,
-    unchanged,
+    unanswered: { n: unanswered.length, max: unanswered.length ? Math.max(...unanswered) : undefined },
     demandedMs: ms(demandedUs),
     frames: judged,
     longFrames: long.length,
     longShare,
     long,
     cadence: judged === 0 ? 'n/a' : longShare <= 0.01 && !cadenceStalls ? 'pass' : 'fail',
-    firstFrame: { n: firstFrameMs.length, p50: percentile(firstFrameMs, 50), p95: percentile(firstFrameMs, 95), max: firstFrameMs.length ? Math.max(...firstFrameMs) : undefined },
+    firstFrame: { n: latencies.length, p50: percentile(latencies, 50), p95: percentile(latencies, 95), max: latencies.length ? Math.max(...latencies) : undefined },
     responsiveness: neverPainted.length === 0 && !stalls.some((s) => s.first) ? 'pass' : 'fail',
     stalls,
     neverPainted,
