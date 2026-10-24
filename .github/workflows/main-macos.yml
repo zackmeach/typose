@@ -1,16 +1,15 @@
-# macOS on merges to main only, while the repo is private (Z60). A red run is fixed in the next PR.
-# `workflow_dispatch` lets a macOS fix be checked on its branch before merge (`gh workflow run main-macos.yml --ref <branch>`).
-# Hardened as pr.yml is (plan PR 2): macOS minutes bill 10x, so caches, a docs-only skip, a time box, and bounded
-# evidence only on failure. Every merge keeps its own run, so a red one names its merge (Z60: fixed in the next PR).
+# macOS on main once a week, while the repo is private (Z60, made weekly by Z65: macOS minutes bill 10x). A red run is
+# fixed in the next PR. `workflow_dispatch` checks main after a macOS-sensitive merge, or a macOS fix on its branch before
+# merge (`gh workflow run main-macos.yml --ref <branch>`).
+# Hardened as pr.yml is (plan PR 2): caches, a time box, and bounded evidence only on failure.
 name: main-macos
 
 on:
-  push:
-    branches: [main]
-    paths-ignore: ['docs/**', '*.md'] # as pr.yml; for a push, GitHub judges only the pushed commits
+  schedule:
+    - cron: '0 6 * * 1' # Mondays 06:00 UTC, on the default branch
   workflow_dispatch:
-    # A dispatch can run only the e2e tests it names, so checking a macOS fix costs what those tests take. A push to
-    # main has no inputs, so it runs the whole suite.
+    # A dispatch can run only the e2e tests it names, so checking a macOS fix costs what those tests take. The weekly
+    # run has no inputs, so it runs the whole suite.
     inputs:
       grep:
         description: Run only the e2e tests whose title matches this regular expression (Playwright --grep)
@@ -21,11 +20,10 @@ on:
         required: false
         default: ''
 
-# A push to main gets a group of its own (its sha), so a later merge neither cancels it nor replaces it while it waits.
-# Manual runs on one branch share a group, and a newer one cancels the older.
+# Runs on one branch share a group, and a newer one cancels the older: only the latest state of a branch matters.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'push' }}
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
