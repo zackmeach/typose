@@ -150,6 +150,7 @@ export interface TyposeApi {
 export const STARTUP_MARKS = [
   'navigationStart',
   'bundleEvaluated',
+  'firstFrame',
   'titlebarPainted',
   'titlebarPresented',
   'shownPresented',

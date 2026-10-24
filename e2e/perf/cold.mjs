@@ -2,8 +2,9 @@
 // Each restart appends one `cold:startup` record (startup.perf.ts, COLD=1 RUNS=1), with the packaged build's sha256 and
 // the OS boot time; this reads a batch's records back.
 // - Shell visible < 200 ms on the PC, < 400 ms on the Mac.
-// - Raw's first screen, open→usable, < 150 ms on the PC, measured from the open request (plan §7: a cold launch has no
-//   first-frame mark to start Z64's clock); reported on the Mac, where §13.1 sets no cold value.
+// - Raw's first screen, open→usable, < 150 ms on the PC, measured from the open request, not from Z64's later start
+//   (plan §7, PR 10: an argv open comes before the page's first frame, so from there it would time one frame); reported
+//   on the Mac, where §13.1 sets no cold value.
 // - launch→firstContent: informational (the restored-content gate is M2).
 export const COLD_RUNS = 5
 // ponytail: two records are one boot when their boot times (now − uptime) are within a minute; no restart is that quick.

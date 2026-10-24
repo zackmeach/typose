@@ -2,7 +2,7 @@ import { createRoot } from 'react-dom/client'
 import type { TyposeApi } from '../shared/protocol'
 import { App, appHooks } from './App'
 import { CoreClient, testHooks } from './core'
-import { markBundleEvaluated, markPresentations } from './perf'
+import { markBundleEvaluated, markNow, markPresentations } from './perf'
 import './style.css'
 
 declare global {
@@ -14,8 +14,12 @@ declare global {
 markBundleEvaluated()
 markPresentations()
 // Z64: the page's own first frame, on the User Timing clock beside Z37's marks. Z37's first-screen clock starts no
-// earlier. Paint timing's first-paint isn't used: it comes with the window's first presentation, frames later.
-requestAnimationFrame(() => performance.mark('typose:first-frame'))
+// earlier. Paint timing's first-paint isn't used: it comes with the window's first presentation, frames later. The same
+// frame is a startup mark too (`firstFrame`, under main's TYPOSE_MARKS hook), so a launch without CDP can read it.
+requestAnimationFrame(() => {
+  performance.mark('typose:first-frame')
+  markNow('firstFrame')
+})
 const core = new CoreClient()
 // The test-hooks build's handle for the e2e tests (plan m8): the client, its hooks, and App's.
 if (__TEST_HOOKS__) Object.assign(window, { typoseTest: { core, client: testHooks, app: appHooks } })
