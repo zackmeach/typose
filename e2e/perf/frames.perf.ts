@@ -60,6 +60,17 @@ for (const a11y of ['on', 'off'] as const) {
      */
     const covers = (span: Span & { began: number }, busy: Span) => span.to >= busy.to && span.began <= busy.from
     const valid = (r: Run) => expect(r.analysis.valid, `invalid run: ${r.analysis.reason}`).toBe(true)
+    /**
+     * The scroll control's delivery precondition (the coordinator's ruling B, PR 9): a gesture the driver delivered
+     * thinly can't be judged. It needs ≥ 200 wheels, with every gap between consecutive wheel inputs under 60 ms (Chromium's
+     * gesture generator pauses for longer as the rig is loaded); otherwise the run is invalid, with the counts as its reason.
+     */
+    const delivered = (r: Run): Run => {
+      const { n, maxGapMs } = r.analysis.wheels
+      if (n >= 200 && maxGapMs < 60) return r
+      const reason = `the driver delivered ${n} wheels (needs ≥ 200), the largest gap between them ${maxGapMs} ms (needs < 60)`
+      return { ...r, analysis: { ...r.analysis, valid: false, reason, cadence: 'invalid', responsiveness: 'invalid' } as Run['analysis'] }
+    }
     const keep = (name: string, r: Run, extra?: Record<string, unknown>) => {
       run = { name, r, extra }
       const a = r.analysis
@@ -86,10 +97,12 @@ for (const a11y of ['on', 'off'] as const) {
     })
 
     test('control: a scroll with no injection has no stall and passes cadence and responsiveness', async () => {
-      const r = await traced(l, (_page, cdp) => scroll(cdp))
+      const r = delivered(await traced(l, (_page, cdp) => scroll(cdp)))
       keep('control', r)
       valid(r)
-      expect(r.analysis.frames).toBeGreaterThan(250) // the 2 s gesture is judged as one demanded interval
+      // Integrity (ruling B): the 2 s gesture is judged whole, as one demanded interval. Every present in it is judged
+      // but the first answer and at most one frame before it.
+      expect(r.analysis.frames, `${r.analysis.frames} judged of ${r.analysis.presents} presents`).toBeGreaterThanOrEqual(r.analysis.presents - 2)
       expect(r.analysis.stalls).toEqual([])
       expect(r.analysis.neverPainted).toEqual([])
       // Plan C8 as amended: a loaded rig can miss a real refresh (its slice is in the trace), so the control is held

@@ -385,6 +385,8 @@ async function framesRow(file: string, label: string, drive: Drive, a11y: string
       unanswered: a.unanswered,
       folded: a.folded,
       ownerUnpresented: a.ownerUnpresented,
+      // A folded pointerdown's press → the drag's answer, reported and not judged (ruling A).
+      foldedToPaint: a.foldedToPaint,
       stalls: a.stalls,
       neverPainted: a.neverPainted.length,
       long: a.long.slice(0, 10),

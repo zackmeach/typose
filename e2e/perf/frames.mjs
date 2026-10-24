@@ -95,7 +95,11 @@ const percentile = (values, p) => {
  * - A frame is demanded from an input until its answer. Demanded intervals that overlap merge, so a continuous gesture
  *   is one interval. Only an input that changes the view opens one: an input whose first mark is a later input's is
  *   folded into it (`folded`). It's timed to the answer of the mark it folded into and judged on responsiveness like
- *   any other, but it doesn't open or anchor an interval.
+ *   any other, but it doesn't open or anchor an interval. A folded pointerdown isn't judged: its press → the drag's
+ *   answer spans the driver's separate down and move round trips. Its latency is reported apart (`foldedToPaint`).
+ * - `presents` counts the presented frames inside the demanded intervals, from each interval's first input, and
+ *   `wheels` the wheel inputs and the largest gap between consecutive ones: a control can tell a gesture judged whole
+ *   from one the driver delivered thinly.
  * - Cadence: a merged interval's frames start at its first answer. Presents between an input and its answer are
  *   compositor or pipeline frames that can't carry the response, and the input's latency covers that span. Every
  *   present after the first answer is judged on its gap from the one before it: long at ≥ 16.7 ms, a stall over
@@ -113,7 +117,7 @@ const percentile = (values, p) => {
  */
 export function analyzeFrames(events) {
   const ms = (us) => Math.round(us) / 1000
-  const none = { inputs: 0, folded: 0, ownerUnpresented: 0, unanswered: { n: 0 }, demandedMs: 0, frames: 0, longFrames: 0, longShare: 0, long: [], stalls: [], neverPainted: [], inputToPaint: [], firstFrame: { n: 0 }, raf: { maxGapMs: 0 } }
+  const none = { inputs: 0, folded: 0, ownerUnpresented: 0, unanswered: { n: 0 }, demandedMs: 0, presents: 0, frames: 0, longFrames: 0, longShare: 0, long: [], stalls: [], neverPainted: [], inputToPaint: [], foldedToPaint: [], wheels: { n: 0, maxGapMs: 0 }, firstFrame: { n: 0 }, raf: { maxGapMs: 0 } }
   const invalid = (reason) => ({ ...none, valid: false, reason, cadence: 'invalid', responsiveness: 'invalid' })
   let slices
   try {
@@ -160,6 +164,7 @@ export function analyzeFrames(events) {
 
   const neverPainted = []
   const inputToPaint = []
+  const foldedToPaint = []
   const unanswered = []
   const demanded = []
   const stalls = []
@@ -192,13 +197,21 @@ export function analyzeFrames(events) {
     }
     // Responsiveness: the input is answered by the frame that owns its paint (plan §5's input latency).
     const latency = settle - input.at
-    inputToPaint.push({ seq: input.seq, kind: input.kind, ms: ms(latency) })
-    if (latency > STALL_MS * 1000) stalls.push({ from: ms(input.at), to: ms(settle), ms: ms(latency), began: ms(input.at), first: true })
     // Only an input that changes the view opens a demanded interval (the coordinator's rulings, PR 9). One whose first
     // mark is a later input's (a scrollbar pointerdown before the drag's scroll, Control before End, two keydowns painted
-    // in one frame) is folded into it: judged on the same answer above, but it doesn't open or anchor an interval.
-    if (mark.seq === input.seq) demanded.push([input.at, settle])
-    else folded++
+    // in one frame) is folded into it: judged on the same answer, but it doesn't open or anchor an interval. A folded
+    // pointerdown isn't judged either (ruling A, round 6): press → the drag's answer includes the driver's separate
+    // mouse down and move round trips, so it's reported apart. The mark doesn't carry a keydown's key, so a folded
+    // Control is still judged.
+    if (mark.seq !== input.seq) {
+      folded++
+      if (input.kind === 'pointerdown') {
+        foldedToPaint.push({ seq: input.seq, kind: input.kind, ms: ms(latency) })
+        continue
+      }
+    } else demanded.push([input.at, settle])
+    inputToPaint.push({ seq: input.seq, kind: input.kind, ms: ms(latency) })
+    if (latency > STALL_MS * 1000) stalls.push({ from: ms(input.at), to: ms(settle), ms: ms(latency), began: ms(input.at), first: true })
   }
   if (demanded.length === 0 && neverPainted.length === 0) return invalid('nothing was demanded: every input changed nothing')
 
@@ -216,10 +229,12 @@ export function analyzeFrames(events) {
 
   // Cadence: each present after a merged interval's first answer, on its gap from the one before it.
   let judged = 0
+  let presents = 0
   const long = []
   let demandedUs = 0
   for (const [a, s, first] of merged) {
     demandedUs += s - a
+    presents += presented.filter((f) => f.at >= a && f.at <= s).length
     const inside = presented.filter((f) => f.at >= first && f.at <= s)
     if (inside.length === 0) return invalid(`the demanded interval ${ms(a)}..${ms(s)} ms has no presented frame`)
     for (let k = 1; k < inside.length; k++) {
@@ -242,6 +257,8 @@ export function analyzeFrames(events) {
   const longShare = judged ? long.length / judged : 0
   const cadenceStalls = stalls.some((s) => !s.first)
   const latencies = inputToPaint.map((p) => p.ms)
+  const wheelAts = inputs.filter((x) => x.kind === 'wheel').map((x) => x.at).sort((x, y) => x - y)
+  const wheelGap = wheelAts.slice(1).reduce((max, t, k) => Math.max(max, t - wheelAts[k]), 0)
   return {
     valid: true,
     reason: undefined,
@@ -250,6 +267,7 @@ export function analyzeFrames(events) {
     ownerUnpresented,
     unanswered: { n: unanswered.length, max: unanswered.length ? Math.max(...unanswered) : undefined },
     demandedMs: ms(demandedUs),
+    presents,
     frames: judged,
     longFrames: long.length,
     longShare,
@@ -260,6 +278,8 @@ export function analyzeFrames(events) {
     stalls,
     neverPainted,
     inputToPaint,
+    foldedToPaint,
+    wheels: { n: wheelAts.length, maxGapMs: ms(wheelGap) },
     raf: { maxGapMs: ms(rafMax) }
   }
 }

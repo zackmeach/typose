@@ -191,13 +191,24 @@ test("a pointerdown folded into the drag's scroll doesn't anchor the interval: t
   assert.equal(r.frames, 0)
   assert.deepEqual(r.long, [])
   assert.equal(r.cadence, 'n/a')
-  // Both are judged on responsiveness, on the rows' frame (the coordinator's round-5 ruling): the pointerdown 40 ms,
-  // the scroll 33 ms.
-  assert.deepEqual(r.inputToPaint.map((p) => [p.kind, p.ms]), [['pointerdown', 40], ['scroll', 33]])
+  // The scroll is judged on the rows' frame (33 ms). The pointerdown isn't (the coordinator's ruling A, round 6): its
+  // 40 ms to the same frame is reported apart.
+  assert.deepEqual(r.inputToPaint.map((p) => [p.kind, p.ms]), [['scroll', 33]])
+  assert.deepEqual(r.foldedToPaint.map((p) => [p.kind, p.ms]), [['pointerdown', 40]])
   assert.equal(r.unanswered.n, 0)
-  // Control before End (Ctrl+End) folds the same way, and a discrete keypress stays n/a.
+  // Control before End (Ctrl+End) folds the same way, and a discrete keypress stays n/a. The mark doesn't carry the
+  // key, so the folded Control is still judged.
   const key = analyze(input(100, null, 'y', 1, 'keydown'), input(101, 104, 'end', 1, 'keydown'), frame(108, { began: 102 }))
   assert.deepEqual([key.folded, key.frames, key.cadence], [1, 0, 'n/a'])
+  assert.deepEqual(key.inputToPaint.map((p) => [p.kind, p.ms]), [['keydown', 8], ['keydown', 7]])
+})
+
+test('a folded pointerdown at 52 ms is reported apart, not judged: its drag, answered at 46, passes', () => {
+  // As on the 1 GiB jump with accessibility off: the press at 0, the drag's scroll at 6, painted in frame 61 at 52.
+  const r = analyze(input(0, null, 'x', 0.5, 'pointerdown'), input(6, 40, 'k', 0.5, 'scroll', { owner: 61 }), frame(52, { began: 30, seq: 61 }))
+  assert.deepEqual(r.inputToPaint.map((p) => [p.kind, p.ms]), [['scroll', 46]])
+  assert.deepEqual(r.foldedToPaint.map((p) => [p.kind, p.ms]), [['pointerdown', 52]])
+  assert.deepEqual([r.folded, r.stalls, r.responsiveness, r.cadence], [1, [], 'pass', 'n/a'])
 })
 
 test('the answer is the frame that owns the paint: a keypress answered by its own frame, begun before the paint', () => {
@@ -220,7 +231,8 @@ test('the first jump after launch is answered by its paint\'s frame, and the com
     frame(19.8, { began: 12.6, seq: 150, state: 'STATE_DROPPED' }),
     frame(44.0, { began: 12.6, seq: 150 })
   )
-  assert.deepEqual(r.inputToPaint.map((p) => [p.kind, p.ms]), [['pointerdown', 44], ['scroll', 36.2]])
+  assert.deepEqual(r.inputToPaint.map((p) => [p.kind, p.ms]), [['scroll', 36.2]])
+  assert.deepEqual(r.foldedToPaint.map((p) => [p.kind, p.ms]), [['pointerdown', 44]])
   assert.deepEqual([r.folded, r.frames, r.cadence, r.ownerUnpresented], [1, 0, 'n/a', 0])
   assert.deepEqual(r.long, [])
 })
