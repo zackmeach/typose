@@ -73,6 +73,10 @@ The packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`) holds
 | Z62 | **The 16.7 ms / ≥ 99% frame gate (§10.2, plan §5, OQ-6) judges cadence: every presented frame after the first in a demanded interval.** The first frame after an input is judged by responsiveness: the 50 ms stall rule and plan §5's 50 ms input-latency gate. A run whose demands each produce one frame (discrete keypresses) reports the frame gate as not applicable, never as passed. |
 | Z63 | **Change detection checks the path's size, modified time and file identity after every lazy read, against the identity taken at open (it was before and after).** Reads go through the handle opened at open, so any change before or during a read fails the after-check and freezes the document. The before-check only narrowed a change-then-revert window on a chunk's first read, which §3.1's content verification already concedes metadata can't close. Measured 64 KiB fetch p95 at the napi layer: before and after 2.91–3.03 ms; after only 2.52–2.55 ms. (2026-10-23; §3.1, brief §7.9) |
 | Z64 | **In tests, Z37's first-screen clock starts at the later of the open and the page's first frame.** A lens that waits for the line's end still fails; a page that can't paint yet is a startup problem the Z59 gates measure, not the lens's. |
+| Z65 | **Close M1 lean, then a lens.** M1 closes with its remaining gaps recorded, not chased, and the process gets leaner:<br>• one review round per PR, except for security and memory;<br>• Sonnet for mechanical work;<br>• no further measuring work;<br>• macOS CI weekly. (2026-10-24; §11.2, §13.2) |
+| Z66 | **Raw lines wrap at 2,048 UTF-16 units into ↪ continuation rows** (plan PR 6b). This is a deliberate deviation from brief §5.1 for lines of 2,049–10,000 units. (2026-10-24; brief §5.1) |
+| Z67 | **The PC's shell-visible cold budget is < 400ms, provisional.**<br>• Z29's half-budget rule doesn't apply to this row: the GPU process's start (driver device creation, measured at 175–196ms per process in M1's PR 10 review) doesn't scale with CPU.<br>• It's measured with an existing profile, on an unlocked, displayed session (an addition to Z49).<br>• The final number is set after a real cold batch of OS restarts [Z54].<br>Amends Z54's < 200ms PC target. (2026-10-24; §10.2, §10.3) |
+| Z68 | **The first formatted lens is rendered Markdown,** built end to end before M2. (2026-10-24; §13.2) |
 
 ---
 
@@ -541,7 +545,7 @@ Nothing can expose DOM that doesn't exist (§14, D5). The design:
 ### 10.2 Budgets and where they're gated [Z29]
 | Budget (brief §8.1, as revised in §14) | Zack's PC (half budget) | Apple-silicon Mac (full budget) |
 |---|---|---|
-| Shell visible, cold | < 200ms | < 400ms |
+| Shell visible, cold [Z67] | < 400ms, provisional | < 400ms |
 | First restored lens content | < 500ms | < 1s |
 | First screen, fixture set ≤ 100MB, ready lens | < 50ms | < 100ms |
 | First screen, 1GiB/10GiB JSONL (Raw, Rows), warm cache | < 50ms | < 100ms |
@@ -553,7 +557,7 @@ Nothing can expose DOM that doesn't exist (§14, D5). The design:
 | Rendered on a 1GiB Markdown file (background index; Raw is immediate) | ~20s, informational [Z30] | informational |
 
 - **"First screen" in Raw** is the first bounded piece visible and usable, with continuation available while scanning proceeds [Z37]. On a file whose first line is huge, it doesn't wait for the line's end. Full-line scan completion is measured and reported separately.
-- **"Cold":** the first launch after an OS restart (n=5).
+- **"Cold":** the first launch after an OS restart (n=5). Shell visible is measured with an existing profile, on an unlocked, displayed session [Z67].
 - **"Warm":** n=30, reporting p50 and p95.
 - **Memory:** OS-appropriate metrics are reported separately (private bytes, RSS, PSS) and summed across all processes.
 
@@ -562,7 +566,7 @@ Nothing can expose DOM that doesn't exist (§14, D5). The design:
 - **Frame timing:** from Chromium tracing during scripted scrolls.
 - **Regression gate:** the harness runs on Zack's PC before each milestone closes. CI only runs a smoke version, because CI machines are too noisy to gate on.
 - **Qualification runs** [Z49]:
-  - Run on a quiet machine: no other heavy work or agent lanes, the CPU under 10% for a minute before each timing run, load recorded during it, and Defender on.
+  - Run on a quiet machine: no other heavy work or agent lanes, the CPU under 10% for a minute before each timing run, load recorded during it, and Defender on. The session is unlocked and displayed [Z67].
   - Automated warm runs, the cold-restart batch and manual checks are separate batches.
   - Every failed or invalid run is kept with its reason, never replaced by a clean rerun in the report.
 
@@ -703,7 +707,7 @@ Sequence [Z38, amended by Z39 and Z53]:
 ### 13.2 Milestones (each one is a sequence of PRs; the implementation plan details M1 first)
 | # | Milestone | Exit criterion |
 |---|---|---|
-| M1 | **Walking skeleton.** Repo, CI, security baseline (§7), core host + protocol, byte store and generations, the Raw lens on the virtualizer, title bars on Windows and macOS, single instance and CLI. | Open a 10GiB file into Raw within the §10.2 budgets, on an unsigned dev build (signing starts at M7, §15). Z34's aggregate accounting and enforcement, with a deterministic multi-document budget-exhaustion test [Z47]. Cold startup measured on the M1 app and within its targets [Z54, Z59]. No corresponding unexplained exit in the M1 baseline [Z56]. M1 stays open while Mac acceptance is pending [Z58] |
+| M1 | **Walking skeleton.** Repo, CI, security baseline (§7), core host + protocol, byte store and generations, the Raw lens on the virtualizer, title bars on Windows and macOS, single instance and CLI. | Open a 10GiB file into Raw within the §10.2 budgets, on an unsigned dev build (signing starts at M7, §15). Z34's aggregate accounting and enforcement, with a deterministic multi-document budget-exhaustion test [Z47]. Cold startup measured on the M1 app and within its targets [Z54, Z59, Z67]. No corresponding unexplained exit in the M1 baseline [Z56]. M1 stays open while Mac acceptance is pending [Z58] |
 | M2 | **Workspace.** Sidebar roots, pills, cards and splits, session restore, quick open, the command palette and command table, settings + `config.toml` + themes, the empty state. | Brief §3, §4.1–4.3, §7.8 and §7.10, verified against the canvas boards |
 | M3 | **Data lenses.** Grid, Rows, Table, JSON and YAML Tree, ⓘ and problems. | Brief §5.3–5.5 and §7.6–7.7; the Spike C gates as regression tests; the Grid's Shift+Space/Ctrl+Space selection [Z40], Rows' Shift+Space selection [Z51] and the "First row is header" override [Z48] |
 | M4 | **Markdown and links.** Rendered, callouts, Mermaid, KaTeX and Shiki, link resolution, the peek, hand-off. | Brief §4.4–4.6 and §5.2; the hostile-fixture network check; `data:` images within their caps, with refusals and zero network effects [Z43] |
