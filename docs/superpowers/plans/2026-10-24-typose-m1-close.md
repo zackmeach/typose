@@ -1,6 +1,6 @@
 # Typose M1 · Close summary
 
-**Status:** M1's code is complete once [PR #17](https://github.com/zackmeach/typose/pull/17) (plan PR 6b, Raw rows ≤ 2,048 UTF-16 units, Z66) merges. Closure follows [Z65](docs/superpowers/specs/2026-10-20-typose-tech-design.md): record what is still open, don't chase it in M1, then start the first formatted lens (Z68).
+**Status:** M1's code is complete once [PR #17](https://github.com/zackmeach/typose/pull/17) (plan PR 6b, Raw rows ≤ 2,048 UTF-16 units, Z66) merges. Closure follows [Z65](../specs/2026-10-20-typose-tech-design.md): record what is still open, don't chase it in M1, then start the first formatted lens (Z68).
 
 **Implements:** spec §13.2's M1 row; M1 plan §3 "M1 close · Qualification run".
 
