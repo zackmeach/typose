@@ -838,6 +838,38 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 - "Empty file (0 bytes, or only whitespace)" is judged on the first chunk, so only for files up to 1 MiB. A bigger whitespace-only file shows its blank lines, since telling would take a full scan.
 - Every freeze shows brief §7.9's "Changed on disk · Reload (Ctrl+R)" banner, with the reason in its tooltip. That includes an I/O error, which C6 freezes on too.
 
+**PR 9's amendments (the runner's mechanisms and test details; no Z-decision, 🔒 requirement or gate threshold changes; the evidence is in PR 9's description):**
+- **The warm first-screen rows open by argv, one launch per sample: 30 after one warm-up launch that isn't kept.** Spike A opened in a window that was already up (`spike/a spikes/app/perf/spike-a.e2e.ts:47-51`). *Why:* M1 has no in-app open a test driver can reach.
+  - The preload's API is frozen and non-configurable (contextBridge; read back over CDP), so it can't be stubbed.
+  - Open file… shows the native dialog. PR 8's second-instance open will be an in-app path.
+  - An argv open comes before the page's first frame: 91–179 ms before it, over PR 9's 300 first-screen runs. Z64's clock start (the later of the two) decides the judged figure, and the time from the open itself is recorded beside it.
+- **On the huge-first file, a run whose scan ends inside the budget from the clock's start isn't judged on order and doesn't fail the row.** That's the exemption plan A's veto keeps (packet:476-478). PR 4's ruling (a run that isn't judged fails on Windows and macOS) stays the 1 GiB line's: that fixture exists to be decisive.
+  - *Why:* the 200 MiB record's scan took 42.9 ms from the open (p50; p95 51.1, max 58.5), under the budget at the median even from the open. With argv opens, it ended 59.7–98.6 ms before the page's first frame in all 30 runs. So the order is never observable there.
+  - The row rests on the budget, the small records following, and no item over 64 KiB.
+  - Growing the record until the scan outlasts the first frame by 50 ms would take about 1 GiB at this PC's scan rate, which is the 1 GiB line's case again.
+- **The 64 KiB fetch is timed on the app's own core port.** The runner takes the port and the document from the app's next page request over CDP, by patching `MessagePort.prototype.postMessage` as PR 3's suppression control does. Then it times 300 random 327-line pages on the port, renderer to core host and back. *Why:* the renderer's `CoreClient` is private, and a hook would be product code for what CDP already reaches.
+- **Line index throughput is decimal bytes over `typose:open-start` → `typose:index-done`, from the 30 first-screen runs on the 10 GiB file, judged at the p95 time.** *Why:* the core reports no elapsed time, and the renderer's marks bracket it. The span includes the open's round trip, so it under-reads the index's rate.
+- **Scrolling while indexing is two cases, each in its own launch: a 2 s wheel gesture, and PR 3's 21 discrete keys.**
+  - A run whose index was done before its drive began is invalid ("not while indexing"). A drive that outlasts the index is judged whole, with its overlap recorded.
+  - Input latency while indexing is every answered input of both cases, judged by C8's responsiveness: each under 50 ms, and every target painted.
+  - *Why:* the 10 GiB index took 2.1–2.5 s here, which doesn't hold both drives after the trace's 500 ms lead-in. Each drive overlapped the index for its first 1.35–1.69 s.
+- **A frames run with an input its drive didn't send is invalid, with the inputs named.** *Why:* the runs take focus on a PC its owner may be using. `Control+End` is two keydowns, Control's and End's.
+- **A launch that doesn't quit cleanly fails its test, and never invalidates its run** (plan §5's exit integrity, OQ-3).
+- **Plan §5's cold first screen is judged from the open request.** *Why:* a cold launch passes no debugging switch, and the TYPOSE_MARKS hook carries no first-frame mark, so Z64's later clock start can't be read there.
+  - That's stricter than Z64. With the page's first frame 91–179 ms after an argv open, it charges startup to the lens.
+  - Reading Z64's start needs a first-frame startup mark in the renderer. That's a product change, left to the startup remediation (PR 10+).
+
+**Found in PR 9, carried (instrument and owner questions; no product change in PR 9):**
+- **While a logical-mode document indexes, Raw's own re-applied scroll position is marked as input.**
+  - As the total grows, `VirtualList.setRowCount` re-applies the logical top, which moves `scrollTop`, and Raw marks every `scroll` event (`raw.ts`). Those marks demand frames, and their answers are timed as inputs.
+  - A scrollbar jump or Ctrl+End came with 6 `scroll` marks on the indexing 10 GiB file, against 1 on the indexed 1 GiB file.
+  - The fix belongs in the renderer: don't mark a scroll the list applied itself. Until then, the while-indexing frames rows include those marks, and each run lists its slow answers by kind.
+- **Open-then-scroll, with the open argv's, measures startup.**
+  - C8 starts its interval at the open request. That comes 111–144 ms before the page's first frame, so the open was answered 185–297 ms after its request in all 12 runs. Z64 moves Z37's first-screen clock for the same reason, but C8's open interval has no such rule.
+  - Zack decides whether Z64's start applies to the open's answer, or whether open-then-scroll waits for an in-app open (PR 8). Until then it's measured as written.
+  - The scroll right after it stalls too, which a different start wouldn't excuse: its slowest answer was 73–94 ms in each run.
+- **The 1 GiB line wasn't decisive in 1 of 30 argv runs, so its row fails under PR 4's ruling.** The page's first frame came 170.7 ms after the open and the scan's end at 211.8 ms, 41.0 ms from the clock's start. The ruling says the fixture must grow. Plan §5 names the 1 GiB line, so the size is the coordinator's or Zack's call. An in-app open (PR 8) takes the first frame out of the clock: the scan's end came 211.8–249.1 ms after the open.
+
 **Implementer proposals Zack may veto (one place):**
 1. **Memory-refused open state** (C1), shown in the card: "Can't open `<file>` · Typose's memory budget is full. Close a file, then Retry." Brief §7.9 has no such state yet.
 2. **After a second core death within 60 s,** Reopen respawns the core once 60 s have passed (C7).
