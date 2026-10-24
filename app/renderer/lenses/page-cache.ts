@@ -8,9 +8,9 @@ export const WRAP = 2048
 
 /**
  * What a mounted row's layout costs per UTF-16 unit it shows, once garbage is collected: the DOM's copy of its text, its
- * layout and paint. Measured on rows of 2,048 units (plan §7, PR 6b): 20 bytes for ASCII, 137 for CJK, 148 for Arabic,
- * 247 for emoji, 262 for Devanagari; PR 6's review measured ≤ 143 for Tibetan, Zalgo, harakat and Thai. 320 leaves a
- * fifth over the worst.
+ * layout and paint. Measured as the slope between rows laying out 512 and 4,096 units (plan §7, PR 6b): 20 bytes for
+ * ASCII, 137 for CJK, 148 for Arabic, 247 for emoji, 262 for Devanagari; PR 6's review measured ≤ 143 for Tibetan,
+ * Zalgo, harakat and Thai. 320 leaves a fifth over the worst.
  */
 export const LAYOUT_PER_UNIT = 320
 

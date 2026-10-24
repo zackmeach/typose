@@ -88,6 +88,8 @@ test('no mounted item holds more than 64 KiB of text, and a long line ends at a 
   const rows = await win.locator('.vl-row[data-line="0"] .text').allTextContents()
   expect(rows.map((t) => t.length)).toEqual([...Array(10).fill(2048), 21_845 - 10 * 2048])
   expect(rows.join('')).toBe('語'.repeat(21_845))
+  // Each row but the piece's last ends in ↪, which assistive tech skips.
+  await expect(win.locator('.vl-row[data-line="0"] .more[aria-hidden="true"]')).toHaveText(Array(10).fill('↪'))
   await expect(win.getByRole('button', { name: 'Show more of line 1' })).toHaveCount(1) // on the piece's last row
   await finish(l)
 })
