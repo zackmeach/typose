@@ -16,7 +16,7 @@ const frame = (t, { state = 'STATE_PRESENTED_ALL', pid = 1, began = t - 6, seq =
     { name: 'PipelineReporter', ph: 'e', pid, id2, ts: t * 1000 }
   ]
 }
-const stamp = (t, message) => ({ name: 'TimeStamp', ts: t * 1000, args: { data: { message } } })
+const stamp = (t, message) => ({ name: 'TimeStamp', pid: 1, ts: t * 1000, args: { data: { message } } })
 /** The main thread's AnimationFrame for frame `seq`, from `from` to `to`: a paint mark inside it is that frame's. */
 const animationFrame = (from, to, seq) => {
   const id2 = { local: `0x${(++ids).toString(16)}` }
@@ -191,9 +191,10 @@ test("a pointerdown folded into the drag's scroll doesn't anchor the interval: t
   assert.equal(r.frames, 0)
   assert.deepEqual(r.long, [])
   assert.equal(r.cadence, 'n/a')
-  // The scroll is judged on its answer (33 ms); the pointerdown is timed to the scroll's mark (21 ms) and reported apart.
-  assert.deepEqual(r.inputToPaint.map((p) => [p.kind, p.ms]), [['scroll', 33]])
-  assert.deepEqual(r.unanswered, { n: 1, max: 21 })
+  // Both are judged on responsiveness, on the rows' frame (the coordinator's round-5 ruling): the pointerdown 40 ms,
+  // the scroll 33 ms.
+  assert.deepEqual(r.inputToPaint.map((p) => [p.kind, p.ms]), [['pointerdown', 40], ['scroll', 33]])
+  assert.equal(r.unanswered.n, 0)
   // Control before End (Ctrl+End) folds the same way, and a discrete keypress stays n/a.
   const key = analyze(input(100, null, 'y', 1, 'keydown'), input(101, 104, 'end', 1, 'keydown'), frame(108, { began: 102 }))
   assert.deepEqual([key.folded, key.frames, key.cadence], [1, 0, 'n/a'])
@@ -219,8 +220,7 @@ test('the first jump after launch is answered by its paint\'s frame, and the com
     frame(19.8, { began: 12.6, seq: 150, state: 'STATE_DROPPED' }),
     frame(44.0, { began: 12.6, seq: 150 })
   )
-  assert.deepEqual(r.inputToPaint.map((p) => [p.kind, p.ms]), [['scroll', 36.2]])
-  assert.deepEqual(r.unanswered, { n: 1, max: 19.8 })
+  assert.deepEqual(r.inputToPaint.map((p) => [p.kind, p.ms]), [['pointerdown', 44], ['scroll', 36.2]])
   assert.deepEqual([r.folded, r.frames, r.cadence, r.ownerUnpresented], [1, 0, 'n/a', 0])
   assert.deepEqual(r.long, [])
 })
@@ -234,8 +234,72 @@ test("a frame that never presents: the next presented frame carries the change, 
 test('a paint mark with no AnimationFrame around it makes the run invalid: its answer is never guessed', () => {
   const r = analyze(input(0, 3, 'k', 1, 'wheel', { owner: null }), frame(6), frame(12))
   assert.equal(r.valid, false)
-  assert.match(r.reason, /^no AnimationFrame around input \d+'s paint mark/)
+  assert.match(r.reason, /^input \d+: no AnimationFrame around the paint mark at 3 ms/)
   assert.deepEqual([r.cadence, r.responsiveness], ['invalid', 'invalid'])
+})
+
+test("a run is invalid when its answer's linkage is wrong: another process's AnimationFrame, or an answer before the mark", () => {
+  // The reviewer's P1b: an AnimationFrame of a second renderer (pid 2) is the one around the mark.
+  const foreign = analyze(renderer(2), input(0, 20, 'k', 1, 'wheel', { owner: 50 }), animationFrame(19.8, 20.05, 40).map((e) => ({ ...e, pid: 2 })), frame(-30, { seq: 40 }), frame(30, { seq: 50 }))
+  assert.equal(foreign.valid, false)
+  assert.match(foreign.reason, /^input \d+: the AnimationFrame around the paint mark at 20 ms is another process's \(pid 2, the mark's 1\)/)
+  // P1c: the owning frame presented 900 ms before the mark.
+  const early = analyze(input(0, 20, 'k', 1, 'wheel', { owner: 50 }), frame(-890, { began: -900, seq: 50 }), frame(30, { seq: 51 }))
+  assert.equal(early.valid, false)
+  assert.match(early.reason, /^input \d+: frame 50, around the paint mark at 20 ms, presented before it, at -890 ms/)
+})
+
+test('an owning frame with no update to present answers nothing: the input changed nothing on screen', () => {
+  // The reviewer's P5, a scrollbar jump while indexing: the pointerdown's own mark has the top view with a grown row
+  // count, so its key changed, but its frame (100) had no update. The progress line's frame (101) presents at 8, and the
+  // drag's scroll at 6 paints in frame 102, presented at 52.
+  const jump = (progress) =>
+    analyze(
+      stamp(-30, 'typose:painted 0 0,0,1000'),
+      input(0, 1, '0,0,1500', 0.5, 'pointerdown', { owner: 100 }),
+      input(progress ? 6 : 8, 45, '5000,0,1500', 0.5, 'scroll', { owner: 102 }),
+      frame(-5, { began: -20, seq: 99 }),
+      frame(3, { began: -2, seq: 100, state: 'STATE_NO_UPDATE_DESIRED' }),
+      progress ? frame(8, { began: 2, seq: 101 }) : [],
+      frame(progress ? 52 : 51, { began: 38, seq: 102 })
+    )
+  const r = jump(true)
+  assert.deepEqual(r.unanswered, { n: 1, max: 1 })
+  assert.deepEqual(r.inputToPaint.map((p) => [p.kind, p.ms]), [['scroll', 46]])
+  assert.deepEqual([r.frames, r.cadence, r.responsiveness, r.ownerUnpresented], [0, 'n/a', 'pass', 0])
+  // P5b: with nothing presented before the drag's frame (51), the fallback would answer the pointerdown 51 ms after it.
+  const b = jump(false)
+  assert.deepEqual(b.inputToPaint.map((p) => [p.kind, p.ms]), [['scroll', 43]])
+  assert.deepEqual([b.cadence, b.responsiveness], ['n/a', 'pass'])
+  // A dropped owner still falls back to the next presented frame.
+  const dropped = analyze(input(0, 3, 'k', 1, 'wheel', { owner: 301 }), frame(8, { began: 2, seq: 301, state: 'STATE_DROPPED' }), frame(14, { began: 8, seq: 302 }))
+  assert.deepEqual([dropped.firstFrame.max, dropped.ownerUnpresented], [14, 1])
+})
+
+test('a folded input is judged on the answer of the mark it folded into, and still opens no interval', () => {
+  // The reviewer's P3k: two keydowns (key repeat) painted in one frame after a 40 ms block. The first has no mark of its
+  // own; frame 70, which owns the second's paint, presents at 57: the first keydown waited 57 ms.
+  const keys = analyze(
+    stamp(-50, 'typose:painted 0 0,0,9'),
+    input(0, null, 'x', 40, 'keydown'),
+    input(30, 44, '40,0,9', 10.5, 'keydown', { owner: 70 }),
+    frame(-6, { began: -20, seq: 69 }),
+    frame(57, { began: 39, seq: 70 })
+  )
+  assert.deepEqual(keys.inputToPaint.map((p) => [p.kind, p.ms]), [['keydown', 57], ['keydown', 27]])
+  assert.deepEqual(keys.stalls.map((s) => `${s.ms}${s.first ? 'r' : 'c'}`), ['57r'])
+  assert.deepEqual([keys.folded, keys.frames, keys.cadence, keys.responsiveness], [1, 0, 'n/a', 'fail'])
+  // Right after an in-app open, a wheel's first mark can be the native scroll's: the wheel is timed to its answer too.
+  const open = analyze(
+    stamp(-10, 'typose:painted 0 none'),
+    input(0, 30, 'opened', 1, 'open', { owner: 10 }),
+    input(45, null, 'x', 1, 'wheel'),
+    input(47, 52, 'scrolled', 1, 'scroll', { owner: 12 }),
+    frame(40, { began: 25, seq: 10 }),
+    frame(58, { began: 50, seq: 12 })
+  )
+  assert.deepEqual(open.inputToPaint.map((p) => [p.kind, p.ms]), [['open', 40], ['wheel', 13], ['scroll', 11]])
+  assert.equal(open.folded, 1)
 })
 
 test("the baseline mark: a first input whose mark repeats it changes nothing, and doesn't open an interval", () => {

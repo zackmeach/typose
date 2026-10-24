@@ -23,25 +23,31 @@ const NEVER_MS = 1000
 
 const rendererPids = (events) => new Set(events.filter((e) => e.ph === 'M' && e.name === 'process_name' && e.args?.name === 'Renderer').map((e) => e.pid))
 
-/** The renderer's fully presented frames (trace µs), one per present: when it was presented, its earliest begin, and
- *  the frames (sequence and source) it presents. */
-export function presentedFrames(events) {
+/** The renderer's PipelineReporter slices (trace µs), one per frame report: its state, the frame (sequence and source),
+ *  when it began, and when it ended. */
+function reporterSlices(events) {
   const renderers = rendererPids(events)
   const reporters = events.filter((e) => e.name === 'PipelineReporter' && renderers.has(e.pid)).sort((a, b) => a.ts - b.ts)
   const pids = new Set(reporters.map((e) => e.pid))
   if (pids.size !== 1) throw new Error(`expected one renderer reporting frames, found ${pids.size}`)
   const open = new Map()
-  const frames = []
+  const slices = []
   for (const e of reporters) {
     const key = e.id2?.local ?? e.id
     const r = e.args?.frame_reporter
-    if (e.ph === 'b') open.set(key, { state: r?.state, began: e.ts, seq: { seq: r?.frame_sequence, source: r?.frame_source } })
+    if (e.ph === 'b') open.set(key, { state: r?.state, began: e.ts, seq: r?.frame_sequence, source: r?.frame_source })
     else if (e.ph === 'e' && open.has(key)) {
-      const { state, began, seq } = open.get(key)
-      if (state === 'STATE_PRESENTED_ALL') frames.push({ at: e.ts, began, seqs: [seq] })
+      slices.push({ ...open.get(key), at: e.ts })
       open.delete(key)
     }
   }
+  return slices
+}
+
+/** The renderer's fully presented frames (trace µs), one per present: when it was presented, its earliest begin, and
+ *  the frames (sequence and source) it presents. */
+export function presentedFrames(events, slices = reporterSlices(events)) {
+  const frames = slices.filter((s) => s.state === 'STATE_PRESENTED_ALL').map(({ at, began, seq, source }) => ({ at, began, seqs: [{ seq, source }] }))
   frames.sort((a, b) => a.at - b.at)
   const presents = []
   for (const f of frames) {
@@ -62,7 +68,7 @@ function animationFrames(events) {
   for (const e of events.filter((e) => e.name === 'AnimationFrame' && renderers.has(e.pid)).sort((a, b) => a.ts - b.ts)) {
     const key = e.id2?.local ?? e.id
     const frame = e.args?.animation_frame_timing_info?.begin_frame_id
-    if (e.ph === 'b') open.set(key, { b: e.ts, seq: frame?.sequence_number, source: frame?.source_id })
+    if (e.ph === 'b') open.set(key, { b: e.ts, pid: e.pid, seq: frame?.sequence_number, source: frame?.source_id })
     else if (e.ph === 'e' && open.has(key)) {
       out.push({ ...open.get(key), e: e.ts })
       open.delete(key)
@@ -82,12 +88,14 @@ const percentile = (values, p) => {
  * - An input's answer is the frame that owns its paint (the coordinator's rulings, PR 9): the presented slice of the
  *   frame whose main-thread AnimationFrame contains the input's painted mark (`begin_frame_id` = `frame_sequence`). The
  *   mark fires inside its own frame, which began before it. If that frame never presents (dropped, or partial only),
- *   the answer is the next presented frame after it, which carries the change (`ownerUnpresented` counts them). A
- *   trace with no AnimationFrame around a mark is invalid: the answer can't be told, and nothing falls back.
+ *   the answer is the next presented frame after it, which carries the change (`ownerUnpresented` counts them). If it
+ *   had no update to present (STATE_NO_UPDATE_DESIRED, with no presented slice), the input changed nothing on screen,
+ *   whatever its key says: while indexing, the row count in the key grows between marks. The run is invalid when the
+ *   answer can't be told: no AnimationFrame around the mark, one from another process, or an answer before the mark.
  * - A frame is demanded from an input until its answer. Demanded intervals that overlap merge, so a continuous gesture
  *   is one interval. Only an input that changes the view opens one: an input whose first mark is a later input's is
- *   folded into it (`folded`). Like an input that changes nothing, it's timed to that mark and reported apart in
- *   `unanswered`: the later input is the one judged on its answer.
+ *   folded into it (`folded`). It's timed to the answer of the mark it folded into and judged on responsiveness like
+ *   any other, but it doesn't open or anchor an interval.
  * - Cadence: a merged interval's frames start at its first answer. Presents between an input and its answer are
  *   compositor or pipeline frames that can't carry the response, and the input's latency covers that span. Every
  *   present after the first answer is judged on its gap from the one before it: long at ≥ 16.7 ms, a stall over
@@ -107,20 +115,28 @@ export function analyzeFrames(events) {
   const ms = (us) => Math.round(us) / 1000
   const none = { inputs: 0, folded: 0, ownerUnpresented: 0, unanswered: { n: 0 }, demandedMs: 0, frames: 0, longFrames: 0, longShare: 0, long: [], stalls: [], neverPainted: [], inputToPaint: [], firstFrame: { n: 0 }, raf: { maxGapMs: 0 } }
   const invalid = (reason) => ({ ...none, valid: false, reason, cadence: 'invalid', responsiveness: 'invalid' })
-  let presented
+  let slices
   try {
-    presented = presentedFrames(events)
+    slices = reporterSlices(events)
   } catch (e) {
     return invalid(e.message)
   }
+  const presented = presentedFrames(events, slices)
   const owners = animationFrames(events)
-  /** The answer to a paint mark: its owning frame's present, or the next present after an owner that never presented. */
+  /**
+   * The answer to a paint mark: its owning frame's present; nothing, when that frame had no update; or the next present
+   * after an owner that never presented. `invalid` says why the answer can't be told.
+   */
   const answerOf = (mark) => {
     const af = owners.filter((o) => o.b <= mark.ts && mark.ts <= o.e && o.seq !== undefined).sort((x, y) => y.b - x.b)[0]
-    if (!af) return { missing: true }
+    if (!af) return { invalid: `no AnimationFrame around the paint mark at ${ms(mark.ts)} ms` }
+    if (af.pid !== mark.pid) return { invalid: `the AnimationFrame around the paint mark at ${ms(mark.ts)} ms is another process's (pid ${af.pid}, the mark's ${mark.pid})` }
     const sameSource = (f) => f.source === undefined || af.source === undefined || f.source === af.source
     const own = presented.find((p) => p.seqs.some((f) => f.seq === af.seq && sameSource(f)))
+    if (own && own.at < mark.ts) return { invalid: `frame ${af.seq}, around the paint mark at ${ms(mark.ts)} ms, presented before it, at ${ms(own.at)} ms` }
     if (own) return { at: own.at }
+    const reports = slices.filter((s) => s.seq === af.seq && sameSource(s)).map((s) => s.state)
+    if (reports.includes('STATE_NO_UPDATE_DESIRED') && !reports.includes('STATE_PRESENTED_PARTIAL')) return { noChange: true }
     const next = presented.find((p) => p.at > mark.ts && p.seqs.some((f) => f.seq > af.seq && sameSource(f)))
     return next ? { at: next.at, unpresented: true } : {}
   }
@@ -135,7 +151,7 @@ export function analyzeFrames(events) {
       // The mark's own ts is the dispatch; the input's timestamp maps onto the trace clock through it.
       inputs.push({ seq: Number(seq), kind: a, at: e.ts - (Number(c) - Number(b)) * 1000, dispatch: e.ts })
     } else if (what === 'typose:painted') {
-      painted.push({ seq: Number(seq), key: a, ts: e.ts })
+      painted.push({ seq: Number(seq), key: a, ts: e.ts, pid: e.pid })
     }
   }
   inputs.sort((x, y) => x.seq - y.seq)
@@ -152,26 +168,22 @@ export function analyzeFrames(events) {
   for (const input of inputs) {
     const i = painted.findIndex((p) => p.seq >= input.seq && p.ts >= input.dispatch)
     const mark = painted[i]
-    if (mark && i > 0 && painted[i - 1].key === mark.key) {
-      // Changes nothing, so no frame answers it: timed to its mark, and kept out of the latency figure.
+    // An input that changes nothing owes no frame: it's timed to its mark, and kept out of the latency figure.
+    const toMark = () => {
       const late = mark.ts - input.at
       unanswered.push(ms(late))
       if (late > STALL_MS * 1000) stalls.push({ from: ms(input.at), to: ms(mark.ts), ms: ms(late), began: ms(input.at), first: true })
-      continue
     }
-    if (mark && mark.seq !== input.seq) {
-      // Only an input that changes the view opens a demanded interval (the coordinator's rulings, PR 9). This one's first
-      // mark is a later input's: nothing of its own reached the screen before that input came (a scrollbar pointerdown
-      // before the drag's scroll, or Control before End). It's folded into the later input, which is the one judged on
-      // its answer; like an input that changes nothing, it's timed to the mark, reported apart, and a stall if late.
-      folded++
-      const late = mark.ts - input.at
-      unanswered.push(ms(late))
-      if (late > STALL_MS * 1000) stalls.push({ from: ms(input.at), to: ms(mark.ts), ms: ms(late), began: ms(input.at), first: true })
+    if (mark && i > 0 && painted[i - 1].key === mark.key) {
+      toMark()
       continue
     }
     const answer = mark ? answerOf(mark) : {}
-    if (answer.missing) return invalid(`no AnimationFrame around input ${input.seq}'s paint mark at ${ms(mark.ts)} ms: its answer's frame can't be told`)
+    if (answer.invalid) return invalid(`input ${input.seq}: ${answer.invalid}, so its answer can't be told`)
+    if (answer.noChange) {
+      toMark()
+      continue
+    }
     if (answer.unpresented) ownerUnpresented++
     const settle = answer.at
     if (settle === undefined || settle - input.at > NEVER_MS * 1000) {
@@ -181,8 +193,12 @@ export function analyzeFrames(events) {
     // Responsiveness: the input is answered by the frame that owns its paint (plan §5's input latency).
     const latency = settle - input.at
     inputToPaint.push({ seq: input.seq, kind: input.kind, ms: ms(latency) })
-    demanded.push([input.at, settle])
     if (latency > STALL_MS * 1000) stalls.push({ from: ms(input.at), to: ms(settle), ms: ms(latency), began: ms(input.at), first: true })
+    // Only an input that changes the view opens a demanded interval (the coordinator's rulings, PR 9). One whose first
+    // mark is a later input's (a scrollbar pointerdown before the drag's scroll, Control before End, two keydowns painted
+    // in one frame) is folded into it: judged on the same answer above, but it doesn't open or anchor an interval.
+    if (mark.seq === input.seq) demanded.push([input.at, settle])
+    else folded++
   }
   if (demanded.length === 0 && neverPainted.length === 0) return invalid('nothing was demanded: every input changed nothing')
 
