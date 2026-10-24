@@ -1,4 +1,4 @@
-import { BrowserWindow, MessageChannelMain, app, crashReporter, dialog, ipcMain, protocol, screen, session, utilityProcess } from 'electron'
+import { BrowserWindow, MessageChannelMain, app, crashReporter, dialog, ipcMain, protocol, screen, session, systemPreferences, utilityProcess } from 'electron'
 import type { IpcMainEvent, IpcMainInvokeEvent } from 'electron'
 import { once } from 'node:events'
 import { readFile } from 'node:fs/promises'
@@ -23,6 +23,12 @@ let titlebarPainted: () => void = () => {}
 // No proxy resolution at all: with Windows' "Automatically detect settings" on, Chromium otherwise runs WPAD
 // (a DNS lookup for "wpad") at startup in every network context, though Typose requests nothing (spec §7.3).
 app.commandLine.appendSwitch('no-proxy-server')
+
+// macOS: no window restoration. Typose restores no window through AppKit, yet after a crash AppKit asks at the next
+// launch whether to reopen its windows, in a modal that holds the launch short of ready until someone answers it: on
+// CI, for good (main-macos runs 40067408502 and 40072658390, after lifecycle.e2e.ts's deliberate crash). It's set
+// before the run loop starts: AppKit restores windows, and asks, from inside it.
+if (process.platform === 'darwin') systemPreferences.registerDefaults({ ApplePersistenceIgnoreState: true })
 
 // Plan §5's read-only measurement hook. A refused path, or a write that fails, is logged and never stops startup.
 const mark = marksHook(process.env.TYPOSE_MARKS, log)
