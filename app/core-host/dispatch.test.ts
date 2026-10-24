@@ -169,7 +169,7 @@ it('an addon error keeps its typed code, and anything else is Internal', async (
   expect(await call('open', { path: 'x', count: 1 })).toMatchObject({ error: { code: 'Internal' } })
 })
 
-/** A page read that runs until the test ends it: its promise, and its cancel flag. */
+/** A page read that runs until the test ends it, with `end` or `fail`. */
 function pendingRead(): { end: (r: unknown) => void; fail: (e: unknown) => void } {
   const ends = {} as { end: (r: unknown) => void; fail: (e: unknown) => void }
   page.mockImplementationOnce(() => new Promise<Page>((ok, fail) => Object.assign(ends, { end: ok, fail })))
@@ -191,7 +191,7 @@ describe('cancels (plan C5, C6)', () => {
   })
 
   it("close cancels the document's index job and its reads, closes it, and forgets it", async () => {
-    const job = flags.length // the index job's flag is made first, at open
+    const job = flags.length // an open makes its first page's flag, then its index job's
     expect(await call('open', { path: 'b.txt', count: 1 })).toMatchObject({ result: { doc: 2 } })
     const [ownJob, otherJob] = [flags[job + 1], flags[job - 1]] // doc 2's (after its first page's), and doc 1's
     void pendingRead()
