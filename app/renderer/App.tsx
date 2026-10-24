@@ -83,6 +83,12 @@ export function App({ core }: { core: CoreClient }) {
       void reload()
     }
     window.addEventListener('keydown', onKey)
+    // Spec §8.1: a file named later (a second launch, macOS's open-file) replaces the card's. While the core is
+    // stopped, it's the file Reopen opens.
+    const offOpenPath = window.typose.onOpenPath((path) => {
+      if (latest.current.card.kind === 'gone') setCard((c) => (c.kind === 'gone' ? { ...c, path, line: undefined } : c))
+      else void open(path)
+    })
     void core.connect().then(
       async (hello) => {
         setLimits(hello.limits)
@@ -101,6 +107,7 @@ export function App({ core }: { core: CoreClient }) {
       offGone()
       offReady()
       offProgress()
+      offOpenPath()
       window.removeEventListener('keydown', onKey)
     }
   }, [core])

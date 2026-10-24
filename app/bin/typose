@@ -1,0 +1,15 @@
+#!/bin/sh
+# Typose's command-line launcher (spec §8.1). Usage: typose [--] FILE...
+# Every argument is a file to open, whatever it looks like: Typose gets them after "--", so none is taken for a
+# switch. The Typose it runs is two folders up, as in the package (resources/bin, or Contents/Resources/bin in the
+# macOS bundle). It doesn't wait for Typose to quit.
+# ponytail: $0 isn't resolved through a symlink; M7's PATH install resolves it if it links rather than copies.
+dir=$(dirname -- "$0")
+exe="$dir/../../MacOS/Typose"
+[ -x "$exe" ] || exe="$dir/../../typose"
+if [ ! -x "$exe" ]; then
+  echo "typose: no Typose two folders up from $dir" >&2
+  exit 1
+fi
+[ "$1" = "--" ] && shift
+"$exe" -- "$@" </dev/null >/dev/null 2>&1 &

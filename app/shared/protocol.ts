@@ -134,8 +134,10 @@ export type MainMessage = { type: 'core-port'; session: number } | { type: 'core
 
 /** The page's whole API into main, from the preload. Only `mark` takes arguments, which main validates (plan C4). */
 export interface TyposeApi {
-  /** The file named on the command line, if any. */
+  /** The file named on the command line, if any: the newest named before the page asked (spec §8.1). */
   launchPath(): Promise<string | null>
+  /** Called with each file named after that: by a second launch, or macOS's open-file. Returns the unsubscribe. */
+  onOpenPath(cb: (path: string) => void): () => void
   /** The OS Open dialog; null when cancelled. */
   openDialog(): Promise<string | null>
   /** A startup mark at a wall-clock time (ms); main records it only under the TYPOSE_MARKS hook (plan C8). */

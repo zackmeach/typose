@@ -10,6 +10,11 @@ ipcRenderer.on('core-gone', (_event, { session }: { session: number }) => forwar
 
 const typose: TyposeApi = {
   launchPath: () => ipcRenderer.invoke('launch-path'),
+  onOpenPath: (cb) => {
+    const listener = (_event: unknown, path: string) => cb(path)
+    ipcRenderer.on('open-path', listener)
+    return () => void ipcRenderer.off('open-path', listener)
+  },
   openDialog: () => ipcRenderer.invoke('open-dialog'),
   mark: (name, t) => ipcRenderer.send('mark', name, t),
   onShown: (cb) => void ipcRenderer.once('shown', () => cb())
