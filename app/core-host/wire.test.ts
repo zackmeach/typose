@@ -38,7 +38,9 @@ function indexed(doc: Doc): Promise<number> {
 it("one item's fixed fields fit ITEM_WIRE_FIXED", () => {
   const MAX = Number.MAX_SAFE_INTEGER
   const map = { uniform: false, start: MAX, end: MAX, units: 2 ** 32 - 1, unitBytes: 2 ** 32 - 1, points: new Uint32Array(0) }
-  const item = { gen: 2 ** 32 - 1, line: MAX, offset: MAX, text: '一', more: true, map }
+  // With a continuation token, the session and document stamped in, and the rest of a long line (plan C3, C7).
+  const next = { gen: 2 ** 32 - 1, line: MAX, offset: MAX, session: MAX, doc: MAX }
+  const item = { gen: 2 ** 32 - 1, line: MAX, offset: MAX, text: '一', more: true, map, next, rest: MAX }
   const fixed = serialize({ items: [item] }).byteLength - serialize({ items: [] }).byteLength
   expect(fixed).toBeLessThanOrEqual(itemWireFixed)
 })
@@ -54,7 +56,8 @@ for (const [shape, bytes] of Object.entries(SHAPES)) {
     const total = await indexed(doc)
     let [largest, most, start, pages] = [0, 0, 0, 0]
     while (start < total) {
-      const page = doc.page(start, maxItems)
+      const page = doc.page(doc.generation, start, maxItems)
+      for (const item of page.items) if (item.next) Object.assign(item.next, { session: Number.MAX_SAFE_INTEGER, doc: Number.MAX_SAFE_INTEGER }) // as the core host sends it
       const size = serialize(page).byteLength
       expect(size).toBeLessThanOrEqual(pageWireMax)
       largest = Math.max(largest, size)

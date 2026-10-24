@@ -50,6 +50,7 @@ fn doc_error(e: DocError) -> Error<Code> {
         DocError::Frozen(_) => Code::Frozen,
         DocError::Refused(_) => Code::Refused,
         DocError::Binary => Code::Binary,
+        DocError::Invalid(_) => Code::InvalidParams,
     };
     Error::new(code, e.to_string())
 }
@@ -111,7 +112,19 @@ pub struct WireMap {
     pub points: Uint32Array,
 }
 
-/// One bounded piece of a line (plan C2). `offset` is the line's first byte; `more` says the line goes on.
+/// Where a line's next piece starts (plan C3): the core issues it and checks it when it comes back. The core host
+/// adds its session.
+#[napi(object)]
+pub struct Continuation {
+    #[napi(js_name = "gen")]
+    pub generation: u32,
+    pub line: f64,
+    pub offset: f64,
+}
+
+/// One bounded piece of a line (plan C2). `offset` is the piece's first byte; `more` says the line goes on, `next`
+/// is its next piece while the line's first 1 MiB goes on, and `rest` is how many bytes the line has past the last
+/// piece shown (brief §5.1), once the index knows.
 #[napi(object)]
 pub struct PageItem {
     #[napi(js_name = "gen")]
@@ -121,6 +134,8 @@ pub struct PageItem {
     pub text: String,
     pub more: bool,
     pub map: WireMap,
+    pub next: Option<Continuation>,
+    pub rest: Option<f64>,
 }
 
 #[napi(object)]
@@ -147,7 +162,9 @@ fn item(generation: u32, p: LinePiece) -> PageItem {
         unit_bytes: w.unit_bytes,
         points: Uint32Array::new(w.points),
     };
-    PageItem { generation, line: p.line as f64, offset: p.offset as f64, text: p.text, more: p.more, map }
+    let next = p.next.map(|offset| Continuation { generation, line: p.line as f64, offset: offset as f64 });
+    let (line, offset, rest) = (p.line as f64, p.offset as f64, p.rest.map(|r| r as f64));
+    PageItem { generation, line, offset, text: p.text, more: p.more, map, next, rest }
 }
 
 /// An open document in Raw. Offsets and sizes are exact numbers: `Raw::open` refuses files over 2^53 − 1 bytes.
@@ -179,6 +196,20 @@ impl Doc {
     #[napi(getter)]
     pub fn encoding(&self) -> String {
         self.raw.encoding().into()
+    }
+
+    /// Brief §7.9's empty file: 0 bytes, or only whitespace.
+    #[napi(getter)]
+    pub fn blank(&self) -> bool {
+        self.raw.blank()
+    }
+
+    /// Ctrl+R (spec §3.1): the same path at the next generation, which `startIndex` then indexes. Every page and
+    /// token of the old generation is refused from now on (`Stale`). If the open fails, nothing changes.
+    #[napi]
+    pub fn reload(&mut self) -> std::result::Result<(), Error<Code>> {
+        self.raw = Arc::new(self.raw.reload().map_err(doc_error)?);
+        Ok(())
     }
 
     /// Lines found so far by the index, and whether it's done.
@@ -216,7 +247,7 @@ impl Doc {
             });
             if let Err(e) = result {
                 let progress = IndexProgress {
-                    lines: sent_lines as f64,
+                    lines: raw.lines_known().0 as f64, // what the index published, not the last count sent
                     bytes: 0.0,
                     done: false,
                     elapsed_ms: 0.0,
@@ -227,12 +258,19 @@ impl Doc {
         });
     }
 
-    /// Up to `count` lines from line `start`, within plan C2's bounds.
+    /// Up to `count` lines from line `start` of generation `gen`, within plan C2's bounds.
     #[napi]
-    pub fn page(&self, start: f64, count: f64) -> std::result::Result<Page, Error<Code>> {
-        let (start, count) = (int("start", start)?, int("count", count)?);
-        let generation = self.raw.document().generation();
-        let pieces = self.raw.page(start, count as usize).map_err(doc_error)?;
+    pub fn page(&self, generation: f64, start: f64, count: f64) -> std::result::Result<Page, Error<Code>> {
+        let (generation, start, count) = (int("gen", generation)? as u32, int("start", start)?, int("count", count)?);
+        let pieces = self.raw.page(generation, start, count as usize).map_err(doc_error)?;
         Ok(Page { items: pieces.into_iter().map(|p| item(generation, p)).collect() })
+    }
+
+    /// The piece a continuation names (plan C3): `Stale` for an old generation, `InvalidParams` for an offset this
+    /// core couldn't have issued.
+    #[napi]
+    pub fn piece(&self, generation: f64, line: f64, offset: f64) -> std::result::Result<PageItem, Error<Code>> {
+        let (generation, line, offset) = (int("gen", generation)? as u32, int("line", line)?, int("offset", offset)?);
+        Ok(item(generation, self.raw.piece(generation, line, offset).map_err(doc_error)?))
     }
 }

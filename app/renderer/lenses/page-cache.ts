@@ -6,26 +6,29 @@ export const charge = (item: PageItem): number => 2 * item.text.length + item.ma
 /** The elastic part of the cap: room for scrolling back without refetching (~40,000 short lines). */
 const ELASTIC = 16 << 20
 
+/** A line's first piece is keyed by its line number; a further piece by `line:k`, its k-th continuation. */
+export type Key = number | string
+
 /**
- * Raw's items by line, bounded in charged bytes rather than a count (plan C1; PR 6's ledger reserves the cap).
+ * Raw's items by key, bounded in charged bytes rather than a count (plan C1; PR 6's ledger reserves the cap).
  * Mounted items count twice, for their DOM copy, and are never evicted, so the cap reserves room for the most a
  * mounted window can hold: rows × 2 × (2 × pieceBytes + mapMax), plus the elastic part.
  */
 export class PageCache {
-  private readonly items = new Map<number, PageItem>()
+  private readonly items = new Map<Key, PageItem>()
   private cached = 0
-  private mounted = { first: 0, last: 0 }
+  private mounted = new Set<Key>()
   private mountedCharge = 0
   cap = ELASTIC
 
   constructor(private readonly maxItemCharge: number) {}
 
-  get(line: number): PageItem | undefined {
-    return this.items.get(line)
+  get(key: Key): PageItem | undefined {
+    return this.items.get(key)
   }
 
-  has(line: number): boolean {
-    return this.items.has(line)
+  has(key: Key): boolean {
+    return this.items.has(key)
   }
 
   /** The charged total: every cached item, and mounted ones a second time. */
@@ -39,35 +42,57 @@ export class PageCache {
     this.evict()
   }
 
-  /** The lines now mounted, `[first, last)`. */
-  setMounted(first: number, last: number): void {
-    this.mounted = { first, last }
+  /** The keys of the items now mounted, one per mounted row. */
+  setMounted(keys: Iterable<Key>): void {
+    this.mounted = new Set(keys)
     this.mountedCharge = 0
-    for (let line = first; line < last; line++) {
-      const item = this.items.get(line)
+    for (const key of this.mounted) {
+      const item = this.items.get(key)
       if (item) this.mountedCharge += charge(item)
     }
     this.evict()
   }
 
+  /** First pieces, keyed by line. */
   add(items: readonly PageItem[]): void {
-    for (const item of items) {
-      const old = this.items.get(item.line)
-      if (old) this.cached -= charge(old)
-      this.items.delete(item.line) // re-inserted last: eviction goes oldest-first
-      this.items.set(item.line, item)
-      this.cached += charge(item)
-    }
-    this.setMounted(this.mounted.first, this.mounted.last)
+    for (const item of items) this.put(item.line, item)
+    this.setMounted(this.mounted)
   }
 
-  /** Oldest first, never a mounted line. ponytail: insertion order, not distance from the viewport. */
+  /** A further piece of a line. */
+  addPiece(key: string, item: PageItem): void {
+    this.put(key, item)
+    this.setMounted(this.mounted)
+  }
+
+  /** Drops every item `test` picks, mounted or not, so it's fetched again; returns how many. */
+  drop(test: (item: PageItem) => boolean): number {
+    let dropped = 0
+    for (const [key, item] of this.items) {
+      if (!test(item)) continue
+      this.items.delete(key)
+      this.cached -= charge(item)
+      dropped++
+    }
+    this.setMounted(this.mounted)
+    return dropped
+  }
+
+  private put(key: Key, item: PageItem): void {
+    const old = this.items.get(key)
+    if (old) this.cached -= charge(old)
+    this.items.delete(key) // re-inserted last: eviction goes oldest-first
+    this.items.set(key, item)
+    this.cached += charge(item)
+  }
+
+  /** Oldest first, never a mounted item. ponytail: insertion order, not distance from the viewport. */
   private evict(): void {
     if (this.charged <= this.cap) return
-    for (const [line, item] of this.items) {
+    for (const [key, item] of this.items) {
       if (this.charged <= this.cap) return
-      if (line >= this.mounted.first && line < this.mounted.last) continue
-      this.items.delete(line)
+      if (this.mounted.has(key)) continue
+      this.items.delete(key)
       this.cached -= charge(item)
     }
   }
