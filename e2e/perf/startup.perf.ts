@@ -4,11 +4,12 @@
 // Raw's first screen. No launch here passes a debugging switch: every mark comes from the TYPOSE_MARKS hook (plan §5).
 //   Controls:  npm run build:hooks && npm run package, then `npm run perf -- -g control`
 //   Warm:      npm run package, then `npm run perf -- -g warm` (RUNS=30 by default)
-//   Cold:      COLD=1 RUNS=1 `npm run perf -- -g warm`, as the first launch after each OS restart (Z54).
+//   Cold:      COLD=1 RUNS=1 `npm run perf -- -g warm`, as the first launch after each OS restart (Z54). Plan §5's
+//              batches name their file: FILE=.fixtures/10gib.jsonl (batch A) or FILE=.fixtures/1gib.jsonl (batch B).
 // Every run is appended to .evidence/m1/perf/, valid or not.
 import { expect } from '@playwright/test'
 import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { APP_DIR, FIXTURES, fixture, test } from '../app'
 import { type LaunchOptions, closePackaged, launchPackaged, readMarks, waitMarks } from '../packaged'
 import { cpuLoad, cpuTimes, idleLoad, percentile, recordOutcome, summary } from './rig'
@@ -131,8 +132,10 @@ test.describe('startup controls', () => {
 
 test(`warm startup on the packaged build, n = ${RUNS} (informational)`, async () => {
   test.setTimeout(30 * 60_000)
-  // Plan §5's batches open 1 GiB and 10 GiB files; this informational run opens a small one.
-  const file = fixture('startup.jsonl', Array.from({ length: 200_000 }, (_, i) => `{"n":${i},"msg":"startup line ${i}"}`).join('\n'))
+  // Plan §5's batches open 1 GiB and 10 GiB files, named by FILE; unset, this informational run opens a small one.
+  const file = process.env.FILE
+    ? resolve(process.env.FILE)
+    : fixture('startup.jsonl', Array.from({ length: 200_000 }, (_, i) => `{"n":${i},"msg":"startup line ${i}"}`).join('\n'))
   const before = await idleLoad()
   const from = cpuTimes()
   if (!COLD) await startup({ file }) // one warm-up launch, not kept

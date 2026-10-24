@@ -6,16 +6,12 @@
 // and a freeze are each answered by the view they show.
 //   Run: npm run package, then `npm run perf -- -g accessibility`, and the keypress control 10 times over with
 //   `npm run perf -- -g "keypresses with no injection" --repeat-each=10`. Every run is appended to .evidence/m1/perf/.
-import { type CDPSession, type Page, expect } from '@playwright/test'
-import { closeSync, openSync, writeFileSync, writeSync } from 'node:fs'
+import { type Page, expect } from '@playwright/test'
+import { closeSync, openSync, writeSync } from 'node:fs'
 import { fixture, test, waitIndexed, waitOpen } from '../app'
 import { type PackagedLaunch, closePackaged, launchPackaged, waitMarks } from '../packaged'
-import { CATEGORIES, analyzeFrames } from './frames.mjs'
-import { cpuLoad, cpuTimes, recordOutcome } from './rig'
-
-type Analysis = ReturnType<typeof analyzeFrames>
-type Span = { from: number; to: number }
-type Run = { analysis: Analysis; busy: Span[]; load: number }
+import { type Run, type Span, jump, keypresses, scroll, traced } from './drive'
+import { recordOutcome } from './rig'
 
 // 1M lines × 20 px is past the 16M px native cap, so Raw scrolls logically: every wheel goes through the main thread.
 const LINES = 1_000_000
@@ -23,24 +19,6 @@ let file: string
 test.beforeAll(() => {
   file = fixture('frames.txt', Array.from({ length: LINES }, (_, i) => `${i} ${'frame '.repeat(i % 12)}`).join('\n'))
 })
-
-/** Traces `drive` (Chromium tracing over CDP, C8's pinned categories) and analyzes it; also returns the busy spans. */
-async function traced(l: PackagedLaunch, drive: (page: Page, cdp: CDPSession) => Promise<void>): Promise<Run> {
-  const page = l.page!
-  const cdp = await page.context().newCDPSession(page)
-  const from = cpuTimes()
-  await l.browser!.startTracing(page, { categories: CATEGORIES })
-  await page.waitForTimeout(500) // the first frame after tracing starts can take 120 ms: keep it out of the run
-  await drive(page, cdp)
-  await page.waitForTimeout(500) // let the last input settle inside the trace
-  const trace = await l.browser!.stopTracing()
-  writeFileSync(test.info().outputPath('trace.json'), trace) // the evidence, beside the run's lifecycle log
-  const events = JSON.parse(trace.toString()).traceEvents as { name: string; ts: number; args?: { data?: { message?: string } } }[]
-  const load = cpuLoad(from)
-  const at = (m: string) => events.filter((e) => e.name === 'TimeStamp' && e.args?.data?.message === m).map((e) => e.ts / 1000)
-  const busy: Span[] = at('typose:busy-start').map((from, i) => ({ from, to: at('typose:busy-end')[i] }))
-  return { analysis: analyzeFrames(events), busy, load }
-}
 
 type Busy = Window & { typoseBusy: (ms: number) => void }
 
@@ -54,11 +32,6 @@ const installBusy = (page: Page) =>
       console.timeStamp('typose:busy-end')
     }
   })
-
-/** A smooth mouse-wheel scroll down, synthesized by the browser at the display's rate. */
-async function scroll(cdp: CDPSession): Promise<void> {
-  await cdp.send('Input.synthesizeScrollGesture', { x: 400, y: 400, yDistance: -6000, speed: 3000, gestureSourceType: 'mouse' })
-}
 
 /** Arms a busy-wait in the handler of the `nth` event of `type` from now (capture phase, before the app's handler). */
 const busyOn = (page: Page, type: 'wheel' | 'keydown', nth: number, ms: number) =>
@@ -74,26 +47,6 @@ const busyOn = (page: Page, type: 'wheel' | 'keydown', nth: number, ms: number) 
     },
     [type, nth, ms] as const
   )
-
-/** 21 discrete ArrowDown presses, 100 ms apart: each scrolls one row, so each is answered by one frame. */
-async function keypresses(page: Page): Promise<void> {
-  for (let i = 0; i < 21; i++) {
-    await page.keyboard.press('ArrowDown')
-    await page.waitForTimeout(100)
-  }
-}
-
-/** Drags the scrollbar thumb from the top to near the bottom in one move: a far jump. */
-async function jump(page: Page): Promise<void> {
-  const box = (await page.locator('.vl-scroller').boundingBox())!
-  // The thumb starts just below the up-arrow button, which is as tall as the scrollbar is wide.
-  const bar = await page.locator('.vl-scroller').evaluate((el) => (el as HTMLElement).offsetWidth - el.clientWidth)
-  const x = box.x + box.width - bar / 2
-  await page.mouse.move(x, box.y + bar + 8)
-  await page.mouse.down()
-  await page.mouse.move(x, box.y + box.height * 0.8)
-  await page.mouse.up()
-}
 
 for (const a11y of ['on', 'off'] as const) {
   test.describe(`accessibility ${a11y}`, () => {
