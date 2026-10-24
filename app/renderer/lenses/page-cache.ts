@@ -16,9 +16,9 @@ export const LAYOUT_PER_UNIT = 320
 
 /**
  * The garbage a mounted row's layout leaves until a GC, per unit it shows: the rows a scroll unmounts, and the lens a
- * Reload replaces. Measured over six runs of Z66's gate, per unit mounted, in a 480 px window (plan §7, PR 6b): at most
- * 800 bytes scrolling 10 viewports (Devanagari, accessibility on; Arabic 777) and 575 in a Reload's handover (emoji).
- * 960 leaves a fifth over the worst. Reserved, never charged.
+ * Reload replaces. Measured in Z66's gate, per unit mounted, in a 480 px window (plan §7, PR 6b): at most 800 bytes
+ * scrolling 10 viewports (five runs; Devanagari, accessibility on; Arabic 777), and 575 in a Reload's handover (six
+ * runs; emoji). 960 leaves a fifth over the worst. Reserved, never charged.
  */
 export const GARBAGE_PER_UNIT = 960
 

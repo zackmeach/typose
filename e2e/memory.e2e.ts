@@ -30,9 +30,9 @@ const resize = (l: Launched, width: number, height: number) =>
 
 const cp = (c: number) => String.fromCodePoint(c)
 /**
- * Z66's gate's scripts (PR 6b): seeded words, a line of them within one 60,000-byte piece (C2). A unit a byte for
- * ASCII; 3 bytes a unit for CJK and Devanagari, 2 for Arabic, 4 bytes per 2 units for emoji. Devanagari's runs with
- * accessibility on, so its rows' AX tree is laid out too.
+ * Z66's gate's scripts (PR 6b): seeded words, a line of them about 60,000 bytes, within one piece (C2). A unit a byte
+ * for ASCII; 3 bytes a unit for CJK and Devanagari, 2 for Arabic, 4 bytes per 2 units for emoji. Devanagari's runs
+ * with accessibility on, so its rows' AX tree is laid out too.
  */
 const SCRIPTS: { script: string; units: number; space: boolean; ax?: boolean; word: (r: (n: number) => number) => string }[] = [
   { script: 'ASCII', units: 60_000, space: true, word: (r) => Array.from({ length: 2 + r(9) }, () => 'abcdefghijklmnopqrstuvwxyz0123456789{}":,'[r(41)]).join('') },
@@ -65,9 +65,9 @@ for (const s of SCRIPTS)
 
 /**
  * Z66's deterministic gate (PR 6b): the rise in the renderer's private bytes from the empty card, after a forced GC, is
- * within what Raw's reservation holds for what stays (all of it but the garbage part: the fixed allowance, the two items
- * partly mounted, each row's charge and the elastic part), after the open and after 10 viewports down. A Reload's
- * handover, read without a GC, leaves at most the garbage part.
+ * within the reservation's formula at the rows mounted, less their garbage part (the fixed allowance, the two items
+ * partly mounted, the elastic part and each mounted row's charge), after the open, after 10 viewports down and after a
+ * Reload. The Reload's handover, read without a GC, leaves at most the garbage part.
  */
 async function layoutGate(s: (typeof SCRIPTS)[number]): Promise<void> {
   test.setTimeout(5 * 60_000)
@@ -137,10 +137,9 @@ async function layoutGate(s: (typeof SCRIPTS)[number]): Promise<void> {
     await win.keyboard.press('F5')
     reserved = await settled('2')
     const peak = (await renderer())! - base
-    const after = (await collected()) - base
+    const after = await check('Reload', reserved)
     console.log(`${s.script} Reload: rise ${mib(peak)} before a GC, ${mib(after)} after: garbage ${mib(peak - after)}, within ${mib(garbagePart(reserved))} reserved for it`)
     expect(peak - after).toBeLessThanOrEqual(garbagePart(reserved))
-    expect(after).toBeLessThanOrEqual(reserved - garbagePart(reserved))
     expect(l.pageErrors).toEqual([])
   } finally {
     await finish(l)
