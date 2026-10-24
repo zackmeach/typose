@@ -88,8 +88,15 @@ async function layoutGate(s: (typeof SCRIPTS)[number]): Promise<void> {
       await win.waitForTimeout(300)
       return (await renderer())!
     }
-    if ((await renderer()) === undefined) return console.log('private bytes: not reported by Electron on this OS; nothing judged') // macOS
-    const base = await collected()
+    // Electron reports no private bytes on macOS (memory.ts). The charge and the ledger are still judged; only the
+    // private-byte asserts are not, and the annotation says so — a return here used to pass with nothing judged.
+    let base: number | undefined
+    if ((await renderer()) === undefined)
+      test.info().annotations.push({
+        type: 'skip',
+        description: 'private bytes are not reported by Electron on this OS; the private-byte asserts are not judged'
+      })
+    else base = await collected()
     // As a second launch would open it (spec §8.1): no dialog.
     await app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), path)
     /** Raw at `gen` holds its reservation for its height, as the core does, and every mounted row has its text. */
@@ -99,7 +106,10 @@ async function layoutGate(s: (typeof SCRIPTS)[number]): Promise<void> {
       const reserved = capFor(L, 3 * Math.ceil(host / 20) + 1)
       await expect.poll(async () => (await cacheStats(win))?.reserved, { timeout: 30_000 }).toBe(reserved)
       expect((await debugStats(win)).ledger.rendererCache).toBe(reserved)
-      await expect.poll(() => win.evaluate(() => [...document.querySelectorAll('.vl-row')].every((r) => r.querySelector('.text'))), { timeout: 60_000 }).toBe(true)
+      await expect.poll(() => win.evaluate(() => {
+        const rows = [...document.querySelectorAll('.vl-row')]
+        return rows.length > 0 && rows.every((r) => r.querySelector('.text'))
+      }), { timeout: 60_000 }).toBe(true)
       const c = (await cacheStats(win))!
       expect(c.charged, JSON.stringify(c)).toBeLessThanOrEqual(c.cap)
       return reserved
@@ -108,8 +118,10 @@ async function layoutGate(s: (typeof SCRIPTS)[number]): Promise<void> {
     const garbagePart = (reserved: number) => rowsFor(L, reserved) * WRAP * GARBAGE_PER_UNIT
     /** After a GC, the rise is within the reservation's formula at the rows mounted, less their garbage part. */
     const check = async (step: string, reserved: number) => {
-      const rise = (await collected()) - base
       const u = await units()
+      expect(Math.max(...u)).toBeLessThanOrEqual(WRAP)
+      if (base === undefined) return
+      const rise = (await collected()) - base
       const bound = capFor(L, u.length) - u.length * WRAP * GARBAGE_PER_UNIT
       console.log(
         `${s.script} ${step}: rise ${mib(rise)} after GC, within ${mib(bound)} for ${u.length} rows mounted (${u.reduce((a, b) => a + b, 0)} units, ` +
@@ -131,17 +143,19 @@ async function layoutGate(s: (typeof SCRIPTS)[number]): Promise<void> {
       // drawn from 500 or 3,000 of them, at most 33 ms (plan §7, PR 6b).
       await expect.poll(top, { timeout: 60_000 }).toBeGreaterThan(was)
       reserved = await settled('1')
-      scrolled = Math.max(scrolled, (await renderer())! - base)
+      if (base !== undefined) scrolled = Math.max(scrolled, (await renderer())! - base)
     }
     const down = await check('10 viewports down', reserved)
-    console.log(`${s.script} scrolling: rise ${mib(scrolled)} at most before a GC, ${mib(scrolled - down)} over what stays`)
+    if (base !== undefined) console.log(`${s.script} scrolling: rise ${mib(scrolled)} at most before a GC, ${mib(scrolled - down!)} over what stays`)
     // The Reload's handover: the next lens mounted, the last one's rows left for a GC.
     await win.keyboard.press('F5')
     reserved = await settled('2')
-    const peak = (await renderer())! - base
-    const after = await check('Reload', reserved)
-    console.log(`${s.script} Reload: rise ${mib(peak)} before a GC, ${mib(after)} after: garbage ${mib(peak - after)}, within ${mib(garbagePart(reserved))} reserved for it`)
-    expect(peak - after).toBeLessThanOrEqual(garbagePart(reserved))
+    if (base !== undefined) {
+      const peak = (await renderer())! - base
+      const after = await check('Reload', reserved)
+      console.log(`${s.script} Reload: rise ${mib(peak)} before a GC, ${mib(after)} after: garbage ${mib(peak - after!)}, within ${mib(garbagePart(reserved))} reserved for it`)
+      expect(peak - after!).toBeLessThanOrEqual(garbagePart(reserved))
+    } else await check('Reload', reserved)
     expect(l.pageErrors).toEqual([])
   } finally {
     await finish(l)

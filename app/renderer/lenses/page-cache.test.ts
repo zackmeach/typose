@@ -54,6 +54,19 @@ describe('rowBreaks (Z66)', () => {
     }
   })
 
+  it('seeks a ZWJ sequence longer than the 96-unit lookback from the row start', () => {
+    // 33 × (man, ZWJ) + woman = 101 units; 40 × = 122. The 96-unit slice starts inside the sequence.
+    const cluster = (men: number) => `${'\u{1F468}\u200D'.repeat(men)}\u{1F469}`
+    expect([cluster(33).length, cluster(40).length]).toEqual([101, 122])
+    for (const text of [cluster(33), cluster(40)].map((c) => `${'a'.repeat(WRAP - 96 - 4)}${c}`)) {
+      const b = rowBreaks(text)
+      const ok = clusters(text)
+      for (const at of b.slice(1, -1)) expect(ok.has(at), `at ${at}`).toBe(true)
+      expect(Math.max(...rows(text).map((x) => x.length))).toBeLessThanOrEqual(WRAP)
+      expect(rows(text).join('')).toBe(text)
+    }
+  })
+
   it('cuts a cluster longer than a row at the limit, but not inside a surrogate pair', () => {
     const zalgo = `a${'́'.repeat(3000)}`
     expect(rows(zalgo)[0].length).toBe(WRAP)

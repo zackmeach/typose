@@ -71,11 +71,27 @@ export function rowBreaks(text: string): number[] {
   const out = [0]
   for (let start = 0; text.length - start > WRAP; ) {
     const limit = start + WRAP
-    let near = boundaries(text, Math.max(start, limit - 96), limit).filter((b) => b > start)
-    if (near.length === 0) near = boundaries(text, start, limit)
+    const windowFrom = Math.max(start, limit - 96)
+    let near = boundaries(text, windowFrom, limit).filter((b) => b > start)
+    // No boundary in the slice: the cluster is longer than the lookback, so read it from the row's start.
+    const sawWindow = near.length > 0 && windowFrom > start
+    if (!sawWindow) near = boundaries(text, start, limit)
     const spaced = near.filter((b) => b >= limit - 64 && text[b - 1] === ' ')
     let at = spaced.at(-1) ?? near.at(-1) ?? limit
-    if (near.length === 0 && /[\uDC00-\uDFFF]/.test(text[at])) at-- // one cluster longer than a row
+    // A slice that starts inside a ZWJ sequence invents a boundary, so the rescan above never runs. If the chosen
+    // break isn't one of the scan from the row start, use that scan's last boundary. The 96-unit slice stays the fast
+    // path when it holds no ZWJ — a run of regional indicators past the 32-unit context can mispair (plan §7, carried),
+    // and a scan from the row start would pair them differently.
+    let cutLong = near.length === 0
+    if (sawWindow && text.slice(windowFrom, limit + 1).includes('\u200D')) {
+      const full = boundaries(text, start, limit)
+      if (!full.includes(at)) {
+        const last = full.at(-1)
+        at = last ?? limit
+        cutLong = last === undefined
+      }
+    }
+    if (cutLong && /[\uDC00-\uDFFF]/.test(text[at])) at-- // one cluster longer than a row
     out.push(at)
     start = at
   }

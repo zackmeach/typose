@@ -91,5 +91,13 @@ test('no mounted item holds more than 64 KiB of text, and a long line ends at a 
   // Each row but the piece's last ends in ↪, which assistive tech skips.
   await expect(win.locator('.vl-row[data-line="0"] .more[aria-hidden="true"]')).toHaveText(Array(10).fill('↪'))
   await expect(win.getByRole('button', { name: 'Show more of line 1' })).toHaveCount(1) // on the piece's last row
+  // The marker is painted on the row, and a selection across that row doesn't take it.
+  const selected = await win.evaluate(() => {
+    const row = document.querySelector('.vl-row[data-line="0"]')!
+    window.getSelection()!.selectAllChildren(row)
+    return window.getSelection()!.toString()
+  })
+  expect(selected).toContain('語')
+  expect(selected).not.toContain('↪')
   await finish(l)
 })
