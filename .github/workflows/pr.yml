@@ -61,7 +61,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [ubuntu-latest] # TEMP (reverted): Linux only for the long-line diagnosis
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25 # the e2e step's 12 after a cold ~5-minute setup, with room left for the evidence upload
     steps:
@@ -132,3 +132,28 @@ jobs:
           compression-level: 9
           include-hidden-files: true
           if-no-files-found: ignore
+
+  # TEMP (reverted): PR 1's Linux test job verbatim (no caches), on the same commit, as the long-line baseline.
+  pr1-baseline:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Rust 1.96.0
+        run: rustup toolchain install 1.96.0 --profile minimal && rustup default 1.96.0
+      - run: npm ci
+      - name: napi build (before the typecheck, which reads the addon's generated types)
+        run: npm run build:addon
+      - name: cargo test
+        run: cargo test --locked
+        working-directory: core
+      - run: npm run check
+      - run: npm run build
+      - name: e2e and the NetLog assertion (Linux, under xvfb, with the sandbox on)
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          xvfb-run -a npm run e2e

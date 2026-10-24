@@ -2,7 +2,7 @@
 // first MiB loads on demand as pieces of their own (brief §5.1, plan C3).
 import { expect } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
-import { closeSync, openSync, readSync, rmSync, statSync } from 'node:fs'
+import { closeSync, openSync, readFileSync, readSync, rmSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { FIXTURES, finish, launch, test, waitIndexed, waitOpen } from './app'
 
@@ -74,6 +74,23 @@ test("1 GiB on one line: the first piece shows before the scan passes the line's
   await waitOpen(win)
   await waitIndexed(win)
   const seen = await win.evaluate(() => (window as unknown as { statusSeen: string[] }).statusSeen)
+  // TEMP (reverted): diagnostics for PR 2's Linux CI failure.
+  const diag = await win.evaluate(async () => {
+    const marks = () => performance.getEntriesByType('mark').map((m) => `${m.name}@${m.startTime.toFixed(1)}`)
+    const before = marks()
+    const raf = await new Promise<string>((ok) => {
+      const t0 = performance.now()
+      requestAnimationFrame(() => ok(`raf after ${(performance.now() - t0).toFixed(1)} ms`))
+      setTimeout(() => ok('no raf in 3 s'), 3000)
+    })
+    return { timeOrigin: performance.timeOrigin, now: performance.now(), visibility: document.visibilityState, focus: document.hasFocus(), before, raf, after: marks(), rows: document.querySelectorAll('.vl-row').length }
+  })
+  const shell = await l.app.evaluate(({ BrowserWindow }) => {
+    const w = BrowserWindow.getAllWindows()[0]
+    return { visible: w?.isVisible(), minimized: w?.isMinimized(), focused: w?.isFocused(), bounds: w?.getBounds() }
+  })
+  console.log(`DIAG ${JSON.stringify({ seen, ...diag, shell, openStartWall: new Date(diag.timeOrigin + Number(diag.before.find((m) => m.startsWith('typose:open-start'))?.split('@')[1])).toISOString() })}`)
+  console.log(`DIAG lifecycle ${readFileSync(join(l.userData, 'logs', 'lifecycle.jsonl'), 'utf8')}`)
   expect(seen).toContain('Indexing 1 line…') // brief §8.2's indicator, while the scan was on
 
   await test.step("Z37's gate on the scan marks, with the veto's negative control", async () => {
