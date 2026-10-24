@@ -1,5 +1,5 @@
-//! Documents with generations (spec §3.1): every read checks the path's identity before and after,
-//! and every chunk is verified against its first-read hash. Any change freezes the document.
+//! Documents with generations (spec §3.1): after every read, the path's identity is checked against the one
+//! taken at open [Z63], and every chunk is verified against its first-read hash. Any change freezes the document.
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -19,21 +19,9 @@ pub struct FileId {
 impl FileId {
     #[cfg(windows)]
     pub fn of(path: &Path) -> io::Result<FileId> {
-        use std::os::windows::fs::OpenOptionsExt;
         use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{
-            BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
-            FILE_SHARE_WRITE, GetFileInformationByHandle, SECURITY_IDENTIFICATION,
-        };
-        // Access 0 = query only: no read access requested, so nothing is locked and nothing is scanned.
-        // Identification-level QoS: if a swap ever wins the race between the route check and this open, a pipe
-        // server on the other end can identify the caller but can't impersonate it.
-        let f = std::fs::OpenOptions::new()
-            .access_mode(0)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-            .security_qos_flags(SECURITY_IDENTIFICATION)
-            .open(path)?;
+        use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle};
+        let f = crate::store::query_open(path, 0)?; // query only, with identification-level QoS
         let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
         if unsafe { GetFileInformationByHandle(f.as_raw_handle() as _, &mut info) } == 0 {
             return Err(io::Error::last_os_error());

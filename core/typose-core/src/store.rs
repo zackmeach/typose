@@ -53,9 +53,31 @@ pub fn refusal(path: &Path) -> io::Result<Option<&'static str>> {
     if let Some(why) = route_refusal(path)? {
         return Ok(Some(why));
     }
-    // A stat. On Unix it opens nothing. On Windows it opens a query handle, once `route_refusal` has followed
-    // every link in the path to a location that isn't a device.
-    Ok((!std::fs::metadata(path)?.is_file()).then_some("not a regular file"))
+    // A stat. On Unix it opens nothing. On Windows it opens a query handle (`query_open`), once `route_refusal` has
+    // followed every link in the path to a location that isn't a device.
+    #[cfg(windows)]
+    let meta = query_open(path, 0)?.metadata()?;
+    #[cfg(unix)]
+    let meta = std::fs::metadata(path)?;
+    Ok((!meta.is_file()).then_some("not a regular file"))
+}
+
+/// Opens `path` for queries only, as `std::fs::metadata` does (access 0, so nothing is locked or read; backup
+/// semantics, so a directory opens too), plus `flags`, with identification-level QoS: if a swap ever wins the race
+/// between the route walk and this open, a pipe server on the other end can identify the caller but can't
+/// impersonate it.
+#[cfg(windows)]
+pub(crate) fn query_open(path: &Path, flags: u32) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, SECURITY_IDENTIFICATION,
+    };
+    std::fs::OpenOptions::new()
+        .access_mode(0)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | flags)
+        .security_qos_flags(SECURITY_IDENTIFICATION)
+        .open(path)
 }
 
 /// The part of `refusal` that opens nothing a device could answer, to run before any by-path access after the
@@ -78,6 +100,8 @@ mod windows {
     use std::io;
     use std::path::{Component, Path, PathBuf, Prefix};
 
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+
     /// Links followed before giving up (Windows itself stops at 63).
     const MAX_LINKS: usize = 32;
 
@@ -86,7 +110,7 @@ mod windows {
     ///   reserved device names;
     /// - the drive letter's target (`drive`), read without opening anything;
     /// - the links: each component in turn, through `GetFileAttributesW`, which reads a link's own attributes, then
-    ///   for a reparse point `symlink_metadata`, which opens the link itself and never its target. A junction's or
+    ///   for a reparse point a `query_open` of the link itself, never its target, then `read_link`. A junction's or
     ///   symlink's target gets the same checks before anything past the link is touched, so a link into
     ///   `\??\pipe\` is refused.
     pub fn refusal(path: &Path) -> io::Result<Option<&'static str>> {
@@ -226,9 +250,12 @@ mod windows {
             }
             // `GetFileAttributesW` returns a link's own attributes, without a handle: one query per component, which
             // keeps the walk cheap enough to run before every identity check (plan PR 4). Only a reparse point needs
-            // `symlink_metadata`, whose `is_symlink` is true for symlinks and junctions (name surrogates), not for
-            // placeholders like OneDrive's.
-            if reparse_point(&walked)? && std::fs::symlink_metadata(&walked)?.file_type().is_symlink() {
+            // the link's own metadata (what `symlink_metadata` reads, here through `query_open` for its QoS), whose
+            // `is_symlink` is true for symlinks and junctions (name surrogates), not for placeholders like OneDrive's.
+            // `GetFileAttributesW` and `read_link` can't take QoS flags (plan §7).
+            if reparse_point(&walked)?
+                && super::query_open(&walked, FILE_FLAG_OPEN_REPARSE_POINT)?.metadata()?.file_type().is_symlink()
+            {
                 let target = std::fs::read_link(&walked)?;
                 // A relative target is relative to the link's directory; an absolute one replaces the whole path.
                 let base = walked.parent().unwrap_or(&walked);
@@ -274,7 +301,12 @@ pub fn open_regular(path: &Path) -> io::Result<File> {
     #[cfg(unix)]
     let regular = file.metadata()?.is_file();
     #[cfg(windows)]
-    let file = File::open(path)?; // Windows default share mode: READ | WRITE | DELETE
+    let file = {
+        // `File::open`'s options (default share mode: READ | WRITE | DELETE), with `query_open`'s QoS.
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION;
+        std::fs::OpenOptions::new().read(true).security_qos_flags(SECURITY_IDENTIFICATION).open(path)?
+    };
     #[cfg(windows)]
     let regular = {
         use std::os::windows::io::AsRawHandle;
