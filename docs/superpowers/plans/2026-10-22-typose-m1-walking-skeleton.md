@@ -208,7 +208,7 @@ The spike trusted the caller's offset and clamped negatives to 0 (`spike/a spike
 
 **Acceptance:** with the `test-hooks` per-read delay (m8), jump far every frame for 2 s.
 - Outstanding requests stay ≤ 2 per lens throughout (debug stats).
-- Every superseded request ends `Cancelled` within one chunk read of its cancel. *(Amended in PR 5: superseded means cancelled while its read runs; plan §7.)*
+- Every superseded request ends `Cancelled` within one chunk read of its cancel. *(Amended in PR 5: superseded means cancelled while its read runs; plan §7.)* *(After PR 5's macOS run: one chunk read as the machine times it; plan §7.)*
 - The final viewport's page arrives, and 0 tasks are running after the view settles.
 
 ### C6 · Close, freeze and failure: what each releases
@@ -319,7 +319,7 @@ The document keeps its explicitly charged state (its floor, checkpoints, hashes,
 
 **Main** calls `crashReporter.start({ uploadToServer: false })` before anything else (§7.3). Plan B armed the same call after launch, via `app.evaluate` (`spike/b spikes/app/perf/spike-b1.e2e.ts:35`).
 - A bounded lifecycle log, `userData/logs/lifecycle.jsonl` (rotated at 1 MiB, 2 kept), records:
-  - start (version and pid), window shown and utility `exit`;
+  - start (version and pid), `ready` and the page's `did-finish-load` (plan §7), window shown and utility `exit`;
   - `child-process-gone` and `render-process-gone`, with every field;
   - `unresponsive` and `responsive`;
   - `before-quit`, `will-quit` and `quit` with its code, and `uncaughtException`.
@@ -328,6 +328,7 @@ The document keeps its explicitly charged state (its floor, checkpoints, hashes,
 **The harness:**
 - Records the main process's externally observed exit status, as plan B did (`spike-b1.e2e.ts:30,158-162`). It ports that capability, not every handler (reply2.md:23).
 - Copies `lifecycle.jsonl` and any new dumps into each run's results; CI keeps them per PR 2's retention rules.
+- Kills a launch whose window never comes, or that hasn't exited 15 s after its close, keeps its evidence, and fails the test (plan §7).
 - **Invalid runs, not crashes:** a superseded run, or an infrastructure interruption with evidence (a runner shutdown or a lost runner, with the platform's record), is kept as invalid with its reason (Z49). An application timeout isn't invalid: it stays a failure that needs explaining.
 
 **Acceptance:** four controlled failures, each told apart by the log and exit status alone, as in plan B rev3 `REVIEW.md:126-128`:
@@ -857,6 +858,13 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 - **C7's port teardown:** on a death, main closes its handles to both ends of the session's channel and removes the utility process's listeners. Both ends were transferred: the core host's died with it, and the renderer detaches and closes its own when it hears `core-gone`. The renderer takes a port only from its own window and only for a newer session than the last.
 - **C6's debug stats count:** `handles`, the documents' open byte stores (each one file handle); `jobs`, index threads not yet ended (a job's own reopened handle closes before its thread ends); `tasks`, page reads not yet settled. They exist only in the `test-hooks` addon, with the per-read delay.
 
+**Amendments from PR 5's macOS run (main-macos run 40067408502, on PR 5's merge):**
+- **C5's "within one chunk read" is a chunk read as the machine times it.** The test-hooks addon times every delay, and its debug stats carry the slowest (`delayMs`). Setting the delay starts the slowest over. The e2e test holds the slowest cancel under that plus 50 ms, and the napi test holds the rest of its cancelled read under that read's slowest delay plus 50 ms. The e2e bound is the run's slowest delay, since the core host sets the delay once: on macOS an outlier anywhere in the run loosens it, and Windows' and Linux's PR CI, where delays are tight, still catch a regression in the shared cancel code. *Why:* on the macOS runner a sleep overruns in every process, the test runner's own too: there, 100 ms waits took up to 242 ms in the test runner and 248 in main, and the core host's 100 ms delays up to 247 (run 40069785888). Against the nominal 100 ms, the e2e test failed there (232 ms) with no fault in the product: the cancelled read's result reached the core host's JS thread within 0.15 ms of its compute. The napi test's read ended 197 ms after its cancel there, against 200 (run 40072658390). On Windows a delay takes at most about 100.6 ms, so the e2e bound there is the old one. The gate is unchanged.
+- **C9's lifecycle log also records `ready` and the page's `did-finish-load`.** *Why:* a launch whose window never came logged only its start, so its log couldn't say how far it got.
+- **C9's harness kills a launch whose window never comes, or that hasn't exited 15 s after its close, keeps its evidence, and fails the test.** *Why:* each one held the job for minutes, at macOS's 10× (Z61): 5 at the worker's teardown, twice in run 40067408502, and the e2e step's whole 12-minute time box in run 40070774628.
+- **`main-macos.yml`'s dispatch takes `grep` and `repeat-each`, and then skips `cargo test`.** *Why:* a macOS fix is checked on its branch for what its tests cost. A push to main runs everything.
+- **On macOS, AppKit restores no windows** (proposal 5, below).
+
 **Implementer calls in PR 4 (brief gaps):**
 - Brief §5.1's "1MB" per line is 1 MiB: 16 pieces of 64 KiB, in C2's source bytes. A continuation is issued only while at least 4 bytes (the longest element) are left before the line's first MiB ends, so no piece is ever empty.
 - "Further pieces mount on demand": the first piece ends in a "↪ more" button. Activating it gives the line one row per piece, each fetched when it comes into view. Expanding every long line on its own would shift every row below whenever a page revealed one. Until it's expanded, a long line shows its first 64 KiB, where brief §5.1 says lines over 1MB "show their first 1MB" (Zack may veto).
@@ -868,6 +876,7 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 2. **After a second core death within 60 s,** the core is respawned once 60 s have passed, and Reopen is offered then (C7; amended in PR 5, above).
 3. **Raw wrapping** (brief §5.1's wrap rules) is deferred to M4, with horizontal scrolling meanwhile (plan §6).
 4. **Raw's accessibility pattern:** a labelled, focusable region with an `aria-hidden` gutter (PR 1, checked in PR 7). Neither §6.1 nor brief §9 defines one. If Zack accepts it, it becomes a row in §6.1's 🔒 table.
+5. **No AppKit window restoration on macOS:** main registers `ApplePersistenceIgnoreState` before the run loop starts (after PR 5's macOS run). *Why:* Typose restores no window through AppKit, yet after a crash AppKit asks at the next launch whether to reopen its windows, in a modal that keeps the launch from finishing until it's answered. In main-macos run 40072658390, after `lifecycle.e2e.ts`'s deliberate crash, 7 launches in a row sat in it, and on CI no one answers.
 
 **Implementer calls on spec gaps:**
 - §3.4 gives no unit for "256KiB" or "64KiB of text". C2 sets source bytes plus an item count.

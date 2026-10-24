@@ -1,4 +1,4 @@
-import { BrowserWindow, MessageChannelMain, app, crashReporter, dialog, ipcMain, protocol, screen, session, utilityProcess } from 'electron'
+import { BrowserWindow, MessageChannelMain, app, crashReporter, dialog, ipcMain, protocol, screen, session, systemPreferences, utilityProcess } from 'electron'
 import type { IpcMainEvent, IpcMainInvokeEvent } from 'electron'
 import { once } from 'node:events'
 import { readFile } from 'node:fs/promises'
@@ -23,6 +23,12 @@ let titlebarPainted: () => void = () => {}
 // No proxy resolution at all: with Windows' "Automatically detect settings" on, Chromium otherwise runs WPAD
 // (a DNS lookup for "wpad") at startup in every network context, though Typose requests nothing (spec §7.3).
 app.commandLine.appendSwitch('no-proxy-server')
+
+// macOS: no window restoration. Typose restores no window through AppKit, yet after a crash AppKit asks at the next
+// launch whether to reopen its windows, in a modal that holds the launch short of ready until someone answers it: on
+// CI, for good (main-macos runs 40067408502 and 40072658390, after lifecycle.e2e.ts's deliberate crash). It's set
+// before the run loop starts: AppKit restores windows, and asks, from inside it.
+if (process.platform === 'darwin') systemPreferences.registerDefaults({ ApplePersistenceIgnoreState: true })
 
 // Plan §5's read-only measurement hook. A refused path, or a write that fails, is logged and never stops startup.
 const mark = marksHook(process.env.TYPOSE_MARKS, log)
@@ -137,9 +143,10 @@ function createWindow(): BrowserWindow {
   })
   win.webContents.on('will-navigate', (e) => e.preventDefault())
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  // Not once a quit has begun: the window would only flash up as it closes.
   win.once('ready-to-show', () => {
     mark?.('readyToShow')
-    if (!showDelay) win.show()
+    if (!showDelay && !quitting) win.show()
   })
   win.on('show', () => {
     log('window-shown')
@@ -151,6 +158,10 @@ function createWindow(): BrowserWindow {
   })
   win.on('unresponsive', () => log('unresponsive'))
   win.on('responsive', () => log('responsive'))
+  // A closed window keeps no listeners. On macOS, one shown just before its quit can get its visibility event after
+  // it's destroyed, and Electron's own visibility listener then throws on it, so the app never exits (main-macos runs
+  // 40070774628 and 40072219356).
+  win.once('closed', () => win.removeAllListeners())
   return win
 }
 
@@ -166,6 +177,7 @@ function handle(win: BrowserWindow, channel: string, fn: () => unknown): void {
 }
 
 void app.whenReady().then(() => {
+  log('ready') // with did-finish-load below, how far a launch whose window never came got (plan C9)
   mark?.('ready')
   // Chromium's hunspell (Linux, and Windows for languages it lacks) loads its dictionaries even with spellcheck off,
   // and downloads a missing one through a loader the network guard never sees. Point those downloads at our own
@@ -182,9 +194,14 @@ void app.whenReady().then(() => {
   })
   if (showDelay) {
     const painted = new Promise<void>((ok) => (titlebarPainted = ok))
-    void Promise.all([once(win, 'ready-to-show'), painted]).then(() => setTimeout(() => win.show(), showDelay))
+    void Promise.all([once(win, 'ready-to-show'), painted]).then(() => setTimeout(() => quitting || win.show(), showDelay))
   }
-  const loaded = new Promise<void>((ok) => win.webContents.once('did-finish-load', () => ok()))
+  const loaded = new Promise<void>((ok) =>
+    win.webContents.once('did-finish-load', () => {
+      log('did-finish-load')
+      ok()
+    })
+  )
   spawnCore(win, loaded) // in parallel with the page load (spec §2.1)
   const initial = launchPath()
   handle(win, 'launch-path', () => initial)
