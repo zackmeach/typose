@@ -435,9 +435,9 @@ Each PR's tests land in that PR, and every PR extends C4's table to what it adds
 - **Triggers [Z60]:** unchanged from PR 1. A macOS-only break surfaces after merge. PR 3's macOS package and the macOS checks in PRs 7 and 8 run in that job, and a red macOS run is fixed in the next PR.
 - **Minutes [Z61]:** GitHub Free's included minutes, with the $0 spending limit. Windows minutes count 2× and macOS 10×.
   - Caches for cargo, npm and the Electron binary.
-  - `paths-ignore` for docs-only changes (`docs/**`, `*.md`).
-  - `concurrency` with `cancel-in-progress: true` per ref.
-  - Platform-independent steps (fmt and lint) run on Linux only. (PR 1 dropped the range staleness check: there's no generated table.)
+  - `paths-ignore` for docs-only changes (`docs/**`, `*.md`). *(Amended in PR 2: `*.md` is root-level, and a PR is judged on its whole diff; plan §7.)*
+  - `concurrency` with `cancel-in-progress: true` per ref. *(Amended in PR 2: not for pushes to `main`, which keep one macOS run each; plan §7.)*
+  - Platform-independent steps (fmt and lint) run on Linux only. (PR 1 dropped the range staleness check: there's no generated table.) *(PR 2 adds clippy for the Windows target there, plan §7.)*
   - **If the quota runs out,** the $0 limit pauses CI, and gated merges wait until it resets or Zack changes the policy. There's no automatic downgrade of the macOS job.
 - **Artifacts and storage [Z61]:**
   - GitHub Free includes 500 MB of artifact storage plus a separate cache allowance (`reply3.md:61`, citing GitHub's docs; not re-fetched here).
@@ -446,10 +446,13 @@ Each PR's tests land in that PR, and every PR extends C4's table to what it adds
   - Caches are keyed per lockfile and pruned.
   - Before an artifact expires, the orchestrator copies the failure evidence into `.evidence/m1/ci/` with `gh run download`.
 - **Stopping budget:** Zack verifies that the $0 limit stops billing rather than only alerting, or that free capacity is verified. The `gh` token has no `user` scope, so this is unverified here. It doesn't block local development, but hosted CI can't run until it's verified (PR 1).
-- **Minutes estimate (proposal; PR 2 replaces it with measured figures from its first runs):**
-  - With warm caches, a PR run takes about 12 min on Windows (24 billed) and 8 on Linux (8 billed): about 32 billed minutes, or about 100 at ~3 runs per PR.
-  - A macOS merge run takes about 15 min (150 billed).
-  - So a merged PR costs about 250 billed minutes, or about 8 merged PRs a month on the 2,000-minute quota (`reply3.md:61`).
+- **Measured minutes (PR 2's runs on 2026-10-23, replacing the estimate).** Billed means each job rounded up to the whole minute, then Windows ×2, Linux ×1 and macOS ×10.
+  - **A PR's first run, with cold caches** (pr run 39981985343): Windows 5m46s (12 billed), Linux 3m02s (4) and lint 1m06s (2), so 18 billed.
+  - **A later push to the same PR, with warm caches** (pr run 39983589063, which ran every step): Windows 3m03s (8 billed), Linux 2m12s (3) and lint 54s (1), so 12 billed. The warm cache cut Windows' napi build from 84 s to 22 s and its `cargo test` from 91 s to 37 s.
+  - **A macOS merge run** took 1m37s and 1m24s, the job times of main-macos runs 39977019396 and 39979583756, before PR 2's caches. So 20 billed each.
+  - So a merged PR with ~3 runs costs about 18 + 12 + 12 + 20 ≈ 62 billed minutes, or about 32 merged PRs a month on the 2,000-minute quota (`reply3.md:61`). The estimate said 250 and 8.
+  - Manual `workflow_dispatch` macOS runs aren't in that figure: about 20 billed each, and there were three on 2026-10-23.
+  - A PR's first run is always cold: `main` runs only macOS, so Windows and Linux caches are saved on each PR's own ref, which other PRs can't read.
 - **Additions to the steps:**
   - `cargo fmt --check` and `clippy -D warnings`;
   - lint on Linux, with a linter that doesn't need the TS compiler API (proposal: oxlint). TS 7.0.2 ships no `createSourceFile` (`m1rev` P4); typescript-eslint is used only if it's first verified on TS 7;
@@ -459,7 +462,7 @@ Each PR's tests land in that PR, and every PR extends C4's table to what it adds
 **Acceptance:**
 - The Windows and Linux jobs are green on the PR, and the macOS job is green on the merge.
 - A planted fmt error, a clippy warning, a type error and a test-only external request (caught by NetLog) each fail their job.
-- A docs-only change triggers no run, and a second push cancels the first push's run.
+- A docs-only change triggers no run, and a second push cancels the first push's run. *(A docs-only PR, or a docs-only push to `main`; amended in PR 2, plan §7.)*
 - A failing run uploads its evidence with the retention set.
 
 ### PR 3 · Packaged build, fuses and the minimal instruments (large, high: security and instrument validity)
@@ -730,6 +733,18 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 **Amendments from the first macOS run (main-macos run 39977019396, on PR 1's merge):**
 - **C9's `forcefullyCrashRenderer()` case** expects `crashed` on Windows and Linux and `killed` on macOS. *Why:* Electron reports the forced crash as `killed` on macOS. The gate is unchanged: the four controlled failures stay told apart by the log and exit status alone.
 - **`main-macos.yml` also takes `workflow_dispatch`.** *Why:* a macOS fix can be run on its branch before merge. The automatic triggers stay Z60's.
+
+**PR 2's amendments (mechanisms only; no Z-decision, 🔒 requirement or gate changes):**
+- **"A docs-only change triggers no run" means a docs-only PR, or a docs-only push to `main`.** GitHub applies a `pull_request` path filter to the PR's whole diff against its base, so a docs-only push to a PR that changes code still runs, as it should: the head moved. *Why:* that's GitHub's rule, not a choice. PR 2 shows the push case on `main-macos.yml`'s filter (a reverted probe commit, its job skipped); the first docs-only PR after PR 2 shows the PR case.
+- **`*.md` matches root-level Markdown only** (GitHub's `*` doesn't cross `/`); `docs/**` covers the docs tree. *Why:* Typose's own tests will carry Markdown inputs under `app/`, `core/` and `e2e/`, and `**/*.md` would let a fixture-only PR skip CI.
+- **Clippy also checks `x86_64-pc-windows-msvc`, from Linux.** *Why:* clippy runs on Linux only, so `cfg(windows)` code, such as §3.3's pipe and device refusals in `store.rs`, would never be linted. The cross-check lints it at Linux's rate.
+- **Within a job, a step runs when what it needs succeeded,** not only when every earlier step did; the job still fails. *Why:* one run reports every failure (fmt, both clippies and oxlint; `cargo test`, `check` and the e2e) instead of one per push.
+- **Every job is time-boxed** (`timeout-minutes`: lint 15, test 25, macOS 20, and 12 for the e2e step). *Why:* GitHub's default is 360 minutes, so one hung macOS job would bill 3,600 of the 2,000 included minutes. The e2e step's 12 is past the longest test's own limit (10 minutes in `large.e2e.ts` and `long-line.e2e.ts`; the config's is 5) and leaves room in each job's limit, so a hung e2e fails its own step and its evidence still uploads (a job timeout cancels the job, skipping the upload).
+- **Rust is pinned in a root `rust-toolchain.toml`** (1.96.0, minimal profile, with rustfmt and clippy), which rustup reads locally and in CI. *Why:* one place; at the root it also covers `npm run fixtures`, which runs cargo from the root.
+- **The Electron binary is fetched in its own step** (`npx --no install-electron`), from a cache keyed per lockfile and OS. *Why:* Electron 44 installs no binary at `npm ci`; the first `require('electron')` downloads it, which would otherwise land inside the e2e step.
+- **`main-macos.yml` keeps one run per merge.** A push to `main` gets a concurrency group of its own (its sha), so a later merge neither cancels it nor replaces it while it waits. Only `workflow_dispatch` runs on one branch cancel each other. *Why:* a red macOS run must name its merge, since Z60's macOS break is fixed in the next PR, and a cancelled or replaced run leaves that merge with no verdict. It costs at most one more macOS run per overlapping merge, about 20 billed minutes.
+- **Z57's green CI, for a docs-only PR.** `paths-ignore` gives a PR whose files are all under `docs/**` or root-level `*.md` no checks at all. Its CI counts as green when its file list shows nothing else, which the review confirms. Z57 itself is unchanged.
+- **Failure evidence is capped by stored size** (deflated at level 9, as the artifact zip stores it): 16 MiB a file and 32 MiB in all. *Why:* a raw-byte cap dropped C9's 35 MB Windows main-process dump (pr run 39983589063), which stores at about 180 KB (kept in pr run 40047349718).
 
 **PR 3's amendments (instrument definitions and test details; the frame gate's scope follows Zack's Z62; no other Z-decision, 🔒 requirement or gate threshold changes; the evidence is in PR 3's description):**
 - **`shellVisible` is the title bar's first presentation after `show`, not max(`show`, `titlebarPainted`), and never `show` itself.** This is stricter: on the packaged build it reads 70–95 ms later than the old definition. *Why:* PR 3's control settled C8's UNVERIFIED point.
