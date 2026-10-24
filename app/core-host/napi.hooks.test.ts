@@ -83,7 +83,10 @@ it('plan C5: a cancelled read stops within the chunk read under way, and reads n
   expect(core.debugStats().delayMs).toBeGreaterThanOrEqual(DELAY - 20)
   expect(core.debugStats().delayMs).toBeLessThan(whole.total)
   const cut = await read(1.5 * DELAY) // during the second
-  console.log(`a page of four chunk reads: ${whole.total.toFixed(0)} ms; cancelled during the second, it ended ${cut.afterCancel.toFixed(0)} ms later`)
+  const { delayMs } = core.debugStats()
+  console.log(`a page of four chunk reads: ${whole.total.toFixed(0)} ms; cancelled during the second, it ended ${cut.afterCancel.toFixed(0)} ms later (the slowest delay ${delayMs.toFixed(0)} ms)`)
   expect(cut.code).toBe('Cancelled')
-  expect(cut.afterCancel).toBeLessThan(DELAY) // the rest of the read under way, and no other
+  // The rest of the read under way, and no other: under one delay, as long as the slowest took here. On the macOS
+  // runner four 200 ms delays took 903-1086 ms, and in run 40072658390 this came 197 ms after the cancel (plan §7).
+  expect(cut.afterCancel).toBeLessThan(delayMs)
 })
