@@ -1,5 +1,6 @@
-// Plan C6 on the test-hooks build: what close and a failure release, read from the core's debug stats. The 10 GiB
-// fixture is sparse: 2,000 lines of text, then zeros the disk doesn't store but the index still reads.
+// Plan C6 on the test-hooks build: what close and a failure release, read from the core's debug stats, the ledger's
+// included (plan C1). With nothing open and no lens mounted, the ledger holds only its pool: that's the baseline. The
+// 10 GiB fixture is sparse: 2,000 lines of text, then zeros the disk doesn't store but the index still reads.
 import { expect } from '@playwright/test'
 import { rmSync, truncateSync } from 'node:fs'
 import { join } from 'node:path'
@@ -36,6 +37,10 @@ test('close mid-index on 10 GiB: the job stops within 50 ms, and 0 jobs, 0 tasks
   console.log(`close mid-index: everything released ${stoppedMs.toFixed(1)} ms after close`)
   expect(stoppedMs).toBeLessThan(50)
   expect(await debugStats(l.win)).toMatchObject({ jobs: 0, tasks: 0, handles: 0, docs: 0 })
+  // The ledger is back to its baseline, byte for byte: the document's charges and the lens's cache are released.
+  await expect.poll(async () => (await debugStats(l.win)).ledger).toMatchObject({ rendererCache: 0 })
+  const { ledger } = await debugStats(l.win)
+  expect(ledger.used).toBe(ledger.pool)
   await expect(l.win.locator('.open-button')).toHaveText('Open file…') // the empty card
   expect(l.pageErrors).toEqual([])
   await finish(l)
@@ -48,8 +53,17 @@ test('a truncation mid-index freezes the document: 0 jobs and 0 tasks remain, it
   await expect(l.win.locator('.card-status')).toHaveText(/^Indexing stopped at /)
   // The document keeps what it holds (its handle, here) until close; the job and any reads are gone.
   await expect.poll(() => debugStats(l.win)).toMatchObject({ jobs: 0, tasks: 0, handles: 1, docs: 1 })
+  // The ledger: the baseline, the frozen lens's cache, and exactly the document's retained charges, as itemized.
+  const frozen = await debugStats(l.win)
+  const { hashes, checkpoints, cache, metadata, total } = frozen.charges[1]
+  expect(hashes + checkpoints + cache + metadata).toBe(total)
+  expect(frozen.ledger.used).toBe(frozen.ledger.pool + frozen.ledger.rendererCache + total)
+  console.log(`frozen: ${total} bytes retained (${hashes} hashes, ${checkpoints} checkpoints, ${cache} cache, ${metadata} metadata)`)
   await l.win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.app.close!())
   await expect.poll(() => debugStats(l.win)).toMatchObject({ jobs: 0, tasks: 0, handles: 0, docs: 0 })
+  await expect.poll(async () => (await debugStats(l.win)).ledger).toMatchObject({ rendererCache: 0 })
+  const { ledger } = await debugStats(l.win)
+  expect(ledger.used).toBe(ledger.pool) // a later close returns it to the baseline
   expect(l.pageErrors).toEqual([])
   await finish(l)
 })
