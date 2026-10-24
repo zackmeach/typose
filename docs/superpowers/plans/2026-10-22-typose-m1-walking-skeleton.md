@@ -293,9 +293,12 @@ The document keeps its explicitly charged state (its floor, checkpoints, hashes,
 - PR 3's control settled the UNVERIFIED point: on Electron 44, `show` doesn't mark on-screen display. `titlebarPainted` (React's first title-bar commit, then rAF + task) is still recorded, for the cost breakdown.
 
 **Acceptance,** with accessibility on and off:
-- An injected 30 ms busy-wait during a scroll registers a long frame covering it, and no stall. A control scroll registers no stall and passes cadence (the ≥ 99% rule) and responsiveness, and every long frame it registers is listed. (Amended in PR 3.)
+- An injected 30 ms busy-wait during a scroll registers a long frame covering it, and no cadence stall. Its responsiveness is recorded as measured, not asserted: the block adds onto one input's answer.
+- A control scroll registers no stall and passes cadence (the ≥ 99% rule) and responsiveness, and every long frame it registers is listed. (Amended in PR 3.)
 - The keypress control (21 discrete ArrowDown presses, no injection) passes responsiveness and reports cadence as `n/a` in 10 of 10 live runs, with accessibility on and with it off (Z62).
-- A 60 ms busy-wait is **detected**: at least one stall covers the injection window. That holds during a scroll, in the handler of one discrete keypress (Z62), and in the first frame after a scrollbar jump. The test doesn't require exactly one stall under every scheduling outcome.
+- A 60 ms busy-wait is **detected**: at least one stall covers the injection window. That holds during a scroll, in the handler of one discrete keypress (Z62), and in the first frame after a scrollbar jump.
+  - During a scroll, the stall that covers it is a cadence stall. So the 30 ms control's assertion fails once its injection is 60 ms.
+  - The test doesn't require exactly one stall under every scheduling outcome.
   - "Covers": the stall runs past the injection's end, and the work behind it began before the injection did. That's the frame that opens a gap, or the input whose first frame is late (Z62). A frame already in the pipeline still presents during the block. (Amended in PR 3.)
 - A jump whose target rendering is suppressed fails as never painted. The test driver drops the page requests over CDP, so no hook is needed. (Amended in PR 3.)
 - Startup controls, on the test-hooks build (amended in PR 3):
@@ -755,7 +758,7 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
     - synthetic keypresses answered in 10 and 45 ms report cadence `n/a` and pass responsiveness;
     - answered in 61 ms, every key is a stall;
     - a first frame begun late is judged from the input, not as a long frame;
-    - the live keypress control passed responsiveness with cadence `n/a` in 10 of 10 runs with accessibility on and 10 of 10 with it off, timed to the answer (review round 3). Its answers came in at most 15.2 ms. Round 2's first batch, timed to the next present, had one failure from keyboard input the test didn't send; PR 3's description has it;
+    - the live keypress control passed responsiveness with cadence `n/a` in 10 of 10 runs with accessibility on and 10 of 10 with it off, timed to the answer (review round 3). Over round 3's 20 runs, each run's answers had p50 4.3–8.9 ms, p95 9.1–13.3 ms and max 10.3–15.2 ms; the round-3 review's own 5 runs reached 15.4 ms. Round 2's first batch, timed to the next present, had one failure from keyboard input the test didn't send; PR 3's description has it;
     - a 60 ms busy-wait in one keypress's handler is a stall covering it: 66.1 ms and 70.7 ms in round 3's frame-control run.
   - A continuous gesture still merges into one interval: 289–329 judged frames per 2 s scroll at 165 Hz.
 - **One present is one frame.** Two `STATE_PRESENTED_ALL` `PipelineReporter` slices, for different `frame_sequence`s, can end at the same timestamp. They count once, begun when the earlier began.
@@ -776,6 +779,10 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
   - *Why:* the first version passed a trace with no inputs, or with 0 judged frames. The review's empty and input-less traces now return `valid: false` with a reason.
 - **Perf results are appended, never overwritten.** Each run goes to `.evidence/m1/perf/<host>.jsonl` after the test's verdict. It carries its status, the test's error (`testError`) and the run's own `reason` for being invalid, and neither overwrites the other. *Why:* Z49 and §10.3 keep every failed or invalid run "with its reason, never replaced by a clean rerun"; the first version rewrote a key on every run.
 - **The frame control is held to no stall and the ≥ 99% rule, not to 0 long frames. The injections must register a long frame or stall covering the injected window.** *Why:* on the loaded PC, each control scroll registered up to two long frames among about 300–330 judged: mostly 18.2–18.4 ms, once 36.4 ms and once 42.5 ms. The inspected 18.2 ms trace shows frames presented a refresh late: slices that began 6 ms apart, the next presented 18.2 ms after the previous one. That's the instrument detecting a real missed refresh, not a false positive. The §10.2 gate is unchanged, and a stray long frame can't satisfy the coverage check.
+- **The 30 ms injection control asserts no cadence stall, and records responsiveness as measured (review round 4).**
+  - *Why:* since responsiveness times the answer, the 30 ms block adds onto one input's answer. The live worst answers were 42.3–42.5 ms, about 7.5 ms under 50.
+  - On a 60 Hz panel the baseline answer is one to two refreshes (16.7–33 ms), so "no stall" of either kind would fail there with the instrument right.
+  - The 60 ms control must register a cadence stall covering its injection, so the 30 ms assertion still fails once the injection grows to 60 ms. The uninjected control scroll keeps asserting no stall of either kind: there, a late answer is the app's.
 - **"Covers" means the stall runs past the injection's end, and the work behind it began before the injection did; it may start after the injection starts.** That work is the frame that opens a gap, or the input whose first frame is late (Z62). *Why:* a frame already in the pipeline when the main thread blocks still presents during the block (seen 3–12 ms in). No frame begun after the block starts can present until the block ends. The span is still the whole time nothing new reached the screen.
 - **Target suppression needs no `test-hooks` hook.** The test driver drops the renderer's page requests over CDP. *Why:* CDP already reaches the page on the fused build; a hook would add behaviour-changing code to the app for nothing.
 
