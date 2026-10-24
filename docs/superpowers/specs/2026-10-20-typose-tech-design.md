@@ -70,6 +70,7 @@ The packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`) holds
 | Z59 | **A missed cold-startup target blocks M1 closure** until it's fixed or Zack explicitly changes the budget [Z54] (§10.2, §13.2). |
 | Z60 | **CI on the private repo:** Windows and Linux run on every PR; macOS runs on merges to `main`, until the repo goes public (§11.2). |
 | Z61 | **No spending until after launch, once Typose is working.** Everything uses free resources:<br>• GitHub Free for the private repo. Actions stay within the included minutes, with a $0 spending limit, so overage pauses CI rather than billing.<br>• A loaned or borrowed Mac only [Z55]; nothing is bought.<br>• No paid subscriptions.<br>Consequence: §12.1's paid signing (Azure Trusted Signing, the Apple Developer Program) can't start before launch, so how the launch builds are signed is open (§15). |
+| Z63 | **Change detection checks the path's size, modified time and file identity after every lazy read, against the identity taken at open (it was before and after).** Reads go through the handle opened at open, so any change before or during a read fails the after-check and freezes the document. The before-check only narrowed a change-then-revert window on a chunk's first read, which §3.1's content verification already concedes metadata can't close. Measured 64 KiB fetch p95 at the napi layer: before and after 2.91–3.03 ms; after only 2.52–2.55 ms. (2026-10-23; §3.1, brief §7.9) |
 
 ---
 
@@ -146,7 +147,7 @@ typose/
 ### 3.1 Identity and generations
 - Each open file gets one **`DocumentId`**, and a **generation** number within it.
 - **Opening a file** records its size, modified time and file identity, starting **generation 1**.
-- **Change detection (brief §7.9):** before and after every lazy read, the core checks the path's size, modified time and **file identity** (volume + file index on Windows, device + inode elsewhere).
+- **Change detection (brief §7.9):** after every lazy read, against the identity taken at open [Z63], the core checks the path's size, modified time and **file identity** (volume + file index on Windows, device + inode elsewhere).
   - Any difference **freezes** the document at its current content: the brief's "Changed on disk" banner shows, and nothing new is read.
   - **Ctrl+R** starts a new generation.
 - **Content verification 🔒:** metadata checks alone can't catch every write. An in-place, same-size write inside the timestamp resolution, or one landing between the check and the read, slips through. So:

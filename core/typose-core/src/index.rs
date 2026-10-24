@@ -153,13 +153,15 @@ fn block_len(cfg: &IndexConfig) -> usize {
     cfg.block.max(CHUNK) / CHUNK * CHUNK // whole chunks, so every hash covers exactly one chunk
 }
 
+/// Indexes `file` block by block. After each block `on_progress` says whether to go on: when it says no, the index
+/// stops there, published as far as it got and not done (plan C6: a frozen document's index ends).
 pub fn build(
     file: &File,
     len: u64,
     cfg: IndexConfig,
     hashes: &ChunkHashes,
     shared: &RwLock<LineIndex>,
-    mut on_progress: impl FnMut(Progress),
+    mut on_progress: impl FnMut(Progress) -> bool,
 ) -> Result<(), StoreError> {
     let started = Instant::now();
     let encoding = shared.read().unwrap().encoding;
@@ -176,7 +178,9 @@ pub fn build(
         }
         pos += n as u64;
         let lines = b.publish(shared, pos, false);
-        on_progress(Progress { lines, bytes: pos, done: false, elapsed_ms: started.elapsed().as_millis() as u64 });
+        if !on_progress(Progress { lines, bytes: pos, done: false, elapsed_ms: started.elapsed().as_millis() as u64 }) {
+            return Ok(());
+        }
     }
     let lines = b.publish(shared, len, true);
     on_progress(Progress { lines, bytes: len, done: true, elapsed_ms: started.elapsed().as_millis() as u64 });
@@ -219,7 +223,7 @@ mod tests {
         let store = ByteStore::open(&path).unwrap();
         let shared = RwLock::new(LineIndex::default());
         let file = File::open(&path).unwrap();
-        build(&file, store.len(), cfg, &store.hashes(), &shared, |_| {}).unwrap();
+        build(&file, store.len(), cfg, &store.hashes(), &shared, |_| true).unwrap();
         (store, shared.into_inner().unwrap())
     }
 
@@ -300,7 +304,7 @@ mod tests {
         let path = temp_file(name, bytes);
         let store = ByteStore::open(&path).unwrap();
         let shared = RwLock::new(LineIndex { encoding, ..LineIndex::default() });
-        build(&File::open(&path).unwrap(), store.len(), cfg, &store.hashes(), &shared, |_| {}).unwrap();
+        build(&File::open(&path).unwrap(), store.len(), cfg, &store.hashes(), &shared, |_| true).unwrap();
         (store, shared.into_inner().unwrap())
     }
 
