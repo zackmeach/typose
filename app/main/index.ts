@@ -11,6 +11,10 @@ const mainStart = Date.now() // plan C8's first startup mark: read now, written 
 
 // Plan C9: armed before anything else. Minidumps stay on this machine (spec §7.3).
 crashReporter.start({ uploadToServer: false })
+// Spec §8.1: one instance per profile. A second launch hands the first its own argv and cwd (the event's `argv` is
+// Chromium's re-parse: switches moved first, whitespace trimmed) and exits 0 here, before it logs or writes a
+// `running` marker (C9). Before the message loop, app.exit ends the process at once; app.quit would still emit ready.
+if (!app.requestSingleInstanceLock({ argv: process.argv, cwd: process.cwd() })) app.exit(0)
 const log = startLifecycle()
 // Plan C8's startup controls, compiled only into the test-hooks build: show() a set delay after both
 // ready-to-show and the title bar's paint, or delay React's mount.
@@ -47,12 +51,28 @@ const MIME: Record<string, string> = {
 const CSP =
   "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
-/** The file named on the command line: the last argument that isn't a switch (PR 8 normalizes the rest). */
-function launchPath(): string | null {
-  const plain = process.argv.slice(1).filter((a) => !a.startsWith('-'))
-  const file = (process.defaultApp ? plain.slice(1) : plain).at(-1) // `electron <app> <file>` in development
-  return file ? resolve(file) : null
+/**
+ * The file a launch names (spec §8.1): its last path, resolved against its cwd. Every argument after the first `--`
+ * is a path, whatever it looks like; before it, switches aren't. It's a path, never a URL: what it names is opened
+ * like any other, so the core's checks and refusals apply (plan C4, spec §3.3).
+ */
+function launchPath(argv: string[], cwd: string): string | null {
+  const end = argv.indexOf('--', 1)
+  const plain = argv.slice(1, end < 0 ? undefined : end).filter((a) => !a.startsWith('-'))
+  const paths = [...(process.defaultApp ? plain.slice(1) : plain), ...(end < 0 ? [] : argv.slice(end + 1))] // `electron <app> <file>` in development
+  const file = paths.filter(Boolean).at(-1)
+  return file ? resolve(cwd, file) : null
 }
+
+/** The newest file named: by this launch, a second one, or macOS's open-file. M1's one card shows it. */
+let newest = launchPath(process.argv, process.cwd())
+/** Until the page asks for its first file, a newer one replaces it; after, main sends each to the page. */
+let deliver = (path: string) => void (newest = path)
+// macOS names files through open-file, not argv: before ready for the file a launch opens, and after.
+app.on('open-file', (event, path) => {
+  event.preventDefault()
+  deliver(path)
+})
 
 function serveApp(): void {
   const rendererDir = join(__dirname, '../renderer')
@@ -186,8 +206,22 @@ void app.whenReady().then(() => {
   }
   const loaded = new Promise<void>((ok) => win.webContents.once('did-finish-load', () => ok()))
   spawnCore(win, loaded) // in parallel with the page load (spec §2.1)
-  const initial = launchPath()
-  handle(win, 'launch-path', () => initial)
+  // Emitted only after ready. What a second instance sends is untrusted: anything of another shape names nothing.
+  app.on('second-instance', (_event, _argv, _cwd, data) => {
+    if (win.isDestroyed()) return // quitting
+    const { argv, cwd } = (data ?? {}) as { argv?: unknown; cwd?: unknown }
+    const path = Array.isArray(argv) && argv.every((a) => typeof a === 'string') && typeof cwd === 'string' ? launchPath(argv, cwd) : null
+    if (path) deliver(path)
+    if (win.isMinimized()) win.restore()
+    if (win.isVisible()) win.focus() // focus() would show a window that isn't shown yet, ahead of plan C8's show
+  })
+  handle(win, 'launch-path', () => {
+    deliver = (path) => {
+      newest = path
+      if (!win.isDestroyed()) win.webContents.send('open-path', path)
+    }
+    return newest
+  })
   handle(win, 'open-dialog', async () => {
     const r = await dialog.showOpenDialog(win, { properties: ['openFile'] })
     return r.canceled ? null : (r.filePaths[0] ?? null)
