@@ -77,6 +77,9 @@ The packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`) holds
 | Z66 | **Raw lines wrap at 2,048 UTF-16 units into ↪ continuation rows** (plan PR 6b). This is a deliberate deviation from brief §5.1 for lines of 2,049–10,000 units. (2026-10-24; brief §5.1) |
 | Z67 | **The PC's shell-visible cold budget is < 400ms, provisional.**<br>• Z29's half-budget rule doesn't apply to this row: the GPU process's start (driver device creation, measured at 175–196ms per process in M1's PR 10 review) doesn't scale with CPU.<br>• It's measured with an existing profile, on an unlocked, displayed session (an addition to Z49).<br>• The final number is set after a real cold batch of OS restarts [Z54].<br>Amends Z54's < 200ms PC target. (2026-10-24; §10.2, §10.3) |
 | Z68 | **The first formatted lens is rendered Markdown,** built end to end before M2. (2026-10-24; §13.2) |
+| Z71 | **Rendered's size ceiling is 8MiB of source** in the first Markdown slice. Above it, the file opens in Raw with Rendered disabled and the reason in its tooltip. (2026-10-24; §4.6; the slice's plan, §4) |
+| Z72 | **Rendered uses native `content-visibility` over all of its blocks** in the first Markdown slice, within Z71's ceiling, instead of the virtualizer: a temporary departure from Z26. (2026-10-24; §5.3; the slice's plan, §2.2) |
+| Z73 | **A relative link to a supported file replaces the card's file** ("open it in the window"). There's no Back until M2. (2026-10-24; §5.4; the slice's plan, §2.4) |
 
 ---
 
