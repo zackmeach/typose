@@ -30,7 +30,7 @@
 - **Z49:** "Quiet machine: no other heavy work or agent lanes; the CPU under 10% for a minute before each timing run, with load recorded during it; Defender on." Batches run separately. "Every failed or invalid run is kept with its reason."
 - **Z52:** A far jump is scrolling under §10.2's "no stall > 50ms" rule: a scrollbar jump, an Outline jump, or open-then-scroll.
 - **Z53:** M1 is authorized despite the failed and pending gates, which keep that status (or "parked"). This authorizes "implementation, not a release."
-- **Z54:** "Cold startup is measured on the M1 app, early enough to inform its implementation. The **< 200ms PC / < 400ms Mac** targets stay." Measure "one fixed build and layout, launched first after each of five restarts." "A miss stays a miss."
+- **Z54:** "Cold startup is measured on the M1 app, early enough to inform its implementation. The **< 200ms PC / < 400ms Mac** targets stay." Measure "one fixed build and layout, launched first after each of five restarts." "A miss stays a miss." The PC's target is now < 400 ms, provisional (Z67, 2026-10-24).
 - **Z55:** Mac access is "an Apple-silicon Mac under Zack's control." "The friend's Mac may bridge an initial batch." "Mac-dependent acceptance stays pending until measured."
 - **Z56 conditions:** "Memory enforcement and its tests remain mandatory for M1 closure." "A corresponding unexplained exit in M1 blocks M1 closure." "Performance failures stay failures."
 - **Z57:** "the implementer merges each PR once its review is clean and CI is green, within an approved milestone plan."
@@ -301,7 +301,7 @@ The document keeps its explicitly charged state (its floor, checkpoints, hashes,
 - When the title bar was first presented to the still-hidden window, it's `shownPresented`: the presentation of the first frame after the show. Under the TYPOSE_MARKS hook only, main tells the page it has shown, and the page puts in a one-character probe in the background colour, outside React's root, and reads that probe's Element Timing.
 - A run that can't establish a presentation after `show` is invalid, with its reason (Z49).
 - PR 3's control settled the UNVERIFIED point: on Electron 44, `show` doesn't mark on-screen display. `titlebarPainted` (React's first title-bar commit, then rAF + task) is still recorded, for the cost breakdown.
-- The page's own first frame is `typose:first-frame` on the renderer's User Timing timeline: a rAF scheduled when the bundle evaluates. Z37's first-screen gate starts its clock no earlier (Z64), since a page that can't paint yet is this section's problem, not the lens's. A run whose scan ends inside the budget from that start is not judged: that fails on Windows and macOS, and is logged on Linux (Z28).
+- The page's own first frame is `typose:first-frame` on the renderer's User Timing timeline: a rAF scheduled when the bundle evaluates. The same rAF sends the startup mark `firstFrame` (PR 10, plan §7). Z37's first-screen gate starts its clock no earlier (Z64), since a page that can't paint yet is this section's problem, not the lens's. A run whose scan ends inside the budget from that start is not judged: that fails on Windows and macOS, and is logged on Linux (Z28).
 
 **Acceptance,** with accessibility on and off:
 - An injected 30 ms busy-wait during a scroll registers a long frame covering it, and no cadence stall. Its responsiveness is recorded as measured, not asserted: the block adds onto one input's answer. (Amended in PR 3.)
@@ -626,7 +626,7 @@ Run plan §5 and record the M1 summary. An executed review checks the evidence a
 
 | Gate (§13.1) | Status now | Evidence | Owner |
 |---|---|---|---|
-| A: shell visible cold < 200 / < 400ms | pending; warm smoke under load p50 412 / p95 456ms (n=3); never run cold | `snap1/pv/results/spike-a-Zack-PC.json` `smokeShell`; MANIFEST:45-47 | M1 (Z59) |
+| A: shell visible cold < 400 (provisional, Z67) / < 400ms | pending; warm smoke under load p50 412 / p95 456ms (n=3); never run cold | `snap1/pv/results/spike-a-Zack-PC.json` `smokeShell`; MANIFEST:45-47 | M1 (Z59, Z67) |
 | A: first screen Raw 1GiB/10GiB < 50ms warm, < 150ms cold | pending; loaded runs; "10g" was a 1,288,490,200 B stand-in | `snap1/lanes/ra/sandbox2/…/spike-a-Zack-PC.json`; `pv/results` `index10g` | M1 (both sizes, both cache states) |
 | A: first screen Rows 1GiB/10GiB | pending | same | M3 |
 | A: oversized first record (piece in gate, no item > 64KiB) | pending; post-Z37 max 25.9ms Raw, under load | `snap1/plana/z37/AMEND.md:130-143` | Raw M1; Rows M3 |
@@ -657,14 +657,15 @@ Run plan §5 and record the M1 summary. An executed review checks the evidence a
 
 ## 5. Qualification for M1's exit
 
-**Protocol [Z49, unchanged]:** a quiet PC, with CPU < 10% for a minute before each timing run, load recorded during it, and Defender on. Warm runs, the cold batches and manual checks run as separate batches. Every failed or invalid run is kept with its reason.
+**Protocol [Z49, with Z67's addition]:** a quiet PC, with CPU < 10% for a minute before each timing run, load recorded during it, and Defender on, on an unlocked, displayed session (Z67). Warm runs, the cold batches and manual checks run as separate batches. Every failed or invalid run is kept with its reason.
 
 **Build [Z54; ruling OQ-2]:**
 - **The build:** one fixed build, the PR 3 packaged unsigned layout at the M1 closing commit, with every §7.1 fuse set. It's named by its commit and binary hash, and every qualification run uses it.
 - **Two required cold batches per reference platform,** each of five OS restarts, with the build launched **first** after each restart:
   - batch A opens the 10 GiB file by argv;
   - batch B opens the 1 GiB file.
-  - Each launch records `shellVisible`, `launch→firstContent` (informational until restore, M2) and the judged `open→usable Raw` (from the open request to the first bounded piece visible and usable, Z37).
+  - Each launch records `shellVisible`, `launch→firstContent` (informational until restore, M2) and the judged `open→usable Raw` (from Z64's start, the later of the open request and the page's first frame, to the first bounded piece visible and usable, Z37; plan §7, PR 10).
+  - `shellVisible` is measured with an existing profile (Z67). The PC's final number is set after these batches.
   - The launch passes no debugging switch; its marks come from the read-only hooks. A second launch isn't cold.
 - **Driving the build:** Playwright's `_electron.launch` can't, because it waits for the Node inspector, which the fuse disables (`m1rev` P2). `_electron.launch` is for dev-layout e2e only.
   - The M1 runner spawns the executable with `--remote-debugging-port=0` and attaches with `chromium.connectOverCDP`.
@@ -675,7 +676,7 @@ Run plan §5 and record the M1 summary. An executed review checks the evidence a
 
 | Gate | Fixture | Cache | PC (half budget) | Mac (full budget) |
 |---|---|---|---|---|
-| Shell visible (`shellVisible`) | launch | cold | < 200ms | < 400ms |
+| Shell visible (`shellVisible`) [Z67] | launch | cold | < 400ms, provisional | < 400ms |
 | Raw first screen, `open→usable` | 1 GiB and 10 GiB JSONL | warm | < 50ms | < 100ms |
 | Raw first screen, `open→usable` | 1 GiB and 10 GiB JSONL | cold | < 150ms | reported: §13.1 sets no Mac cold value |
 | Raw first screen, ready lens (§10.2's ≤ 100MB row) | the named set, one per format | warm | < 50ms | < 100ms |
@@ -1054,6 +1055,37 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 - **Electron's default menu's accelerators were live on Windows with its bar hidden.** At `5debd25`, Ctrl+Shift+R delivered as the OS delivers keys (`sendInputEvent`) reloaded the page while `isMenuBarVisible()` was false; PR 7's scope said "live wherever its menu bar is". Playwright's keyboard, over CDP, never reached them.
 - **Select All takes the whole page:** the card header ("accelerators.txt", the status line, "Open file…") and every row's gutter number, with no line breaks ("1line 02line 1…"). It's M6's, with copy (brief §7.4).
 - **The page can forge the accessibility mode.** The check is `event.source === window`, which the page's own script passes with `window.postMessage`. Harmless while the mode only sets an attribute; before Rendered and Transcript's wide window reads it (M4, M5), the mode should come another way, or the forgery be shown harmless.
+
+**PR 10's amendments (a startup mark, and Z64's clock on the cold first screen; the shell-visible budget changed by Zack's Z67, not by amendment; the evidence is in PR 10's description):**
+- **The page's first frame is also a startup mark, `firstFrame` (C8).** The rAF that marks `typose:first-frame` (Z64) sends it to main, which records it under the TYPOSE_MARKS hook like the other renderer marks. So a launch without CDP, a cold one included, can read it.
+  - *Why:* PR 9 left this mark to the startup remediation (above). It also shows startup's longest wait without a trace: on the packaged build it comes 141–165 ms after `bundleEvaluated` (n = 30), once the GPU process is ready (below).
+- **The cold first screen is judged from Z64's start: the later of the open request and `firstFrame`** (the coordinator's ruling in PR 10's review: Z64 is Zack's, and a cold launch can now read it). This replaces PR 9's "judged from the open request" (above).
+  - In an argv launch the open comes before the page's first frame: 121–147 ms before it, in PR 10's 30 warm runs. From Z64's start those first screens read 2–4 ms, against 123–150 ms from the open. The GPU wait is `shellVisible`'s, not the lens's.
+  - `startup.perf.ts` waits for `firstFrame` as well, so a run without it is invalid, with its reason.
+
+**Found in PR 10, carried (Z59, settled by Z67):**
+- **Every PR 10 timing, and the review's, ran on a locked session.** LogonUI was up from 2026-10-24 00:02:57, and the last unlock was 2026-10-23 10:41 (the review). So the figures after `show` (`show()` 25–53 ms, the title bar's presentation 13–94 ms, and that figure's bimodality, below) are of unknown validity. Z67 now requires an unlocked, displayed session.
+- **On this PC, no change to Typose brought the shell within 200 ms. Zack's Z67 (2026-10-24) sets the PC's row at < 400 ms, provisional, until a real cold batch.** The page's first frame waits for the GPU process: `firstFrame` came 340–363 ms after the spawn (medians of PR 10's batches), and the title bar was presented 56–116 ms after it. (The packaged build at `5debd25`, on this PC; informational, not Z49.)
+  - Chromium launches the GPU process once its browser main loop has made its threads: 104–170 ms after the spawn in 12 traces, which add their own overhead. The process reaches `GpuInit` 32–51 ms later, and `GpuInit` takes 199–250 ms, of which `D3D11CreateDevice` is 173–218 ms.
+  - A bare `D3D11CreateDevice`, in a fresh process outside Electron, takes 143–150 ms here (NVIDIA RTX 3070 Ti, driver 32.0.16.1742). In the GPU process the review measured 175–196 ms each time, with no warming across processes.
+  - ANGLE's other hardware backends were slower: GL, Vulkan and D3D11on12 added 117–1,397 ms (paired medians, n = 6). Two backends were faster in the review: `--use-angle=d3d11-warp` by 138 ms (10 of 10; WARP is software, with no hardware GPU) and `--use-angle=d3d9` by 39 ms (10 of 10; a legacy backend, whose gain comes after `show`).
+  - Typose's own code on that path is main's module-level code, which runs inside Chromium's early initialization, before the GPU process is launched. From main's first line to that step's end is 26–41 ms; `crashReporter.start` is 21–36 ms of it, and the single-instance lock 1–4 ms. C9 arms the reporter first: Electron's docs say a renderer created before it isn't monitored, and the GPU process is launched before `ready`. macOS's `registerDefaults` doesn't run on Windows.
+  - **The renderer isn't on the path.** Its bundle, React's render and its first layout end 93–126 ms before its GPU channel arrives, in all 12 traces. A 300 ms mount delay raised the median by 59–88 ms (PR 10's two control runs, n = 5 each).
+    - So the bundle's size (702 kB; 278 kB minified, no measurable change), React Aria (94 kB of it) and the code cache don't move `shellVisible` here.
+    - Even with the GPU off, where the renderer is the path, minifying cut the bundle's load by a median 4.5 ms (paired; lower in 9 of 10) and `shellVisible` by nothing measurable (paired median −1 ms).
+  - After `ready-to-show`, `show()` took 25–53 ms (the window's activation). The title bar was presented 13–31 ms after the `show` event in 21 of 25 launches on a used profile, and 69–94 ms after it in 110 of 131 on a fresh one, whose GPU shader caches are empty. These are the locked-session figures above.
+  - **Measured, none adopted** (paired medians against the shipping build, n = 10 unless noted; the review's evidence is in `<SP>\rev10\`):
+    - `showInactive()` on `ready-to-show`: −30 ms (10 of 10, the review). The one follow-up worth doing, once its focus semantics are checked;
+    - `crashReporter.start` after `ready`: −32 ms (10 of 10, the review). It breaks C9;
+    - `--disable-gpu-rasterization`: −41 ms (n = 12, lower in 11, IQR −170 to −20; noisy; the review);
+    - the GPU in the browser process (`--in-process-gpu`): −43 ms, without the GPU process's sandbox (§7);
+    - software compositing (`--disable-gpu`): −198 ms, to 260 ms. It gives up the GPU compositing that the frame gates rely on;
+    - showing the window at creation instead of on `ready-to-show` (§10.1): no measurable change (paired medians +15 ms in PR 10's run and −9 to −14 ms in the review's, every IQR crossing 0), with about 300 ms of a mapped window and no frame in it. PR 10's run had Chromium's window-occlusion tracking off in both arms: without it, a window shown that early was judged occluded, and its page never painted. The session was locked; the cause isn't verified.
+  - The Mac (< 400 ms) is unmeasured. There the GPU may start sooner, and if the renderer becomes the path, the bundle and the code cache will count.
+- **The startup instrument launches every run on a new profile (`e2e/packaged.ts`), so it never sees the V8 code cache or the GPU's shader caches.** A user's cold start, after a restart, has its profile.
+  - The code cache works on the packaged, fused build. A profile's second launch produces 194,272 bytes for the bundle, and from its third launch the bundle compiles from them (`consumedCacheSize` 194,272, not rejected).
+  - A used profile read 18 and 63 ms lower in two batches (paired medians, n = 10 and 15; lower in 9 of 10 and 14 of 15), mostly in the title bar's presentation after `show`.
+  - Z67 settles what's measured: shell visible is measured with an existing profile. `e2e/packaged.ts` still makes a new one for every launch, so the cold batch needs an existing profile before it runs (carried to M1's close).
 
 **Implementer proposals Zack may veto (one place):**
 1. **Memory-refused open state** (C1), shown in the card: "Can't open `<file>` · Typose's memory budget is full. Close a file, then Retry." Brief §7.9 has no such state yet.

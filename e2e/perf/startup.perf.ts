@@ -1,7 +1,8 @@
 // Plan C8's startup instrument, as amended in PR 3. shellVisible is when the title bar reaches the screen: its first
 // presentation after main's `show` (Element Timing), from the spawn, on the wall clock. It's never `show` itself: a run
 // that can't establish that presentation is invalid, with its reason. launch→firstContent and open→usable Raw end at
-// Raw's first screen. No launch here passes a debugging switch: every mark comes from the TYPOSE_MARKS hook (plan §5).
+// Raw's first screen; open→usable starts at Z64's clock, the later of the open and the page's first frame (`firstFrame`).
+// No launch here passes a debugging switch: every mark comes from the TYPOSE_MARKS hook (plan §5).
 //   Controls:  npm run build:hooks && npm run package, then `npm run perf -- -g control`
 //   Warm:      npm run package, then `npm run perf -- -g warm` (RUNS=30 by default)
 //   Cold:      COLD=1 RUNS=1 `npm run perf -- -g warm`, as the first launch after each OS restart (Z54). Plan §5's
@@ -37,7 +38,7 @@ async function startup(opts: LaunchOptions) {
   const l = await launchPackaged(opts)
   let reason: string | undefined
   try {
-    await waitMarks(l, ['show', 'titlebarPainted', 'titlebarPresented', 'shownPresented', ...(opts.file ? ['rawUsable'] : [])], 15_000)
+    await waitMarks(l, ['show', 'titlebarPainted', 'titlebarPresented', 'shownPresented', ...(opts.file ? ['firstFrame', 'rawUsable'] : [])], 15_000)
   } catch (e) {
     reason = (e as Error).message
   }
@@ -56,7 +57,7 @@ async function startup(opts: LaunchOptions) {
     shellVisible: reason ? undefined : shellVisible,
     presentedBy,
     firstContent: opts.file && !reason ? at('rawUsable') : undefined,
-    openToUsable: opts.file && !reason ? m.rawUsable.t - m.openRequested.t : undefined,
+    openToUsable: opts.file && !reason ? m.rawUsable.t - Math.max(m.openRequested.t, m.firstFrame.t) : undefined,
     marks: Object.fromEntries(Object.keys(m).map((k) => [k, at(k)])),
     hz: m.show?.hz as number | undefined,
     load: cpuLoad(from),

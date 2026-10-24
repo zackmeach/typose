@@ -3,7 +3,7 @@ import type { TyposeApi } from '../shared/protocol'
 import { onA11yMode } from './a11y'
 import { App, appHooks } from './App'
 import { CoreClient, testHooks } from './core'
-import { markBundleEvaluated, markPresentations } from './perf'
+import { markBundleEvaluated, markNow, markPresentations } from './perf'
 import './style.css'
 
 declare global {
@@ -15,8 +15,12 @@ declare global {
 markBundleEvaluated()
 markPresentations()
 // Z64: the page's own first frame, on the User Timing clock beside Z37's marks. Z37's first-screen clock starts no
-// earlier. Paint timing's first-paint isn't used: it comes with the window's first presentation, frames later.
-requestAnimationFrame(() => performance.mark('typose:first-frame'))
+// earlier. Paint timing's first-paint isn't used: it comes with the window's first presentation, frames later. The same
+// frame is a startup mark too (`firstFrame`, under main's TYPOSE_MARKS hook), so a launch without CDP can read it.
+requestAnimationFrame(() => {
+  performance.mark('typose:first-frame')
+  markNow('firstFrame')
+})
 // Spec §6.2: nothing in M1 renders differently with a screen reader on; the mode is kept on the root for the lenses
 // that will (Rendered and Transcript's wide window, M4–M5).
 onA11yMode((on) => (document.documentElement.dataset.a11y = on ? 'on' : 'off'))

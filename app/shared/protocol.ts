@@ -183,6 +183,7 @@ export type Command = 'open' | 'reload' | 'exit'
 export const STARTUP_MARKS = [
   'navigationStart',
   'bundleEvaluated',
+  'firstFrame',
   'titlebarPainted',
   'titlebarPresented',
   'shownPresented',
