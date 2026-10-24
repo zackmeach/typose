@@ -3,6 +3,7 @@
 // claim: real-reader testing stays parked.
 import AxeBuilder from '@axe-core/playwright'
 import { type Page, expect } from '@playwright/test'
+import { closeSync, openSync, writeSync } from 'node:fs'
 import { type Launched, finish, fixture, launch, test, visibleRows, waitIndexed, waitOpen } from './app'
 import { HT, hitTest, uiaNodes, uiaTree } from './win32'
 
@@ -115,12 +116,17 @@ test('Raw is a named region whose text leaves out the gutter, and ☰ exposes me
 test('focus stays in Raw across scrolling, far jumps and page replacement', async () => {
   const l = await opened()
   const { app, win } = l
+  if (MODE) {
+    await app.evaluate(({ app }) => app.setAccessibilitySupportEnabled(true)) // as a screen reader turns it on
+    await expect(win.locator('html')).toHaveAttribute('data-a11y', 'on')
+  }
   expect(await waitIndexed(win)).toBe(5000)
   const scroller = win.locator('.vl-scroller')
   await scroller.focus()
   /** Focus is on Raw: in the DOM, and in Chromium's accessibility tree; in UIA too while the window has the OS's
    *  focus, the only time UIA reports keyboard focus (spike B's uia-element.ps1). Another window, or the lock screen,
-   *  can hold it. */
+   *  can hold it: on CI every step must be checked, and locally at least one. UIA's tree can trail the page's, so it's
+   *  polled. */
   let uiaUnchecked = 0
   const inRaw = async (when: string) => {
     expect(await scroller.evaluate((el) => el === document.activeElement), when).toBe(true)
@@ -129,7 +135,7 @@ test('focus stays in Raw across scrolling, far jumps and page replacement', asyn
     expect(focused.map((n) => `${n.role?.value} ${n.name?.value}`), when).toEqual([`region ${RAW}`])
     if (process.platform !== 'win32') return
     if (await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isFocused()))
-      expect(uiaNodes(await uiaTree(app)).find((n) => n.name === RAW)?.focus, when).toBe(true)
+      await expect.poll(async () => uiaNodes(await uiaTree(app)).find((n) => n.name === RAW)?.focus, { message: when }).toBe(true)
     else uiaUnchecked++
   }
   const first = await visibleRows(win)
@@ -153,6 +159,32 @@ test('focus stays in Raw across scrolling, far jumps and page replacement', asyn
   await expect.poll(async () => (await visibleRows(win))[0]).toEqual({ line: 1, text: LINES[0] })
   await inRaw('after Reload')
   if (uiaUnchecked) test.info().annotations.push({ type: 'unchecked', description: `UIA's focus, ${uiaUnchecked} of 5 times: the window hadn't the OS's focus` })
+  if (process.platform === 'win32') expect(uiaUnchecked, 'steps whose UIA focus went unchecked').toBeLessThanOrEqual(process.env.CI ? 0 : 4)
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+test('Reload from the "Changed on disk" banner leaves the focus in Raw', async () => {
+  // 60,000 lines of 64 bytes, and a same-size write near the end, then a far jump to it: the document freezes before
+  // anything there was read (as in states.e2e.ts).
+  const line = (n: number) => `line ${n}`.padEnd(63, '.')
+  const file = fixture('a11y-banner.txt', Array.from({ length: 60_000 }, (_, n) => `${line(n)}\n`).join(''))
+  const l = await launch({ file })
+  const { win } = l
+  await waitOpen(win)
+  expect(await waitIndexed(win)).toBe(60_000)
+  const fd = openSync(file, 'r+')
+  writeSync(fd, 'CHANGED'.padEnd(63, '!'), 59_990 * 64)
+  closeSync(fd)
+  await win.locator('.vl-scroller').focus()
+  await win.keyboard.press('Control+End')
+  await expect(win.locator('.banner')).toBeVisible()
+  // The banner's button, from the keyboard: it goes with the banner, so the focus must land in the new lens.
+  await win.locator('.banner-button').focus()
+  await win.keyboard.press('Enter')
+  await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '2')
+  await expect(win.locator('.banner')).toHaveCount(0)
+  await expect(win.locator('.vl-scroller')).toBeFocused()
   expect(l.pageErrors).toEqual([])
   await finish(l)
 })

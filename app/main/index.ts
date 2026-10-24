@@ -186,15 +186,15 @@ function createWindow(): BrowserWindow {
 }
 
 /**
- * macOS's native menu (spec §9): ☰'s commands, which the page runs as ☰'s do, and the app, Edit and Window menus
- * of every Mac app (Edit's Copy and Select All are how Cmd+C and Cmd+A reach the page). The page keeps Cmd+R (PR 4),
- * so Reload has no accelerator here.
+ * macOS's native menu (spec §9): ☰'s commands, which the page runs as ☰'s do, with Close Window (Cmd+W, brief §7.2),
+ * and the app, Edit and Window menus of every Mac app (Edit's Copy and Select All are how Cmd+C and Cmd+A reach the
+ * page). The page keeps Cmd+R (PR 4), so Reload has no accelerator here.
  */
 function macMenu(win: BrowserWindow): Menu {
   const run = (command: Command) => () => win.isDestroyed() || win.webContents.send('command', command)
   return Menu.buildFromTemplate([
     { role: 'appMenu' },
-    { label: 'File', submenu: [{ label: 'Open File…', click: run('open') }, { label: 'Reload', click: run('reload') }] },
+    { label: 'File', submenu: [{ label: 'Open File…', click: run('open') }, { label: 'Reload', click: run('reload') }, { role: 'close' }] },
     { role: 'editMenu' },
     { role: 'windowMenu' }
   ])

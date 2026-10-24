@@ -1,6 +1,9 @@
 import { Button, Menu, MenuItem, MenuTrigger, Popover } from 'react-aria-components'
 import type { Command } from '../shared/protocol'
 
+/** Linux says Quit, and binds Ctrl+Q to it (brief §3.2, §7.2). */
+export const LINUX = navigator.platform.startsWith('Linux')
+
 /** Brief §3.2's ☰, on Windows and Linux, with M1's commands; the full command table is M2's. */
 export function AppMenu({ run }: { run: (command: Command) => void }) {
   return (
@@ -17,7 +20,7 @@ export function AppMenu({ run }: { run: (command: Command) => void }) {
             Reload
           </MenuItem>
           <MenuItem id="exit" className="menu-item">
-            {navigator.platform.startsWith('Linux') ? 'Quit' : 'Exit'}
+            {LINUX ? 'Quit' : 'Exit'}
           </MenuItem>
         </Menu>
       </Popover>

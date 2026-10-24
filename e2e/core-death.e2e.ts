@@ -5,7 +5,7 @@
 import { type Page, expect } from '@playwright/test'
 import { rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { FIXTURES, type Launched, type TestHooks, debugStats, finish, fixture, launch, lifecycle, sparseFixture, test, visibleRows, waitIndexed, waitOpen } from './app'
+import { FIXTURES, type Launched, type TestHooks, debugStats, finish, fixture, launch, lifecycle, sparseFixture, stubOpenDialog, test, visibleRows, waitIndexed, waitOpen } from './app'
 
 const hooks = (win: Page) => win.evaluate(() => (({ held, ...rest }) => ({ ...rest, held: held.length }))((window as unknown as { typoseTest: TestHooks }).typoseTest.client))
 /** Holds back what `session`'s core host sends from now on, until `deliverHeld`. */
@@ -137,6 +137,31 @@ test('a second death during a Reopen keeps its line: once 60 s have passed, the 
   await win.locator('.card-message .open-button').click()
   await waitOpen(win)
   await expect.poll(() => top(win), { timeout: 15_000 }).toEqual(before)
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+test('☰’s Open file… while the core is stopped names the file Reopen opens, as a second launch does (plan C7, PR 8)', async () => {
+  test.skip(process.platform === 'darwin', 'macOS has the native menu bar instead of ☰')
+  test.setTimeout(3 * 60_000)
+  const l = await launch({ hooks: true, file: fixture('core-death-first.txt', lines(50)) })
+  const { app, win } = l
+  await waitOpen(win)
+  await stubOpenDialog(app, fixture('core-death-chosen.txt', 'the chosen file\n'))
+  await diedWithin1s(l, killCore(l))
+  await expect(win.locator('.card-message .open-button')).toHaveText(['Reopen']) // respawned at once
+  killCore(l) // a second death within 60 s: stopped, with nothing offered
+  await expect(win.locator('.card-message .open-button')).toHaveCount(0)
+  await win.getByRole('button', { name: 'Menu' }).click()
+  await win.getByRole('menuitem', { name: 'Open file…' }).click()
+  // The stopped card names the chosen file, and says it's stopped; Reopen opens that file once the core is back.
+  await expect(win.locator('.card-name')).toHaveText('core-death-chosen.txt')
+  await expect(win.locator('.card-message p')).toHaveText("Typose's core stopped")
+  await expect(win.locator('.card-message .open-button')).toHaveText(['Reopen'], { timeout: 70_000 })
+  await win.locator('.card-message .open-button').click()
+  await waitOpen(win)
+  expect((await visibleRows(win))[0]).toEqual({ line: 1, text: 'the chosen file' })
+  expect(await app.evaluate(() => (globalThis as { dialogCalls?: number }).dialogCalls)).toBe(1)
   expect(l.pageErrors).toEqual([])
   await finish(l)
 })

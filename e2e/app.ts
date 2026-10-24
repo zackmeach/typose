@@ -130,6 +130,38 @@ export function dumps(userData: string): string[] {
   return found
 }
 
+/**
+ * Gives the window the OS's focus and waits until it and its page have it. Tests of keys a menu would take, or of
+ * UIA's keyboard focus, need it to be able to fail (PR 7's review).
+ */
+export async function osFocus(l: Launched): Promise<void> {
+  await l.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].focus())
+  await expect
+    .poll(() =>
+      l.app.evaluate(({ BrowserWindow }) => {
+        const w = BrowserWindow.getAllWindows()[0]
+        return w.isFocused() && w.webContents.isFocused()
+      })
+    )
+    .toBe(true)
+}
+
+/**
+ * Open file… without the OS dialog, which must never open on the desktop the tests run on: main's handler is replaced
+ * by one that answers `path` and counts its calls (`globalThis.dialogCalls`), and the dialog itself rejects.
+ */
+export async function stubOpenDialog(app: ElectronApplication, path: string): Promise<void> {
+  await app.evaluate(({ dialog, ipcMain }, path) => {
+    dialog.showOpenDialog = () => Promise.reject(new Error('the real dialog was reached'))
+    ipcMain.removeHandler('open-dialog')
+    ipcMain.handle('open-dialog', () => {
+      ;(globalThis as { dialogCalls?: number }).dialogCalls = ((globalThis as { dialogCalls?: number }).dialogCalls ?? 0) + 1
+      return path
+    })
+  }, path)
+  await expect(app.evaluate(({ dialog }) => dialog.showOpenDialog({}))).rejects.toThrow('the real dialog was reached')
+}
+
 /** The card is showing a file's lines once its first row has text. */
 export async function waitOpen(win: Page): Promise<void> {
   await expect(win.locator('.vl-row .text').first()).toBeAttached({ timeout: 30_000 })

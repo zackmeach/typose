@@ -4,7 +4,7 @@ import type { Command, Limits, Opened } from '../shared/protocol'
 import { type Action, type Card, fileName, view } from './card'
 import { type CoreClient, CoreCallError } from './core'
 import { ROW_HEIGHT, RawLens } from './lenses/raw'
-import { AppMenu } from './menu'
+import { AppMenu, LINUX } from './menu'
 import { inputMark, markNow, markPainted } from './perf'
 
 /** macOS has its native menu bar and traffic lights in place of the glyph and ☰ (brief §3.1). */
@@ -42,6 +42,8 @@ export function App({ core }: { core: CoreClient }) {
   const live = useRef<{ doc: number; gen: number } | null>(null)
   /** The Raw lens on screen, if any: where Reopen goes back to after a core death (plan C7). */
   const lens = useRef<RawLens | null>(null)
+  /** A file chosen before the core first came up: it's opened then, ahead of the command line's. */
+  const waiting = useRef<string | null>(null)
   const path = 'path' in card ? card.path : undefined
   const title = path ? `${fileName(path)} — Typose` : 'Typose'
   const shown = view(card)
@@ -81,30 +83,29 @@ export function App({ core }: { core: CoreClient }) {
     // reloaded the page, is gone (main).
     const onKey = (e: KeyboardEvent) => {
       const modified = e.ctrlKey || e.metaKey || e.shiftKey || e.altKey
+      // Brief §7.2: Ctrl+Q quits on Linux, as ☰'s Quit does.
+      if (LINUX && e.key.toLowerCase() === 'q' && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey) return run('exit')
       const ctrlR = e.key.toLowerCase() === 'r' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey
       if (!ctrlR && (e.key !== 'F5' || modified)) return
       e.preventDefault()
       void reload()
     }
     window.addEventListener('keydown', onKey)
-    // Spec §8.1: a file named later (a second launch, macOS's open-file) replaces the card's. While the core is
-    // stopped, it's the file Reopen opens.
-    const offOpenPath = window.typose.onOpenPath((path) => {
-      if (latest.current.card.kind === 'gone') setCard((c) => (c.kind === 'gone' ? { ...c, path, line: undefined } : c))
-      else void open(path)
-    })
+    const offOpenPath = window.typose.onOpenPath(openNamed)
     const offCommand = window.typose.onCommand(run) // macOS's native menu
     void core.connect().then(
       async (hello) => {
         setLimits(hello.limits)
         latest.current.limits = hello.limits // `open` below runs before React re-renders
-        const initial = await window.typose.launchPath()
+        const launched = await window.typose.launchPath()
+        const initial = waiting.current ?? launched
         if (initial) void open(initial)
         else setCard({ kind: 'empty' })
       },
       async () => {
-        // The first core died before its handshake: keep the file named on the command line, for Reopen.
-        const initial = (await window.typose.launchPath()) ?? undefined
+        // The first core died before its handshake: keep the file named, for Reopen.
+        const launched = (await window.typose.launchPath()) ?? undefined
+        const initial = waiting.current ?? launched
         setCard((c) => (c.kind === 'gone' ? { ...c, path: c.path ?? initial } : { kind: 'gone', path: initial, ready: false }))
       }
     )
@@ -121,7 +122,7 @@ export function App({ core }: { core: CoreClient }) {
   /** Opens `path`; Reopen passes the line to go back to. */
   async function open(path: string, atLine?: number): Promise<void> {
     const l = latest.current.limits
-    if (!l) return
+    if (!l) return void (waiting.current = path) // the core isn't up yet: opened once it is
     const mine = ++attempt.current
     live.current = null
     for (const m of MARKS) performance.clearMarks(m)
@@ -164,7 +165,16 @@ export function App({ core }: { core: CoreClient }) {
 
   async function pick(): Promise<void> {
     const chosen = await window.typose.openDialog()
-    if (chosen) void open(chosen)
+    if (chosen) openNamed(chosen)
+  }
+
+  /**
+   * A file named after the first (spec §8.1: a second launch, macOS's open-file) or chosen in the Open dialog: it
+   * replaces the card's. While the core is stopped, it's the file Reopen opens.
+   */
+  function openNamed(path: string): void {
+    if (latest.current.card.kind === 'gone') setCard((c) => (c.kind === 'gone' ? { ...c, path, line: undefined } : c))
+    else void open(path)
   }
 
   /** The menu's commands: ☰'s, and macOS's native menu's (spec §9). */
@@ -193,7 +203,7 @@ export function App({ core }: { core: CoreClient }) {
 
   return (
     <>
-      <header className="titlebar">
+      <header className={MAC ? 'titlebar mac' : 'titlebar'}>
         {MAC ? null : (
           <span className="titlebar-start">
             <span className="glyph" aria-hidden="true">
@@ -221,7 +231,13 @@ export function App({ core }: { core: CoreClient }) {
         {shown.banner ? (
           <div className="banner" role="status" title={frozen}>
             {`${shown.banner} · `}
-            <Button className="banner-button" onPress={() => void reload()}>
+            <Button
+              className="banner-button"
+              onPress={() => {
+                lens.current?.list.element.focus() // so Reload's new lens takes it, as from Ctrl+R in Raw
+                void reload()
+              }}
+            >
               Reload (Ctrl+R)
             </Button>
           </div>
