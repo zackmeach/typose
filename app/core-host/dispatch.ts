@@ -8,6 +8,8 @@ import {
   type DebugStats,
   type ErrorCode,
   type Hello,
+  type MdBuild,
+  type MdPage,
   type Opened,
   type Page,
   type PageItem,
@@ -131,12 +133,12 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     for (const item of page.items) stamp(doc, item)
     return page as Page
   }
-  /** Request `id`'s page read of document `doc`, which `cancel` can stop while it runs (plan C5). */
-  const read = async (id: number, doc: number, start: (cancel: Cancel) => Promise<CorePage>): Promise<Page> => {
+  /** Request `id`'s read of document `doc`, a page or a Markdown build, which `cancel` can stop while it runs (plan C5). */
+  const read = async <T>(id: number, doc: number, start: (cancel: Cancel) => Promise<T>): Promise<T> => {
     const entry: { doc: number; cancel: Cancel; cancelledAt?: number } = { doc, cancel: addon.cancelFlag() }
     reads.set(id, entry)
     try {
-      return stampPage(doc, await start(entry.cancel))
+      return await start(entry.cancel)
     } catch (e) {
       if (codeOf(e) === 'Frozen') cancelReads(doc) // a freeze ends the document's other reads too (plan C6)
       if (__TEST_HOOKS__ && codeOf(e) === 'Cancelled' && entry.cancelledAt !== undefined) {
@@ -162,7 +164,8 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       emit(event)
     })
     const { size, encoding, lines, indexed, blank } = doc
-    return { doc: id, gen, size, encoding, lines, indexed, blank, firstPage: stampPage(id, firstPage) }
+    const format = doc.format as Opened['format'] // the core's two values
+    return { doc: id, gen, format, size, encoding, lines, indexed, blank, firstPage: stampPage(id, firstPage) }
   }
 
   // Each handler checks all of its parameters before it calls the addon or changes state. `id` is the request's.
@@ -198,21 +201,30 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       settle(pending, `${id}:${doc.generation}`)
       return { ...begin(id, doc, firstPage), reserved: held }
     },
-    page: (p, req): Promise<Page> => {
+    page: (p, req): Promise<Page | MdPage> => {
       const id = int(p, 'doc')
-      if (p.lens !== 'raw') throw new Refusal('InvalidParams', "lens must be 'raw'", 'lens')
+      if (p.lens !== 'raw' && p.lens !== 'rendered') throw new Refusal('InvalidParams', "lens must be 'raw' or 'rendered'", 'lens')
       if (Object.hasOwn(p, 'continuation')) {
+        if (p.lens !== 'raw') throw new Refusal('InvalidParams', 'only a raw page takes a continuation', 'continuation')
         const t = p.continuation
         if (!isRecord(t)) throw new Refusal('InvalidParams', 'continuation must be a token', 'continuation')
         const [tokenSession, tokenDoc, gen, line, offset] = ['session', 'doc', 'gen', 'line', 'offset'].map((f) => int(t, f, `continuation.${f}`))
         const doc = getDoc(id)
         if (tokenSession !== session) throw new Refusal('Stale', `a token of session ${tokenSession}; this is session ${session}`)
         if (tokenDoc !== id) throw new Refusal('InvalidParams', `a token of document ${tokenDoc}, not ${id}`, 'continuation.doc')
-        return read(req, id, (cancel) => doc.piece(gen, line, offset, cancel))
+        return read(req, id, async (cancel) => stampPage(id, await doc.piece(gen, line, offset, cancel)))
       }
       const [gen, start, count] = [int(p, 'gen'), int(p, 'start'), int(p, 'count')]
       const doc = getDoc(id)
-      return read(req, id, (cancel) => doc.page(gen, start, count, cancel))
+      // A rendered page's `start` and `count` are blocks of the build `render` made (plan: Rendered Markdown slice §2.1).
+      if (p.lens === 'rendered') return read(req, id, (cancel) => doc.mdPage(gen, start, count, cancel))
+      return read(req, id, async (cancel) => stampPage(id, await doc.page(gen, start, count, cancel)))
+    },
+    // Plan (Rendered Markdown slice) §2.1: the document's Markdown build of generation `gen`, cancelled as a read is.
+    render: (p, req): Promise<MdBuild> => {
+      const [id, gen] = [int(p, 'doc'), int(p, 'gen')]
+      const doc = getDoc(id)
+      return read(req, id, (cancel) => doc.render(gen, cancel))
     },
     // A failed reload (the file is gone, say) leaves the document at its old generation, and gives the renderer cache's
     // reservation back to the document's lens (Z34's "keeps Raw"). A reload that another Reload, or close, overtakes

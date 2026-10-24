@@ -13,6 +13,7 @@ use typose_core::doc::DocError;
 #[cfg(feature = "test-hooks")]
 use typose_core::hooks;
 use typose_core::limits::{self, RANGES};
+use typose_core::md::{self, Rendered};
 use typose_core::pages::{self, LinePiece};
 use typose_core::raw::Raw;
 use typose_core::store::{self, cancellable};
@@ -301,11 +302,139 @@ impl Task for Read {
     }
 }
 
+/// What a Markdown build made (plan: Rendered Markdown slice §2.1): its items, and the text units and HTML bytes
+/// across them, which the lens reserves for (§2.2).
+#[napi(object)]
+pub struct MdBuild {
+    pub blocks: f64,
+    pub units: f64,
+    pub html_bytes: f64,
+}
+
+/// One top-level block of a Markdown build: its index, its first line and how many lines it runs over (Raw's), its
+/// sanitized HTML, and a top-level heading's slug or a footnote definition's label. A block too large to render has
+/// no HTML, and a `note` saying why.
+#[napi(object)]
+pub struct MdItem {
+    pub block: f64,
+    pub line: f64,
+    pub lines: f64,
+    pub html: String,
+    pub slug: Option<String>,
+    pub footnote: Option<String>,
+    pub note: Option<String>,
+}
+
+#[napi(object)]
+pub struct MdPage {
+    pub items: Vec<MdItem>,
+}
+
+/// A generation's Markdown build, once `render` has finished one. Each generation has its own, so a build that ends
+/// after a Reload or close never lands in the document's current one.
+type Built = Arc<Mutex<Option<Rendered>>>;
+
+/// A Markdown build as an async task (plan C5): it runs on libuv's thread pool and stops at its cancel flag, at the
+/// read's next chunk or within 1,024 parser events. It keeps what it built in its generation's `Built`.
+pub struct Render {
+    raw: Arc<Raw>,
+    built: Built,
+    generation: u32,
+    cancel: Arc<AtomicBool>,
+    #[cfg(feature = "test-hooks")]
+    _task: hooks::Live,
+}
+
+impl Task for Render {
+    type Output = std::result::Result<Rendered, DocError>;
+    type JsValue = MdBuild;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        Ok(cancellable(&self.cancel, || self.raw.render(self.generation)))
+    }
+
+    /// As `Read`'s: once the core host has cancelled a build, it never resolves, and what it built drops here.
+    fn resolve(&mut self, env: Env, output: Self::Output) -> Result<MdBuild> {
+        let output = if self.cancel.load(Ordering::Relaxed) { Err(DocError::Cancelled) } else { output };
+        match output {
+            Ok(rendered) => {
+                let size = rendered.items().len() as f64;
+                let (units, html_bytes) = (rendered.units() as f64, rendered.html_bytes() as f64);
+                *self.built.lock().unwrap() = Some(rendered); // the build it replaces drops
+                Ok(MdBuild { blocks: size, units, html_bytes })
+            }
+            Err(e) => Err(Error::from(JsError::from(doc_error(e)).into_unknown(env))),
+        }
+    }
+}
+
+/// A page of a Markdown build (spec §3.4's bounds, `Rendered::page`), read as `Read` reads a Raw page: in a page slot
+/// (plan C1), which holds its copies of the items until the task drops.
+pub struct MdRead {
+    built: Built,
+    current: u32,
+    generation: u32,
+    start: u64,
+    count: u64,
+    cancel: Arc<AtomicBool>,
+    slot: Option<Slot>,
+    #[cfg(feature = "test-hooks")]
+    _task: hooks::Live,
+}
+
+impl Task for MdRead {
+    type Output = std::result::Result<Vec<MdItem>, DocError>;
+    type JsValue = MdPage;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let flag = self.cancel.clone();
+        Ok(cancellable(&flag, || {
+            self.slot = Some(budget::slot(Work::Page, &store::cancelled).map_err(|e| match e {
+                NoSlot::Cancelled => DocError::Cancelled,
+                NoSlot::Budget(over) => DocError::Memory(over),
+            })?);
+            if self.generation != self.current {
+                return Err(DocError::Stale { current: self.current, asked: self.generation });
+            }
+            let built = self.built.lock().unwrap();
+            let rendered = built.as_ref().ok_or_else(|| {
+                DocError::Invalid(format!("generation {} has no Markdown build: render it first", self.generation))
+            })?;
+            let start = usize::try_from(self.start).unwrap_or(usize::MAX);
+            let page = rendered.page(start, self.count as usize);
+            let label = |s: &Option<Box<str>>| s.as_deref().map(String::from);
+            Ok(page
+                .iter()
+                .enumerate()
+                .map(|(k, item)| MdItem {
+                    block: (start + k) as f64,
+                    line: item.line as f64,
+                    lines: item.lines as f64,
+                    html: item.html.to_string(),
+                    slug: label(&item.slug),
+                    footnote: label(&item.footnote),
+                    note: item.note.map(|n| n.text().to_string()),
+                })
+                .collect())
+        }))
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> Result<MdPage> {
+        let output = if self.cancel.load(Ordering::Relaxed) { Err(DocError::Cancelled) } else { output };
+        match output {
+            Ok(items) => Ok(MdPage { items }),
+            Err(e) => Err(Error::from(JsError::from(doc_error(e)).into_unknown(env))),
+        }
+    }
+}
+
 /// An open document in Raw. Offsets and sizes are exact numbers: `Raw::open` refuses files over 2^53 − 1 bytes.
 /// `close` drops it at once; until then it lives as long as the JS object does.
 #[napi]
 pub struct Doc {
     raw: Option<Arc<Raw>>,
+    /// The current generation's Markdown build. Reload and close start a new one, and the old drops with its last task.
+    built: Built,
 }
 
 #[napi]
@@ -317,7 +446,8 @@ impl Doc {
                 format!("path must be a non-empty string of at most {} bytes, without NUL", pages::MAX_PATH_BYTES);
             return Err(Error::new(Code::InvalidParams, why));
         }
-        Ok(Doc { raw: Some(Arc::new(Raw::open(std::path::Path::new(&path)).map_err(doc_error)?)) })
+        let raw = Raw::open(std::path::Path::new(&path)).map_err(doc_error)?;
+        Ok(Doc { raw: Some(Arc::new(raw)), built: Built::default() })
     }
 
     fn raw(&self) -> std::result::Result<&Arc<Raw>, Error<Code>> {
@@ -345,12 +475,19 @@ impl Doc {
         Ok(self.raw()?.blank())
     }
 
+    /// Spec §4.1: `markdown` for a `.md` or `.markdown` file, else `text`.
+    #[napi(getter)]
+    pub fn format(&self) -> std::result::Result<String, Error<Code>> {
+        Ok(if md::is_markdown(self.raw()?.document().path()) { "markdown" } else { "text" }.into())
+    }
+
     /// Ctrl+R (spec §3.1): the same path at the next generation, which `startIndex` then indexes. Every page and
     /// token of the old generation is refused from now on (`Stale`). If the open fails, nothing changes.
     #[napi]
     pub fn reload(&mut self) -> std::result::Result<(), Error<Code>> {
         let next = self.raw()?.reload().map_err(doc_error)?;
         self.raw = Some(Arc::new(next));
+        self.built = Built::default();
         Ok(())
     }
 
@@ -359,6 +496,7 @@ impl Doc {
     #[napi]
     pub fn close(&mut self) {
         self.raw = None;
+        self.built = Built::default();
     }
 
     /// Lines found so far by the index, and whether it's done.
@@ -451,6 +589,47 @@ impl Doc {
     ) -> std::result::Result<AsyncTask<Read>, Error<Code>> {
         let (generation, line, offset) = (int("gen", generation)? as u32, int("line", line)?, int("offset", offset)?);
         Ok(Read::new(self.raw()?, generation, Want::Piece { line, offset }, cancel))
+    }
+
+    /// Plan (Rendered Markdown slice) §2.1: builds generation `gen` as Markdown blocks, up to 8 MiB of source, and keeps
+    /// them for `mdPage`, in place of any build before. Rejects with `Stale`, `Frozen`, `Refused` (over 8 MiB),
+    /// `Memory` (nothing stays charged) or `Cancelled`.
+    #[napi(ts_return_type = "Promise<MdBuild>")]
+    pub fn render(&self, generation: f64, cancel: &Cancel) -> std::result::Result<AsyncTask<Render>, Error<Code>> {
+        let generation = int("gen", generation)? as u32;
+        Ok(AsyncTask::new(Render {
+            raw: self.raw()?.clone(),
+            built: self.built.clone(),
+            generation,
+            cancel: cancel.flag.clone(),
+            #[cfg(feature = "test-hooks")]
+            _task: hooks::Live::new(&hooks::TASKS),
+        }))
+    }
+
+    /// Up to `count` blocks from block `start` of generation `gen`'s Markdown build, within spec §3.4's bounds. `Stale`
+    /// for an old generation; `InvalidParams` before `render` has built this one. A freeze doesn't stop it: the build
+    /// came from one verified read, and the lens keeps what it shows (plan: Rendered Markdown slice §2.2).
+    #[napi(ts_return_type = "Promise<MdPage>")]
+    pub fn md_page(
+        &self,
+        generation: f64,
+        start: f64,
+        count: f64,
+        cancel: &Cancel,
+    ) -> std::result::Result<AsyncTask<MdRead>, Error<Code>> {
+        let (generation, start, count) = (int("gen", generation)? as u32, int("start", start)?, int("count", count)?);
+        Ok(AsyncTask::new(MdRead {
+            built: self.built.clone(),
+            current: self.raw()?.document().generation(),
+            generation,
+            start,
+            count,
+            cancel: cancel.flag.clone(),
+            slot: None,
+            #[cfg(feature = "test-hooks")]
+            _task: hooks::Live::new(&hooks::TASKS),
+        }))
     }
 }
 

@@ -8,6 +8,7 @@ const PATH = 'C:\\logs\\run.jsonl'
 const opened = (over: Partial<Opened> = {}): Opened => ({
   doc: 1,
   gen: 1,
+  format: 'text',
   size: 1000,
   encoding: 'UTF-8',
   lines: 0,

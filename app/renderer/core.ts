@@ -7,7 +7,8 @@ import {
   type Method,
   type Methods,
   type ProgressEvent,
-  type Response
+  type Response,
+  type Result
 } from '../shared/protocol'
 
 export class CoreCallError extends Error {
@@ -82,7 +83,7 @@ export class CoreClient {
 
   /** Calls `method`. Aborting `signal` cancels the request in the core (plan C5); its promise then rejects with
    *  `Cancelled`, unless the result was already on its way. */
-  call<M extends Method>(method: M, params: Methods[M]['params'], signal?: AbortSignal): Promise<Methods[M]['result']> {
+  call<M extends Method, P extends Methods[M]['params']>(method: M, params: P, signal?: AbortSignal): Promise<Result<M, P>> {
     return new Promise((ok, fail) => {
       if (this.gone || !this.port) return fail(new CoreCallError('CoreGone', "Typose's core stopped"))
       const id = this.nextId++

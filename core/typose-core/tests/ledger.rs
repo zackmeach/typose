@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use typose_core::budget::{self, Work};
 use typose_core::doc::{DocError, STRUCT_BYTES};
+use typose_core::md::MAX_SOURCE;
 use typose_core::pages::MAX_ITEMS;
 use typose_core::raw::Raw;
 
@@ -261,6 +262,81 @@ fn long_path(dir: &Path, len: usize) -> PathBuf {
     file
 }
 
+/// One unit of plan (Rendered Markdown slice) §1's mixed Markdown, `i` its number: every In construct, raw HTML
+/// allowed and not, footnotes, repeated headings (the slug map grows), node-dense inline runs and padded table rows.
+fn markdown_unit(i: usize) -> String {
+    let mut s = format!(
+        "# Heading\n\n## Heading {i}\n\nProse with *em*, **strong**, ~~del~~, `code`, [a link](other.md \"t\"), "
+    );
+    s.push_str("![an image](a.png), <https://x.y>, <kbd>K</kbd>, a footnote[^n] and &amp; an entity.\n\n");
+    s.push_str(
+        "- item\n  - nested\n- [ ] task\n- [x] done\n\n1. one\n2. two\n\n> a quote with **bold**\n> > nested\n\n",
+    );
+    s.push_str("```rust\nfn main() { println!(\"<b>\"); }\n```\n\n    indented code\n\n");
+    s.push_str("| a | b | c |\n|:--|:-:|--:|\n| 1 | 2 | 3 |\n| short |\n\n");
+    s.push_str(&format!("{}\n{}\n{}\n", "|h".repeat(64), "|-".repeat(64), "x\n".repeat(16)));
+    s.push_str("<details><summary>S</summary>raw <script>x</script> <img src=x onerror=y></details>\n\n");
+    s.push_str(&format!("{}\n\n[^n]: The note, *styled*.\n\n---\n\n", "*_".repeat(100)));
+    s
+}
+
+/// Markdown of `len` bytes exactly: front matter, then units, each with a long code fence (cheap to build in a debug
+/// test) and every fourth with a heavy block: a note of each kind (over 64 KiB, nested 65 deep, writing over 256 KiB),
+/// raw HTML at ammonia's most a byte, and 200 KiB of HTML to sanitize. Then a paragraph makes up the length.
+fn mixed_markdown(len: usize) -> String {
+    let mut s = String::from("---\ntitle: ledger\n---\n");
+    let heavy = [
+        "word ".repeat(13_400),
+        format!("{} x", ">".repeat(64)),
+        format!("{}\n\n[^a]: a", "[^a]".repeat(15_000)),
+        format!("<div>\n{}\n", "<b>".repeat(21_000)),
+        "*a*".repeat(20_000),
+    ];
+    let fence = format!("```\n{}```\n\n", "a line of code, cheap to build\n".repeat(800));
+    for i in 0.. {
+        let mut unit = markdown_unit(i) + &fence;
+        if i % 4 == 3 {
+            unit += &(heavy[i / 4 % heavy.len()].clone() + "\n\n");
+        }
+        if s.len() + unit.len() + 2 > len {
+            break;
+        }
+        s.push_str(&unit);
+    }
+    s.push_str(&"y".repeat(len - s.len()));
+    s
+}
+
+/// pulldown-cmark's padded cells: 362-column tables of one-cell rows, 9,216 bytes of its tree a byte (`md.rs`).
+fn padded_tables(len: usize) -> String {
+    let mut s = String::new();
+    while s.len() < len {
+        s.push_str(&format!("{}\n{}\n{}\n", "|a".repeat(362), "|-".repeat(362), "a\n".repeat(724)));
+    }
+    s
+}
+
+/// Builds `path` as Markdown, checked throughout, holds the build, then drops it and the document: the ledger is back
+/// to its baseline.
+fn md_shape(step: usize, name: &str, path: &Path) {
+    let before = budget::totals();
+    budget::reset_high();
+    STEP.store(step, SeqCst);
+    ARMED.store(true, SeqCst);
+    let raw = Raw::open(path).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let built = raw.render(1).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let (items, charged, high) = (built.items().len(), built.charged(), budget::totals().high);
+    drop(built);
+    drop(raw);
+    ARMED.store(false, SeqCst);
+    let leaked = LIVE.load(SeqCst) as i64 - BASELINE.load(SeqCst) as i64;
+    println!(
+        "{name:>24}: {items} items, {charged} charged for them; ledger peak {high}; live past baseline after: {leaked}"
+    );
+    assert_eq!(budget::totals().used, before.used, "{name}: the ledger isn't back to its baseline");
+    assert!(leaked.unsigned_abs() < 64 << 10, "{name}: {leaked} bytes still live");
+}
+
 struct Shape {
     name: &'static str,
     path: PathBuf,
@@ -343,8 +419,29 @@ fn main() {
     write(&shapes[4].path, &[&utf16, &lone], 1);
     write(&shapes[5].path, &[astral.as_bytes()], 60);
     one_gib_line(&shapes[6].path);
+    // Plan (Rendered Markdown slice) §3: Markdown at the ceiling, padded tables, the densest parse (a node a byte, `md.rs`),
+    // and UTF-16 and windows-1252 text.
+    let mixed = mixed_markdown(MAX_SOURCE as usize);
+    let small = mixed_markdown(1 << 20);
+    let markdown = [
+        ("Markdown at the ceiling", at("mixed.md"), mixed.into_bytes()),
+        ("padded tables", at("tables.md"), padded_tables(32 << 10).into_bytes()),
+        ("a node a byte", at("dense.md"), "*_".repeat(2 << 20).into_bytes()),
+        (
+            "Markdown in UTF-16",
+            at("utf16.md"),
+            [0xFF, 0xFE].into_iter().chain(small.encode_utf16().flat_map(u16::to_le_bytes)).collect(),
+        ),
+        ("Markdown in windows-1252", at("w1252.md"), small.bytes().map(|b| if b == b'a' { 0xE9 } else { b }).collect()),
+    ];
+    for (_, path, bytes) in &markdown {
+        fs::write(path, bytes).unwrap();
+    }
+    let markdown: Vec<(&str, PathBuf)> = markdown.into_iter().map(|(name, path, _)| (name, path)).collect();
 
     budget::set_limit(8 << 30).unwrap();
+    // A first build makes the statics a build uses once for the process (ammonia's builder, html5ever's atoms).
+    drop(Raw::open(&markdown[3].1).unwrap().render(1).unwrap());
     let workers: Vec<_> = (0..WORKERS).map(|i| std::thread::spawn(move || worker(i))).collect();
     println!("plan C1: live ≤ reserved at every allocation, {WORKERS} page reads at once");
     std::thread::sleep(Duration::from_millis(50)); // the workers are waiting
@@ -386,6 +483,27 @@ fn main() {
     ARMED.store(false, SeqCst);
     assert!(refused, "a 32,000-byte path opened");
     assert_eq!(budget::totals().used, used);
+    // Plan (Rendered Markdown slice) §2.1: each Markdown build, checked throughout. Then a budget with room for the
+    // read but not the parse refuses the build with `Memory`, and nothing stays charged.
+    for (k, (name, path)) in markdown.iter().enumerate() {
+        md_shape(4 * shapes.len() + 2 + k, name, path);
+    }
+    STEP.store(4 * shapes.len() + 2 + markdown.len(), SeqCst);
+    ARMED.store(true, SeqCst);
+    let used = budget::totals().used;
+    let raw = Raw::open(&markdown[0].1).unwrap();
+    let (opened, limit, floor) = (budget::totals().used, budget::totals().limit, raw.charges().cache);
+    budget::set_limit(opened + (64 << 20)).unwrap(); // the read's 35 MiB, not the parse's 1.6 GiB
+    let refused = raw.render(1);
+    budget::set_limit(limit).unwrap();
+    // Beside what the document holds: its read grew its chunk cache, which is the document's to keep (plan C1).
+    let (after, grown) = (budget::totals().used, raw.charges().cache - floor);
+    drop(raw);
+    ARMED.store(false, SeqCst);
+    assert!(matches!(refused, Err(DocError::Memory(_))), "{refused:?}");
+    assert_eq!(after - grown, opened, "a refused build left something charged");
+    assert_eq!(budget::totals().used, used);
+    println!("a build under a tight budget: {}; the cache grew {grown} bytes reading for it", refused.unwrap_err());
 
     JOB.store(0, SeqCst);
     ROUND.fetch_add(1, SeqCst);
@@ -394,11 +512,17 @@ fn main() {
     }
     let (checks, skipped, over) = (CHECKS.load(SeqCst), SKIPPED.load(SeqCst), OVER.load(SeqCst));
     let (margin, at) = (MARGIN.load(SeqCst), MARGIN_AT.load(SeqCst));
-    let step = ["open", "fill the cache", "index", "8 pages"][at % 4];
-    let shape =
-        shapes.get(at / 4).map_or_else(|| ["the elastic cache", "too long a path"][at - 4 * shapes.len()], |s| s.name);
+    let extras: Vec<&str> = ["the elastic cache", "too long a path"]
+        .into_iter()
+        .chain(markdown.iter().map(|m| m.0))
+        .chain(["a Markdown build refused"])
+        .collect();
+    let place = match shapes.get(at / 4) {
+        Some(s) => format!("{}: {}", s.name, ["open", "fill the cache", "index", "8 pages"][at % 4]),
+        None => extras[at - 4 * shapes.len()].to_string(),
+    };
     println!("{checks} allocations checked, {skipped} skipped (the ledger kept moving)");
-    println!("least room: {margin} bytes, in {shape}: {step}");
+    println!("least room: {margin} bytes, in {place}");
     assert_eq!(FAILED.load(SeqCst), 0, "page reads failed");
     let [live, reserved, size] = WORST.each_ref().map(|w| w.load(SeqCst));
     assert_eq!(
