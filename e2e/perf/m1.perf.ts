@@ -5,6 +5,9 @@
 //   Run:   npm run package, then `npm run perf -- m1.perf.ts` (warm n = RUNS, 30 by default; FRAME_RUNS frame runs per
 //          case, 3 by default; the NetLog row idles IDLE_MS, 5 minutes by default). Each row generates its fixtures with
 //          fixtures-gen and deletes them after; a fixture that would take the disk under the 20 GiB floor skips its rows.
+//          QUALIFY=1 measures Z49's minute of CPU before each row; without it no row is qualification-grade.
+//   Opens: every warm row that opens a file opens it in a running app: launched at the path while the file is parked,
+//          its "File not found" card's Ctrl+R opens it once it's back (no dialog). Cold launches open by argv.
 //   Cold:  plan §5's cold rows (shell visible, open→usable, launch→firstContent) are startup.perf.ts's, run as the first
 //          launch after each OS restart: COLD=1 RUNS=1 FILE=.fixtures/10gib.jsonl `npm run perf -- -g warm` (batch A),
 //          and FILE=.fixtures/1gib.jsonl (batch B). Generate each once, before the restarts, and keep it until the
@@ -12,44 +15,48 @@
 //   Not here: the Mac rows run this file on the Mac (Z55, Z58); Snap Layouts is a manual check (PR 7).
 import { type CDPSession, type Page, expect } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
-import { closeSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync, statfsSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, readSync, renameSync, rmSync, statSync, statfsSync } from 'node:fs'
 import { totalmem } from 'node:os'
 import { join, resolve } from 'node:path'
 import { FIXTURES, assertNetLog, fixture, test, visibleRows, waitIndexed, waitOpen } from '../app'
-import { type PackagedLaunch, closePackaged, launchPackaged, readMarks, waitMarks } from '../packaged'
+import { type PackagedLaunch, closePackaged, launchPackaged, readMarks, unrequested, waitMarks } from '../packaged'
 import { BUDGET_MS, type Marks, clockStart, outcome, scanGate, scanMarks, vetoControls } from '../z37'
-import { type Analysis, type Run, inputKinds, jump, keypresses, scroll, traced } from './drive'
-import { CATEGORIES, analyzeFrames } from './frames.mjs'
+import { type Run, jump, keypresses, scroll, traced } from './drive'
 import { cpuLoad, cpuTimes, idleLoad, percentile, recordOutcome } from './rig'
 
 const RUNS = Number(process.env.RUNS ?? 30)
 const FRAME_RUNS = Number(process.env.FRAME_RUNS ?? 3)
 const IDLE_MS = Number(process.env.IDLE_MS ?? 5 * 60_000)
+/** Z49's quiet machine: the CPU under 10% for a minute before each timing run. Only QUALIFY=1 measures the minute. */
+const QUALIFY = process.env.QUALIFY === '1'
 const MAC = process.platform === 'darwin'
 const GIB = 2 ** 30
 /** The lanes' disk floor: no fixture may take the disk under it. */
 const FLOOR = 20 * GIB
 const LINE = 200
 
-type Verdict = 'pass' | 'fail' | 'invalid' | 'pending' | 'reported'
+type Verdict = 'pass' | 'fail' | 'invalid' | 'pending' | 'reported' | 'not qualification-grade'
 type Row = { row: string; threshold: string; verdict: Verdict; [k: string]: unknown }
 
 let rows: Row[] = []
 /** Launches that didn't quit cleanly: never an invalid run, always a failure to explain (plan §5's exit integrity). */
 let exits: string[] = []
-let loadBefore = 0
+let quiet = { ms: 0, load: 0 }
 let from = cpuTimes()
 test.beforeEach(async () => {
   rows = []
   exits = []
-  loadBefore = await idleLoad(3000) // what the machine was doing before the row (Z49 records load; this PC is loaded)
+  const ms = QUALIFY ? 60_000 : 3000
+  quiet = { ms, load: await idleLoad(ms) } // what the machine was doing before the row (Z49)
   from = cpuTimes()
 })
 test.afterEach(() => {
   const loadDuring = cpuLoad(from)
+  // Z49 also asks for no other heavy work or agent lanes and Defender on: QUALIFY=1 is the operator saying so.
+  const qualification = QUALIFY && quiet.load < 10
   for (const r of rows) {
-    recordOutcome(test.info(), `m1:${r.row}`, { ...r, platform: process.platform, loadBefore, loadDuring, exits })
-    console.log(`ROW ${JSON.stringify({ row: r.row, verdict: r.verdict, threshold: r.threshold, n: r.n, p50: r.p50, p95: r.p95, max: r.max, hz: r.hz, loadBefore, loadDuring })}`)
+    recordOutcome(test.info(), `m1:${r.row}`, { ...r, platform: process.platform, loadBefore: quiet.load, loadDuring, quiet, qualification, exits })
+    console.log(`ROW ${JSON.stringify({ row: r.row, verdict: r.verdict, threshold: r.threshold, n: r.n, p50: r.p50, p95: r.p95, max: r.max, hz: r.hz, loadBefore: quiet.load, loadDuring, qualification })}`)
   }
   expect(exits, "a launch that didn't quit cleanly (Z56: an exit the test didn't ask for blocks M1)").toEqual([])
 })
@@ -77,26 +84,60 @@ const ms = (t: number) => Math.round(t * 10) / 10
 const brief = (xs: number[]): { n: number; p50?: number; p95?: number; max?: number } =>
   xs.length ? { n: xs.length, p50: ms(percentile(xs, 50)), p95: ms(percentile(xs, 95)), max: ms(Math.max(...xs)) } : { n: 0 }
 
-/** Closes a launch the way a user does; one that doesn't quit cleanly is kept in `exits`, with its pid. */
+/** Closes a launch the way a user does; anything it did that the test didn't ask for is kept in `exits` (C9). */
 async function close(l: PackagedLaunch): Promise<void> {
   const exit = await closePackaged(l).catch((e: Error) => e)
-  if (exit instanceof Error) exits.push(`pid ${l.pid}: ${exit.message}`)
-  else if (exit.code !== 0 || exit.signal !== null) exits.push(`pid ${l.pid}: quit with ${JSON.stringify(exit)}`)
+  exits.push(...(exit instanceof Error ? [`pid ${l.pid}: ${exit.message}`] : unrequested(l, exit)))
 }
 
+/**
+ * A running app that will open `file` in-app (the coordinator's ruling in PR 9's fix round). It's launched by argv at
+ * the path while the file is parked under another name, so its card shows "File not found"; then the file goes back.
+ * Ctrl+R on that card opens the path (App.tsx's reload of a failed card) in a page whose first frame is long past, so
+ * Z64's clock starts at the open. No dialog opens.
+ */
+async function launchMissing(file: string, args: string[] = []): Promise<PackagedLaunch> {
+  const parked = `${file}.parked`
+  renameSync(file, parked)
+  let l: PackagedLaunch | undefined
+  try {
+    l = await launchPackaged({ cdp: true, file, args })
+    await expect(l.page!.locator('.card-message p')).toHaveText(`File not found at ${file}`, { timeout: 30_000 })
+  } finally {
+    renameSync(parked, file)
+  }
+  await l.page!.waitForTimeout(500) // let startup work settle, as Spike A's openIn did (spike-a.e2e.ts:49)
+  return l
+}
+const openInApp = (page: Page) => page.keyboard.press('Control+R')
+
+/** The held-open control: the page's next `open` request reaches the core `hold` ms late (over CDP; no hook). */
+const holdOpen = (page: Page, hold: number) =>
+  page.evaluate((hold) => {
+    const post = MessagePort.prototype.postMessage
+    MessagePort.prototype.postMessage = function (this: MessagePort, message: unknown, ...rest: never[]) {
+      if ((message as { method?: string })?.method !== 'open') return post.call(this, message, ...rest)
+      MessagePort.prototype.postMessage = post
+      setTimeout(() => post.call(this, message, ...rest), hold)
+    } as typeof post
+  }, hold)
+
 // ---------------------------------------------------------------------------------------------------------------
-// Raw's first screen (Z37), opened by argv on a fresh launch: plan §5's open→usable, from the renderer's scan marks.
-// The clock starts at the later of the open and the page's first frame (Z64). One launch per sample, after one
+// Raw's first screen (Z37), opened in-app: plan §5's open→usable, from the renderer's scan marks. The clock starts at
+// the later of the open and the page's first frame (Z64), which in-app is the open. One launch per sample, after one
 // warm-up launch that isn't kept.
 
 type Sample = { marks: Marks; hz?: number; reason?: string; extra?: Record<string, unknown> }
+type SampleOptions = { after?: (page: Page) => Promise<Record<string, unknown>>; hold?: number; runs?: number }
 
-async function openSample(file: string, timeout: number, after?: (page: Page) => Promise<Record<string, unknown>>): Promise<Sample> {
-  const l = await launchPackaged({ cdp: true, file })
+async function openSample(file: string, timeout: number, { after, hold }: SampleOptions = {}): Promise<Sample> {
+  const l = await launchMissing(file)
   let marks: Marks = {}
   let reason: string | undefined
   let extra: Record<string, unknown> | undefined
   try {
+    if (hold) await holdOpen(l.page!, hold)
+    await openInApp(l.page!)
     marks = await scanMarks(l.page!, timeout)
     extra = await after?.(l.page!)
   } catch (e) {
@@ -107,10 +148,10 @@ async function openSample(file: string, timeout: number, after?: (page: Page) =>
   return { marks, hz, reason, extra }
 }
 
-async function samples(file: string, timeout: number, after?: (page: Page) => Promise<Record<string, unknown>>): Promise<Sample[]> {
+async function samples(file: string, timeout: number, opts: SampleOptions = {}): Promise<Sample[]> {
   await openSample(file, timeout) // warm-up: not kept
   const out: Sample[] = []
-  for (let i = 0; i < RUNS; i++) out.push(await openSample(file, timeout, after))
+  for (let i = 0; i < (opts.runs ?? RUNS); i++) out.push(await openSample(file, timeout, opts))
   return out
 }
 
@@ -134,16 +175,22 @@ function marksInvalid(s: Sample): string | undefined {
   if (!(s.marks['typose:first-screen']! > s.marks['typose:open-start']!)) return `the first screen isn't after the open: ${JSON.stringify(s.marks)}`
 }
 
-/** Plan §5's first-screen row: warm p95 under the budget from Z64's clock start, every sample's marks valid. */
-function firstScreenRow(row: string, file: string, all: Sample[]): Row {
+/**
+ * Plan §5's first-screen row: warm p95 under the budget from Z64's clock start, every sample's marks valid. With `eof`
+ * (the 1 GiB and 10 GiB files), spec §13.1's "without scanning to end of file" is judged too: a run whose index was
+ * done by its first screen fails the row.
+ */
+function firstScreenRow(row: string, file: string, all: Sample[], { eof = false } = {}): Row {
   const invalid = all.map(marksInvalid).filter(Boolean) as string[]
   const valid = all.filter((s) => !marksInvalid(s))
   const f = valid.map(figures)
   const stats = brief(f.map((x) => x.firstScreen))
-  const verdict: Verdict = valid.length && stats.p95! >= BUDGET_MS ? 'fail' : invalid.length || !valid.length ? 'invalid' : 'pass'
+  const indexDoneAtFirstScreen = valid.filter((s) => s.marks['typose:index-done']! <= s.marks['typose:first-screen']!).length
+  const missed = valid.length && (stats.p95! >= BUDGET_MS || (eof && indexDoneAtFirstScreen > 0))
+  const verdict: Verdict = missed ? 'fail' : invalid.length || !valid.length ? 'invalid' : 'pass'
   return {
     row,
-    threshold: `p95 < ${BUDGET_MS} ms (warm), from max(open, first frame) (Z64)`,
+    threshold: `p95 < ${BUDGET_MS} ms (warm), from max(open, first frame) (Z64)${eof ? ", without scanning to end of file (§13.1)" : ''}`,
     verdict,
     fixture: file.replace(FIXTURES, '.fixtures'),
     bytes: statSync(file).size,
@@ -151,8 +198,7 @@ function firstScreenRow(row: string, file: string, all: Sample[]): Row {
     fromOpen: brief(f.map((x) => x.fromOpen)),
     firstFrameAfterOpen: brief(f.map((x) => x.firstFrameAfterOpen)),
     indexDone: brief(f.map((x) => x.indexDone)),
-    // Spec §13.1's "without scanning to end of file": the runs whose index was done before their first screen.
-    indexDoneAtFirstScreen: valid.filter((s) => s.marks['typose:index-done']! <= s.marks['typose:first-screen']!).length,
+    indexDoneAtFirstScreen,
     invalid,
     hz: [...new Set(all.map((s) => s.hz))],
     samples: f.map((x) => ({ firstScreen: ms(x.firstScreen), fromOpen: ms(x.fromOpen), firstFrame: ms(x.firstFrameAfterOpen), indexDone: ms(x.indexDone) }))
@@ -203,9 +249,11 @@ test.describe('oversized first record', () => {
         // The small records after the first follow once the scan passes it; no mounted item is over 64 KiB (C2).
         const after = async (page: Page) => {
           if (small) await expect(page.locator('.vl-row .text').filter({ hasText: 'line 0000000000' })).toBeAttached({ timeout: 60_000 })
-          return { maxText: await page.locator('.vl-row .text').evaluateAll((els) => Math.max(...els.map((e) => e.textContent?.length ?? 0))) }
+          const texts = await page.locator('.vl-row .text').evaluateAll((els) => els.map((e) => e.textContent?.length ?? 0))
+          if (texts.length === 0) throw new Error('no rows mounted') // Math.max of none would read as -Infinity
+          return { maxText: Math.max(...texts) }
         }
-        const all = await samples(file, 60_000, after)
+        const all = await samples(file, 60_000, { after })
         const row = firstScreenRow(`oversized:${name}`, file, all)
         const gates = all.map((s) => {
           const v = scanGate(s.marks)
@@ -239,15 +287,20 @@ test.describe('oversized first record', () => {
 // off. A run with an input the drive didn't send (the owner's keystroke, say) is invalid, with that reason.
 
 type Drive = 'scroll' | 'keys' | 'jump' | 'ctrl-end' | 'open-scroll'
-/** The input kinds each drive sends, and how many. */
+/**
+ * The input marks each drive sends, and how many. Raw doesn't mark a scroll its list applied itself (a wheel or key in
+ * logical mode, or the position re-applied as the index grows), so a scrollbar drag marks one `scroll` per jump. A
+ * wheel drive marks `scroll` too while the document is short enough to scroll natively (under 16M px: a file whose
+ * index is still young), where the browser, not the list, moves it.
+ */
 const SENT: Record<Drive, Record<string, number>> = {
   scroll: { wheel: Infinity, scroll: Infinity },
-  keys: { keydown: 21, scroll: Infinity },
-  jump: { pointerdown: 1, click: 1, scroll: Infinity },
-  'ctrl-end': { keydown: 2, scroll: Infinity }, // Control, then End
+  keys: { keydown: 21 },
+  jump: { pointerdown: 1, click: 1, scroll: 1 },
+  'ctrl-end': { keydown: 2 }, // Control, then End
   'open-scroll': { open: 1, wheel: Infinity, scroll: Infinity }
 }
-type FrameRun = { analysis: Analysis; inputs: Record<string, number>; load: number; hz?: number; stray?: string; whileIndexing?: { driveMs: number; indexDoneAfterDriveStartMs: number | null }; firstFrameAfterOpen?: number; reason?: string }
+type FrameRun = Omit<Run, 'busy'> & { hz?: number; stray?: string; whileIndexing?: { driveMs: number; indexDoneAfterDriveStartMs: number | null }; firstFrameAfterOpen?: number; reason?: string }
 
 const flag = (a11y: string) => (a11y === 'on' ? '--force-renderer-accessibility' : '--disable-renderer-accessibility')
 const stray = (drive: Drive, inputs: Record<string, number>) =>
@@ -256,54 +309,45 @@ const stray = (drive: Drive, inputs: Record<string, number>) =>
     .map(([k, n]) => `${n} ${k}`)
     .join(', ') || undefined
 
-/** Open-then-scroll: the open is the launch's own (argv), so the trace is a startup trace; the scroll follows at once. */
-async function openThenScroll(file: string, a11y: string, n: number): Promise<FrameRun> {
-  const trace = test.info().outputPath(`open-scroll-${n}.json`)
-  const startup = [`--trace-startup=${CATEGORIES.join(',')}`, `--trace-startup-file=${trace}`, '--trace-startup-duration=6', '--trace-startup-format=json']
-  const t = cpuTimes()
-  const l = await launchPackaged({ cdp: true, file, args: [flag(a11y), ...startup] })
-  const page = l.page!
-  await waitOpen(page)
-  await scroll(await page.context().newCDPSession(page))
-  const marks = await scanMarks(page)
-  // Written once the 6 s are up; read once it parses.
-  let events: { name: string; ts: number }[] = []
-  await expect
-    .poll(() => {
-      try {
-        events = (JSON.parse(readFileSync(trace, 'utf8')) as { traceEvents: typeof events }).traceEvents
-        return true
-      } catch {
-        return false
-      }
-    }, { timeout: 30_000 })
-    .toBe(true)
-  const hz = hzOf(l)
-  await close(l)
-  return { analysis: analyzeFrames(events), inputs: inputKinds(events), load: cpuLoad(t), hz, firstFrameAfterOpen: marks['typose:first-frame']! - marks['typose:open-start']! }
-}
-
+/** One frames run. Open-then-scroll opens in-app, inside the trace, and scrolls once the first screen is up. */
 async function frameRun(file: string, drive: Drive, a11y: string, n: number, indexing: boolean): Promise<FrameRun> {
-  if (drive === 'open-scroll') return openThenScroll(file, a11y, n)
-  const l = await launchPackaged({ cdp: true, file, args: [flag(a11y)] })
+  let l: PackagedLaunch
+  if (drive === 'open-scroll') l = await launchMissing(file, [flag(a11y)])
+  else {
+    l = await launchPackaged({ cdp: true, file, args: [flag(a11y)] })
+    await waitOpen(l.page!)
+    if (!indexing) await waitIndexed(l.page!)
+    await l.page!.locator('.vl-scroller').focus()
+  }
   const page = l.page!
-  await waitOpen(page)
-  if (!indexing) await waitIndexed(page)
-  await page.locator('.vl-scroller').focus()
   const hz = (await waitMarks(l, ['show'])).show.hz as number
   const now = () => page.evaluate(() => performance.now())
   let span = [0, 0]
-  const run: Run = await traced(l, async (p: Page, cdp: CDPSession) => {
-    const t0 = await now()
-    if (drive === 'scroll') await scroll(cdp)
-    else if (drive === 'keys') await keypresses(p)
-    else if (drive === 'jump') await jump(p)
-    else await p.keyboard.press('Control+End')
-    span = [t0, await now()]
-  })
-  const done = await page.evaluate(() => performance.getEntriesByName('typose:index-done')[0]?.startTime ?? null)
+  const run: Run = await traced(
+    l,
+    async (p: Page, cdp: CDPSession) => {
+      const t0 = await now()
+      if (drive === 'open-scroll') {
+        await openInApp(p)
+        await waitOpen(p)
+        await scroll(cdp)
+      } else if (drive === 'scroll') await scroll(cdp)
+      else if (drive === 'keys') await keypresses(p)
+      else if (drive === 'jump') await jump(p)
+      else await p.keyboard.press('Control+End')
+      span = [t0, await now()]
+    },
+    `trace-${drive}-a11y-${a11y}-${n}`
+  )
+  const m = await page.evaluate(() => Object.fromEntries(['typose:index-done', 'typose:open-start', 'typose:first-frame'].map((k) => [k, performance.getEntriesByName(k)[0]?.startTime ?? null])))
   await close(l)
-  return { ...run, hz, whileIndexing: indexing ? { driveMs: ms(span[1] - span[0]), indexDoneAfterDriveStartMs: done === null ? null : ms(done - span[0]) } : undefined }
+  const done = m['typose:index-done']
+  return {
+    ...run,
+    hz,
+    whileIndexing: indexing ? { driveMs: ms(span[1] - span[0]), indexDoneAfterDriveStartMs: done === null ? null : ms(done - span[0]) } : undefined,
+    firstFrameAfterOpen: drive === 'open-scroll' ? ms(m['typose:first-frame']! - m['typose:open-start']!) : undefined
+  }
 }
 
 /** Runs one frames case FRAME_RUNS times and judges it: any failed run fails it, any invalid run keeps it from passing. */
@@ -342,7 +386,7 @@ async function framesRow(file: string, label: string, drive: Drive, a11y: string
       stalls: a.stalls,
       neverPainted: a.neverPainted.length,
       long: a.long.slice(0, 10),
-      // Which inputs were answered late: during indexing, Raw's own re-applied scroll position marks `scroll` inputs too.
+      // Which inputs were answered late, by kind.
       slowAnswers: a.inputToPaint.filter((p) => p.ms >= 16.7),
       raf: a.raf
     }))
@@ -376,12 +420,18 @@ function processMemory(pid: number): Memory {
   return { workingSet: sum('workingSet'), privateBytes: sum('privateBytes'), pss: 'n/a: Windows has no PSS', processes }
 }
 
-/** The file system and Defender's real-time protection where the fixtures live (the throughput row's conditions). */
-function rig(): { fs?: string; defender?: boolean } {
+/**
+ * The throughput row's conditions where the fixtures live: the file system, and Defender's real-time protection. Its
+ * exclusions can't be read without admin (they read "N/A: Must be an administrator"), so they're recorded as unknown.
+ */
+function rig(): { fs?: string; defender?: boolean; defenderExclusions?: string } {
   if (process.platform !== 'win32') return {}
-  const ps = `@{ fs = (Get-Volume -DriveLetter ${FIXTURES[0]}).FileSystemType; defender = (Get-MpComputerStatus).RealTimeProtectionEnabled } | ConvertTo-Json -Compress`
+  const ps =
+    `$p = Get-MpPreference; @{ fs = (Get-Volume -DriveLetter ${FIXTURES[0]}).FileSystemType; defender = (Get-MpComputerStatus).RealTimeProtectionEnabled; ` +
+    'exclusions = @($p.ExclusionPath) -join "; " } | ConvertTo-Json -Compress'
   try {
-    return JSON.parse(execFileSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8' }))
+    const r = JSON.parse(execFileSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8' })) as { fs?: string; defender?: boolean; exclusions?: string }
+    return { fs: r.fs, defender: r.defender, defenderExclusions: !r.exclusions ? 'none' : r.exclusions.startsWith('N/A') ? 'unknown: reading them needs admin' : r.exclusions }
   } catch {
     return {}
   }
@@ -404,62 +454,85 @@ for (const [label, bytes] of [
     test(`first screen: ${label}${label === '10gib' ? ', and the index throughput' : ''}`, async () => {
       test.setTimeout(60 * 60_000)
       const all = await samples(file, 10 * 60_000)
-      judge(firstScreenRow(`first-screen:${label}`, file, all))
+      judge(firstScreenRow(`first-screen:${label}`, file, all, { eof: true }))
       if (label !== '10gib') return
       // The line index's throughput, from the same runs: decimal bytes over open → index done, judged at p95 time.
       const elapsed = all.filter((s) => !marksInvalid(s)).map((s) => figures(s).indexDone)
       const t = brief(elapsed)
       const gbps = (msec?: number) => (msec ? Math.round((bytes / 1e9 / (msec / 1000)) * 100) / 100 : undefined)
       const need = MAC ? 0.5 : 1
-      judge({ row: 'index-throughput:10gib', threshold: `≥ ${need} GB/s warm (decimal bytes, at the p95 time), NTFS, Defender on`, verdict: !t.n ? 'invalid' : gbps(t.p95)! >= need ? 'pass' : 'fail', elapsedMs: t, gbps: { p50: gbps(t.p50), p95: gbps(t.p95), slowest: gbps(t.max) }, bytes, ...rig() })
+      const conditions = rig()
+      // §5's conditions on the PC: NTFS, Defender on. A run off them can't pass, whatever its rate.
+      const offConditions = process.platform === 'win32' && (conditions.fs !== 'NTFS' || conditions.defender !== true)
+      const verdict: Verdict = !t.n ? 'invalid' : offConditions ? 'not qualification-grade' : gbps(t.p95)! >= need ? 'pass' : 'fail'
+      judge({ row: 'index-throughput:10gib', threshold: `≥ ${need} GB/s warm (decimal bytes, at the p95 time), NTFS, Defender on`, verdict, elapsedMs: t, gbps: { p50: gbps(t.p50), p95: gbps(t.p95), slowest: gbps(t.max) }, bytes, hz: [...new Set(all.map((s) => s.hz))], ...conditions })
     })
 
     if (label === '1gib') {
+      test('control: a first screen held 60 ms in the page fails the first-screen row', async () => {
+        test.setTimeout(10 * 60_000)
+        // The page's open request reaches the core 60 ms late: the first piece can't show inside the 50 ms budget.
+        const held = await samples(file, 60_000, { hold: 60, runs: 5 })
+        const row = firstScreenRow('control:held-open:1gib', file, held, { eof: true })
+        rows.push({ ...row, threshold: 'the control: every first screen ≥ 60 ms, and the row fails' })
+        expect(held.map(marksInvalid).filter(Boolean)).toEqual([])
+        expect(held.map((s) => figures(s).firstScreen).every((t) => t >= 60), JSON.stringify(row.samples)).toBe(true)
+        expect(row.verdict).toBe('fail')
+      })
+
       test('64 KiB page fetch, round trip (1 GiB, indexed)', async () => {
-        const l = await launchPackaged({ cdp: true, file })
-        const page = l.page!
-        await waitOpen(page)
-        const lines = await waitIndexed(page)
-        // The core's port and the document, from the app's own next page request; then 300 pages of 327 lines (64 KiB
-        // of 200-byte lines) at random positions, each timed from the request to its reply, as the spike did.
-        await page.evaluate(() => {
-          const post = MessagePort.prototype.postMessage
-          MessagePort.prototype.postMessage = function (this: MessagePort, message: unknown, ...rest: never[]) {
-            const m = message as { method?: string; params?: { gen?: number } }
-            if (m?.method === 'page' && m.params?.gen !== undefined) {
-              MessagePort.prototype.postMessage = post
-              Object.assign(window, { typoseFetch: { port: this, params: m.params } })
+        // 300 pages over 3 launches, 100 each: 327 lines (64 KiB of 200-byte lines) at random positions.
+        const all: number[] = []
+        let chars = 0
+        const hz: (number | undefined)[] = []
+        for (let launch = 0; launch < 3; launch++) {
+          const l = await launchPackaged({ cdp: true, file })
+          const page = l.page!
+          await waitOpen(page)
+          const lines = await waitIndexed(page)
+          // The core's port and the document, from the app's own next page request; then each page is timed from the
+          // request to its reply, as the spike did.
+          await page.evaluate(() => {
+            const post = MessagePort.prototype.postMessage
+            MessagePort.prototype.postMessage = function (this: MessagePort, message: unknown, ...rest: never[]) {
+              const m = message as { method?: string; params?: { gen?: number } }
+              if (m?.method === 'page' && m.params?.gen !== undefined) {
+                MessagePort.prototype.postMessage = post
+                Object.assign(window, { typoseFetch: { port: this, params: m.params } })
+              }
+              return post.call(this, message, ...rest)
+            } as typeof post
+          })
+          await page.locator('.vl-scroller').focus()
+          await page.keyboard.press('Control+End')
+          await page.waitForFunction(() => 'typoseFetch' in window)
+          const out = await page.evaluate(async (lines) => {
+            const { port, params } = (window as unknown as { typoseFetch: { port: MessagePort; params: Record<string, unknown> } }).typoseFetch
+            const replies = new Map<number, (data: { result?: { items: { text: string }[] }; error?: unknown }) => void>()
+            port.addEventListener('message', (e: MessageEvent) => replies.get(e.data?.id)?.(e.data))
+            const samples: number[] = []
+            let chars = 0
+            for (let i = 0; i < 100; i++) {
+              const id = 2 ** 40 + i // clear of the app's own ids
+              const start = Math.floor(Math.random() * (lines - 400))
+              const t0 = performance.now()
+              const reply = await new Promise<{ result?: { items: { text: string }[] }; error?: unknown }>((ok) => {
+                replies.set(id, ok)
+                port.postMessage({ id, method: 'page', params: { ...params, start, count: 327 } })
+              })
+              samples.push(performance.now() - t0)
+              if (!reply.result || reply.result.items.length !== 327) throw new Error(`page ${start}: ${JSON.stringify(reply).slice(0, 300)}`)
+              chars += reply.result.items.reduce((s, it) => s + it.text.length, 0)
             }
-            return post.call(this, message, ...rest)
-          } as typeof post
-        })
-        await page.locator('.vl-scroller').focus()
-        await page.keyboard.press('Control+End')
-        await page.waitForFunction(() => 'typoseFetch' in window)
-        const out = await page.evaluate(async (lines) => {
-          const { port, params } = (window as unknown as { typoseFetch: { port: MessagePort; params: Record<string, unknown> } }).typoseFetch
-          const replies = new Map<number, (data: { result?: { items: { text: string }[] }; error?: unknown }) => void>()
-          port.addEventListener('message', (e: MessageEvent) => replies.get(e.data?.id)?.(e.data))
-          const samples: number[] = []
-          let chars = 0
-          for (let i = 0; i < 300; i++) {
-            const id = 2 ** 40 + i // clear of the app's own ids
-            const start = Math.floor(Math.random() * (lines - 400))
-            const t0 = performance.now()
-            const reply = await new Promise<{ result?: { items: { text: string }[] }; error?: unknown }>((ok) => {
-              replies.set(id, ok)
-              port.postMessage({ id, method: 'page', params: { ...params, start, count: 327 } })
-            })
-            samples.push(performance.now() - t0)
-            if (!reply.result || reply.result.items.length !== 327) throw new Error(`page ${start}: ${JSON.stringify(reply).slice(0, 300)}`)
-            chars += reply.result.items.reduce((s, it) => s + it.text.length, 0)
-          }
-          return { samples, chars }
-        }, lines)
-        const hz = hzOf(l)
-        await close(l)
-        const s = brief(out.samples)
-        judge({ row: 'fetch64k:1gib', threshold: 'p95 < 3 ms, round trip', verdict: s.p95! < 3 ? 'pass' : 'fail', ...s, charsPerPage: out.chars / 300, hz, samples: out.samples.map(ms) })
+            return { samples, chars }
+          }, lines)
+          all.push(...out.samples)
+          chars += out.chars
+          hz.push(hzOf(l))
+          await close(l)
+        }
+        const s = brief(all)
+        judge({ row: 'fetch64k:1gib', threshold: 'p95 < 3 ms, round trip', verdict: s.p95! < 3 ? 'pass' : 'fail', ...s, launches: 3, charsPerPage: chars / all.length, hz: [...new Set(hz)], samples: all.map(ms) })
       })
 
       test('memory (1 GiB, indexed)', async () => {
@@ -508,9 +581,17 @@ for (const [label, bytes] of [
         const pageDown = { moved: (await top()) - before, viewport: await scroller.evaluate((el) => el.clientHeight) }
         const hz = hzOf(l)
         await close(l)
-        // 10 × 120 px is 60 rows of 20 px. Float positions near 8e8 px aren't exact, so equal means within a pixel.
-        const ok = Math.abs(atTop.moved - 60) < 0.05 && Math.abs(deep.moved - atTop.moved) <= 1 && painted.gutter === painted.expected && painted.textMatchesDisk && Math.abs(pageDown.moved - pageDown.viewport) < 1
-        judge({ row: 'deep-reading:10gib', threshold: '10 notches at line 40M move as at line 0 (±1 line); PageDown = 1 viewport', verdict: ok ? 'pass' : 'fail', lines, atTop, deep, painted, pageDown, hz })
+        // §13.1: at line 40M (the thumb lands within a few lines of it), 10 notches move as at line 0, ±1 line; PageDown
+        // moves exactly one viewport (positions near 8e8 px are floats, so within a pixel).
+        const ok =
+          atTop.at === 0 &&
+          Math.abs(deep.at - 40_000_000) <= 5 &&
+          atTop.moved > 0 &&
+          Math.abs(deep.moved - atTop.moved) <= 1 &&
+          painted.gutter === painted.expected &&
+          painted.textMatchesDisk &&
+          Math.abs(pageDown.moved - pageDown.viewport) < 1
+        judge({ row: 'deep-reading:10gib', threshold: 'at line 40M (±5), 10 notches move as at line 0 (±1 line); PageDown = 1 viewport', verdict: ok ? 'pass' : 'fail', lines, atTop, deep, painted, pageDown, hz })
         judge({ row: 'trackpad:mac', threshold: 'the trackpad moves ≤ 1 viewport per frame (Mac)', verdict: 'pending', reason: 'Mac only (Z55, Z58)' })
       })
 
@@ -536,7 +617,8 @@ for (const [label, bytes] of [
             verdict: MAC ? 'reported' : runs.some((r) => !r.reason && r.responsiveness === 'fail') ? 'fail' : runs.some((r) => r.reason) ? 'invalid' : 'pass',
             ...brief([scrolled, keys].flatMap((r) => r.answers as number[])),
             wheel: { n: scrolled.n, p50: scrolled.p50, p95: scrolled.p95, max: scrolled.max },
-            keys: { n: keys.n, p50: keys.p50, p95: keys.p95, max: keys.max }
+            keys: { n: keys.n, p50: keys.p50, p95: keys.p95, max: keys.max },
+            hz: [...new Set([scrolled, keys].flatMap((r) => r.hz as number[]))]
           })
         })
     }
@@ -544,7 +626,12 @@ for (const [label, bytes] of [
     for (const a11y of ['on', 'off'])
       test(`far jumps (${label}), a11y ${a11y}`, async () => {
         test.setTimeout(30 * 60_000)
-        for (const drive of FAR_JUMPS) judge(await framesRow(file, label, drive, a11y, label === '10gib'))
+        for (const drive of FAR_JUMPS) {
+          const row = await framesRow(file, label, drive, a11y, label === '10gib')
+          judge(row)
+          // The instrument: one `scroll` input per user jump, indexing or not; Raw's own re-applies aren't marked.
+          if (drive === 'jump') for (const r of row.runs as { inputs: Record<string, number> }[]) expect.soft(r.inputs.scroll, `${row.row}: scroll marks per jump`).toBe(1)
+        }
       })
   })
 }
@@ -556,6 +643,7 @@ test('NetLog after idle, with a remote-image Markdown file open in Raw', async (
   const l = await launchPackaged({ file: md, netlog: log })
   await waitMarks(l, ['rawUsable'])
   await new Promise((ok) => setTimeout(ok, IDLE_MS))
+  const hz = hzOf(l)
   await close(l)
   rmSync(md, { force: true })
   let reason: string | undefined
@@ -564,5 +652,5 @@ test('NetLog after idle, with a remote-image Markdown file open in Raw', async (
   } catch (e) {
     reason = (e as Error).message.slice(0, 2000)
   }
-  judge({ row: 'netlog:idle', threshold: 'no network activity after the idle (spec §7.3)', verdict: reason ? 'fail' : 'pass', reason, idleMs: IDLE_MS })
+  judge({ row: 'netlog:idle', threshold: 'no network activity after the idle (spec §7.3)', verdict: reason ? 'fail' : 'pass', reason, idleMs: IDLE_MS, hz })
 })

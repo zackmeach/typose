@@ -26,6 +26,9 @@ const analyze = (...parts) => analyzeFrames([renderer(1), ...parts.flat(3)])
 
 /** A continuous scroll: an input every 5 ms from 0 to `until`, each painted 4 ms later, so each demand overlaps the next. */
 const scroll = (until) => Array.from({ length: until / 5 + 1 }, (_, i) => input(i * 5, i * 5 + 4))
+/** One gesture: inputs every 5 ms, each painted 6 ms later, so every answer comes after the next input and the whole
+ *  gesture is one demanded interval, as live scrolls are (PR 3: 289–329 judged frames per 2 s scroll). */
+const gesture = (until) => Array.from({ length: until / 5 + 1 }, (_, i) => input(i * 5, i * 5 + 6))
 
 /** 21 discrete keypresses 100 ms apart, each answered by one frame presented `after` ms later. */
 const keypresses = (after) => Array.from({ length: 21 }, (_, i) => [input(i * 100, i * 100 + after - 5, String(i), 1, 'keydown'), frame(i * 100 + after)])
@@ -60,20 +63,20 @@ test('an answer 60 ms after the input is a stall while frames flow every refresh
 })
 
 test('a 30 ms hole in presentation during the scroll is one long frame and no stall', () => {
-  const r = analyze(scroll(500), frames(6.1, 200, 6.1), frames(232, 520, 6.1))
+  const r = analyze(gesture(500), frames(6.1, 200, 6.1), frames(232, 520, 6.1))
   assert.equal(r.longFrames, 1)
   assert.deepEqual(r.stalls, [])
 })
 
 test('a 60 ms hole in presentation during the scroll is a stall covering it, and fails cadence', () => {
-  const r = analyze(scroll(500), frames(6.1, 200, 6.1), frames(262, 520, 6.1))
+  const r = analyze(gesture(500), frames(6.1, 200, 6.1), frames(262, 520, 6.1))
   assert.ok(r.stalls.some((s) => !s.first && s.from <= 200 && s.to >= 262))
   assert.equal(r.cadence, 'fail')
 })
 
 test('a partially presented frame (compositor only, rows stale) does not end a stall', () => {
   const r = analyze(
-    scroll(500),
+    gesture(500),
     frames(6.1, 200, 6.1),
     frame(212, { state: 'STATE_PRESENTED_PARTIAL' }),
     frame(230, { state: 'STATE_DROPPED' }),
@@ -143,6 +146,34 @@ test('but every later frame of the same demand is judged on its gap: a page 20 m
   assert.deepEqual(r.long, [{ from: 110, to: 130, ms: 20, began: 104 }])
   assert.equal(r.cadence, 'fail')
   assert.equal(r.responsiveness, 'pass')
+})
+
+test("a frame already in the pipeline at the input isn't the interval's: a jump answered by the next frame is n/a", () => {
+  // The coordinator's Z62 clarification (PR 9): a present begun before the interval's first input can't contain it.
+  // The jump at 100: the frame begun at 95 presents at 105 with the old rows, then the rows' frame at 130.
+  const r = analyze(input(100, 125), frame(105, { began: 95 }), frame(130, { began: 124 }))
+  assert.equal(r.frames, 0)
+  assert.deepEqual(r.long, [])
+  assert.equal(r.cadence, 'n/a')
+  assert.deepEqual(r.firstFrame, { n: 1, p50: 30, p95: 30, max: 30 })
+  // Without the rule, the same trace read 25 ms long on cadence: the pipeline frame anchored the gap.
+})
+
+test('a real long frame after the input still fails cadence, with a pipeline frame before it', () => {
+  // The frame begun at 94 is excluded; the jump's own frame (begun 104, presented 110) and the rows' 20 ms later aren't.
+  const r = analyze(input(100, 125), frame(103, { began: 94 }), frame(110, { began: 104 }), frame(130, { began: 124 }))
+  assert.equal(r.frames, 1)
+  assert.deepEqual(r.long, [{ from: 110, to: 130, ms: 20, began: 104 }])
+  assert.equal(r.cadence, 'fail')
+})
+
+test("a present reported by two slices belongs to the interval if either slice began after its input", () => {
+  // One slice began 5 ms before the jump and the jump's own 3 ms after it: the present at 110 contains the input, and
+  // the rows' frame 20 ms later is long.
+  const r = analyze(input(100, 125), frame(110, { began: 95 }), frame(110, { began: 103 }), frame(130, { began: 124 }))
+  assert.equal(r.frames, 1)
+  assert.deepEqual(r.long, [{ from: 110, to: 130, ms: 20, began: 95 }])
+  assert.equal(r.cadence, 'fail')
 })
 
 test('idle time is never demanded: a frame long after the view settled is not a gap', () => {

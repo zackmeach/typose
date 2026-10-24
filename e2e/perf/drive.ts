@@ -24,8 +24,11 @@ export function inputKinds(events: TraceEvent[]): Record<string, number> {
   return kinds
 }
 
-/** Traces `drive` (Chromium tracing over CDP, C8's pinned categories) and analyzes it; also returns the busy spans. */
-export async function traced(l: PackagedLaunch, drive: (page: Page, cdp: CDPSession) => Promise<void>): Promise<Run> {
+/**
+ * Traces `drive` (Chromium tracing over CDP, C8's pinned categories) and analyzes it; also returns the busy spans. The
+ * trace is kept as `<name>.json` in the test's output, so each run of a test that traces several keeps its own.
+ */
+export async function traced(l: PackagedLaunch, drive: (page: Page, cdp: CDPSession) => Promise<void>, name = 'trace'): Promise<Run> {
   const page = l.page!
   const cdp = await page.context().newCDPSession(page)
   const from = cpuTimes()
@@ -34,7 +37,7 @@ export async function traced(l: PackagedLaunch, drive: (page: Page, cdp: CDPSess
   await drive(page, cdp)
   await page.waitForTimeout(500) // let the last input settle inside the trace
   const trace = await l.browser!.stopTracing()
-  writeFileSync(test.info().outputPath('trace.json'), trace) // the evidence, beside the run's lifecycle log
+  writeFileSync(test.info().outputPath(`${name}.json`), trace) // the evidence, beside the run's lifecycle log
   const events = JSON.parse(trace.toString()).traceEvents as TraceEvent[]
   const load = cpuLoad(from)
   const at = (m: string) => events.filter((e) => e.name === 'TimeStamp' && e.args?.data?.message === m).map((e) => e.ts / 1000)

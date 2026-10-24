@@ -7,7 +7,7 @@
 //   show stale rows, so they don't end a gap. These ends coincide with viz's Display::FrameDisplayed. Two
 //   STATE_PRESENTED_ALL slices, for different frame_sequences, can end at the same ts; the earlier sequence often also
 //   has a FORKED slice. Why Chromium reports one present twice is unverified. One present is one frame, begun when its
-//   earliest slice began.
+//   earliest slice began; `lastBegan` is when its latest slice began, for demanded-interval membership (below).
 // - TimeStamp (devtools.timeline): the renderer's console.timeStamp() marks from app/renderer/perf.ts:
 //   `typose:input <seq> <kind> <inputMs> <dispatchMs>` and `typose:painted <seq> <key>`, both in performance.now() ms.
 // - FireAnimationFrame (devtools.timeline): rAF callbacks, printed beside the judged figures and never judged.
@@ -17,7 +17,8 @@ const LONG_MS = 16.7 // §10.2's frame threshold, absolute (ruling OQ-6)
 const STALL_MS = 50
 const NEVER_MS = 1000
 
-/** The renderer's fully presented frames (trace µs), one per present: when it was presented, and its earliest begin. */
+/** The renderer's fully presented frames (trace µs), one per present: when it was presented, and its earliest and latest
+ *  begins. */
 export function presentedFrames(events) {
   const renderers = new Set(events.filter((e) => e.ph === 'M' && e.name === 'process_name' && e.args?.name === 'Renderer').map((e) => e.pid))
   const reporters = events.filter((e) => e.name === 'PipelineReporter' && renderers.has(e.pid)).sort((a, b) => a.ts - b.ts)
@@ -30,7 +31,7 @@ export function presentedFrames(events) {
     if (e.ph === 'b') open.set(key, { state: e.args?.frame_reporter?.state, began: e.ts })
     else if (e.ph === 'e' && open.has(key)) {
       const { state, began } = open.get(key)
-      if (state === 'STATE_PRESENTED_ALL') frames.push({ at: e.ts, began })
+      if (state === 'STATE_PRESENTED_ALL') frames.push({ at: e.ts, began, lastBegan: began })
       open.delete(key)
     }
   }
@@ -38,8 +39,10 @@ export function presentedFrames(events) {
   const presents = []
   for (const f of frames) {
     const last = presents.at(-1)
-    if (last && last.at === f.at) last.began = Math.min(last.began, f.began)
-    else presents.push(f)
+    if (last && last.at === f.at) {
+      last.began = Math.min(last.began, f.began)
+      last.lastBegan = Math.max(last.lastBegan, f.lastBegan)
+    } else presents.push(f)
   }
   return presents
 }
@@ -54,9 +57,11 @@ const percentile = (values, p) => {
  * Z62: the 16.7 ms / ≥ 99% frame gate judges cadence, and the first frame after an input is judged by responsiveness.
  * - A frame is demanded from an input until the view settles: the first presented frame after the renderer marked the
  *   input's target rows painted. Demanded intervals that overlap merge, so a continuous gesture is one interval.
- * - Cadence: every presented frame after the first in a merged interval is judged on its gap from the presented frame
- *   before it: long at ≥ 16.7 ms, a stall over 50 ms. A run where no interval has a second frame (discrete keypresses,
- *   each answered by one frame) reports cadence as 'n/a', never as passed.
+ * - Cadence: a present belongs to a merged interval only if it began at or after the interval's first input (the
+ *   coordinator's Z62 clarification, PR 9): a frame already in the pipeline can't contain the input. A present reported
+ *   by two slices belongs if either began then (`lastBegan`). Every such present after the first is judged on its gap
+ *   from the one before it: long at ≥ 16.7 ms, a stall over 50 ms. A run where no interval has a second such present
+ *   (discrete keypresses, each answered by one frame) reports cadence as 'n/a', never as passed.
  * - Responsiveness: each input that changes the view is answered by the first present after its target rows painted,
  *   and judged on input → that present, a stall over 50 ms (plan §5's input latency, `inputToPaint`). The distribution
  *   of these answered inputs is reported (`firstFrame`). The next present after an input isn't its answer: while frames
@@ -134,14 +139,16 @@ export function analyzeFrames(events) {
     else merged.push([a, s])
   }
 
-  // Cadence: each presented frame after the first in a merged interval, on its gap from the frame before it.
+  // Cadence: the presents begun at or after each merged interval's first input, each after the first on its gap from
+  // the one before it. A present begun before the input was already in the pipeline: it can't contain the input.
   let judged = 0
   const long = []
   let demandedUs = 0
   for (const [a, s] of merged) {
     demandedUs += s - a
-    const inside = presented.filter((f) => f.at > a && f.at <= s)
-    if (inside.length === 0) return invalid(`the demanded interval ${ms(a)}..${ms(s)} ms has no presented frame`)
+    const ending = presented.filter((f) => f.at > a && f.at <= s)
+    if (ending.length === 0) return invalid(`the demanded interval ${ms(a)}..${ms(s)} ms has no presented frame`)
+    const inside = ending.filter((f) => f.lastBegan >= a)
     for (let k = 1; k < inside.length; k++) {
       const gap = inside[k].at - inside[k - 1].at
       const span = { from: ms(inside[k - 1].at), to: ms(inside[k].at), ms: ms(gap), began: ms(inside[k - 1].began) }

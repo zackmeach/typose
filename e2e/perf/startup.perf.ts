@@ -9,10 +9,12 @@
 // Every run is appended to .evidence/m1/perf/, valid or not.
 import { expect } from '@playwright/test'
 import { existsSync, readFileSync } from 'node:fs'
+import { hostname } from 'node:os'
 import { join, resolve } from 'node:path'
 import { APP_DIR, FIXTURES, fixture, test } from '../app'
-import { type LaunchOptions, closePackaged, launchPackaged, readMarks, waitMarks } from '../packaged'
-import { cpuLoad, cpuTimes, idleLoad, percentile, recordOutcome, summary } from './rig'
+import { type LaunchOptions, closePackaged, launchPackaged, readMarks, unrequested, waitMarks } from '../packaged'
+import { coldVerdict } from './cold.mjs'
+import { RESULTS, cpuLoad, cpuTimes, idleLoad, percentile, recordOutcome, summary } from './rig'
 
 const RUNS = Number(process.env.RUNS ?? 30)
 const COLD = process.env.COLD === '1'
@@ -38,10 +40,10 @@ async function startup(opts: LaunchOptions) {
     reason = (e as Error).message
   }
   const m = readMarks(l)
-  // A launch that had to be killed is this run's invalidity, never the batch's end: every sample is kept.
+  // A launch that didn't quit cleanly, or lost a process, is a failure to explain (plan §5's exit integrity, Z56),
+  // never an invalid run. Every sample is still kept, and the batch goes on.
   const exit = await closePackaged(l).catch((e: Error) => e)
-  if (exit instanceof Error) reason ??= `the launch didn't quit cleanly: ${exit.message}`
-  else if (!reason && (exit.code !== 0 || exit.signal !== null)) reason = `the launch didn't quit cleanly: ${JSON.stringify(exit)}`
+  const exits = exit instanceof Error ? [`pid ${l.pid}: ${exit.message}`] : unrequested(l, exit)
   const at = (name: string) => (m[name] ? m[name].t - l.spawnedAt : NaN)
   const presentedBy = at('titlebarPresented') >= at('show') ? 'titlebarPresented' : 'shownPresented'
   const shellVisible = at(presentedBy)
@@ -55,9 +57,12 @@ async function startup(opts: LaunchOptions) {
     openToUsable: opts.file && !reason ? m.rawUsable.t - m.openRequested.t : undefined,
     marks: Object.fromEntries(Object.keys(m).map((k) => [k, at(k)])),
     hz: m.show?.hz as number | undefined,
-    load: cpuLoad(from)
+    load: cpuLoad(from),
+    exits
   }
 }
+/** Fails the test on any launch that didn't quit cleanly (Z56), naming each. */
+const noExits = (samples: Sample[]) => expect(samples.flatMap((s) => s.exits), "a launch that didn't quit cleanly (Z56)").toEqual([])
 type Sample = Awaited<ReturnType<typeof startup>>
 
 /** The dev layout of `npm run build:hooks`, on the same Electron: only it has the startup controls' hooks. */
@@ -88,6 +93,7 @@ test.describe('startup controls', () => {
       outcome = { key: `control:${key}`, value: { raisedBy: med(delayed) - med(base), base, delayed } }
       console.log(control, JSON.stringify({ base: med(base), delayed: med(delayed), presentedBy: delayed.map((s) => s.presentedBy) }))
       // Every run establishes the presentation after the show; an invalid one fails the control with its reason.
+      noExits([...base, ...delayed])
       for (const s of [...base, ...delayed]) expect(s.valid, s.reason).toBe(true)
       // Each delayed run's presentation lands ≥ 300 ms after the instant its delay started from (plan C8 as amended):
       // max(ready-to-show, titlebarPainted) for show(), the bundle's evaluation for the mount.
@@ -158,9 +164,14 @@ test(`warm startup on the packaged build, n = ${RUNS} (informational)`, async ()
     samples,
     file: file.replace(FIXTURES, '.fixtures')
   }
-  outcome = { key: COLD ? 'cold:startup' : 'warm:startup', value: result }
+  // A cold run is one restart of a batch: its verdict reads the batch's earlier restarts back from the log (cold.mjs).
+  const log = join(RESULTS, `m1-${hostname()}.jsonl`)
+  const earlier = COLD && existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line) as { key: string; file?: string }) : []
+  const batch = COLD ? coldVerdict([...earlier.filter((r) => r.key === 'cold:startup' && r.file === result.file), { key: 'cold:startup', samples }]) : undefined
+  outcome = { key: COLD ? 'cold:startup' : 'warm:startup', value: { ...result, batch } }
   const brief = (s?: { n: number; p50: number; p95: number; max: number }) => s && { n: s.n, p50: s.p50, p95: s.p95, max: s.max }
   const { samples: _all, ...shown } = result
-  console.log(JSON.stringify({ ...shown, shellVisible: brief(result.shellVisible), firstContent: brief(result.firstContent), openToUsable: brief(result.openToUsable) }, null, 1))
+  console.log(JSON.stringify({ ...shown, shellVisible: brief(result.shellVisible), firstContent: brief(result.firstContent), openToUsable: brief(result.openToUsable), batch }, null, 1))
+  noExits(samples)
   expect(result.invalid, 'invalid runs are kept with their reasons above').toEqual([])
 })

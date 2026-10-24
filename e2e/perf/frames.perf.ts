@@ -2,8 +2,8 @@
 // cadence and responsiveness are judged apart): a 30 ms busy-wait during a scroll is a long frame covering it and no
 // cadence stall; 60 ms is a stall covering it, during a scroll, in the handler of one discrete keypress, and in the first frame
 // after a scrollbar jump; a control scroll has no stall and passes cadence; control keypresses pass responsiveness and
-// report cadence as not applicable; and a jump whose target never renders fails. Then, once: expanding a long line
-// and a freeze are each answered by the view they show.
+// report cadence as not applicable; an uninjected jump is n/a or pass; and a jump whose target never renders fails.
+// Then, once: expanding a long line and a freeze are each answered by the view they show.
 //   Run: npm run package, then `npm run perf -- -g accessibility`, and the keypress control 10 times over with
 //   `npm run perf -- -g "keypresses with no injection" --repeat-each=10`. Every run is appended to .evidence/m1/perf/.
 import { type Page, expect } from '@playwright/test'
@@ -52,7 +52,7 @@ for (const a11y of ['on', 'off'] as const) {
   test.describe(`accessibility ${a11y}`, () => {
     let l: PackagedLaunch
     let hz: number
-    let run: { name: string; r: Run } | null = null
+    let run: { name: string; r: Run; extra?: Record<string, unknown> } | null = null
     /**
      * The span covers the injection: it runs past the injection's end, and the work behind it began before the
      * injection did. A frame already in the pipeline when the main thread blocks still presents during the block (seen
@@ -60,8 +60,8 @@ for (const a11y of ['on', 'off'] as const) {
      */
     const covers = (span: Span & { began: number }, busy: Span) => span.to >= busy.to && span.began <= busy.from
     const valid = (r: Run) => expect(r.analysis.valid, `invalid run: ${r.analysis.reason}`).toBe(true)
-    const keep = (name: string, r: Run) => {
-      run = { name, r }
+    const keep = (name: string, r: Run, extra?: Record<string, unknown>) => {
+      run = { name, r, extra }
       const a = r.analysis
       console.log(name, `a11y ${a11y}`, JSON.stringify({ hz, valid: a.valid, reason: a.reason, cadence: a.cadence, responsiveness: a.responsiveness, frames: a.frames, firstFrame: a.firstFrame, unanswered: a.unanswered, long: a.long, stalls: a.stalls, never: a.neverPainted?.length, busy: r.busy, raf: a.raf, load: r.load }))
     }
@@ -80,7 +80,7 @@ for (const a11y of ['on', 'off'] as const) {
       // Kept with its status and reason, pass or fail (Z49), and when the app fails to exit: nothing overwrites an earlier run.
       if (run) {
         const { inputToPaint, ...a } = run.r.analysis
-        recordOutcome(test.info(), `frames:${run.name}:a11y-${a11y}`, { ...a, hz, inputToPaintMaxMs: Math.max(0, ...(inputToPaint ?? []).map((p) => p.ms)), busy: run.r.busy, load: run.r.load, closeError: closed?.message })
+        recordOutcome(test.info(), `frames:${run.name}:a11y-${a11y}`, { ...a, hz, inputToPaintMaxMs: Math.max(0, ...(inputToPaint ?? []).map((p) => p.ms)), busy: run.r.busy, load: run.r.load, closeError: closed?.message, ...run.extra })
       }
       if (closed) throw closed
     })
@@ -162,6 +162,22 @@ for (const a11y of ['on', 'off'] as const) {
       valid(r)
       expect(r.busy).toHaveLength(1)
       expect(r.analysis.stalls.some((s) => covers(s, r.busy[0])), JSON.stringify(r)).toBe(true)
+    })
+
+    test('control: an uninjected scrollbar jump reports cadence n/a or pass, in 10 of 10 runs', async () => {
+      // The coordinator's Z62 clarification (PR 9): a frame already in the pipeline at the pointerdown isn't judged on
+      // cadence against the jump's answer. Ten jumps from the top, each traced on its own.
+      const runs: { cadence: string; frames: number; long: number[]; answers: number[] }[] = []
+      let last: Run | undefined
+      for (let n = 0; n < 10; n++) {
+        await l.page!.keyboard.press('Control+Home')
+        await l.page!.waitForTimeout(300)
+        last = await traced(l, (page) => jump(page), `trace-jump-${n}`)
+        valid(last)
+        runs.push({ cadence: last.analysis.cadence, frames: last.analysis.frames, long: last.analysis.long.map((s) => s.ms), answers: last.analysis.inputToPaint.map((p) => p.ms) })
+      }
+      keep('jump-control', last!, { runs })
+      expect(runs.map((r) => r.cadence).filter((c) => c !== 'n/a' && c !== 'pass'), JSON.stringify(runs)).toEqual([])
     })
 
     test('a jump whose target rows never render fails as never painted', async () => {

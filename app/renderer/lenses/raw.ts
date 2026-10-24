@@ -73,8 +73,16 @@ export class RawLens {
     this.setLineCount(opened.lines)
     // Plan C8: every input that can move the view demands frames until its target rows paint. A click can expand a
     // long line; it's marked after the button's own handler has added the rows.
+    // A scroll the list applied itself (a wheel or key in logical mode, or the position re-applied as the index grows)
+    // isn't an input: the wheel or key behind it is marked already, and a re-apply is the app's own (PR 9).
     for (const type of ['wheel', 'keydown', 'pointerdown', 'scroll', 'click'] as const)
-      this.list.element.addEventListener(type, (e) => inputMark(type, e.timeStamp), { passive: true })
+      this.list.element.addEventListener(
+        type,
+        (e) => {
+          if (type !== 'scroll' || !this.list.ownScroll) inputMark(type, e.timeStamp)
+        },
+        { passive: true }
+      )
     setPaintProbe(() => this.paintedKey())
     markPainted('rawUsable') // the first bounded piece is on screen and scrollable (Z37)
     // Z37's first screen: the first frame that shows the first page has painted (rAF, then a task). Once per open.
