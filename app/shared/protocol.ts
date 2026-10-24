@@ -41,7 +41,8 @@ export type ErrorCode =
   | 'CoreGone'
   /** The request was cancelled (plan C5): the renderer no longer wanted it. */
   | 'Cancelled'
-  /** The memory budget refused the open (plan C1; the ledger that sends it arrives in PR 6). */
+  /** The memory budget refused it (plan C1): the ledger can't hold a document's floor and its open's temporaries.
+   *  Nothing changed. */
   | 'Memory'
 
 export interface CoreError {
@@ -86,13 +87,16 @@ export interface Methods {
   close: { params: { doc: number }; result: boolean }
   /** Plan C5: cancels request `id`'s page read. True if it was still running: it then rejects with `Cancelled`. */
   cancel: { params: { id: number }; result: boolean }
+  /** Plan C1: sets the ledger's reservation for the renderer's page cache to `bytes`. False when the ledger refuses
+   *  the growth, which leaves the reservation as it was. */
+  reserve: { params: { bytes: number }; result: boolean }
   /** The test-hooks build only (plan m8): what's alive in the core host. Elsewhere it's `UnknownMethod`. */
-  debugStats: { params: Record<string, never>; result: DebugStats }
+  debugStats: { params: { gc?: boolean; resetHigh?: boolean }; result: DebugStats }
 }
 
 /** The test-hooks build's debug stats (plan C5, C6): the core's live jobs, tasks and file handles, the documents the
  *  core host holds, and how its cancels went: `cancels` found a read running, `cancelled` reads ended `Cancelled`,
- *  at most `cancelMs` after their cancel. */
+ *  at most `cancelMs` after their cancel. Plan C1: the ledger, each open document's charges, and the core host's heap. */
 export interface DebugStats {
   jobs: number
   tasks: number
@@ -101,6 +105,25 @@ export interface DebugStats {
   cancels: number
   cancelled: number
   cancelMs: number
+  /** In bytes: the limit; what's charged now, the pool and the renderer cache included; the most it's been; and the
+   *  pool's and the renderer cache's shares. */
+  ledger: { limit: number; used: number; high: number; pool: number; rendererCache: number }
+  /** Each open document's charges in bytes, itemized, by document id. */
+  charges: Record<number, Charges>
+  /** The core host's `process.memoryUsage()`, after a forced GC when the call asked for one (`{ gc: true }`). With
+   *  `{ resetHigh: true }`, the ledger's high-water mark starts again from what's charged. */
+  heap: { rss: number; heapUsed: number; external: number; arrayBuffers: number }
+}
+
+/** What one document holds charged (plan C1): its floor and what's grown since. */
+export interface Charges {
+  hashes: number
+  checkpoints: number
+  cache: number
+  metadata: number
+  total: number
+  /** The ledger stopped its line checkpoints: only the byte-bound ones were added after that. */
+  linesStopped: boolean
 }
 
 export type Method = keyof Methods

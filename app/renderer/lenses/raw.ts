@@ -1,5 +1,5 @@
 import type { Limits, Opened, PageItem, Token } from '../../shared/protocol'
-import { type CoreClient, CoreCallError } from '../core'
+import { type CoreClient, CoreCallError, testHooks } from '../core'
 import { inputMark, markPainted, setPaintProbe } from '../perf'
 import { VirtualList } from '../virtual/virtual-list'
 import { type Key, PageCache } from './page-cache'
@@ -61,6 +61,12 @@ export class RawLens {
   private stopped = false
   /** The freeze has reached the screen: App's banner is up (plan C8's paint probe). */
   private frozen = false
+  /** Plan C1: what the core holds reserved for the cache, and the mounted rows it's being sized for. */
+  private reserved = 0
+  private sizedRows = 0
+  private sizing = Promise.resolve()
+  /** No page is fetched until the cache's first reservation has settled: its growth is charged first. */
+  private reservedOnce = false
 
   constructor(
     private readonly host: HTMLElement,
@@ -70,10 +76,11 @@ export class RawLens {
     private readonly limits: Limits,
     private readonly options: RawOptions
   ) {
-    this.cache = new PageCache(2 * limits.pieceBytes + limits.mapMax)
-    this.sizeCache()
+    this.cache = new PageCache(2 * limits.pieceBytes + limits.mapMax, limits.pieceBytes) // a unit per source byte at most (C2)
+    this.cache.setMountedRows(this.mountedRows())
     this.cache.add(opened.firstPage.items)
     this.list = new VirtualList(host, ROW_HEIGHT, (i, el) => this.paint(i, el), (r) => this.want(r))
+    if (__TEST_HOOKS__) testHooks.cache = () => ({ charged: this.cache.charged, cap: this.cache.cap, reserved: this.reserved })
     Object.assign(this.list.element, { role: 'region', ariaLabel: `${label}, Raw` })
     // Reload's reading position, reached once the new index has found that line, unless the reader moves first.
     this.atLine = options.atLine
@@ -123,6 +130,10 @@ export class RawLens {
     for (const q of this.inflight) q.abort.abort()
     setPaintProbe(null)
     this.list.dispose()
+    if (__TEST_HOOKS__) testHooks.cache = null
+    // Plan C1: the cache is gone. Sent now, so it reaches the core before the next lens's reservation does; a sizing
+    // still under way sends nothing more (`reserveFor`).
+    void this.core.call('reserve', { bytes: 0 }).catch(() => {})
   }
 
   private rowCount(): number {
@@ -166,9 +177,47 @@ export class RawLens {
     })
   }
 
-  /** Sizes the cache's cap for the most rows `visibleRange` mounts here: a viewport and one more each way. */
+  /** The most rows `visibleRange` mounts here by default: a viewport and one more each way. */
+  private mountedRows(): number {
+    return 3 * Math.ceil(this.host.clientHeight / ROW_HEIGHT) + 1
+  }
+
+  /** Sizes the cache for the card's height, when that changes (plan C1). */
   private sizeCache(): void {
-    this.cache.setMountedRows(3 * Math.ceil(this.host.clientHeight / ROW_HEIGHT) + 1)
+    const rows = this.mountedRows()
+    if (rows === this.sizedRows) return
+    this.sizedRows = rows
+    this.sizing = this.sizing.then(() => this.reserveFor(rows))
+  }
+
+  /**
+   * Plan C1: the core's ledger reserves the cache's cap before the cache may grow into it, for `rows` mounted rows and
+   * the elastic part. A refusal drops the elastic part, then the overscan, so only the viewport is mounted. A smaller
+   * cap than what's held applies at once, and the rest is released. Refused even for the viewport, the cache shrinks to
+   * what's reserved, with no overscan; mounted rows are never evicted, so no visible row blanks.
+   */
+  private async reserveFor(rows: number): Promise<void> {
+    if (rows !== this.sizedRows || this.stopped) return // a later size has superseded this one
+    const visible = Math.ceil(this.host.clientHeight / ROW_HEIGHT) + 1
+    const tries: [cap: number, overscan: number | null][] = [
+      [this.cache.capFor(rows), null],
+      [this.cache.capFor(rows, false), null],
+      [this.cache.capFor(visible, false), 0],
+      [this.reserved, 0] // all refused: what the core already holds
+    ]
+    for (const [cap, overscan] of tries) {
+      const held = cap <= this.reserved
+      const granted = held || (await this.core.call('reserve', { bytes: cap }).catch(() => false))
+      if (this.stopped) return // disposed meanwhile: its release is already on its way
+      if (!granted) continue
+      this.cache.setCap(cap)
+      this.list.overscan = overscan
+      if (held && cap < this.reserved) void this.core.call('reserve', { bytes: cap }).catch(() => {})
+      this.reserved = cap
+      break
+    }
+    this.reservedOnce = true
+    this.schedule()
   }
 
   /**
@@ -177,7 +226,7 @@ export class RawLens {
    */
   private pump(): void {
     const r = this.wanted
-    if (!r || this.stopped) return
+    if (!r || this.stopped || !this.reservedOnce) return
     for (const q of this.inflight) if (!q.keys.some((key) => this.wantedKeys.has(key))) q.abort.abort()
     if (this.inflight.size >= 2) return
     let missing: Slot | null = null

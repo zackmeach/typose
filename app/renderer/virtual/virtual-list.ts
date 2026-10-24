@@ -16,6 +16,8 @@ export class VirtualList {
   private pointerDown = false
   /** The widest row painted so far: the horizontal scroll extent only grows, so it doesn't jump while reading. */
   private contentWidth = 0
+  /** Rows mounted beyond the viewport each way: one viewport's worth (spec §5.3) unless a lens sets fewer. */
+  overscan: number | null = null
 
   constructor(
     parent: HTMLElement,
@@ -83,10 +85,10 @@ export class VirtualList {
     this.apply(this.state.moveTo(i * this.rowHeight))
   }
 
-  /** The mounted row range: the viewport plus one viewport of overscan each way (spec §5.3). */
+  /** The mounted row range: the viewport plus `overscan` each way, one viewport by default (spec §5.3). */
   visibleRange(): { first: number; last: number } {
     const vp = this.state.geometry.viewport
-    return visibleRows(this.state.top, vp, this.rowHeight, this.rowCount, Math.ceil(vp / this.rowHeight))
+    return visibleRows(this.state.top, vp, this.rowHeight, this.rowCount, this.overscan ?? Math.ceil(vp / this.rowHeight))
   }
 
   private readonly release = (): void => {

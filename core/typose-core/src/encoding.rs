@@ -101,8 +101,11 @@ pub fn decode_prefix(
         }
     };
     let mut decoder = encoding.new_decoder_without_bom_handling();
-    let mut map = MapBuilder::new(start_offset + bom as u64);
-    let (mut text, mut pos, mut used, mut replacements) = (String::with_capacity(src.len().min(budget)), 0, 0u64, 0);
+    // Plan C1: sized once from the most this decode can cover, so neither grows. Every source byte decodes to at most
+    // 3 bytes of UTF-8 (a U+FFFD for one malformed byte; a UTF-16 unit; a single-byte encoding's char).
+    let most = src.len().min(budget);
+    let mut map = MapBuilder::with_capacity(start_offset + bom as u64, most);
+    let (mut text, mut pos, mut used, mut replacements) = (String::with_capacity(3 * most), 0, 0u64, 0);
     let budget = budget as u64;
     // A small fixed buffer: `decode_to_string_*` touches every page of the String's spare capacity on each
     // call, and hostile input makes one call per malformed byte, which would be quadratic.

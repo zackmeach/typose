@@ -16,6 +16,7 @@ const close = vi.fn()
 const startIndex = vi.fn((_cancel: Cancel, _onProgress: (p: IndexProgress) => void) => {})
 const doc = { generation: 1, size: 3, encoding: 'UTF-8', lines: 0, indexed: false, blank: false, page, piece, reload, close, startIndex } as unknown as Doc
 const openDoc = vi.fn(() => doc)
+const reserveCache = vi.fn((_bytes: number) => true)
 /** Every cancel flag the dispatcher made, in order. */
 let flags: { cancel: ReturnType<typeof vi.fn> }[]
 const cancelFlag = () => {
@@ -23,7 +24,7 @@ const cancelFlag = () => {
   flags.push(flag)
   return flag as unknown as Cancel
 }
-const addon: Addon = { coreVersion: () => '0.0.0', limits, openDoc, cancelFlag }
+const addon: Addon = { coreVersion: () => '0.0.0', limits, openDoc, cancelFlag, reserveCache }
 const range = (field: string) => limits().ranges.find((r) => r.field === field)!
 
 let dispatch: (data: unknown) => Promise<Response>
@@ -55,7 +56,8 @@ const TABLE: [method: string, field: string, base: Record<string, unknown>][] = 
   ['reload', 'doc', { count: 1 }],
   ['reload', 'count', { doc: 1 }],
   ['close', 'doc', {}],
-  ['cancel', 'id', {}]
+  ['cancel', 'id', {}],
+  ['reserve', 'bytes', {}]
 ]
 
 /** `base` with `field` (a token's, for `continuation.x`) set to `value`, or missing for `undefined`. */
@@ -80,7 +82,7 @@ describe('every numeric parameter takes only integers in its range', () => {
           return
         }
         expect(response).toMatchObject({ id: nextId - 1, session: 7, error: { code: 'InvalidParams', field } })
-        for (const spy of [openDoc, page, piece, reload, close, startIndex]) expect(spy).not.toHaveBeenCalled()
+        for (const spy of [openDoc, page, piece, reload, close, startIndex, reserveCache]) expect(spy).not.toHaveBeenCalled()
         // No state change: document 1 is still open, and the next open is document 2.
         expect(await call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 })).toHaveProperty('result')
         expect(await call('open', { path: 'c.txt', count: 1 })).toMatchObject({ result: { doc: 2 } })
@@ -163,6 +165,12 @@ it('an addon error keeps its typed code, and anything else is Internal', async (
     throw Object.assign(new Error('refused: a device path'), { code: 'Refused' })
   })
   expect(await call('open', { path: '\\\\.\\NUL', count: 1 })).toMatchObject({ error: { code: 'Refused', message: 'refused: a device path' } })
+  // Plan C1: the ledger's refusal reaches the renderer as `Memory`, which its card shows (plan §7 proposal 1).
+  openDoc.mockImplementationOnce(() => {
+    throw Object.assign(new Error('the memory budget is full: 4523288 bytes asked, 12 free'), { code: 'Memory' })
+  })
+  expect(await call('open', { path: 'big.txt', count: 1 })).toMatchObject({ error: { code: 'Memory' } })
+  expect(await call('open', { path: 'c.txt', count: 1 })).toMatchObject({ result: { doc: 2 } }) // the refusal took no id
   openDoc.mockImplementationOnce(() => {
     throw Object.assign(new Error('boom'), { code: 'GenericFailure' })
   })

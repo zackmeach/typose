@@ -1,7 +1,7 @@
 //! File-backed byte store (spec §3.1, §3.3): positional reads only, never mmap.
 //! Every 1MiB chunk is hashed the first time it's read and verified on every later read.
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io;
 use std::path::Path;
@@ -10,8 +10,12 @@ use std::sync::{Arc, Mutex};
 
 use xxhash_rust::xxh3::xxh3_64;
 
+use crate::budget::{OverBudget, Reservation};
+
 pub const CHUNK: usize = 1 << 20;
 const DEFAULT_CACHE_CHUNKS: usize = 64;
+/// Plan C1's Raw floor: the cache keeps 4 chunks whatever the ledger holds (or the whole file, if it's smaller).
+pub const FLOOR_CHUNKS: usize = 4;
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -24,15 +28,36 @@ pub enum StoreError {
     Cancelled,
 }
 
-#[derive(Default)]
-pub struct ChunkHashes(Mutex<HashMap<u64, u64>>);
+/// Each chunk's xxh3, and a bit for whether it's been seen, since 0 is a valid hash (spec §3.1). The tables are sized
+/// at open: a document's length is fixed for its life, so they never grow (plan C1).
+pub struct ChunkHashes {
+    table: Mutex<HashTable>,
+    /// Pays for the tables and this struct. Declared after them, so they're freed first.
+    charge: Reservation,
+}
+
+struct HashTable {
+    hashes: Box<[u64]>,
+    seen: Box<[u64]>,
+}
+
+/// The chunk cache (spec §3.3), bounded in charged bytes (plan C1). Its floor (`FLOOR_CHUNKS`) is reserved at open;
+/// past that it grows a chunk at a time while the ledger allows, up to `max`, and otherwise evicts. Readers copy out of
+/// it under its lock, so an evicted chunk is freed at once rather than when the last reader lets go.
+struct Cache {
+    chunks: VecDeque<(u64, Vec<u8>)>,
+    slots: usize,
+    max: usize,
+    /// The file's length: the cache never holds more than that.
+    len: u64,
+    charge: Reservation,
+}
 
 pub struct ByteStore {
     file: File,
     len: u64,
     hashes: Arc<ChunkHashes>,
-    cache: Mutex<VecDeque<(u64, Arc<Vec<u8>>)>>,
-    cache_chunks: usize,
+    cache: Mutex<Cache>,
 }
 
 impl From<io::Error> for StoreError {
@@ -72,7 +97,8 @@ pub fn cancellable<T>(cancel: &Arc<AtomicBool>, reads: impl FnOnce() -> T) -> T 
     reads()
 }
 
-fn cancelled() -> bool {
+/// Whether the read `cancellable` runs on this thread has been cancelled.
+pub fn cancelled() -> bool {
     CANCEL.with(|c| c.borrow().as_ref().is_some_and(|flag| flag.load(Ordering::Relaxed)))
 }
 
@@ -373,22 +399,82 @@ pub fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> io::Re
 }
 
 impl ChunkHashes {
+    /// What `new(chunks)` charges: 8 bytes and a seen bit per chunk, and the shared struct (plan C1's floor).
+    pub const fn bytes(chunks: u64) -> u64 {
+        chunks * 8 + chunks.div_ceil(64) * 8 + size_of::<ChunkHashes>() as u64 + 16 // an `Arc`'s two counts
+    }
+
+    pub fn new(chunks: u64) -> Result<Arc<ChunkHashes>, OverBudget> {
+        let charge = Reservation::new(Self::bytes(chunks))?;
+        let n = chunks as usize;
+        let table =
+            HashTable { hashes: vec![0; n].into_boxed_slice(), seen: vec![0; n.div_ceil(64)].into_boxed_slice() };
+        Ok(Arc::new(ChunkHashes { table: Mutex::new(table), charge }))
+    }
+
     /// Records the chunk's hash the first time it's seen; afterwards, verifies against it.
     pub fn check(&self, chunk: u64, data: &[u8]) -> Result<(), StoreError> {
         let hash = xxh3_64(data);
-        let mut map = self.0.lock().unwrap();
-        match map.get(&chunk) {
-            Some(&known) if known != hash => Err(StoreError::Changed { chunk }),
-            Some(_) => Ok(()),
-            None => {
-                map.insert(chunk, hash);
-                Ok(())
-            }
+        let mut table = self.table.lock().unwrap();
+        let HashTable { hashes, seen } = &mut *table;
+        let Some(known) = hashes.get_mut(chunk as usize) else {
+            return Err(StoreError::Changed { chunk }); // past the length the document opened with
+        };
+        let (word, bit) = (chunk as usize / 64, 1u64 << (chunk % 64));
+        if seen[word] & bit == 0 {
+            seen[word] |= bit;
+            *known = hash;
+            Ok(())
+        } else if *known == hash {
+            Ok(())
+        } else {
+            Err(StoreError::Changed { chunk })
         }
     }
 
+    /// Chunks hashed so far.
     pub fn len(&self) -> usize {
-        self.0.lock().unwrap().len()
+        self.table.lock().unwrap().seen.iter().map(|w| w.count_ones() as usize).sum()
+    }
+
+    pub fn charged(&self) -> u64 {
+        self.charge.bytes()
+    }
+}
+
+impl Cache {
+    /// The charge for `slots` chunks of a cache of at most `max`: its queue, and the chunks, never more than the file.
+    fn bytes(slots: usize, max: usize, len: u64) -> u64 {
+        (max * size_of::<(u64, Vec<u8>)>()) as u64 + (slots as u64 * CHUNK as u64).min(len)
+    }
+
+    fn new(max: usize, len: u64) -> Result<Cache, OverBudget> {
+        let slots = FLOOR_CHUNKS.min(max);
+        let charge = Reservation::new(Self::bytes(slots, max, len))?;
+        Ok(Cache { chunks: VecDeque::with_capacity(max), slots, max, len, charge })
+    }
+
+    fn get(&self, idx: u64) -> Option<&[u8]> {
+        self.chunks.iter().find(|(i, _)| *i == idx).map(|(_, data)| data.as_slice())
+    }
+
+    /// Takes a chunk a reader has just read and verified. Past its floor the cache grows only while the ledger takes
+    /// the next chunk's charge; otherwise the oldest chunk goes first, so the cache's bytes stay within its charge.
+    fn insert(&mut self, idx: u64, data: Vec<u8>) {
+        if self.get(idx).is_some() {
+            return; // another read got there first
+        }
+        if self.chunks.len() >= self.slots {
+            let more = Self::bytes(self.slots + 1, self.max, self.len) - Self::bytes(self.slots, self.max, self.len);
+            if self.slots < self.max && self.charge.grow(more).is_ok() {
+                self.slots += 1;
+            } else {
+                // At its most, or at the ledger's limit: the cache evicts, and keeps what it has (plan §7, PR 6).
+                // ponytail: FIFO eviction, not LRU. Switch to LRU if Spike A shows cache thrash while scrolling.
+                self.chunks.pop_front();
+            }
+        }
+        self.chunks.push_back((idx, data));
     }
 }
 
@@ -397,18 +483,22 @@ impl ByteStore {
         Self::open_with(path, DEFAULT_CACHE_CHUNKS)
     }
 
+    /// Opens `path` and reserves its share of plan C1's floor: the hash tables and the cache's floor. A refused
+    /// reservation is an `io::Error` holding the `OverBudget`, and nothing stays charged.
     pub fn open_with(path: &Path, cache_chunks: usize) -> io::Result<ByteStore> {
         let file = open_regular(path)?;
         let len = file.metadata()?.len();
+        let chunks = len.div_ceil(CHUNK as u64);
+        let hashes = ChunkHashes::new(chunks).map_err(io::Error::other)?;
+        let cache = Cache::new(cache_chunks.min(chunks as usize).max(1), len).map_err(io::Error::other)?;
         #[cfg(feature = "test-hooks")]
         crate::hooks::HANDLES.fetch_add(1, Ordering::Relaxed); // until `drop` below
-        Ok(ByteStore {
-            file,
-            len,
-            hashes: Arc::new(ChunkHashes::default()),
-            cache: Mutex::new(VecDeque::new()),
-            cache_chunks: cache_chunks.max(1),
-        })
+        Ok(ByteStore { file, len, hashes, cache: Mutex::new(cache) })
+    }
+
+    /// What this store has charged: (its hash tables, its cache).
+    pub fn charges(&self) -> (u64, u64) {
+        (self.hashes.charged(), self.cache.lock().unwrap().charge.bytes())
     }
 
     pub fn len(&self) -> u64 {
@@ -443,12 +533,14 @@ impl ByteStore {
         }
     }
 
-    pub fn chunk(&self, idx: u64) -> Result<Arc<Vec<u8>>, StoreError> {
+    /// Runs `f` on chunk `idx`: from the cache, or read from disk and verified (spec §3.1), then cached. A read from
+    /// disk allocates the chunk in its caller's page slot (plan C1), and the cache takes it from there.
+    fn with_chunk(&self, idx: u64, f: impl FnOnce(&[u8]) -> usize) -> Result<usize, StoreError> {
         if cancelled() {
             return Err(StoreError::Cancelled);
         }
-        if let Some((_, hit)) = self.cache.lock().unwrap().iter().find(|(i, _)| *i == idx) {
-            return Ok(hit.clone());
+        if let Some(hit) = self.cache.lock().unwrap().get(idx) {
+            return Ok(f(hit));
         }
         #[cfg(feature = "test-hooks")]
         crate::hooks::read_delay();
@@ -460,14 +552,10 @@ impl ByteStore {
             _ => StoreError::Io(e),
         })?;
         self.hashes.check(idx, &buf)?;
-        let data = Arc::new(buf);
         let mut cache = self.cache.lock().unwrap();
-        cache.push_back((idx, data.clone()));
-        // ponytail: FIFO eviction, not LRU. Switch to LRU if Spike A shows cache thrash while scrolling.
-        if cache.len() > self.cache_chunks {
-            cache.pop_front();
-        }
-        Ok(data)
+        let n = f(&buf);
+        cache.insert(idx, buf);
+        Ok(n)
     }
 
     pub fn read(&self, start: u64, end: u64) -> Result<Vec<u8>, StoreError> {
@@ -476,13 +564,16 @@ impl ByteStore {
         let mut pos = start;
         while pos < end {
             let idx = pos / CHUNK as u64;
-            let data = self.chunk(idx)?;
             let off = (pos - idx * CHUNK as u64) as usize;
-            let take = ((end - pos) as usize).min(data.len().saturating_sub(off));
+            let want = (end - pos) as usize;
+            let take = self.with_chunk(idx, |data| {
+                let take = want.min(data.len().saturating_sub(off));
+                out.extend_from_slice(&data[off..off + take]);
+                take
+            })?;
             if take == 0 {
                 break;
             }
-            out.extend_from_slice(&data[off..off + take]);
             pos += take as u64;
         }
         Ok(out)
@@ -554,13 +645,13 @@ mod tests {
         let data = pattern(2 * CHUNK);
         let path = temp_file("changed", &data);
         let store = ByteStore::open_with(&path, 1).unwrap();
-        store.chunk(0).unwrap();
-        store.chunk(1).unwrap(); // evicts chunk 0 from the one-chunk cache
+        store.read(0, 1).unwrap();
+        store.read(CHUNK as u64, CHUNK as u64 + 1).unwrap(); // evicts chunk 0 from the one-chunk cache
         let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         f.seek(SeekFrom::Start(10)).unwrap();
         f.write_all(b"same-size in-place write").unwrap();
         drop(f);
-        assert!(matches!(store.chunk(0), Err(StoreError::Changed { chunk: 0 })));
+        assert!(matches!(store.read(0, 1), Err(StoreError::Changed { chunk: 0 })));
     }
 
     #[test]
@@ -569,14 +660,14 @@ mod tests {
         let path = temp_file("truncated", &data);
         let store = ByteStore::open(&path).unwrap();
         std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_len(10).unwrap();
-        assert!(matches!(store.chunk(1), Err(StoreError::Changed { chunk: 1 })));
+        assert!(matches!(store.read(CHUNK as u64, CHUNK as u64 + 1), Err(StoreError::Changed { chunk: 1 })));
     }
 
     #[test]
     fn the_file_stays_deletable_while_open() {
         let path = temp_file("deletable", &pattern(100));
         let store = ByteStore::open(&path).unwrap();
-        store.chunk(0).unwrap();
+        store.read(0, 1).unwrap();
         std::fs::remove_file(&path).expect("Typose must never lock a file (brief §7.9)");
     }
 }

@@ -1,21 +1,26 @@
-// The test-hooks addon (plan m8) at the napi layer: its debug stats count what a document holds (plan C6), and its
-// per-read delay shows a cancelled read stopping within the chunk read it's in (plan C5). Run by `npm run test:hooks`,
-// after `npm run build:addon:hooks`; the release addon has none of this.
+// The test-hooks addon (plan m8) at the napi layer: its debug stats count what a document holds (plan C6), its
+// per-read delay shows a cancelled read stopping within the chunk read it's in (plan C5), and its budget override shows
+// the ledger refusing an open it can't hold (plan C1). Run by `npm run test:hooks`, after `npm run build:addon:hooks`;
+// the release addon has none of this.
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { tmpdir } from 'node:os'
+import { tmpdir, totalmem } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, expect, it } from 'vitest'
 import type * as Core from 'typose-node'
+import type { Charges, DebugStats } from '../shared/protocol'
 
 interface Hooks {
-  debugStats(): { jobs: number; tasks: number; handles: number }
+  debugStats(): Pick<DebugStats, 'jobs' | 'tasks' | 'handles' | 'ledger'>
   setReadDelay(ms: number): void
+  setLimit(bytes: number): void
+  docCharges(doc: Core.Doc): Charges
 }
 const core = createRequire(import.meta.url)('typose-node/hooks') as typeof Core & Hooks
 const dir = mkdtempSync(join(tmpdir(), 'typose-hooks-'))
 afterAll(() => rmSync(dir, { recursive: true, force: true }))
 afterEach(() => core.setReadDelay(0))
+core.setBudget(totalmem()) // plan C1: as the core host does, before anything opens
 
 const indexed = (doc: Core.Doc) =>
   new Promise<number>((ok, fail) => doc.startIndex(new core.Cancel(), (p) => (p.error ? fail(new Error(p.error)) : p.done && ok(p.lines))))
@@ -28,9 +33,9 @@ const ending = (read: Promise<unknown>) => read.then(
 it('debug stats: a document holds a handle, its index a job, a read a task; once they end and it closes, none is left', async () => {
   const path = join(dir, 'stats.txt')
   writeFileSync(path, 'a\nb\n'.repeat(1000))
-  expect(core.debugStats()).toEqual({ jobs: 0, tasks: 0, handles: 0 })
+  expect(core.debugStats()).toMatchObject({ jobs: 0, tasks: 0, handles: 0 })
   const doc = core.Doc.open(path)
-  expect(core.debugStats()).toEqual({ jobs: 0, tasks: 0, handles: 1 })
+  expect(core.debugStats()).toMatchObject({ jobs: 0, tasks: 0, handles: 1 })
   const done = indexed(doc)
   expect(core.debugStats().jobs).toBe(1)
   await done
@@ -40,7 +45,32 @@ it('debug stats: a document holds a handle, its index a job, a read a task; once
   await read
   await expect.poll(() => core.debugStats().tasks).toBe(0)
   doc.close()
-  expect(core.debugStats()).toEqual({ jobs: 0, tasks: 0, handles: 0 })
+  expect(core.debugStats()).toMatchObject({ jobs: 0, tasks: 0, handles: 0 })
+})
+
+it("plan C1: the ledger refuses an open it can't hold with Memory, and nothing stays charged; close returns it all", () => {
+  // Four files of 4 MiB + 1 byte: each one's floor holds a 4-chunk cache (plus its hashes, checkpoints and metadata).
+  const paths = [0, 1, 2, 3].map((i) => join(dir, `floor-${i}.txt`))
+  for (const path of paths) writeFileSync(path, 'a line\n'.repeat(599_187).padEnd((4 << 20) + 1, 'x'))
+  const { used: base, limit } = core.debugStats().ledger
+  const probe = core.Doc.open(paths[0])
+  const floor = core.docCharges(probe).total
+  probe.close()
+  expect(core.debugStats().ledger.used).toBe(base)
+  expect(floor).toBeGreaterThan(4 << 20)
+  const { openTemp } = core.limits()
+  try {
+    core.setLimit(base + 3 * floor + openTemp) // three documents' floors, and one open's temporaries on top
+    const docs = paths.slice(0, 3).map((path) => core.Doc.open(path))
+    expect(core.debugStats().ledger.used).toBe(base + 3 * floor)
+    expect(() => core.Doc.open(paths[3])).toThrow(expect.objectContaining({ code: 'Memory' }))
+    expect(core.debugStats().ledger.used).toBe(base + 3 * floor) // the refused open changed nothing
+    for (const doc of docs) doc.close()
+    expect(core.debugStats().ledger.used).toBe(base) // close returns every reservation (plan C6)
+    expect(core.Doc.open(paths[3]).generation).toBe(1) // and the room is there again
+  } finally {
+    core.setLimit(limit)
+  }
 })
 
 it('the read delay takes only whole ms in [0, 10000] (plan C4)', () => {

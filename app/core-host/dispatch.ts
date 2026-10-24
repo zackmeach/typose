@@ -3,6 +3,7 @@
 import type { Cancel, Doc, IndexProgress, Limits, Page as CorePage, PageItem as CorePageItem } from 'typose-node'
 import {
   PROTOCOL,
+  type Charges,
   type CoreError,
   type DebugStats,
   type ErrorCode,
@@ -24,8 +25,16 @@ export interface Addon {
   openDoc(path: string): Doc
   /** A new cancel flag, for one page read or one index job (plan C5, C6). */
   cancelFlag(): Cancel
-  /** The test-hooks addon's live jobs, tasks and file handles (plan m8). */
-  debugStats?(): Pick<DebugStats, 'jobs' | 'tasks' | 'handles'>
+  /** Plan C1: sets the renderer cache's reservation in the ledger; false if the ledger refused it. */
+  reserveCache(bytes: number): boolean
+  /** The test-hooks addon's live jobs, tasks and file handles, and its ledger (plan m8, C1). */
+  debugStats?(): Pick<DebugStats, 'jobs' | 'tasks' | 'handles' | 'ledger'>
+  /** The test-hooks addon's itemized charges of one document (plan C1, C6). */
+  docCharges?(doc: Doc): Charges
+  /** The test-hooks build's forced GC of the core host's heap (plan C1's measurements). */
+  gc?(): void
+  /** The test-hooks addon's reset of the ledger's high-water mark (plan C1's exhaustion test). */
+  resetHigh?(): void
 }
 
 class Refusal extends Error {
@@ -39,7 +48,7 @@ class Refusal extends Error {
 }
 
 /** The addon's own codes (`typose-node`'s `Code`), passed through; anything else thrown is `Internal`. */
-const ADDON_CODES = new Set<string>(['InvalidParams', 'NotFound', 'PermissionDenied', 'Refused', 'Binary', 'Frozen', 'Stale', 'Io', 'Cancelled', 'NoDocument'])
+const ADDON_CODES = new Set<string>(['InvalidParams', 'NotFound', 'PermissionDenied', 'Refused', 'Binary', 'Frozen', 'Stale', 'Io', 'Cancelled', 'NoDocument', 'Memory'])
 
 type Params = Record<string, unknown>
 const isRecord = (v: unknown): v is Params => typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -191,7 +200,20 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       }
       return true
     },
-    ...(__TEST_HOOKS__ ? { debugStats: (): DebugStats => ({ ...addon.debugStats!(), docs: docs.size, ...cancels }) } : {})
+    // Plan C1: the renderer's page cache, reserved in the ledger before the cache may grow into it.
+    reserve: (p) => addon.reserveCache(int(p, 'bytes')),
+    ...(__TEST_HOOKS__
+      ? {
+          debugStats: (p): DebugStats => {
+            if (p.gc === true) addon.gc!()
+            if (p.resetHigh === true) addon.resetHigh!()
+            const charges: Record<number, Charges> = {}
+            for (const [id, doc] of docs) charges[id] = addon.docCharges!(doc)
+            const { rss, heapUsed, external, arrayBuffers } = process.memoryUsage()
+            return { ...addon.debugStats!(), docs: docs.size, ...cancels, charges, heap: { rss, heapUsed, external, arrayBuffers } }
+          }
+        }
+      : {})
   }
 
   return async (data) => {

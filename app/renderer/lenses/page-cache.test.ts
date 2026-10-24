@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { PageItem } from '../../shared/protocol'
-import { PageCache, charge } from './page-cache'
+import { MOUNTED_PER_UNIT, PageCache, charge } from './page-cache'
 
 const PIECE = 65_536
 const MAP_MAX = 393_224
@@ -16,7 +16,7 @@ const cjk = (line: number, points = 0): PageItem => ({
 
 describe('PageCache', () => {
   it("never exceeds its cap in charged bytes, and never evicts a mounted line, under 64 KiB CJK items", () => {
-    const cache = new PageCache(2 * PIECE + MAP_MAX)
+    const cache = new PageCache(2 * PIECE + MAP_MAX, PIECE)
     const rows = 31 // 3 × ceil(200 px / 20 px) + 1
     cache.setMountedRows(rows)
     let seen = 0
@@ -31,37 +31,37 @@ describe('PageCache', () => {
       seen++
     }
     expect(seen).toBeGreaterThan(500)
-    expect(cache.cap).toBe(rows * 2 * (2 * PIECE + MAP_MAX) + (16 << 20))
+    expect(cache.cap).toBe(rows * (2 * PIECE + MAP_MAX + MOUNTED_PER_UNIT * PIECE) + (16 << 20))
   })
 
-  it('counts a mounted item twice, and an item at its text and map bytes', () => {
-    const cache = new PageCache(2 * PIECE + MAP_MAX)
+  it('charges an item at its text and map bytes, and a mounted one its layout besides', () => {
+    const cache = new PageCache(2 * PIECE + MAP_MAX, PIECE)
     const item = cjk(0, 100)
     expect(charge(item)).toBe(2 * 21_845 + 400)
     cache.add([item])
     expect(cache.charged).toBe(charge(item))
     cache.setMounted([0])
-    expect(cache.charged).toBe(2 * charge(item))
+    expect(cache.charged).toBe(charge(item) + MOUNTED_PER_UNIT * 21_845)
   })
 
   it('keeps a first page added before anything is mounted (Z37: no refetch)', () => {
-    const cache = new PageCache(2 * PIECE + MAP_MAX)
+    const cache = new PageCache(2 * PIECE + MAP_MAX, PIECE)
     cache.add([cjk(0), cjk(1)])
     expect(cache.has(0) && cache.has(1)).toBe(true)
   })
 
   it("charges a line's further pieces like first pieces, and evicts them oldest first but never a mounted one", () => {
-    const cache = new PageCache(2 * PIECE + MAP_MAX)
+    const cache = new PageCache(2 * PIECE + MAP_MAX, PIECE)
     cache.setMountedRows(1)
     cache.setMounted(['0:1'])
-    for (let k = 1; k <= 500; k++) cache.addPiece(`0:${k}`, cjk(0)) // 500 × 43,690 bytes: past the cap
+    for (let k = 1; k <= 1000; k++) cache.addPiece(`0:${k}`, cjk(0)) // 1,000 × 43,690 bytes: past the cap
     expect(cache.charged).toBeLessThanOrEqual(cache.cap)
     expect(cache.has('0:1')).toBe(true)
-    expect([cache.has('0:2'), cache.has('0:500')]).toEqual([false, true])
+    expect([cache.has('0:2'), cache.has('0:1000')]).toEqual([false, true])
   })
 
   it('drops the items a test picks, mounted ones too, and charges only what stays', () => {
-    const cache = new PageCache(2 * PIECE + MAP_MAX)
+    const cache = new PageCache(2 * PIECE + MAP_MAX, PIECE)
     const tail = cjk(0) // a last piece whose line's end wasn't known: no `next`, no `rest`
     const going = { ...cjk(1), next: { session: 1, doc: 1, gen: 1, line: 1, offset: 65_535 } } // its line goes on
     cache.add([going])
@@ -69,6 +69,6 @@ describe('PageCache', () => {
     cache.setMounted([1, '0:15'])
     expect(cache.drop((item) => item.more && !item.next && item.rest === undefined)).toBe(1)
     expect([cache.has('0:15'), cache.has(1)]).toEqual([false, true])
-    expect(cache.charged).toBe(2 * charge(going))
+    expect(cache.charged).toBe(charge(going) + MOUNTED_PER_UNIT * going.text.length)
   })
 })

@@ -4,6 +4,7 @@
 // `len` here is a file or table size; nothing is a container that could be empty-checked.
 #![allow(clippy::len_without_is_empty)]
 
+pub mod budget;
 pub mod bytemap;
 pub mod doc;
 pub mod encoding;
