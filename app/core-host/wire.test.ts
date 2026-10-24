@@ -1,11 +1,13 @@
 // Plan C2's wire bound: the largest pages of each shape, structured-cloned as `v8.serialize` does, fit within
 // PAGE_WIRE_MAX, which the core derives from this representation (`pages.rs`).
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tmpdir, totalmem } from 'node:os'
 import { join } from 'node:path'
 import { serialize } from 'node:v8'
 import { afterAll, expect, it } from 'vitest'
-import { Cancel, Doc, type IndexProgress, limits } from 'typose-node'
+import { Cancel, Doc, type IndexProgress, limits, setBudget } from 'typose-node'
+
+setBudget(totalmem()) // plan C1: the core host sets the ledger's limit before anything opens
 
 const { pageWireMax, itemWireFixed, maxItems } = limits()
 const dir = mkdtempSync(join(tmpdir(), 'typose-wire-'))

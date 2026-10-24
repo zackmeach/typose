@@ -1,11 +1,15 @@
 import type { Limits, Opened, PageItem, Token } from '../../shared/protocol'
-import { type CoreClient, CoreCallError } from '../core'
+import { type CoreClient, CoreCallError, testHooks } from '../core'
 import { inputMark, markPainted, setPaintProbe } from '../perf'
 import { VirtualList } from '../virtual/virtual-list'
-import { type Key, PageCache } from './page-cache'
+import { type Key, PageCache, rowCost } from './page-cache'
 
 /** Brief §6.1's mono line: 13px at 1.55, rounded to whole pixels so row math stays exact. */
 export const ROW_HEIGHT = 20
+
+/** Plan C1: the cache's cap for a viewport `height` px tall and no overscan, the least a lens mounts with: part of the
+ *  open's floor. */
+export const viewportCap = (l: Limits, height: number): number => (Math.ceil(height / ROW_HEIGHT) + 1) * rowCost(l)
 
 /** A long line the reader expanded (brief §5.1): `tokens[k]` fetches its piece k + 1, which gets a row of its own. */
 interface Expansion {
@@ -61,6 +65,15 @@ export class RawLens {
   private stopped = false
   /** The freeze has reached the screen: App's banner is up (plan C8's paint probe). */
   private frozen = false
+  /** Plan C1: what the core holds reserved for the cache, and the card size and mounted rows it was last sized for. */
+  private reserved: number
+  private readonly rowCost: number
+  private sizedTo = ''
+  private sizedRows = 0
+  private sizings = 0
+  private sizing = Promise.resolve()
+  /** No page is fetched until the cache's first reservation has settled: its growth is charged first. */
+  private reservedOnce = false
 
   constructor(
     private readonly host: HTMLElement,
@@ -70,10 +83,14 @@ export class RawLens {
     private readonly limits: Limits,
     private readonly options: RawOptions
   ) {
-    this.cache = new PageCache(2 * limits.pieceBytes + limits.mapMax)
-    this.sizeCache()
+    // Plan C1: the open reserved at least the viewport's cap; only the rows a reservation covers are ever mounted.
+    this.reserved = opened.reserved
+    this.rowCost = rowCost(limits)
+    this.cache = new PageCache(this.rowCost)
+    this.cache.setCap(this.reserved)
     this.cache.add(opened.firstPage.items)
-    this.list = new VirtualList(host, ROW_HEIGHT, (i, el) => this.paint(i, el), (r) => this.want(r))
+    this.list = new VirtualList(host, ROW_HEIGHT, (i, el) => this.paint(i, el), (r) => this.want(r), this.coveredRows())
+    if (__TEST_HOOKS__) testHooks.cache = () => ({ charged: this.cache.charged, cap: this.cache.cap, reserved: this.reserved })
     Object.assign(this.list.element, { role: 'region', ariaLabel: `${label}, Raw` })
     // Reload's reading position, reached once the new index has found that line, unless the reader moves first.
     this.atLine = options.atLine
@@ -97,6 +114,11 @@ export class RawLens {
     // Z37's first screen: the first frame that shows the first page has painted (rAF, then a task). Once per open.
     if (opened.firstPage.items.length > 0 && performance.getEntriesByName('typose:first-screen').length === 0)
       requestAnimationFrame(() => setTimeout(() => performance.mark('typose:first-screen')))
+  }
+
+  /** Plan C1: the viewport-only cap for this card's height, the least the next lens here needs: an open's floor. */
+  floorBytes(): number {
+    return viewportCap(this.limits, this.host.clientHeight)
   }
 
   /** Lines known so far: the index's count, but never fewer than the first page already showed (Z37). */
@@ -131,6 +153,11 @@ export class RawLens {
     for (const q of this.inflight) q.abort.abort()
     setPaintProbe(null)
     this.list.dispose()
+    if (__TEST_HOOKS__) testHooks.cache = null
+    // Plan C1: the cache is gone. A sizing still under way sends nothing more (`reserveFor`). If an open or Reload has
+    // taken the reservation for the next lens, the core ignores this.
+    const { doc, gen } = this.opened
+    void this.core.call('reserve', { doc, gen, bytes: 0 }).catch(() => {})
   }
 
   private rowCount(): number {
@@ -174,9 +201,54 @@ export class RawLens {
     })
   }
 
-  /** Sizes the cache's cap for the most rows `visibleRange` mounts here: a viewport and one more each way. */
+  /** The most rows `visibleRange` mounts here by default: a viewport and one more each way. */
+  private mountedRows(): number {
+    return 3 * Math.ceil(this.host.clientHeight / ROW_HEIGHT) + 1
+  }
+
+  /** The rows the reservation covers, each at a row's most. */
+  private coveredRows(): number {
+    return Math.floor(this.reserved / this.rowCost)
+  }
+
+  /** Sizes the cache when the card's height changes, and tries again on any resize while the ledger has it cut short. */
   private sizeCache(): void {
-    this.cache.setMountedRows(3 * Math.ceil(this.host.clientHeight / ROW_HEIGHT) + 1)
+    const rows = this.mountedRows()
+    const size = `${this.host.clientWidth}x${this.host.clientHeight}`
+    if (size === this.sizedTo) return
+    this.sizedTo = size
+    if (rows === this.sizedRows && this.reserved >= this.cache.capFor(rows)) return
+    this.sizedRows = rows
+    const n = ++this.sizings
+    this.sizing = this.sizing.then(() => this.reserveFor(rows, n))
+  }
+
+  /**
+   * Plan C1: the core's ledger reserves the cache's cap before the cache may grow into it, for `rows` mounted rows and
+   * the elastic part. A refusal drops the elastic part, then the overscan, so only the viewport is mounted. A smaller
+   * cap than what's held applies at once, and the rest is released. Refused even for the viewport, the lens keeps what's
+   * held and mounts only the rows it covers: the rest of the viewport stays blank, and the cache is never charged past
+   * its reservation.
+   */
+  private async reserveFor(rows: number, n: number): Promise<void> {
+    if (n !== this.sizings || this.stopped) return // a later size has superseded this one
+    const { doc, gen } = this.opened
+    // The last, if all are refused: what the core already holds.
+    const caps = [this.cache.capFor(rows), this.cache.capFor(rows, false), viewportCap(this.limits, this.host.clientHeight), this.reserved]
+    for (const cap of caps) {
+      const held = cap <= this.reserved
+      const granted = held || (await this.core.call('reserve', { doc, gen, bytes: cap }).catch(() => false))
+      if (this.stopped) return // disposed meanwhile: its release is already on its way
+      if (!granted) continue
+      const shrunk = held && cap < this.reserved
+      this.reserved = cap
+      this.cache.setCap(cap)
+      this.list.setMaxRows(this.coveredRows()) // mounts or unmounts rows now, not at the next scroll
+      if (shrunk) void this.core.call('reserve', { doc, gen, bytes: cap }).catch(() => {}) // what it paid for has gone
+      break
+    }
+    this.reservedOnce = true
+    this.schedule()
   }
 
   /**
@@ -185,7 +257,7 @@ export class RawLens {
    */
   private pump(): void {
     const r = this.wanted
-    if (!r || this.stopped) return
+    if (!r || this.stopped || !this.reservedOnce) return
     for (const q of this.inflight) if (!q.keys.some((key) => this.wantedKeys.has(key))) q.abort.abort()
     if (this.inflight.size >= 2) return
     let missing: Slot | null = null

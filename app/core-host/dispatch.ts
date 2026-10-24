@@ -3,6 +3,7 @@
 import type { Cancel, Doc, IndexProgress, Limits, Page as CorePage, PageItem as CorePageItem } from 'typose-node'
 import {
   PROTOCOL,
+  type Charges,
   type CoreError,
   type DebugStats,
   type ErrorCode,
@@ -24,8 +25,18 @@ export interface Addon {
   openDoc(path: string): Doc
   /** A new cancel flag, for one page read or one index job (plan C5, C6). */
   cancelFlag(): Cancel
-  /** The test-hooks addon's live jobs, tasks and file handles, and its slowest read delay (plan m8). */
-  debugStats?(): Pick<DebugStats, 'jobs' | 'tasks' | 'handles' | 'delayMs'>
+  /** Plan C1: sets the renderer cache's reservation in the ledger; false if the ledger refused it. */
+  reserveCache(bytes: number): boolean
+  /** The test-hooks addon's live jobs, tasks and file handles, its slowest read delay, and its ledger (plan m8, C1). */
+  debugStats?(): Pick<DebugStats, 'jobs' | 'tasks' | 'handles' | 'delayMs' | 'ledger'>
+  /** The test-hooks addon's itemized charges of one document (plan C1, C6). */
+  docCharges?(doc: Doc): Charges
+  /** The test-hooks build's forced GC of the core host's heap (plan C1's measurements). */
+  gc?(): void
+  /** The test-hooks addon's reset of the ledger's high-water mark (plan C1's exhaustion test). */
+  resetHigh?(): void
+  /** The test-hooks addon's budget override (plan C1): the ledger's limit, in bytes. */
+  setLimit?(bytes: number): void
 }
 
 class Refusal extends Error {
@@ -39,7 +50,7 @@ class Refusal extends Error {
 }
 
 /** The addon's own codes (`typose-node`'s `Code`), passed through; anything else thrown is `Internal`. */
-const ADDON_CODES = new Set<string>(['InvalidParams', 'NotFound', 'PermissionDenied', 'Refused', 'Binary', 'Frozen', 'Stale', 'Io', 'Cancelled', 'NoDocument'])
+const ADDON_CODES = new Set<string>(['InvalidParams', 'NotFound', 'PermissionDenied', 'Refused', 'Binary', 'Frozen', 'Stale', 'Io', 'Cancelled', 'NoDocument', 'Memory'])
 
 type Params = Record<string, unknown>
 const isRecord = (v: unknown): v is Params => typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -69,6 +80,43 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     const doc = docs.get(id)
     if (!doc) throw new Refusal('NoDocument', `no document ${id}`)
     return doc
+  }
+  /**
+   * Plan C1: the renderer cache's reservation. One renderer talks to a core host and shows one lens at a time, so it's
+   * held for one lens: `doc:gen`. An open or Reload takes it at its first step for the lens it opens (`#id` while it's
+   * under way), with at least that lens's viewport-only cap, `bytes`: part of the open's floor. The renderer unmounts the
+   * lens it replaces one commit before an open's reply, and in the commit that mounts a Reload's new lens, so it holds
+   * the larger of the two, not their sum, and what the replaced lens asks for is refused.
+   */
+  let holder: string | null = null
+  let held = 0
+  /** The lens the reservation was last handed to, and its bytes since; null once released. A failed Reload gives it
+   *  back. It's never a request: requests only take the reservation, and the takes only grow it. */
+  let settled: { lens: string; bytes: number } | null = null
+  const hold = (bytes: number): boolean => {
+    if (!addon.reserveCache(bytes)) return false
+    held = bytes
+    return true
+  }
+  /** Request `req` takes the reservation for the lens it opens; refused, it's `Memory` and nothing has changed. */
+  const take = (req: number, bytes: number): string => {
+    if (!hold(Math.max(held, bytes))) throw new Refusal('Memory', `the memory budget can't hold the view's ${bytes} bytes`)
+    return (holder = `#${req}`)
+  }
+  /** The open or Reload holding the reservation as `key` hands it on: to its lens, `doc:gen`, or, failed, to nobody. */
+  const settle = (key: string, lens: string | null): void => {
+    if (holder !== key) return // a newer one has taken it
+    holder = lens
+    settled = lens === null ? null : { lens, bytes: held }
+    if (lens === null) hold(0)
+  }
+  /** A failed Reload of document `id`, holding the reservation as `key`, gives it back to the last lens it was handed
+   *  to, if that's this document's; else to nobody. Never more than it holds, so this can't be refused. */
+  const giveBack = (key: string, id: number): void => {
+    if (holder !== key) return // a newer one has taken it
+    settled = settled?.lens.startsWith(`${id}:`) ? settled : null
+    holder = settled?.lens ?? null
+    if ((settled?.bytes ?? 0) !== held) hold(settled?.bytes ?? 0)
   }
   /** Plan C6: close and a freeze cancel the document's page reads in flight. */
   const cancelReads = (doc: number) => {
@@ -102,7 +150,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     }
   }
   /** Starts indexing a document's current generation, and describes it with its first page. */
-  const begin = (id: number, doc: Doc, firstPage: CorePage): Opened => {
+  const begin = (id: number, doc: Doc, firstPage: CorePage): Omit<Opened, 'reserved'> => {
     const gen = doc.generation
     const cancel = addon.cancelFlag()
     jobs.get(id)?.cancel() // the previous generation's job, if it still runs (plan C6)
@@ -124,11 +172,18 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       if (int(p, 'protocol') !== PROTOCOL) throw new Refusal('Unsupported', `protocol ${String(p.protocol)}; this core speaks ${PROTOCOL}`)
       return { protocol: PROTOCOL, core: addon.coreVersion(), session, limits }
     },
-    open: async (p): Promise<Opened> => {
-      const count = int(p, 'count')
+    open: async (p, req): Promise<Opened> => {
+      const [count, bytes] = [int(p, 'count'), int(p, 'bytes')]
       if (typeof p.path !== 'string' || p.path.length === 0 || p.path.length > 32_767 || p.path.includes('\0'))
         throw new Refusal('InvalidParams', 'path must be a non-empty string of at most 32,767 characters, without NUL', 'path')
-      const doc = addon.openDoc(p.path)
+      const pending = take(req, bytes)
+      let doc: Doc
+      try {
+        doc = addon.openDoc(p.path)
+      } catch (e) {
+        settle(pending, null)
+        throw e
+      }
       // The first page reads from byte 0, so it doesn't wait for the index (Z37). It's read before the document is
       // registered, and a failure closes it, so nothing is left behind.
       let firstPage: CorePage
@@ -136,11 +191,13 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         firstPage = await doc.page(doc.generation, 0, count, addon.cancelFlag())
       } catch (e) {
         doc.close()
+        settle(pending, null)
         throw e
       }
       const id = nextDoc++
       docs.set(id, doc)
-      return begin(id, doc, firstPage)
+      settle(pending, `${id}:${doc.generation}`)
+      return { ...begin(id, doc, firstPage), reserved: held }
     },
     page: (p, req): Promise<Page> => {
       const id = int(p, 'doc')
@@ -158,16 +215,25 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const doc = getDoc(id)
       return read(req, id, (cancel) => doc.page(gen, start, count, cancel))
     },
-    // A failed reload (the file is gone, say) leaves the document at its old generation. A reload that another
-    // Reload, or close, overtakes while its first page is read is Stale, and starts nothing: the newer one indexes.
-    reload: async (p): Promise<Opened> => {
-      const [id, count] = [int(p, 'doc'), int(p, 'count')]
+    // A failed reload (the file is gone, say) leaves the document at its old generation, and gives the renderer cache's
+    // reservation back to the document's lens (Z34's "keeps Raw"). A reload that another Reload, or close, overtakes
+    // while its first page is read is Stale, and starts nothing: the newer one indexes.
+    reload: async (p, req): Promise<Opened> => {
+      const [id, count, bytes] = [int(p, 'doc'), int(p, 'count'), int(p, 'bytes')]
       const doc = getDoc(id)
-      doc.reload()
-      const gen = doc.generation
-      const firstPage = await doc.page(gen, 0, count, addon.cancelFlag())
-      if (docs.get(id) !== doc || doc.generation !== gen) throw new Refusal('Stale', `generation ${gen} was replaced while it opened`)
-      return begin(id, doc, firstPage)
+      const pending = take(req, bytes)
+      try {
+        doc.reload()
+        const gen = doc.generation
+        const firstPage = await doc.page(gen, 0, count, addon.cancelFlag())
+        if (docs.get(id) !== doc || doc.generation !== gen) throw new Refusal('Stale', `generation ${gen} was replaced while it opened`)
+        settle(pending, `${id}:${gen}`)
+        return { ...begin(id, doc, firstPage), reserved: held }
+      } catch (e) {
+        if (docs.get(id) === doc) giveBack(pending, id)
+        else settle(pending, null) // closed meanwhile: its lens is gone
+        throw e
+      }
     },
     // Plan C6: the index job and the page reads stop, and the document's handle closes once they have.
     close: (p) => {
@@ -179,6 +245,8 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       doc.close()
       if (__TEST_HOOKS__) closed.push(doc)
       jobs.delete(id)
+      if (holder?.startsWith(`${id}:`)) settle(holder, null) // its lens is gone
+      if (settled?.lens.startsWith(`${id}:`)) settled = null
       return docs.delete(id)
     },
     cancel: (p) => {
@@ -191,7 +259,26 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       }
       return true
     },
-    ...(__TEST_HOOKS__ ? { debugStats: (): DebugStats => ({ ...addon.debugStats!(), docs: docs.size, ...cancels }) } : {})
+    // Plan C1: the renderer's page cache, reserved in the ledger before the cache may grow into it.
+    reserve: (p) => {
+      const [doc, gen, bytes] = [int(p, 'doc'), int(p, 'gen'), int(p, 'bytes')]
+      if (holder !== `${doc}:${gen}` || !hold(bytes)) return false
+      settled = { lens: holder, bytes }
+      return true
+    },
+    ...(__TEST_HOOKS__
+      ? {
+          debugStats: (p): DebugStats => {
+            if (p.gc === true) addon.gc!()
+            if (p.resetHigh === true) addon.resetHigh!()
+            if (p.limit !== undefined) addon.setLimit!(int({ bytes: p.limit }, 'bytes', 'limit'))
+            const charges: Record<number, Charges> = {}
+            for (const [id, doc] of docs) charges[id] = addon.docCharges!(doc)
+            const { rss, heapUsed, external, arrayBuffers } = process.memoryUsage()
+            return { ...addon.debugStats!(), docs: docs.size, ...cancels, charges, heap: { rss, heapUsed, external, arrayBuffers } }
+          }
+        }
+      : {})
   }
 
   return async (data) => {

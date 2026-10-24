@@ -6,7 +6,7 @@ use crate::pages::MAX_ITEMS;
 
 /// Every numeric protocol field and its inclusive range. The core host checks requests against this same table,
 /// which it reads through the addon, so the two sides can't drift.
-pub const RANGES: [(&str, u64, u64); 9] = [
+pub const RANGES: [(&str, u64, u64); 11] = [
     ("id", 1, MAX_SAFE),       // a request id
     ("protocol", 0, MAX_SAFE), // the handshake's protocol version
     ("doc", 1, MAX_SAFE),      // a document id
@@ -18,6 +18,10 @@ pub const RANGES: [(&str, u64, u64); 9] = [
     ("session", 1, MAX_SAFE),
     ("line", 0, MAX_SAFE),
     ("offset", 0, MAX_SAFE),
+    // Plan C1: the renderer cache's reservation, and the test-hooks build's budget override, in bytes.
+    ("bytes", 0, MAX_SAFE),
+    // The core host's `os.totalmem()`, which sets the ledger's limit.
+    ("totalmem", 1, MAX_SAFE),
 ];
 
 /// `field`'s inclusive range. Panics on a field missing from `RANGES`, which is a bug, not input.

@@ -37,7 +37,9 @@ export const testHooks = {
   /** When the last core death was reported (wall clock, ms), and how many pending calls it rejected. */
   gone: null as { at: number; rejected: number } | null,
   /** What arrived from another session, or after its core's death, and was dropped: an event or a response. */
-  dropped: [] as ('event' | 'response')[]
+  dropped: [] as ('event' | 'response')[],
+  /** Plan C1: the mounted Raw lens's page cache: its charged bytes, its cap, and what the core holds reserved. */
+  cache: null as (() => { charged: number; cap: number; reserved: number }) | null
 }
 
 /**

@@ -1,11 +1,14 @@
 // Plan C4 at the napi layer: the addon itself refuses every hostile number, whatever the core host checked. And
 // plan C3's forged-token table, at the boundary a token crosses, and C5's cancel and C6's close.
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tmpdir, totalmem } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { Cancel, Doc, limits } from 'typose-node'
+import { Cancel, Doc, limits, reserveCache, setBudget } from 'typose-node'
 import { HOSTILE, isValid } from './numbers'
+
+// Plan C1: nothing opens until the ledger has its limit, as the core host sets it first.
+setBudget(totalmem())
 
 const dir = mkdtempSync(join(tmpdir(), 'typose-napi-'))
 afterAll(() => rmSync(dir, { recursive: true, force: true }))
@@ -68,8 +71,25 @@ describe('Doc.page and Doc.piece refuse every number that is not an integer in r
   }
 })
 
-it('Doc.open refuses a path that is empty or holds a NUL', () => {
-  for (const bad of ['', 'a\0b']) expect(() => Doc.open(bad)).toThrow(expect.objectContaining({ code: 'InvalidParams' }))
+it('Doc.open refuses a path that is empty, holds a NUL or is longer than the core opens', () => {
+  for (const bad of ['', 'a\0b', 'x'.repeat(3 * 32_767 + 1)]) expect(() => Doc.open(bad)).toThrow(expect.objectContaining({ code: 'InvalidParams' }))
+})
+
+it('plan C1: setBudget and reserveCache refuse every number that is not an integer in range', () => {
+  for (const [name, call, field] of [
+    ['setBudget', setBudget, 'totalmem'],
+    ['reserveCache', reserveCache, 'bytes']
+  ] as const) {
+    const { min, max } = range(field)
+    for (const value of [...HOSTILE, min, max, max + 1]) {
+      if (isValid(value, min, max)) continue // a valid budget or reservation changes the ledger: napi.hooks.test.ts
+      const error = thrown(() => call(value as number))
+      expect(error, `${name}(${String(value)})`).toBeInstanceOf(Error)
+      if (typeof value === 'number') expect(error).toMatchObject({ code: 'InvalidParams', message: expect.stringContaining(field) })
+    }
+  }
+  expect(reserveCache(1 << 20)).toBe(true)
+  expect(reserveCache(0)).toBe(true)
 })
 
 // A 70,000-byte line of 3-byte characters, then a short line: the first piece ends at 65,535, a character's end.

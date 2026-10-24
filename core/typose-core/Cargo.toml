@@ -23,6 +23,11 @@ proptest = "=1.12.0"
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "=0.61.2", features = ["Win32_Security", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Pipes"] }
 
+# Plan C1's counting-allocator test: a binary of its own, so its global allocator counts every thread.
+[[test]]
+name = "ledger"
+harness = false
+
 [features]
 # Plan m8: the test-hooks addon's behaviour-changing hooks (a per-read delay, debug stats). Never in a release build.
 test-hooks = []
