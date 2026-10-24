@@ -15,14 +15,14 @@ const restart = (...launches) => ({
 const batch = (n, first = {}) => Array.from({ length: n }, () => restart(first))
 
 test('five valid restarts under the budgets pass, judged on the worst', () => {
-  const v = coldVerdict([...batch(4), restart({ shellVisible: 199.9, openToUsable: 149.9 })], 'win32')
+  const v = coldVerdict([...batch(4), restart({ shellVisible: 399.9, openToUsable: 149.9 })], 'win32')
   assert.equal(v.n, 5)
   assert.deepEqual([v.shellVisible.verdict, v.openToUsable.verdict, v.firstContent.verdict], ['pass', 'pass', 'informational'])
-  assert.deepEqual([v.shellVisible.worst, v.openToUsable.worst], [199.9, 149.9])
+  assert.deepEqual([v.shellVisible.worst, v.openToUsable.worst], [399.9, 149.9])
 })
 
-test('one restart over a budget fails it: shell visible at 200 ms, first screen at 150 ms', () => {
-  assert.equal(coldVerdict([...batch(4), restart({ shellVisible: 200 })], 'win32').shellVisible.verdict, 'fail')
+test('one restart over a budget fails it: shell visible at 400 ms (Z67), first screen at 150 ms', () => {
+  assert.equal(coldVerdict([...batch(4), restart({ shellVisible: 400 })], 'win32').shellVisible.verdict, 'fail')
   const slow = coldVerdict([...batch(4), restart({ openToUsable: 150 })], 'win32')
   assert.deepEqual([slow.shellVisible.verdict, slow.openToUsable.verdict], ['pass', 'fail'])
 })
