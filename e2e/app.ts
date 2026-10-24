@@ -63,7 +63,13 @@ export async function launch(opts: { file?: string; userData?: string; netlog?: 
     else proc.once('exit', (code, signal) => ok({ code, signal }))
   })
   const pid = await app.evaluate(() => process.pid)
-  const win = await app.firstWindow()
+  const win = await app.firstWindow().catch(async (e: unknown) => {
+    // Killed, so it can't hold up the worker's teardown, as twice in main-macos run 40067408502; and its evidence kept.
+    // Only while it runs: once it has exited, its pid may be another process's.
+    if (proc.exitCode === null && proc.signalCode === null) kill(pid)
+    keepEvidence(userData, pid, await exited, false)
+    throw e
+  })
   const pageErrors: string[] = []
   win.on('pageerror', (e) => pageErrors.push(e.message))
   const l = { app, win, userData, pid, exited, pageErrors }
@@ -71,16 +77,28 @@ export async function launch(opts: { file?: string; userData?: string; netlog?: 
   return l
 }
 
+/** Main's own pid, not the launched process's: on Windows, Playwright launches Electron through a shell. */
+function kill(pid: number): void {
+  try {
+    process.kill(pid, 'SIGKILL')
+  } catch {
+    // Already gone.
+  }
+}
+
 /**
  * Closes the app if it's still up, then keeps the run's evidence in the test's output directory: the exit status,
- * the lifecycle log and any crash dumps. Deletes the private profile unless `keep` (a relaunch reuses it).
+ * the lifecycle log and any crash dumps. Deletes the private profile unless `keep` (a relaunch reuses it). An app
+ * that hasn't exited 15 s after its close, as one didn't in main-macos run 40070774628, is killed and fails the test.
  */
 export async function finish(l: Launched, keep = false): Promise<Exit> {
   running.delete(l)
   const closing = l.app.close().catch(() => {})
-  const exit = await l.exited
+  const closed = await Promise.race([l.exited, new Promise<null>((ok) => setTimeout(() => ok(null), 15_000))])
+  const exit = closed ?? (kill(l.pid), await l.exited)
   await closing
   keepEvidence(l.userData, l.pid, exit, keep)
+  if (!closed) throw new Error(`pid ${l.pid} didn't exit within 15 s of its close, and was killed`)
   return exit
 }
 

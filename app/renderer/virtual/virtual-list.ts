@@ -13,6 +13,10 @@ export class VirtualList {
   private readonly observer: ResizeObserver
   private rowCount = 0
   private applied = 0
+  /** The position `apply()` last set, until its scroll event arrives. */
+  private ownTop: number | null = null
+  /** Whether the latest scroll event was the list's own `apply()`, not the reader's (plan C8's paint probe reads it). */
+  ownScroll = false
   private pointerDown = false
   /** The widest row painted so far: the horizontal scroll extent only grows, so it doesn't jump while reading. */
   private contentWidth = 0
@@ -49,6 +53,8 @@ export class VirtualList {
       { passive: false }
     )
     this.element.addEventListener('scroll', () => {
+      this.ownScroll = this.element.scrollTop === this.ownTop
+      this.ownTop = null
       this.applied = this.element.scrollTop
       if (this.state.onNativeScroll(this.element.scrollTop)) this.render()
     })
@@ -142,6 +148,7 @@ export class VirtualList {
   private apply(native: number): void {
     this.element.scrollTop = native
     this.applied = this.element.scrollTop
+    this.ownTop = this.applied
     this.state.confirmNative(this.applied)
     this.render()
   }

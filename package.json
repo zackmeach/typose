@@ -12,7 +12,7 @@
     "package": "npm run build && npm run package --workspace typose",
     "start": "npm run start --workspace typose",
     "typecheck": "tsc --noEmit -p app/shared && tsc --noEmit -p app/main && tsc --noEmit -p app/preload && tsc --noEmit -p app/core-host && tsc --noEmit -p app/renderer && tsc --noEmit -p e2e",
-    "check": "npm run typecheck && vitest run && node --test e2e/netlog-assert.test.mjs e2e/perf/frames.test.mjs",
+    "check": "npm run typecheck && vitest run && node --test e2e/netlog-assert.test.mjs e2e/perf/frames.test.mjs e2e/perf/cold.test.mjs",
     "lint": "oxlint --deny-warnings app e2e",
     "test:hooks": "npm run build:addon:hooks && cargo test --locked --manifest-path core/Cargo.toml --workspace --features typose-node/test-hooks && vitest run --mode test-hooks",
     "e2e": "npm run build:hooks && playwright test -c e2e/playwright.config.ts",

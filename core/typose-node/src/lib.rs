@@ -469,18 +469,21 @@ pub mod test_hooks {
         pub renderer_cache: f64,
     }
 
-    /// What's alive in this core (plan C6's "0 jobs, 0 tasks and 0 handles"), and the ledger.
+    /// What's alive in this core (plan C6's "0 jobs, 0 tasks and 0 handles"), the longest a chunk read's delay has
+    /// actually waited since the delay was set (`delay_ms`, plan C5), and the ledger.
     #[napi(object)]
     pub struct DebugStats {
         pub jobs: u32,
         pub tasks: u32,
         pub handles: u32,
+        pub delay_ms: f64,
         pub ledger: Ledger,
     }
 
     #[napi]
     pub fn debug_stats() -> DebugStats {
         let count = |c| hooks::count(c) as u32;
+        let delay_ms = hooks::slowest_delay_ms();
         let t = budget::totals();
         let renderer_cache = RENDERER_CACHE.lock().unwrap().bytes() as f64;
         let ledger = Ledger {
@@ -490,7 +493,13 @@ pub mod test_hooks {
             pool: t.pool as f64,
             renderer_cache,
         };
-        DebugStats { jobs: count(&hooks::JOBS), tasks: count(&hooks::TASKS), handles: count(&hooks::HANDLES), ledger }
+        DebugStats {
+            jobs: count(&hooks::JOBS),
+            tasks: count(&hooks::TASKS),
+            handles: count(&hooks::HANDLES),
+            delay_ms,
+            ledger,
+        }
     }
 
     /// One document's charges, itemized (plan C1, C6), and whether its line checkpoints stopped at the limit.

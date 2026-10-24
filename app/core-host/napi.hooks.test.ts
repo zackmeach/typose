@@ -11,12 +11,14 @@ import type * as Core from 'typose-node'
 import type { Charges, DebugStats } from '../shared/protocol'
 
 interface Hooks {
-  debugStats(): Pick<DebugStats, 'jobs' | 'tasks' | 'handles' | 'ledger'>
+  debugStats(): Pick<DebugStats, 'jobs' | 'tasks' | 'handles' | 'delayMs' | 'ledger'>
   setReadDelay(ms: number): void
   setLimit(bytes: number): void
   docCharges(doc: Core.Doc): Charges
 }
 const core = createRequire(import.meta.url)('typose-node/hooks') as typeof Core & Hooks
+/** The debug stats' counts of what's alive. */
+const alive = () => (({ jobs, tasks, handles }) => ({ jobs, tasks, handles }))(core.debugStats())
 const dir = mkdtempSync(join(tmpdir(), 'typose-hooks-'))
 afterAll(() => rmSync(dir, { recursive: true, force: true }))
 afterEach(() => core.setReadDelay(0))
@@ -33,9 +35,9 @@ const ending = (read: Promise<unknown>) => read.then(
 it('debug stats: a document holds a handle, its index a job, a read a task; once they end and it closes, none is left', async () => {
   const path = join(dir, 'stats.txt')
   writeFileSync(path, 'a\nb\n'.repeat(1000))
-  expect(core.debugStats()).toMatchObject({ jobs: 0, tasks: 0, handles: 0 })
+  expect(alive()).toEqual({ jobs: 0, tasks: 0, handles: 0 })
   const doc = core.Doc.open(path)
-  expect(core.debugStats()).toMatchObject({ jobs: 0, tasks: 0, handles: 1 })
+  expect(alive()).toEqual({ jobs: 0, tasks: 0, handles: 1 })
   const done = indexed(doc)
   expect(core.debugStats().jobs).toBe(1)
   await done
@@ -45,7 +47,7 @@ it('debug stats: a document holds a handle, its index a job, a read a task; once
   await read
   await expect.poll(() => core.debugStats().tasks).toBe(0)
   doc.close()
-  expect(core.debugStats()).toMatchObject({ jobs: 0, tasks: 0, handles: 0 })
+  expect(alive()).toEqual({ jobs: 0, tasks: 0, handles: 0 })
 })
 
 it("plan C1: the ledger refuses an open it can't hold with Memory, and nothing stays charged; close returns it all", () => {
@@ -100,15 +102,22 @@ it('plan C5: a cancelled read stops within the chunk read under way, and reads n
     }
     const code = await ended
     const end = performance.now()
+    const { delayMs } = core.debugStats() // this read's own slowest: setReadDelay, above and just below, starts it over
     core.setReadDelay(0)
     doc.close()
-    return { code, total: end - start, afterCancel: end - cancelled }
+    return { code, total: end - start, afterCancel: end - cancelled, delayMs }
   }
   const whole = await read()
   expect(whole.code).toBe('resolved')
   expect(whole.total).toBeGreaterThanOrEqual(4 * DELAY - 20) // four chunk reads (Windows' timers run a little early)
+  // The stats keep the slowest single delay: at least the one asked for, and less than the page's four.
+  expect(whole.delayMs).toBeGreaterThanOrEqual(DELAY - 20)
+  expect(whole.delayMs).toBeLessThan(whole.total)
   const cut = await read(1.5 * DELAY) // during the second
-  console.log(`a page of four chunk reads: ${whole.total.toFixed(0)} ms; cancelled during the second, it ended ${cut.afterCancel.toFixed(0)} ms later`)
+  console.log(`a page of four chunk reads: ${whole.total.toFixed(0)} ms; cancelled during the second, it ended ${cut.afterCancel.toFixed(0)} ms later (its slowest delay ${cut.delayMs.toFixed(0)} ms)`)
   expect(cut.code).toBe('Cancelled')
-  expect(cut.afterCancel).toBeLessThan(DELAY) // the rest of the read under way, and no other
+  // The rest of the read under way, and no other: under one of its delays, as long as its slowest took here, plus the
+  // e2e test's 50 ms for the read, hash and resolve after the sleep. On the macOS runner four 200 ms delays took
+  // 903-1086 ms, and in run 40072658390 this came 197 ms after the cancel (plan §7).
+  expect(cut.afterCancel).toBeLessThan(cut.delayMs + 50)
 })

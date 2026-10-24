@@ -98,13 +98,15 @@ export interface Methods {
   debugStats: { params: { gc?: boolean; resetHigh?: boolean; limit?: number }; result: DebugStats }
 }
 
-/** The test-hooks build's debug stats (plan C5, C6): the core's live jobs, tasks and file handles, the documents the
- *  core host holds, and how its cancels went: `cancels` found a read running, `cancelled` reads ended `Cancelled`,
- *  at most `cancelMs` after their cancel. Plan C1: the ledger, each open document's charges, and the core host's heap. */
+/** The test-hooks build's debug stats (plan C5, C6): the core's live jobs, tasks and file handles, the longest a chunk
+ *  read's delay actually waited since the delay was set (`delayMs`), the documents the core host holds, and how its
+ *  cancels went: `cancels` found a read running, `cancelled` reads ended `Cancelled`, at most `cancelMs` after their
+ *  cancel. Plan C1: the ledger, each open document's charges, and the core host's heap. */
 export interface DebugStats {
   jobs: number
   tasks: number
   handles: number
+  delayMs: number
   docs: number
   cancels: number
   cancelled: number

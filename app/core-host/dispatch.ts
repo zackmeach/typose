@@ -27,8 +27,8 @@ export interface Addon {
   cancelFlag(): Cancel
   /** Plan C1: sets the renderer cache's reservation in the ledger; false if the ledger refused it. */
   reserveCache(bytes: number): boolean
-  /** The test-hooks addon's live jobs, tasks and file handles, and its ledger (plan m8, C1). */
-  debugStats?(): Pick<DebugStats, 'jobs' | 'tasks' | 'handles' | 'ledger'>
+  /** The test-hooks addon's live jobs, tasks and file handles, its slowest read delay, and its ledger (plan m8, C1). */
+  debugStats?(): Pick<DebugStats, 'jobs' | 'tasks' | 'handles' | 'delayMs' | 'ledger'>
   /** The test-hooks addon's itemized charges of one document (plan C1, C6). */
   docCharges?(doc: Doc): Charges
   /** The test-hooks build's forced GC of the core host's heap (plan C1's measurements). */

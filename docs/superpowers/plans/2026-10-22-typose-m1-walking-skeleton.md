@@ -208,7 +208,7 @@ The spike trusted the caller's offset and clamped negatives to 0 (`spike/a spike
 
 **Acceptance:** with the `test-hooks` per-read delay (m8), jump far every frame for 2 s.
 - Outstanding requests stay ≤ 2 per lens throughout (debug stats).
-- Every superseded request ends `Cancelled` within one chunk read of its cancel. *(Amended in PR 5: superseded means cancelled while its read runs; plan §7.)*
+- Every superseded request ends `Cancelled` within one chunk read of its cancel. *(Amended in PR 5: superseded means cancelled while its read runs; plan §7.)* *(After PR 5's macOS run: one chunk read as the machine times it; plan §7.)*
 - The final viewport's page arrives, and 0 tasks are running after the view settles.
 
 ### C6 · Close, freeze and failure: what each releases
@@ -262,16 +262,24 @@ The document keeps its explicitly charged state (its floor, checkpoints, hashes,
 
 **Frames (from a Chromium trace taken over CDP's `Tracing` domain on the fused build; amended in PR 3, plan §7):**
 - **Demanded frames:** a frame is demanded from an input (a wheel, a key, a scrollbar drag, a jump, an open, a click that expands a long line) until the view settles, meaning the scroll has stopped and the target rows have painted. Idle time isn't demanded, so an idle tail is never a gap.
-  - Concretely: an input demands frames from its own timestamp until the first presented frame after the renderer marks its target rows painted. Overlapping demands merge, so a continuous gesture is one demanded interval.
+  - Concretely: an input demands frames from its own timestamp until its answer (below). Overlapping demands merge, so a continuous gesture is one demanded interval.
+  - **Only an input that changes the view opens a demanded interval** (the coordinator's ruling, PR 9). An input whose first mark is a later input's had nothing of its own on screen before that input came: a scrollbar pointerdown before the drag's `scroll`, or Control before End. It's folded into the later input, so it doesn't open or anchor the interval. It's still timed to the answer of the mark it folded into, and judged on responsiveness like any input (the coordinator's round-5 ruling), except a folded pointerdown. That one's latency is reported apart (`foldedToPaint`), not judged (ruling A, round 6).
+  - A scroll event the list caused itself isn't an input (PR 9). That covers a wheel or key in logical mode, whose own mark is the input, and the position re-applied as the index grows, which no one asked for.
   - An input that changes nothing on screen (its painted mark repeats the previous one) owes no frame. It's timed to its mark and reported apart (`unanswered`), outside the latency figure, and it's a stall if its mark comes over 50 ms after the input.
+  - **Every trace begins with a baseline mark** (PR 9): the view as it stands, marked painted as sequence 0 when tracing starts (`typose:baseline`). So the trace's first input is judged against it; without it, an input that changed nothing, but was the trace's first mark, read as a change.
 - **Presented frames:** the renderer's `PipelineReporter` slices whose state is `STATE_PRESENTED_ALL`, at their end. A `STATE_PRESENTED_PARTIAL` frame (a compositor-only update, such as the scrollbar thumb moving, shown while the main thread's update is still pending) shows stale rows, so it doesn't end a gap.
   - One present is one frame. Two `STATE_PRESENTED_ALL` slices, for different `frame_sequence`s, can end at the same timestamp. The earlier sequence often also has a slice of type `FORKED`. Why Chromium reports one present twice is unverified. The present counts once, begun when its earliest slice began.
 - **Frame rule (ruling OQ-6, scoped by Z62): the 16.7 ms / ≥ 99% gate judges cadence.** Within each merged demanded interval, every presented frame after the first is judged on its gap from the presented frame before it, and passes if that gap is < 16.7 ms. That's §10.2's absolute threshold, at the panel's native refresh (164 Hz on the PC, `snap1/lanes/b2/REPORT.md:60`; Electron reports 165), with the Hz recorded.
-  - Every frame after the first counts in the ≥ 99% denominator. None is exempt.
-  - The first presented frame after an input isn't judged on cadence. It's judged by responsiveness.
-  - A run where no interval has a second frame reports cadence as `n/a`, never as passed. That's a run of discrete keypresses, each answered by one frame. Responsiveness is still judged.
-- **Responsiveness (Z62):** each input that changes the view is timed from its own timestamp to its answer: the first present after its target rows painted (input → target paint, below). Over 50 ms it's a stall, and plan §5's input-latency gate (< 50 ms) applies. Every run records the distribution over these answered inputs: n, p50, p95 and max.
-  - The next present after an input isn't its answer. While frames flow, the next present comes within a refresh, whatever it shows.
+  - **A merged interval's frames start at its first answer** (the coordinator's ruling, PR 9). Presents between an input and its answer are compositor or pipeline frames that can't carry the response, and the input's latency already covers that span. Later inputs' answers in a continuous gesture are ordinary cadence frames.
+  - Every present after the first answer counts in the ≥ 99% denominator. None is exempt.
+  - The answer itself isn't judged on cadence. It's judged by responsiveness.
+  - A run where no interval has a present after its first answer reports cadence as `n/a`, never as passed. That's a run of discrete keypresses, each answered by one frame. Responsiveness is still judged.
+- **Responsiveness (Z62):** each input that changes the view is timed from its own timestamp to its answer (input → target paint, below). Over 50 ms it's a stall, and plan §5's input-latency gate (< 50 ms) applies. Every run records the distribution over these answered inputs: n, p50, p95 and max.
+  - **The answer is the frame that owns the input's paint** (the coordinator's ruling, PR 9): the `STATE_PRESENTED_ALL` slice of the frame whose main-thread `AnimationFrame` contains the painted mark, where `begin_frame_id.sequence_number` matches the `PipelineReporter`'s `frame_sequence` (and source). The mark fires inside its own frame, which began before it.
+  - If that frame never presents (dropped, or partial only), the answer is the next presented frame after it, which carries the change. Runs count these (`ownerUnpresented`).
+  - If that frame had no update to present (`STATE_NO_UPDATE_DESIRED`, with no presented slice), the input changed nothing on screen, whatever its key says (the coordinator's round-5 ruling). It's timed to its mark and reported apart (`unanswered`). While indexing, the row count in Raw's key grows between marks.
+  - A trace is invalid with that reason when the answer can't be told: no `AnimationFrame` around a mark, one from another process, or an owning frame presented before the mark. The answer is never guessed.
+  - The next present after an input, or after its paint, isn't its answer. While frames flow, it comes within a refresh, whatever it shows.
 - **Stalls:** an open-then-scroll interval starts at the open request, and plan §5's input-latency gate (< 50 ms) stands beside all three kinds. A stall is any of these:
   - a presentation interval over 50 ms inside a demanded interval;
   - an input answered over 50 ms after its own timestamp;
@@ -280,12 +288,13 @@ The document keeps its explicitly charged state (its floor, checkpoints, hashes,
   - no renderer frames, or more than one renderer;
   - no input marks;
   - nothing demanded (every input changed nothing);
-  - a demanded interval with no presented frame.
-- **Input → target paint:** for each input that changes the view, a jump included, measured from the input's timestamp to the first presented frame that contains the target rows (a renderer mark when they commit, matched to the next presented frame).
+  - a demanded interval with no presented frame;
+  - a paint mark whose answer can't be told (above).
+- **Input → target paint:** for each input that changes the view, a jump included, measured from the input's timestamp to the presented frame that contains the target rows: the frame that owns the renderer's painted mark (above).
   - An input whose target never paints within 1 s fails.
   - It's the responsiveness latency above.
   - Raw's painted mark keys the view by its scroll position and row count, which grows as a long line's pieces expand (C3). It comes once every row in the viewport has its text, whether that's a line's first piece or a further one. Once a freeze's banner is up, the view is settled as it stands, and rows that never got their text stay blank.
-- PR 3 pins the trace events to the Electron version: `PipelineReporter` and the renderer's `console.timeStamp` marks (`TimeStamp`) on Electron 44.9.2 (`e2e/perf/frames.mjs`). rAF figures are printed beside them and not judged.
+- PR 3 pins the trace events to the Electron version: `PipelineReporter`, the renderer's `console.timeStamp` marks (`TimeStamp`), and (from PR 9) the main thread's `AnimationFrame` on Electron 44.9.2 (`e2e/perf/frames.mjs`). rAF figures are printed beside them and not judged.
 
 **Startup (amended in PR 3, plan §7):** `shellVisible` is when the title bar reaches the screen: its first presentation after main's `show` event, on the wall clock. It's never `show` itself.
 - That's `titlebarPresented` (Element Timing's `renderTime` for the title-bar text) when it comes after `show`.
@@ -319,7 +328,7 @@ The document keeps its explicitly charged state (its floor, checkpoints, hashes,
 
 **Main** calls `crashReporter.start({ uploadToServer: false })` before anything else (§7.3). Plan B armed the same call after launch, via `app.evaluate` (`spike/b spikes/app/perf/spike-b1.e2e.ts:35`).
 - A bounded lifecycle log, `userData/logs/lifecycle.jsonl` (rotated at 1 MiB, 2 kept), records:
-  - start (version and pid), window shown and utility `exit`;
+  - start (version and pid), `ready` and the page's `did-finish-load` (plan §7), window shown and utility `exit`;
   - `child-process-gone` and `render-process-gone`, with every field;
   - `unresponsive` and `responsive`;
   - `before-quit`, `will-quit` and `quit` with its code, and `uncaughtException`.
@@ -328,6 +337,7 @@ The document keeps its explicitly charged state (its floor, checkpoints, hashes,
 **The harness:**
 - Records the main process's externally observed exit status, as plan B did (`spike-b1.e2e.ts:30,158-162`). It ports that capability, not every handler (reply2.md:23).
 - Copies `lifecycle.jsonl` and any new dumps into each run's results; CI keeps them per PR 2's retention rules.
+- Kills a launch whose window never comes, or that hasn't exited 15 s after its close, keeps its evidence, and fails the test (plan §7).
 - **Invalid runs, not crashes:** a superseded run, or an infrastructure interruption with evidence (a runner shutdown or a lost runner, with the platform's record), is kept as invalid with its reason (Z49). An application timeout isn't invalid: it stays a failure that needs explaining.
 
 **Acceptance:** four controlled failures, each told apart by the log and exit status alone, as in plan B rev3 `REVIEW.md:126-128`:
@@ -857,6 +867,13 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 - **C7's port teardown:** on a death, main closes its handles to both ends of the session's channel and removes the utility process's listeners. Both ends were transferred: the core host's died with it, and the renderer detaches and closes its own when it hears `core-gone`. The renderer takes a port only from its own window and only for a newer session than the last.
 - **C6's debug stats count:** `handles`, the documents' open byte stores (each one file handle); `jobs`, index threads not yet ended (a job's own reopened handle closes before its thread ends); `tasks`, page reads not yet settled. They exist only in the `test-hooks` addon, with the per-read delay.
 
+**Amendments from PR 5's macOS run (main-macos run 40067408502, on PR 5's merge):**
+- **C5's "within one chunk read" is a chunk read as the machine times it.** The test-hooks addon times every delay, and its debug stats carry the slowest (`delayMs`). Setting the delay starts the slowest over. The e2e test holds the slowest cancel under that plus 50 ms, and the napi test holds the rest of its cancelled read under that read's slowest delay plus 50 ms. The e2e bound is the run's slowest delay, since the core host sets the delay once: on macOS an outlier anywhere in the run loosens it, and Windows' and Linux's PR CI, where delays are tight, still catch a regression in the shared cancel code. *Why:* on the macOS runner a sleep overruns in every process, the test runner's own too: there, 100 ms waits took up to 242 ms in the test runner and 248 in main, and the core host's 100 ms delays up to 247 (run 40069785888). Against the nominal 100 ms, the e2e test failed there (232 ms) with no fault in the product: the cancelled read's result reached the core host's JS thread within 0.15 ms of its compute. The napi test's read ended 197 ms after its cancel there, against 200 (run 40072658390). On Windows a delay takes at most about 100.6 ms, so the e2e bound there is the old one. The gate is unchanged.
+- **C9's lifecycle log also records `ready` and the page's `did-finish-load`.** *Why:* a launch whose window never came logged only its start, so its log couldn't say how far it got.
+- **C9's harness kills a launch whose window never comes, or that hasn't exited 15 s after its close, keeps its evidence, and fails the test.** *Why:* each one held the job for minutes, at macOS's 10× (Z61): 5 at the worker's teardown, twice in run 40067408502, and the e2e step's whole 12-minute time box in run 40070774628.
+- **`main-macos.yml`'s dispatch takes `grep` and `repeat-each`, and then skips `cargo test`.** *Why:* a macOS fix is checked on its branch for what its tests cost. A push to main runs everything.
+- **On macOS, AppKit restores no windows** (proposal 5, below).
+
 **PR 6's amendments (C1's mechanisms and test details; no Z-decision, 🔒 requirement or gate changes; the measurements are in PR 6's description):**
 - **The chosen implementations.** A charge is a `Reservation` its owner keeps beside the memory it pays for, released when the owner drops that memory, never when a call returns. The chunk hashes are fixed tables sized at open, since a document's length is fixed for its life (C6 freezes on a change). The checkpoints live in chunks filled in order: the first holds every byte-bound checkpoint and is reserved with the floor, and the line checkpoints take elastic chunks of 1,024 (24 KiB). Per-request text and maps are sized once from C2's bounds. The chunk cache copies out under its lock, so an evicted chunk is freed at once.
 - **Page acknowledgements aren't built: no acknowledgement releases (c)–(e).** *Why:* a page's JS copies become garbage once it's answered, and they're freed by V8's next GC, not by the renderer. The renderer's allocator keeps some of what it frees.
@@ -894,11 +911,93 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 - "Empty file (0 bytes, or only whitespace)" is judged on the first chunk, so only for files up to 1 MiB. A bigger whitespace-only file shows its blank lines, since telling would take a full scan.
 - Every freeze shows brief §7.9's "Changed on disk · Reload (Ctrl+R)" banner, with the reason in its tooltip. That includes an I/O error, which C6 freezes on too.
 
+**PR 9's amendments (the runner's mechanisms and test details, and the coordinator's rulings in its fix rounds; the frame rules clarify Z62; no Z-decision, 🔒 requirement or gate threshold changes; the evidence is in PR 9's description):**
+- **The warm rows that open a file open it in a running app (the coordinator's ruling).** That's the first screen on 1 GiB and 10 GiB, the named set, huge-first, the 1 GiB line, and open-then-scroll.
+  - The app is launched by argv at the file's path while the file is parked under another name. Once its card shows "File not found", the file goes back, and Ctrl+R opens it: `App.tsx` reloads a failed card by opening its path, as `e2e/states.e2e.ts` drives it. No dialog opens.
+  - Cold launches keep argv, as plan §5 requires.
+  - *Why:* an argv open comes before the page's first frame (91–179 ms in PR 9's first pass). With Z64's clock, the argv runs measured only the page's first frame to its next, 2.6–8.3 ms, whatever the open cost.
+  - In-app, the page's first frame came 212–473 ms before the open, so the clock starts at the open.
+  - The control: the page's open request is held 60 ms over CDP. Every first screen reads 84.7–93.9 ms, and the row fails.
+- **On the huge-first file, a run whose scan ends inside the budget from the clock's start isn't judged on order, and doesn't fail the row.** That's the exemption plan A's veto keeps (packet:476-478). PR 4's ruling (a run that isn't judged fails on Windows and macOS) stays the 1 GiB line's: that fixture exists to be decisive.
+  - *Why:* the 200 MiB record's scan takes 44.1 ms from the open (p50; p95 60.6, max 80.2), so in-app it outlasts the budget in only some runs: 6 of 30 were decisive (all passed), and 24 weren't judged.
+  - The row rests on the budget, the small records following, and no item over 64 KiB.
+  - The 1 GiB line was decisive in 30 of 30 in-app runs, against 29 of 30 by argv.
+- **An input's answer is the frame that owns its paint (the coordinator's ruling; C8).** That's the presented slice of the frame whose main-thread `AnimationFrame` contains the painted mark: `begin_frame_id.sequence_number` = the `PipelineReporter`'s `frame_sequence`.
+  - If that frame never presents, the next presented frame after it answers, and runs count these (`ownerUnpresented`). A mark with no `AnimationFrame` around it makes the run invalid.
+  - *Why:* the paint mark fires in a rAF inside its own frame, which began before the mark. In PR 3's keypress trace, `BeginFrame 153` came 3.42 ms before the mark, the `AnimationFrame` around the mark names frame 153, and frame 153 presents 7.33 ms after the mark.
+  - "The first present after the paint", PR 3's rule, was often a frame early. Over 6,385 answers in 84 traces, ownership moved 4,946 later (p50 +7.6 ms).
+  - The keypress answer stays 6.2 ms. The first jump after launch is answered by its paint's frame (seq 150) at 44.0 ms, not by a compositor frame at 20.8.
+- **An owning frame with no update answers nothing (the coordinator's round-5 ruling; C8).** If the owner is `STATE_NO_UPDATE_DESIRED`, with no presented slice, the input changed nothing on screen: it's timed to its mark, in `unanswered`. The next-present fallback stays for dropped and partial-only owners.
+  - *Why:* while indexing, the row count in Raw's key grows between marks, so an input that moved nothing reads as a change. Its owner never presents, and the fallback answered it with an unrelated frame.
+  - That frame opened a cadence interval (the review's P5: cadence `fail` on a 44 ms gap), or made a false stall (P5b: 51 ms).
+  - Of the round-4 final pass's 48 traces, the rule changes 7. One is a 10 GiB jump whose pointerdown had such an owner: it read cadence `pass` on a judged frame that wasn't its answer, and now reads `n/a`. The other six are open-then-scroll runs, each with one such input; their verdicts don't change.
+- **The answer's linkage is checked (the round-2 review).** A run is invalid when the `AnimationFrame` around a paint mark is another process's, or when the owning frame presented before the mark.
+  - *Why:* either one would link a mark to a frame that can't be its answer. The review's constructed cases read −30 ms and −890 ms.
+- **Retracted: "an answer must begin at or after its paint mark" (the coordinator's ruling in PR 9's second fix round, withdrawn in its third).** *Why:* the frame that carries the paint began before it, so that rule was always a frame late.
+  - Over the same 6,385 answers, it moved 99% of them later, p50 +15.6 ms: one frame past the frame that owns the paint (p50 +7.5 ms).
+  - On PR 3's 21-key control, each key would have been answered by the next keypress's frame: 116.0 ms instead of 6.2.
+- **A merged interval's frames start at its first answer (the coordinator's ruling; C8).** Presents between an input and its answer are compositor or pipeline frames that can't carry the response, and the input's latency covers that span. Cadence judges every present after the first answer.
+  - *Why:* in the first jumps after launch, a frame begun after the pointerdown, but before the paint's own frame, presented 23.5–31.2 ms before the rows' frame, and was judged as a long gap.
+- **Removed: round 1's "a present belongs to the interval only if it began at or after the interval's first input".** The interval-starts-at-answer rule decides what it decided.
+  - *Why:* kept as a guard, it would discard answers. The owning frame often begins before its input: in PR 3's keypress trace, frame 153 began at −3.42 ms, and the keydown came at −0.73 ms.
+  - Without it, the first pass's jump runs' first present (begun 3.1–8.8 ms before the pointerdown, the review found) is still left out: it presents before the answer.
+- **Only an input that changes the view opens a demanded interval (the coordinator's ruling; C8).** An input whose first mark is a later input's is folded into it: a scrollbar pointerdown before the drag's `scroll`, Control before End, or two keydowns painted in one frame.
+  - **A folded input is judged (the coordinator's round-5 ruling, stricter than round 2's).** It's timed to the present that answers the mark it folded into, and judged on responsiveness, whatever its kind. Folding only keeps it from opening or anchoring a cadence interval.
+  - *Why:* folding hid real view-changing inputs. Two keydowns painted in one frame folded the first, so a 57 ms stall read as a pass (the review's P3k).
+  - Withdrawn: round 4 timed a folded input to its mark, in `unanswered`. That kept the driver's ~7 ms between a pointerdown and its drag out of the pointerdown's figure, which read 51.2 and 51.4 ms on two 10 GiB jumps whose scrolls were answered under 50 ms.
+  - **Except a folded pointerdown (the coordinator's ruling A, round 6, revising round 5's).** It counts in `folded`, and its latency to the drag's answer is reported in `foldedToPaint`, but it isn't judged on responsiveness. Every other folded input stays judged, which is what closes P3k.
+  - *Why:* a folded pointerdown's latency is press → the drag's answer, and that span includes Playwright's separate `mouse.down` and `mouse.move` round trips: driver time, not app time. At `2d4050b`, the 1 GiB jump with a11y off failed on pointerdowns at 50.6–52.2 ms while every drag was answered under 50.
+  - Folded modifier keydowns (Control before End) stay judged. The input mark carries only `keydown`, and the trace's `EventDispatch` only its type, so the key can't be recovered.
+- **Every trace begins with a baseline mark (the coordinator's ruling; C8).** When tracing starts, `drive.ts` dispatches `typose:baseline`, and the renderer marks the view as it stands as painted sequence 0.
+  - *Why:* without it, a first input that changed nothing read as a change if its mark was the trace's first. In one first jump after launch, the pointerdown (mark `0,0,1000000`, the top view) opened an interval, merged with the drag's late answer, and failed cadence on a 53.0 ms gap.
+- **The live controls, after these rules:**
+  - The uninjected jump control (ten jumps per launch, from the top) read `n/a` in 140 of 140 jumps after the baseline mark, in round 4: 100 at `--repeat-each=5`, ten to a launch, five launches in each mode; and 20 in each of two whole-file runs. About 120 of those were analyzed before round 4's folded-input change; that doesn't change cadence.
+  - With the round-5 rules, on the build merged with PR 5, it read `n/a` in 60 of 60 jumps at `--repeat-each=3`, three launches in each mode, and in 20 of 20 in the full `npm run perf` pass. Its 118 answers at `--repeat-each=3` reached 46.5 ms, none over 50; the pointerdowns are among them now.
+  - PR 3's controls behave as specified. The 21-key control reads `n/a` with accessibility on and off. In the round-5 full pass, the scroll control with accessibility on judged 240 frames, under its 250, with two 61 ms answers, at 35.7% CPU during the run (8–15% in every earlier pass). Run again on its own, it judged 239 at 65%. Round 4's and round 5's analyzers read both traces the same: the driver delivered 236 and 239 wheel events, against 249–260 in every earlier pass. With accessibility off it passed both times.
+- **The scroll control's `frames > 250` floor is replaced (the coordinator's ruling B, round 6).** It was a guard against a vacuous run, but it mixed in how fast the driver delivers input.
+  - Integrity, a fail: judged frames ≥ the presents inside the gesture's demanded interval, from its first input, minus 2 (`presents` in the analysis).
+  - Delivery, a precondition: ≥ 200 wheels, and every gap between consecutive wheel inputs under 60 ms, from the input timestamps (`wheels`). Unmet, the run is invalid, with the counts as its reason.
+  - Stalls, cadence and responsiveness stay fail conditions.
+  - *Why:* on the a11y-on traces, Chromium's gesture generator pauses every ~170–180 ms for 17–56 ms, and the pauses grow with load (the round-3 review). The 07:25 run (65% CPU) failed only the floor: 239 of 240 presents judged, wheel gaps up to 28.2 ms, cadence and responsiveness both pass.
+  - On the saved traces, 07:25 now passes. 07:03 still fails, on its 60.9 and 61.0 ms answers (236 wheels, largest gap 55.9 ms, 240 of 242 presents judged). Both a11y-off runs pass (256 of 257).
+- **Raw doesn't mark a scroll its list applied itself (`VirtualList.ownScroll`).** That covers a wheel or key in logical mode, whose own mark is the input, and the position re-applied as the index grows.
+  - *Why:* the review found that on the indexing 10 GiB file, 15 of 21 jump-row answers came from the list re-applying its own position.
+  - The second pass marks one `scroll` per jump, indexing or not (12 of 12 runs).
+- **The 64 KiB fetch is timed on the app's own core port, 300 pages over 3 launches.** The runner takes the port and the document from the app's next page request over CDP, by patching `MessagePort.prototype.postMessage` as PR 3's suppression control does. Then it times 100 random 327-line pages a launch, renderer to core host and back.
+  - *Why:* the renderer's `CoreClient` is private, and a hook would be product code for what CDP already reaches.
+- **Line index throughput is decimal bytes over `typose:open-start` → `typose:index-done`, from the 30 first-screen runs on the 10 GiB file, judged at the p95 time.**
+  - Off NTFS, or with real-time protection off, the row is "not qualification-grade", never a pass. Defender's exclusions can't be read without admin (they read "N/A: Must be an administrator"), so they're recorded as unknown.
+  - *Why:* the core reports no elapsed time, and the renderer's marks bracket it. The span includes the open's round trip, so it under-reads the index's rate.
+- **Scrolling while indexing is two cases, each in its own launch: a 2 s wheel gesture, and PR 3's 21 discrete keys.**
+  - A run whose index was done before its drive began is invalid ("not while indexing"). A drive that outlasts the index is judged whole, with its overlap recorded.
+  - Input latency while indexing is every answered input of both cases, judged by C8's responsiveness: each under 50 ms, and every target painted.
+  - *Why:* the 10 GiB index took 2.0–2.1 s here, which doesn't hold both drives after the trace's 500 ms lead-in. Each drive overlapped the index for its first 1.30–1.48 s, of 2.06–2.31 s.
+- **A frames run with an input its drive didn't send is invalid, with the inputs named.** *Why:* the runs take focus on a PC its owner may be using.
+  - `Control+End` is two keydowns, Control's and End's.
+  - A wheel drive also marks `scroll` while the document still scrolls natively, under 16M px: a young index's first moments after an open.
+- **Exit integrity (plan §5, OQ-3):** a launch that doesn't quit cleanly fails its test, and never invalidates its run. That's in the runner and in `startup.perf.ts`.
+  - So does anything its kept `lifecycle.jsonl` shows the test didn't ask for: `render-process-gone`, `child-process-gone`, an `uncaughtException`, or the core host exiting before the quit.
+- **Plan §5's cold first screen is judged from the open request.** *Why:* a cold launch passes no debugging switch, and the TYPOSE_MARKS hook carries no first-frame mark, so Z64's later clock start can't be read there.
+  - That's stricter than Z64: with the page's first frame 91–179 ms after an argv open, it charges startup to the lens.
+  - Reading Z64's start needs a first-frame startup mark in the renderer. That's a product change, left to the startup remediation (PR 10+).
+  - The batch verdict (`e2e/perf/cold.mjs`) is the worst of five valid restarts, taking only each restart's first launch. Until there are five, it's pending.
+  - **A batch is one build's restarts, one record per boot (the round-2 review).** Each cold record carries the packaged exe's and asar's sha256 and the OS boot time (now minus uptime). The batch is the build of the run being judged, and the first record of each boot; two boot times within a minute are one boot. A record without them isn't counted.
+  - *Why:* the records carried no build or boot. So restarts from different builds combined into one "complete" batch, and two COLD runs after one restart both counted, the second not cold (Z54).
+- **Z49 is a record field.** `qualification` is true only when QUALIFY=1 measured a minute of CPU under 10% before the row; QUALIFY=1 is also the operator saying there's no other heavy work and Defender is on. Every row of PR 9's passes is `qualification: false`.
+- **Deep reading requires the thumb to land within 5 lines of line 40M**, and §13.1's ±1 line equality with line 0, not a pinned count.
+
+**Found in PR 9, carried (product):**
+- **The first far jump after launch can answer its drag late.** In one run of the jump control (1M lines; round 3, a11y off), the drag's `scroll` came 32 ms after the pointerdown, and was answered 75.3 ms after the scroll's timestamp: a responsiveness miss, which the scrollbar-jump row judges.
+  - The runner's jump rows, each one a first jump after launch, didn't reproduce it in round 4's final 12 runs: answers 29.5–47.7 ms.
+  - Nor did the jump control's ten launches since the baseline mark: their first jumps were answered in 37.4–46.6 ms.
+  - In the round-5 full pass, drags were answered in 30.6–47.7 ms, except one at 264.5 ms on the 10 GiB file at 66.7% CPU. Its pointerdowns, judged in round 5 and reported apart since ruling A, took up to 52.2 ms, and that 10 GiB one 269.6.
+
 **Implementer proposals Zack may veto (one place):**
 1. **Memory-refused open state** (C1), shown in the card: "Can't open `<file>` · Typose's memory budget is full. Close a file, then Retry." Brief §7.9 has no such state yet.
 2. **After a second core death within 60 s,** the core is respawned once 60 s have passed, and Reopen is offered then (C7; amended in PR 5, above).
 3. **Raw wrapping** (brief §5.1's wrap rules) is deferred to M4, with horizontal scrolling meanwhile (plan §6).
 4. **Raw's accessibility pattern:** a labelled, focusable region with an `aria-hidden` gutter (PR 1, checked in PR 7). Neither §6.1 nor brief §9 defines one. If Zack accepts it, it becomes a row in §6.1's 🔒 table.
+5. **No AppKit window restoration on macOS:** main registers `ApplePersistenceIgnoreState` before the run loop starts (after PR 5's macOS run). *Why:* Typose restores no window through AppKit, yet after a crash AppKit asks at the next launch whether to reopen its windows, in a modal that keeps the launch from finishing until it's answered. In main-macos run 40072658390, after `lifecycle.e2e.ts`'s deliberate crash, 7 launches in a row sat in it, and on CI no one answers.
 
 **Implementer calls on spec gaps:**
 - §3.4 gives no unit for "256KiB" or "64KiB of text". C2 sets source bytes plus an item count.
