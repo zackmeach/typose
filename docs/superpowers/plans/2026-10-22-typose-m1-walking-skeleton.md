@@ -293,7 +293,7 @@ The document keeps its explicitly charged state (its floor, checkpoints, hashes,
 - PR 3's control settled the UNVERIFIED point: on Electron 44, `show` doesn't mark on-screen display. `titlebarPainted` (React's first title-bar commit, then rAF + task) is still recorded, for the cost breakdown.
 
 **Acceptance,** with accessibility on and off:
-- An injected 30 ms busy-wait during a scroll registers a long frame covering it, and no cadence stall. Its responsiveness is recorded as measured, not asserted: the block adds onto one input's answer.
+- An injected 30 ms busy-wait during a scroll registers a long frame covering it, and no cadence stall. Its responsiveness is recorded as measured, not asserted: the block adds onto one input's answer. (Amended in PR 3.)
 - A control scroll registers no stall and passes cadence (the ≥ 99% rule) and responsiveness, and every long frame it registers is listed. (Amended in PR 3.)
 - The keypress control (21 discrete ArrowDown presses, no injection) passes responsiveness and reports cadence as `n/a` in 10 of 10 live runs, with accessibility on and with it off (Z62).
 - A 60 ms busy-wait is **detected**: at least one stall covers the injection window. That holds during a scroll, in the handler of one discrete keypress (Z62), and in the first frame after a scrollbar jump.
