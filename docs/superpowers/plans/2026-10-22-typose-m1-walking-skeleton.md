@@ -263,23 +263,27 @@ The document keeps its explicitly charged state (its floor, checkpoints, hashes,
 **Frames (from a Chromium trace taken over CDP's `Tracing` domain on the fused build; amended in PR 3, plan §7):**
 - **Demanded frames:** a frame is demanded from an input (a wheel, a key, a scrollbar drag, a jump, an open) until the view settles, meaning the scroll has stopped and the target rows have painted. Idle time isn't demanded, so an idle tail is never a gap.
   - Concretely: an input demands frames from its own timestamp until the first presented frame after the renderer marks its target rows painted. Overlapping demands merge, so a continuous gesture is one demanded interval.
-  - An input that changes nothing on screen (its painted mark repeats the previous one) owes no frame. It's counted, and it's a stall if its mark comes over 50 ms after the input.
+  - An input that changes nothing on screen (its painted mark repeats the previous one) owes no frame. It's timed to its mark and reported apart (`unanswered`), outside the latency figure, and it's a stall if its mark comes over 50 ms after the input.
 - **Presented frames:** the renderer's `PipelineReporter` slices whose state is `STATE_PRESENTED_ALL`, at their end. A `STATE_PRESENTED_PARTIAL` frame (a compositor-only update, such as the scrollbar thumb moving, shown while the main thread's update is still pending) shows stale rows, so it doesn't end a gap.
-  - One present is one frame. A frame whose main-thread part is forked off (a `STATE_DROPPED` slice of type `FORKED`) presents with the next frame, and both slices end at that present's exact timestamp. It counts once, begun when its earliest slice began.
+  - One present is one frame. Two `STATE_PRESENTED_ALL` slices, for different `frame_sequence`s, can end at the same timestamp. The earlier sequence often also has a slice of type `FORKED`. Why Chromium reports one present twice is unverified. The present counts once, begun when its earliest slice began.
 - **Frame rule (ruling OQ-6, scoped by Z62): the 16.7 ms / ≥ 99% gate judges cadence.** Within each merged demanded interval, every presented frame after the first is judged on its gap from the presented frame before it, and passes if that gap is < 16.7 ms. That's §10.2's absolute threshold, at the panel's native refresh (164 Hz on the PC, `snap1/lanes/b2/REPORT.md:60`; Electron reports 165), with the Hz recorded.
   - Every frame after the first counts in the ≥ 99% denominator. None is exempt.
   - The first presented frame after an input isn't judged on cadence. It's judged by responsiveness.
   - A run where no interval has a second frame reports cadence as `n/a`, never as passed. That's a run of discrete keypresses, each answered by one frame. Responsiveness is still judged.
-- **Responsiveness (Z62):** each demanding input's first presented frame is measured from the input's own timestamp. Over 50 ms it's a stall, and plan §5's input-latency gate (< 50 ms) applies. Every run records the distribution: n, p50, p95 and max.
-- **Stalls:** a stall is any presentation interval over 50 ms inside a demanded interval, or an input whose first presented frame comes over 50 ms after the input's own timestamp. An open-then-scroll interval starts at the open request. Plan §5's input-latency gate (< 50 ms) stands beside both.
+- **Responsiveness (Z62):** each input that changes the view is timed from its own timestamp to its answer: the first present after its target rows painted (input → target paint, below). Over 50 ms it's a stall, and plan §5's input-latency gate (< 50 ms) applies. Every run records the distribution over these answered inputs: n, p50, p95 and max.
+  - The next present after an input isn't its answer. While frames flow, the next present comes within a refresh, whatever it shows.
+- **Stalls:** an open-then-scroll interval starts at the open request, and plan §5's input-latency gate (< 50 ms) stands beside all three kinds. A stall is any of these:
+  - a presentation interval over 50 ms inside a demanded interval;
+  - an input answered over 50 ms after its own timestamp;
+  - an input that changes nothing, marked over 50 ms after it.
 - **Validity:** a trace that can't be judged is invalid, with its reason kept (Z49). It reports cadence and responsiveness as `invalid`, never as passed. That's a trace with:
   - no renderer frames, or more than one renderer;
   - no input marks;
   - nothing demanded (every input changed nothing);
   - a demanded interval with no presented frame.
-- **Input → target paint:** for each jump, measured from the input's timestamp to the first presented frame that contains the target rows (a renderer mark when they commit, matched to the next presented frame).
-  - A jump whose target never paints within 1 s fails.
-  - The first presented frame after each input is checked explicitly.
+- **Input → target paint:** for each input that changes the view, a jump included, measured from the input's timestamp to the first presented frame that contains the target rows (a renderer mark when they commit, matched to the next presented frame).
+  - An input whose target never paints within 1 s fails.
+  - It's the responsiveness latency above.
 - PR 3 pins the trace events to the Electron version: `PipelineReporter` and the renderer's `console.timeStamp` marks (`TimeStamp`) on Electron 44.9.2 (`e2e/perf/frames.mjs`). rAF figures are printed beside them and not judged.
 
 **Startup (amended in PR 3, plan §7):** `shellVisible` is when the title bar reaches the screen: its first presentation after main's `show` event, on the wall clock. It's never `show` itself.
@@ -738,8 +742,11 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
   - The renderer's frame reporter marks those frames `STATE_PRESENTED_PARTIAL`; excluding them is stricter. A negative control that counts partial frames fails the analyzer's tests.
 - **The frame gate judges cadence, and the first frame after an input is judged by responsiveness (Z62, Zack, 2026-10-23).**
   - Cadence: within each merged demanded interval, every presented frame after the first is judged against 16.7 ms on its gap from the frame before it, and counts in the ≥ 99% denominator.
-  - Responsiveness: each demanding input's first presented frame is judged from the input's own timestamp, by the 50 ms stall rule and beside plan §5's 50 ms input-latency gate. Its distribution (n, p50, p95, max) is recorded.
+  - Responsiveness: each input that changes the view is judged from its own timestamp to its answer, the first present after its target rows painted. It's judged by the 50 ms stall rule, beside plan §5's 50 ms input-latency gate, and the distribution over answered inputs (n, p50, p95, max) is recorded. An input that changes nothing is timed to its painted mark and reported apart (`unanswered`); over 50 ms it's still a stall.
   - A run whose demands each produce one frame reports cadence as `n/a`, never as passed, and responsiveness is still judged.
+  - *Why the answer, not the next present (review round 3):* round 2 timed input → the next present. While frames flow (a scroll, a repaint, a frame already in the pipeline), that comes within a refresh whatever it shows: a lower bound, not the latency.
+    - The synthetic tests show it, with frames every 6 ms. A target first presented 40 ms after its input read 4 ms the old way, and reads 40 ms now. At 60 ms it read 6 ms, and is now a stall.
+    - In round 3's frame-control run, the control scrolls' answers read p95 13.5–13.8 ms, with maxima of 25.7–37.9 ms. The 60 ms wheel injection is now also a responsiveness stall, at 72.7 ms and 74.1 ms.
   - *Why:* PR 3's first two definitions both failed.
     - The first judged opening frames as stalls only, so the review's synthetic 21 keypresses answered 45 ms late passed with 0 frames judged.
     - The second, review round 1's ruling, judged opening frames against 16.7 ms too, which counts pipeline depth: the uninjected 21-ArrowDown control failed 2 of 7 runs (18.186 ms in the case the review quoted).
@@ -748,10 +755,14 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
     - synthetic keypresses answered in 10 and 45 ms report cadence `n/a` and pass responsiveness;
     - answered in 61 ms, every key is a stall;
     - a first frame begun late is judged from the input, not as a long frame;
-    - the live keypress control passed responsiveness with cadence `n/a` in 10 of 10 runs with accessibility on and 10 of 10 with it off. Its first frames came in at most 13.7 ms. That was the second batch; the first batch's one failure was keyboard input the test didn't send, and PR 3's description has it;
-    - a 60 ms busy-wait in one keypress's handler is a stall covering it: 64.7–69.0 ms over the round's six runs.
+    - the live keypress control passed responsiveness with cadence `n/a` in 10 of 10 runs with accessibility on and 10 of 10 with it off, timed to the answer (review round 3). Its answers came in at most 15.2 ms. Round 2's first batch, timed to the next present, had one failure from keyboard input the test didn't send; PR 3's description has it;
+    - a 60 ms busy-wait in one keypress's handler is a stall covering it: 66.1 ms and 70.7 ms in round 3's frame-control run.
   - A continuous gesture still merges into one interval: 289–329 judged frames per 2 s scroll at 165 Hz.
-- **One present is one frame.** When a frame's main-thread part is forked off (a `STATE_DROPPED` `PipelineReporter` slice of type `FORKED`), it presents with the next frame, and both slices end at the same timestamp.
+- **One present is one frame.** Two `STATE_PRESENTED_ALL` `PipelineReporter` slices, for different `frame_sequence`s, can end at the same timestamp. They count once, begun when the earlier began.
+  - What the traces show: in 15 traces there were 99 such pairs.
+    - Their begins were 5.5–60.5 ms apart, and their `frame_sequence`s 1, 2 or 10 apart.
+    - In 83 of the pairs, the earlier sequence also had a slice of type `FORKED`, which ended `STATE_PRESENTED_PARTIAL` (46) or `STATE_DROPPED` (37).
+    - Why Chromium reports one present twice is unverified. The 64-bit `display_trace_id`s can't settle it, because JSON parsing rounds them.
   - *Why:* counted twice, the pair is a 0 ms gap.
     - In one full run of the frame controls, 13 of the 14 traces had such pairs, up to 21 in one 2 s scroll. That padded the ≥ 99% denominator by up to 6%.
     - In the two live keypress controls, 2 and 4 presents were doubled, so cadence read `pass` on 0 ms gaps instead of `n/a`.
