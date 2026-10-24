@@ -92,9 +92,9 @@ test("a second launch's argv is untrusted: URL-like, device and option-like path
       await expect(page.locator('.card-message p'), label).toContainText(path)
       await expect(page.locator('.card-message p'), label).toHaveText(says)
       expect(await page.locator('.vl-row').count(), label).toBe(0) // nothing opened
+      expect(connections, label).toBe(0) // and nothing connected to the pipe
     }
     expect(page.url()).toBe('typose://app/index.html')
-    expect(connections).toBe(0)
     expect(await closePackaged(first)).toEqual({ code: 0, signal: null })
   } finally {
     server.close()
