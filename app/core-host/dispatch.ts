@@ -1,7 +1,17 @@
 // The core host's side of protocol v1. Every request is validated before anything acts on it (plan C4):
 // numbers against the core's own range table, methods by own property only, and no addon call on a refusal.
-import type { Doc, IndexProgress, Limits } from 'typose-node'
-import { PROTOCOL, type CoreError, type ErrorCode, type Hello, type Opened, type ProgressEvent, type Response } from '../shared/protocol'
+import type { Doc, IndexProgress, Limits, Page as CorePage, PageItem as CorePageItem } from 'typose-node'
+import {
+  PROTOCOL,
+  type CoreError,
+  type ErrorCode,
+  type Hello,
+  type Opened,
+  type Page,
+  type PageItem,
+  type ProgressEvent,
+  type Response
+} from '../shared/protocol'
 import { isValid } from './numbers'
 
 /** The slice of `typose-node` the core host calls; tests pass a spy. */
@@ -30,10 +40,11 @@ const isRecord = (v: unknown): v is Params => typeof v === 'object' && v !== nul
 export function makeDispatcher(addon: Addon, session: number, emit: (event: ProgressEvent) => void): (data: unknown) => Response {
   const limits = addon.limits()
   const ranges = new Map(limits.ranges.map((r) => [r.field, r]))
-  const int = (params: Params, field: string): number => {
+  /** `params[field]`, checked against the core's range for `field`; `name` is how the error names it. */
+  const int = (params: Params, field: string, name = field): number => {
     const { min, max } = ranges.get(field)!
     const value = params[field]
-    if (!isValid(value, min, max)) throw new Refusal('InvalidParams', `${field} must be an integer in [${min}, ${max}]`, field)
+    if (!isValid(value, min, max)) throw new Refusal('InvalidParams', `${name} must be an integer in [${min}, ${max}]`, name)
     return value
   }
   const docs = new Map<number, Doc>()
@@ -42,6 +53,27 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     const doc = docs.get(id)
     if (!doc) throw new Refusal('NoDocument', `no document ${id}`)
     return doc
+  }
+  // Continuation tokens leave with this session and their document in them, and are refused for any other
+  // (plan C3; C7: every token carries `{session, doc, gen}`).
+  const stamp = (doc: number, item: CorePageItem): PageItem => {
+    if (item.next) Object.assign(item.next, { session, doc })
+    return item as PageItem
+  }
+  const stampPage = (doc: number, page: CorePage): Page => {
+    for (const item of page.items) stamp(doc, item)
+    return page as Page
+  }
+  /** Starts indexing a document's current generation, and describes it with its first page. */
+  const begin = (id: number, doc: Doc, firstPage: CorePage): Opened => {
+    const gen = doc.generation
+    doc.startIndex((e: IndexProgress) => {
+      const event: ProgressEvent = { event: 'progress', session, doc: id, gen, lines: e.lines, bytes: e.bytes, done: e.done }
+      if (e.error !== undefined) event.error = e.error
+      emit(event)
+    })
+    const { size, encoding, lines, indexed, blank } = doc
+    return { doc: id, gen, size, encoding, lines, indexed, blank, firstPage: stampPage(id, firstPage) }
   }
 
   // Each handler checks all of its parameters before it calls the addon or changes state.
@@ -57,21 +89,32 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const doc = addon.openDoc(p.path)
       // The first page reads from byte 0, so it doesn't wait for the index (Z37). It's read before the document is
       // registered, so a failure leaves nothing behind.
-      const firstPage = doc.page(0, count)
+      const firstPage = doc.page(doc.generation, 0, count)
       const id = nextDoc++
       docs.set(id, doc)
-      const gen = doc.generation
-      doc.startIndex((e: IndexProgress) => {
-        const event: ProgressEvent = { event: 'progress', session, doc: id, gen, lines: e.lines, bytes: e.bytes, done: e.done }
-        if (e.error !== undefined) event.error = e.error
-        emit(event)
-      })
-      return { doc: id, gen, size: doc.size, encoding: doc.encoding, lines: doc.lines, indexed: doc.indexed, firstPage }
+      return begin(id, doc, firstPage)
     },
-    page: (p) => {
-      const [id, start, count] = [int(p, 'doc'), int(p, 'start'), int(p, 'count')]
+    page: (p): Page => {
+      const id = int(p, 'doc')
       if (p.lens !== 'raw') throw new Refusal('InvalidParams', "lens must be 'raw'", 'lens')
-      return getDoc(id).page(start, count)
+      if (Object.hasOwn(p, 'continuation')) {
+        const t = p.continuation
+        if (!isRecord(t)) throw new Refusal('InvalidParams', 'continuation must be a token', 'continuation')
+        const [tokenSession, tokenDoc, gen, line, offset] = ['session', 'doc', 'gen', 'line', 'offset'].map((f) => int(t, f, `continuation.${f}`))
+        const doc = getDoc(id)
+        if (tokenSession !== session) throw new Refusal('Stale', `a token of session ${tokenSession}; this is session ${session}`)
+        if (tokenDoc !== id) throw new Refusal('InvalidParams', `a token of document ${tokenDoc}, not ${id}`, 'continuation.doc')
+        return { items: [stamp(id, doc.piece(gen, line, offset))] }
+      }
+      const [gen, start, count] = [int(p, 'gen'), int(p, 'start'), int(p, 'count')]
+      return stampPage(id, getDoc(id).page(gen, start, count))
+    },
+    // A failed reload (the file is gone, say) leaves the document at its old generation.
+    reload: (p): Opened => {
+      const [id, count] = [int(p, 'doc'), int(p, 'count')]
+      const doc = getDoc(id)
+      doc.reload()
+      return begin(id, doc, doc.page(doc.generation, 0, count))
     },
     // PR 5 (plan C6) makes close cancel the index and release the handle; here it forgets the document.
     close: (p) => docs.delete(int(p, 'doc'))

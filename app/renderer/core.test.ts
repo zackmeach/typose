@@ -41,7 +41,7 @@ async function connected(): Promise<CoreClient> {
 
 it('rejects every pending call with CoreGone when the core goes, and every later call at once', async () => {
   const client = await connected()
-  const pending = [client.call('page', { doc: 1, lens: 'raw', start: 0, count: 10 }), client.call('close', { doc: 1 })]
+  const pending = [client.call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 10 }), client.call('close', { doc: 1 })]
   await expect.poll(() => requests.length).toBe(3)
   post({ type: 'core-gone', session: 2 }) // an older session's death changes nothing
   post({ type: 'core-gone', session: 3 })

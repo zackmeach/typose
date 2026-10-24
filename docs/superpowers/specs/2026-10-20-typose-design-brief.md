@@ -88,6 +88,7 @@ The product-facing ones. The technical design's §0.4 holds all of Z39–Z50, an
 | Z48 | **Header detection** stays automatic in v1, and ⓘ's "First row is header" override is required at the Grid milestone: visible, reversible, and recovering the first record when detection is wrong (§5.3). |
 | Z51 | **Rows keys follow the Grid's:** Shift+Space selects the row, and Space doesn't page-scroll; Page Up/Down page (§7.4). |
 | Z52 | **A far jump counts as scrolling.** A scrollbar jump, an Outline jump or open-then-scroll must not stall over the scrolling budget, with accessibility mode on or off (§8.1). |
+| Z63 | **Change detection checks after each lazy read**, against the file as it was when opened (it was before and after). Any change before or during a read still freezes the card, and nothing from that read is shown (2026-10-23; §7.9). |
 
 ---
 
@@ -668,7 +669,7 @@ See §7.10.
 | Missing file (restored session, or Ctrl+R) | "File not found at <path>", with **Locate…** and **Close** |
 | Permission denied | "Can't read <path> · permission denied", with **Retry** and **Close** |
 | Slow open (no first screen after 300ms, e.g. a network share) | A thin progress line under the header plus "Opening…". Input is never blocked, and the file can be closed. |
-| Changed on disk, found on access | Before and after each lazy read (a file over 100MB, or scrolling a file-backed region), Typose checks the file's size, modified time and identity. It also verifies each re-read 1MiB chunk against the hash taken the first time that chunk was read, which catches in-place writes that metadata misses. On any difference, the card **freezes at its current content** and shows the banner "Changed on disk · Reload (Ctrl+R)". Copy is refused until Reload. Everything Typose displays or copies matches the version it first read. This is not watching [Z6]. |
+| Changed on disk, found on access | After each lazy read [Z63] (a file over 100MB, or scrolling a file-backed region), Typose checks the file's size, modified time and identity. It also verifies each re-read 1MiB chunk against the hash taken the first time that chunk was read, which catches in-place writes that metadata misses. On any difference, the card **freezes at its current content** and shows the banner "Changed on disk · Reload (Ctrl+R)". Copy is refused until Reload. Everything Typose displays or copies matches the version it first read. This is not watching [Z6]. |
 | Unresolvable link | A dashed underline; hovering shows "Not found: <path>" |
 
 **Typose never locks a file it's viewing.** On Windows, files are opened with read, write and delete sharing, so agents and editors can save, rename and replace them freely. Files are read with positional reads and **never memory-mapped**. A mapping blocks delete and replace on Windows, and can crash the reader when another process truncates the file elsewhere.

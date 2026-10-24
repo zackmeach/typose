@@ -4,12 +4,14 @@
 //! `TYPOSE_ALLOW_NO_SPARSE=1` says to skip. Off Windows, where the spike has no sparse-file builder, it's ignored.
 
 /// Each segment's text is wrapped in newlines, so it's a line of its own starting one byte after `at`.
+#[cfg(windows)]
 const SEGMENTS: [(u64, &str); 4] = [
     ((1 << 32) - 4096, "\nbelow 4 GiB\n"),
     ((1 << 32) - 8, "\nstraddles 2^32\n"),
     ((1 << 32) + (1 << 20) + 2, "\nabove 4 GiB: é 😀\n"),
     (5 << 30, "\nlast line\n"),
 ];
+#[cfg(windows)]
 const LEN: u64 = (5 << 30) + (4 << 20) + 5; // 5.004 GiB apparent
 
 #[cfg(not(windows))]
@@ -78,7 +80,7 @@ fn offsets_beyond_4_gib_are_exact_in_every_layer() {
     // Line index over the whole file: one giant line of zeros per gap, so only byte-bounded checkpoints help.
     let shared = RwLock::new(LineIndex::default());
     let t = Instant::now();
-    build(&File::open(&path).unwrap(), LEN, IndexConfig::default(), &store.hashes(), &shared, |_| {}).unwrap();
+    build(&File::open(&path).unwrap(), LEN, IndexConfig::default(), &store.hashes(), &shared, |_| true).unwrap();
     let ms = t.elapsed().as_millis().max(1);
     let idx = shared.into_inner().unwrap();
     println!(
