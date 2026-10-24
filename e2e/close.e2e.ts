@@ -70,11 +70,14 @@ test('a truncation mid-index freezes the document: 0 jobs and 0 tasks remain, it
 
 test('a double Reload mid-index on 10 GiB keeps one index job, and close then leaves 0 jobs and 0 handles within 50 ms', async () => {
   const l = await midIndex()
-  // Ctrl+R twice in one task, so the second Reload reaches the core host while the first's first page is being read.
-  await l.win.evaluate(() => {
-    for (let i = 0; i < 2; i++) window.dispatchEvent(new KeyboardEvent('keydown', { key: 'r', ctrlKey: true, cancelable: true }))
+  // Two Reloads in one task, so the second reaches the core host while the first's first page is being read. They're
+  // sent from the page's core client: App starts no Reload while one is under way (plan C1).
+  const replies = await l.win.evaluate(async () => {
+    const { core } = (window as unknown as { typoseTest: TestHooks }).typoseTest
+    const reload = () => core.call('reload', { doc: 1, count: 1, bytes: 0 }).then((r) => (r as { gen: number }).gen, (e: { code: string }) => e.code)
+    return Promise.all([reload(), reload()])
   })
-  await expect(l.win.locator('.raw-host')).toHaveAttribute('data-gen', '3')
+  expect(replies).toEqual(['Stale', 3])
   // While generation 3 indexes (1–3 s), at most one job runs: the superseded generations' end within a block.
   await l.win.waitForTimeout(100)
   for (let i = 0; i < 5; i++) {
@@ -83,7 +86,7 @@ test('a double Reload mid-index on 10 GiB keeps one index job, and close then le
     expect(s).toMatchObject({ handles: 1, docs: 1 })
     await l.win.waitForTimeout(50)
   }
-  await expect(l.win.locator('.card-status')).toHaveText(/^Indexing /) // still mid-index: close stops it
+  expect((await debugStats(l.win)).jobs).toBe(1) // still mid-index: close stops it
   const releasedMs = await l.win.evaluate(async () => {
     const { core, app } = (window as unknown as { typoseTest: TestHooks }).typoseTest
     const t0 = performance.now()
