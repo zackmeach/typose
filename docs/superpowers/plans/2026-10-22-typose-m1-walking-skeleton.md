@@ -995,12 +995,32 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
   - Nor did the jump control's ten launches since the baseline mark: their first jumps were answered in 37.4–46.6 ms.
   - In the round-5 full pass, drags were answered in 30.6–47.7 ms, except one at 264.5 ms on the 10 GiB file at 66.7% CPU. Its pointerdowns, judged in round 5 and reported apart since ruling A, took up to 52.2 ms, and that 10 GiB one 269.6.
 
+**PR 7's amendments (test details and mechanisms; no Z-decision, 🔒 requirement or gate changes):**
+- **"Dragging the bar moves the window, and double-clicking it maximizes" is checked through Windows' own handling on every run, and through real input wherever real input reaches the window.**
+  - Every run: the window answers Windows' hit test (`WM_NCHITTEST`) with `HTCAPTION` over the bar (the glyph, the title and empty bar), `HTCLIENT` over ☰ and the card, and `HTMINBUTTON`, `HTMAXBUTTON` and `HTCLOSE` over the caption buttons. Windows drags a window by `HTCAPTION` and maximizes it on a double click there; `HTMAXBUTTON` is what brings up Snap Layouts. A double click on the bar, queued to the window as Windows delivers one to its frame (`WM_NCLBUTTONDBLCLK` with the hit test's answer), maximizes it, and a second restores it.
+  - Real input (a drag, then two double clicks, with the cursor put back) runs only while the window is the one under the bar's point. Otherwise it's skipped, naming what's there.
+  - *Why:* real input goes to whatever is under the cursor. This PC was locked through PR 7's runs (`LockApp`, then `LockScreenBackstopFrame`, over the bar), so the real-input test was skipped in each of them; its first, unguarded version clicked the lock screen. Playwright's mouse can't stand in: it's page input over CDP, which never reaches Windows' non-client handling.
+- **Snap Layouts' flyout stays a manual check on the packaged build** (plan §5's row). The hit test's `HTMAXBUTTON` is its automated half.
+- **macOS's centred position assumes AppKit's 14 px window buttons:** `{x: 14, y: (40 − 14) / 2}`, spike A's `{14, 13}`. main-macos checks it through `getWindowButtonPosition()`; whether 14 is right waits for the Mac's screenshot (Z55).
+- **macOS's minimal native menu** is the app menu, File (Open File…, Reload), Edit and Window. The page runs File's commands as it runs ☰'s. Reload has no accelerator there, because the page keeps Cmd+R (PR 4). Edit stays because it's how Cmd+C and Cmd+A reach the page.
+- **200% zoom is Chromium's page zoom, in the 720 × 480 minimum window,** which main now sets (brief §9). Brief §6.5's token zoom and its keys are M2's (proposal 6). Under page zoom the bar keeps WCO's height, because `env(titlebar-area-height)` tracks the overlay: 20 CSS px at 200%, still 40 logical.
+- **Focus across page replacement includes Reload.** Reload builds a new lens, and focus fell to the page's body with the old one. The new lens now takes the focus when the old one had it.
+- **axe gates every impact,** not only serious and critical (spike B's filter): 0 violations on the empty card, with Raw, with ☰ open and at 200%. A control checks that a planted unnamed button is flagged.
+- **UIA reads the window's whole control view** (`e2e/uia.ps1`), where spike B's `uia-element.ps1` read one element by name. UIA's keyboard focus is asserted only while the window has the OS's focus, the only time UIA reports it; a run without it says so in the test's annotations.
+- **Linux keeps the native frame** (Z28), so the bar is the canvas's top row: the glyph, ☰ and the title (brief §3.1 moves ☰ there). The frame shows the title too. Main doesn't forward the accessibility mode there: Electron's accessibility-support API and event are macOS's and Windows' only.
+- **C4's table:** PR 7 adds no input to main, the core host or the addon. The accessibility mode and macOS's menu commands go from main to the page, which takes the mode only from its own window (`app/renderer/a11y.ts`; removing the check fails its unit test).
+
+**Found in PR 7:**
+- **Electron's default menu's accelerators were live on Windows with its bar hidden.** At `5debd25`, Ctrl+Shift+R delivered as the OS delivers keys (`sendInputEvent`) reloaded the page while `isMenuBarVisible()` was false; PR 7's scope said "live wherever its menu bar is". Playwright's keyboard, over CDP, never reached them.
+- **Select All takes the gutter.** Ctrl+A's selection reads "1line 02line 1…": each row's gutter number, and no line breaks. It's M6's, with copy (brief §7.4).
+
 **Implementer proposals Zack may veto (one place):**
 1. **Memory-refused open state** (C1), shown in the card: "Can't open `<file>` · Typose's memory budget is full. Close a file, then Retry." Brief §7.9 has no such state yet.
 2. **After a second core death within 60 s,** the core is respawned once 60 s have passed, and Reopen is offered then (C7; amended in PR 5, above).
 3. **Raw wrapping** (brief §5.1's wrap rules) is deferred to M4, with horizontal scrolling meanwhile (plan §6).
 4. **Raw's accessibility pattern:** a labelled, focusable region with an `aria-hidden` gutter (PR 1, checked in PR 7). Neither §6.1 nor brief §9 defines one. If Zack accepts it, it becomes a row in §6.1's 🔒 table.
 5. **No AppKit window restoration on macOS:** main registers `ApplePersistenceIgnoreState` before the run loop starts (after PR 5's macOS run). *Why:* Typose restores no window through AppKit, yet after a crash AppKit asks at the next launch whether to reopen its windows, in a modal that keeps the launch from finishing until it's answered. In main-macos run 40072658390, after `lifecycle.e2e.ts`'s deliberate crash, 7 launches in a row sat in it, and on CI no one answers.
+6. **The default menu's other keys go with it** (PR 7): Ctrl+= / Ctrl+− / Ctrl+0 (Chromium's page zoom), F11, Ctrl+Shift+I (developer tools), Ctrl+W and Ctrl+M on Windows and Linux. Brief §7.2's zoom and full-screen keys come back with M2's command table (spec §9), the zoom as §6.5's token zoom. Ctrl+A is the page's own editing key and still works (tested on Windows; `chrome.e2e.ts` checks it on every platform). Ctrl+C is the same key table's, untested here: a test would write the owner's clipboard.
 
 **Implementer calls on spec gaps:**
 - §3.4 gives no unit for "256KiB" or "64KiB of text". C2 sets source bytes plus an item count.
