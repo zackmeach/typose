@@ -110,10 +110,26 @@ export interface ProgressEvent {
 /** What the preload forwards from main to the page, with `window.postMessage` to its own origin. */
 export type MainMessage = { type: 'core-port'; session: number } | { type: 'core-gone'; session: number }
 
-/** The page's whole API into main, from the preload. Neither call takes arguments. */
+/** The page's whole API into main, from the preload. Only `mark` takes arguments, which main validates (plan C4). */
 export interface TyposeApi {
   /** The file named on the command line, if any. */
   launchPath(): Promise<string | null>
   /** The OS Open dialog; null when cancelled. */
   openDialog(): Promise<string | null>
+  /** A startup mark at a wall-clock time (ms); main records it only under the TYPOSE_MARKS hook (plan C8). */
+  mark(name: StartupMark, t: number): void
+  /** Called once, when main has shown the window; main only tells the page under the TYPOSE_MARKS hook (plan C8). */
+  onShown(cb: () => void): void
 }
+
+/** The renderer's startup marks (plan C8, §5). */
+export const STARTUP_MARKS = [
+  'navigationStart',
+  'bundleEvaluated',
+  'titlebarPainted',
+  'titlebarPresented',
+  'shownPresented',
+  'openRequested',
+  'rawUsable'
+] as const
+export type StartupMark = (typeof STARTUP_MARKS)[number]

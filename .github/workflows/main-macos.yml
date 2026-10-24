@@ -28,5 +28,7 @@ jobs:
         working-directory: core
       - run: npm run check
       - run: npm run build
+      - name: Package the fused --dir build, the arm64 .app (packaged.e2e.ts drives it)
+        run: npm run package
       - name: e2e and the NetLog assertion
         run: npm run e2e
