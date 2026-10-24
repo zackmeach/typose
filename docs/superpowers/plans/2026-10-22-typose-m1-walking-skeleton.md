@@ -563,7 +563,7 @@ Each PR's tests land in that PR, and every PR extends C4's table to what it adds
 ### PR 8 · Single instance, argv/open-file, CLI (small, medium)
 
 **Scope (§8.1):**
-- `requestSingleInstanceLock`. `second-instance` handles `argv` and `cwd`; on macOS, paths arrive through `open-file`, before and after ready.
+- `requestSingleInstanceLock`. `second-instance` handles `argv` and `cwd`; on macOS, paths arrive through `open-file`, before and after ready. *(Amended in PR 8: the second instance's own argv and cwd come as the lock's `additionalData`; plan §7.)*
 - Paths are normalized: relative paths, spaces, Unicode, `--`, and paths that look like options. The `.cmd` launcher also handles `%`, `^`, `&` and `!`.
 - M1's single card shows the newest path; tabs are M2.
 - `typose` launcher scripts (`.cmd` and `sh`) live in the repo. The installers put them on PATH in M7.
@@ -856,6 +856,30 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 - **Proposal 2 (C7): once 60 s have passed since the last respawn, main respawns the core itself, and the card then offers Reopen.** Until then, the stopped state offers nothing. *Why:* the same outcome as Reopen respawning the core, without a renderer-to-main restart call or a "try again in N s" state for a click that comes too early. Main still respawns at most once per 60 s, and there's still no automatic reopen.
 - **C7's port teardown:** on a death, main closes its handles to both ends of the session's channel and removes the utility process's listeners. Both ends were transferred: the core host's died with it, and the renderer detaches and closes its own when it hears `core-gone`. The renderer takes a port only from its own window and only for a newer session than the last.
 - **C6's debug stats count:** `handles`, the documents' open byte stores (each one file handle); `jobs`, index threads not yet ended (a job's own reopened handle closes before its thread ends); `tasks`, page reads not yet settled. They exist only in the `test-hooks` addon, with the per-read delay.
+
+**PR 8's amendments (mechanisms and test details; no Z-decision, 🔒 requirement or gate changes):**
+- **A second instance's argv and cwd come as `requestSingleInstanceLock`'s `additionalData`, not as the `second-instance` event's `argv`.** The first instance reads them as it reads its own.
+  - *Why:* the event's `argv` is Chromium's re-parse of the command line. PR 8's probe of 18 shapes (Electron 44.9.2, Windows) showed:
+    - switches moved ahead of the paths, with `--allow-file-access-from-files` added;
+    - each argument's leading and trailing whitespace trimmed: ` lead.txt ` arrived as `lead.txt`;
+    - on Windows, an argument starting with `/` taken for a switch;
+    - after `--single-argument`, the rest turned into one quoted argument ending in a NUL.
+  - `additionalData` arrived exactly in every case. It's as untrusted as argv: unless it's a string array and a string, it names nothing, and its path goes to the same open as any other (C4's path check, then §3.3's refusals).
+- **Paths:** every argument after the first `--` is a path, whatever it looks like; before it, a switch isn't one. The newest file named is the last. A path is never read as a URL. `typose://…` and `file:…` are relative paths that open nothing, and `\\?\`, `\\.\` and pipe paths reach the core's refusals unchanged. While the core is stopped (C7), a newer path replaces the stopped card's, and Reopen opens it.
+- **The lock comes before C9's log, and a second instance exits with `app.exit(0)`.** So it writes no log line and no `running` marker. That's C9's "only after PR 8's single-instance lock", and the markers stay per pid.
+  - *Why:* `app.quit()` before ready still runs the launch. The probe logged `before-quit`, `will-quit` and `quit`, then `will-finish-launching` and `ready`, so the second instance would have opened a window and spawned a core.
+  - Before the message loop runs, `app.exit` ends the process at the call (nothing after it ran), with exit code 0. The message is already sent by then: every hand-off in the probe and the e2e arrived.
+- **The launchers** (`app/bin/typose.cmd` and `app/bin/typose`) take no options: every argument is a file, and one leading `--` is their own.
+  - They pass the files after `--`, and don't wait for Typose. They ship in the package's `resources/bin` (`Contents/Resources/bin` in the `.app`) and run the Typose two folders up.
+  - The `.cmd` passes each argument quoted and expands none of them again, so `%`, `^`, `&` and `!` arrive as given. An empty argument ends its list, since cmd.exe can't tell `""` from the end. What reaches it is the caller's quoting: cmd.exe's quotes and escapes are tested, PowerShell's passing to batch files isn't.
+- **The launcher test runs them against a stand-in Typose** that records its argv and cwd: Electron's own binary with a stub app on Windows, a script elsewhere. *Why:* the launchers pass no `--user-data-dir`, by design, so the real app would reach the user's own instance. The second-launch test drives the packaged executable itself with the same path shapes, on the test's own profile.
+- **C4's table:** PR 8 adds no number at any boundary. Its new input, a second instance's message, is checked for shape in main, and its path goes to the core's `open`, whose checks C4 already covers.
+
+**Different user or elevated (§8.1, D15).** The lock is per profile, and each user has their own.
+- A launch by another user (Windows' Run as different user, say) starts that user's own Typose, on that user's profile. The running window sees nothing. Untested, as it needs a second account.
+- An elevated launch on Windows (Run as administrator) is the same user and profile, so it reaches the lock. What follows comes from the mechanism, and is untested, because testing it means a UAC prompt. Chromium's Windows singleton messages the running window, and Windows (UIPI) blocks messages only from a lower integrity level to a higher one. So:
+  - a launch that isn't elevated, into an elevated Typose, can't reach it, and does nothing, as §8.1 says;
+  - an elevated launch into a Typose that isn't elevated probably does reach it, and its file opens in the running window. §8.1 says it does nothing.
 
 **Implementer calls in PR 4 (brief gaps):**
 - Brief §5.1's "1MB" per line is 1 MiB: 16 pieces of 64 KiB, in C2's source bytes. A continuation is issued only while at least 4 bytes (the longest element) are left before the line's first MiB ends, so no piece is ever empty.
