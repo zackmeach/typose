@@ -21,7 +21,8 @@ export function startLifecycle(): Log {
     }
   }
 
-  // A marker per pid: another instance's quit can't clear this one's (single instance arrives in PR 8).
+  // A marker per pid: another instance's quit can't clear this one's. Since PR 8, only the instance holding the
+  // single-instance lock gets this far.
   for (const name of readdirSync(dir)) {
     const pid = Number(/^running-(\d+)\.json$/.exec(name)?.[1])
     if (!pid || pid === process.pid || alive(pid)) continue

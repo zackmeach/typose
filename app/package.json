@@ -23,6 +23,7 @@
     "appId": "dev.typose.app",
     "files": ["out/**", "!**/node_modules/typose-node/hooks{,/**}"],
     "asarUnpack": ["**/*.node"],
+    "extraResources": ["bin/**"],
     "electronDist": "../node_modules/electron/dist",
     "npmRebuild": false,
     "win": { "target": "dir", "signAndEditExecutable": false },

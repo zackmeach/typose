@@ -1,0 +1,4 @@
+# cmd.exe misreads batch files with bare LF line ends (its label search, for one).
+*.cmd text eol=crlf
+# The sh launcher runs on macOS and Linux.
+app/bin/typose text eol=lf

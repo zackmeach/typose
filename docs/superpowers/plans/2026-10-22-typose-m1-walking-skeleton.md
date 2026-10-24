@@ -339,6 +339,7 @@ The document keeps its explicitly charged state (its floor, checkpoints, hashes,
 - Copies `lifecycle.jsonl` and any new dumps into each run's results; CI keeps them per PR 2's retention rules.
 - Kills a launch whose window never comes, or that hasn't exited 15 s after its close, keeps its evidence, and fails the test (plan §7).
 - **Invalid runs, not crashes:** a superseded run, or an infrastructure interruption with evidence (a runner shutdown or a lost runner, with the platform's record), is kept as invalid with its reason (Z49). An application timeout isn't invalid: it stays a failure that needs explaining.
+- **A kill by a second launch (Windows):** a main exit with code 2, with no quit sequence logged, followed by `previous-run-unclean` at the next launch. The exit is told apart, not explained: main didn't answer for about 15 s, and the hang is the failure to explain (Z56). *(Added in PR 8, plan §7.)*
 
 **Acceptance:** four controlled failures, each told apart by the log and exit status alone, as in plan B rev3 `REVIEW.md:126-128`:
 - a window close: a clean quit sequence, exit 0;
@@ -573,7 +574,7 @@ Each PR's tests land in that PR, and every PR extends C4's table to what it adds
 ### PR 8 · Single instance, argv/open-file, CLI (small, medium)
 
 **Scope (§8.1):**
-- `requestSingleInstanceLock`. `second-instance` handles `argv` and `cwd`; on macOS, paths arrive through `open-file`, before and after ready.
+- `requestSingleInstanceLock`. `second-instance` handles `argv` and `cwd`; on macOS, paths arrive through `open-file`, before and after ready. *(Amended in PR 8: the second instance's own argv and cwd come as the lock's `additionalData`; plan §7.)*
 - Paths are normalized: relative paths, spaces, Unicode, `--`, and paths that look like options. The `.cmd` launcher also handles `%`, `^`, `&` and `!`.
 - M1's single card shows the newest path; tabs are M2.
 - `typose` launcher scripts (`.cmd` and `sh`) live in the repo. The installers put them on PATH in M7.
@@ -909,6 +910,39 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 - **The counting-allocator test** counts a `realloc`'s new block before freeing the old, as a moving realloc holds both. It leaves the pool's free slots and `JS_PAGES` out of the comparison, so they can't cover an uncharged allocation. It re-reads the ledger whenever the ledger moved while it read, so the comparison is between one moment's figures.
 - **Not ported: `physical_ram` and `private_bytes`.** The core host passes `os.totalmem()`. Private bytes come from Electron's app metrics on Windows and from `/proc/<pid>/smaps_rollup` on Linux, which also gives PSS. Electron reports no private bytes on macOS, so there they're reported as missing, never replaced by RSS.
 - **The exhaustion test's budget is calibrated.** A first launch, without the override, measures one cycle's charges. The test then sets the budget to hold the pool, the frozen document and four indexed ones, with half a floor to spare, so the fifth open is refused.
+
+**PR 8's amendments (mechanisms and test details; no Z-decision, 🔒 requirement or gate changes):**
+- **A second instance's argv and cwd come as `requestSingleInstanceLock`'s `additionalData`, not as the `second-instance` event's `argv`.** The first instance reads them as it reads its own.
+  - *Why:* the event's `argv` is Chromium's re-parse of the command line. PR 8's probe of 18 shapes (Electron 44.9.2, Windows) showed:
+    - switches moved ahead of the paths, with `--allow-file-access-from-files` added;
+    - each argument's leading and trailing whitespace trimmed: ` lead.txt ` arrived as `lead.txt`;
+    - on Windows, an argument starting with `/` taken for a switch;
+    - after `--single-argument`, the rest turned into one quoted argument ending in a NUL.
+  - `additionalData` arrived exactly in every case. It's as untrusted as argv: unless it's a string array and a string, of a real launch's size, it names nothing, and its path goes to the same open as any other (C4's path check, then §3.3's refusals).
+- **Paths:** every argument after the first `--` is a path, whatever it looks like; before it, a switch isn't one. The newest file named is the last. A path is never read as a URL. `typose://…` and `file:…` are relative paths that open nothing, and `\\?\`, `\\.\` and pipe paths reach the core's refusals unchanged. While the core is stopped (C7), a newer path replaces the stopped card's, and Reopen opens it.
+- **The lock comes before C9's log, and a second instance exits with `app.exit(0)`.** So it writes no log line and no `running` marker. That's C9's "only after PR 8's single-instance lock", and the markers stay per pid.
+  - *Why:* `app.quit()` before ready still runs the launch. The probe logged `before-quit`, `will-quit` and `quit`, then `will-finish-launching` and `ready`, so the second instance would have opened a window and spawned a core.
+  - Before the message loop runs, `app.exit` ends the process at the call (nothing after it ran), with exit code 0. The message is already sent by then: every hand-off in the probe and the e2e arrived.
+- **A second launch can kill a hung first instance (Windows).** Chromium's process singleton terminates a first instance that doesn't answer within about 15 s. PR 8's review saw it: a sparse `additionalData` array of length 2^32 − 1 froze main (fixed: see C4 below), and a later launch killed it with exit code 2. The killed instance logs nothing. So C9's harness reads exit code 2, with no quit logged and `previous-run-unclean` at the next launch, as that kill. It identifies the exit; the hang behind it still needs explaining (Z56, ruling OQ-3).
+- **The launchers** (`app/bin/typose.cmd` and `app/bin/typose`) take no options: every argument is a file, and one leading `--` is their own.
+  - They pass the files after `--`, and don't wait for Typose. They ship in the package's `resources/bin` (`Contents/Resources/bin` in the `.app`) and run the Typose two folders up.
+  - The `.cmd` passes each argument quoted and expands none of them again, so `%`, `^`, `&` and `!` arrive as given. An empty argument ends its list, since cmd.exe can't tell `""` from the end.
+  - What reaches it is the caller's quoting, and cmd.exe's own parse:
+    - unquoted, `=`, `,` and `;` split an argument, so such names need quotes;
+    - a trailing backslash breaks the re-quoting (`"C:\dir\"` reads as an escaped quote). It's harmless for files. When folder roots arrive, the launcher must double trailing backslashes;
+    - a `"` inside an argument breaks the `.cmd`. Windows file names can't contain one;
+    - before `--`, an argument starting with `/` is a switch to Chromium and a path to Typose; harmless either way.
+  - **From PowerShell 5.1, the `.cmd` is a command-execution hazard.** A name with `&` reaches cmd.exe unquoted, and cmd.exe runs what follows the `&` as a command (`a&b.txt` runs `b.txt`; PR 8's review). That's the outer shell's handling of batch files, so no `.cmd` can fix it. It's unreachable in M1, since nothing is on PATH until M7. M7 carries the requirement below.
+- **The launcher test runs them against a stand-in Typose** that records its argv and cwd: Electron's own binary with a stub app on Windows, a script elsewhere. *Why:* the launchers pass no `--user-data-dir`, by design, so the real app would reach the user's own instance. The second-launch test drives the packaged executable itself with the same path shapes, on the test's own profile.
+- **C4's table:** PR 8's new input is a second instance's message (`handoff`, `app/main/launch.ts`). Main checks its size before reading any element: at most 4,096 arguments, and 32,767 characters of arguments and of cwd, Windows' command-line limit. Then every element must be a string; a hole isn't. `launch.test.ts` refuses a sparse array of length 2^32 − 1 at once. PR 8's first check, `argv.every(…)`, froze on it, as main did in the review. The path then goes to the core's `open`, whose checks C4 already covers.
+
+**Carried requirement from PR 8's review (owner M7's PATH install):** PowerShell must get an entry point that isn't a batch file: a `typose.ps1` that runs `Typose.exe -- @args`, or an exe shim. The `.cmd` alone isn't enough (the hazard above).
+
+**Different user or elevated (§8.1, D15).** The lock is per profile, and each user has their own.
+- A launch by another user (Windows' Run as different user, say) starts that user's own Typose, on that user's profile. The running window sees nothing. Untested, as it needs a second account.
+- An elevated launch on Windows (Run as administrator) is the same user and profile, so it reaches the lock. What follows comes from the mechanism, and is untested, because testing it means a UAC prompt. Chromium's Windows singleton messages the running window, and Windows (UIPI) blocks messages only from a lower integrity level to a higher one. So:
+  - a launch that isn't elevated, into an elevated Typose, can't reach it, and does nothing, as §8.1 says;
+  - an elevated launch into a Typose that isn't elevated probably does reach it, and its file opens in the running window. §8.1 says it does nothing.
 
 **Implementer calls in PR 4 (brief gaps):**
 - Brief §5.1's "1MB" per line is 1 MiB: 16 pieces of 64 KiB, in C2's source bytes. A continuation is issued only while at least 4 bytes (the longest element) are left before the line's first MiB ends, so no piece is ever empty.
