@@ -1,7 +1,7 @@
 # macOS on merges to main only, while the repo is private (Z60). A red run is fixed in the next PR.
 # `workflow_dispatch` lets a macOS fix be checked on its branch before merge (`gh workflow run main-macos.yml --ref <branch>`).
-# Hardened as pr.yml is (plan PR 2): macOS minutes bill 10x, so caches, a docs-only skip, a newer merge cancelling the
-# older run (its own run covers both), a time box, and bounded evidence only on failure.
+# Hardened as pr.yml is (plan PR 2): macOS minutes bill 10x, so caches, a docs-only skip, a time box, and bounded
+# evidence only on failure. Every merge keeps its own run, so a red one names its merge (Z60: fixed in the next PR).
 name: main-macos
 
 on:
@@ -10,9 +10,11 @@ on:
     paths-ignore: ['docs/**', '*.md'] # as pr.yml; for a push, GitHub judges only the pushed commits
   workflow_dispatch:
 
+# A push to main gets a group of its own (its sha), so a later merge neither cancels it nor replaces it while it waits.
+# Manual runs on one branch share a group, and a newer one cancels the older.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 permissions:
   contents: read
@@ -65,7 +67,7 @@ jobs:
         run: npm run build
       - name: e2e and the NetLog assertion
         if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.electron.outcome == 'success' }}
-        timeout-minutes: 12 # past Playwright's 10-minute test timeout
+        timeout-minutes: 12 # past the longest test's own limit (10 min, large and long-line; the config's is 5)
         run: npm run e2e
       # Failure evidence (plan C9): kept 5 days, for the orchestrator to copy into .evidence/m1/ci/ before it expires.
       - name: Collect the failure evidence (bounded)

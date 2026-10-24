@@ -19,7 +19,8 @@ permissions:
   contents: read
 
 jobs:
-  # Platform-independent checks, on Linux only. Each runs even when an earlier one failed, so one run reports them all.
+  # Platform-independent checks, on Linux only. Each check runs even when an earlier check failed, so one run reports
+  # them all; a failed setup step still skips everything after it.
   lint:
     if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
@@ -51,9 +52,9 @@ jobs:
         if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
         run: cargo clippy --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnings
         working-directory: core
-      - name: oxlint
+      - name: oxlint (app, e2e and .github/scripts)
         if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
-        run: npm run lint
+        run: npm run lint -- .github/scripts
 
   test:
     if: github.event.pull_request.draft == false
@@ -109,13 +110,13 @@ jobs:
         run: npm run build
       - name: e2e and the NetLog assertion (Linux, under xvfb, with the sandbox on)
         if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.electron.outcome == 'success' && runner.os == 'Linux' }}
-        timeout-minutes: 12 # past Playwright's 10-minute test timeout
+        timeout-minutes: 12 # past the longest test's own limit (10 min, large and long-line; the config's is 5)
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           xvfb-run -a npm run e2e
       - name: e2e and the NetLog assertion (Windows)
         if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.electron.outcome == 'success' && runner.os == 'Windows' }}
-        timeout-minutes: 12 # past Playwright's 10-minute test timeout
+        timeout-minutes: 12 # past the longest test's own limit (10 min, large and long-line; the config's is 5)
         run: npm run e2e
       # Failure evidence (plan C9): kept 5 days, for the orchestrator to copy into .evidence/m1/ci/ before it expires.
       - name: Collect the failure evidence (bounded)
