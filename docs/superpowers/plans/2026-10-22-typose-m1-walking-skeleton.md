@@ -292,6 +292,7 @@ The document keeps its explicitly charged state (its floor, checkpoints, hashes,
 - When the title bar was first presented to the still-hidden window, it's `shownPresented`: the presentation of the first frame after the show. Under the TYPOSE_MARKS hook only, main tells the page it has shown, and the page puts in a one-character probe in the background colour, outside React's root, and reads that probe's Element Timing.
 - A run that can't establish a presentation after `show` is invalid, with its reason (Z49).
 - PR 3's control settled the UNVERIFIED point: on Electron 44, `show` doesn't mark on-screen display. `titlebarPainted` (React's first title-bar commit, then rAF + task) is still recorded, for the cost breakdown.
+- The page's own first frame is `typose:first-frame` on the renderer's User Timing timeline: a rAF scheduled when the bundle evaluates. Z37's first-screen gate starts its clock no earlier (Z64), since a page that can't paint yet is this section's problem, not the lens's.
 
 **Acceptance,** with accessibility on and off:
 - An injected 30 ms busy-wait during a scroll registers a long frame covering it, and no cadence stall. Its responsiveness is recorded as measured, not asserted: the block adds onto one input's answer. (Amended in PR 3.)
@@ -498,8 +499,8 @@ Each PR's tests land in that PR, and every PR extends C4's table to what it adds
 
 **Acceptance:**
 - C3's proptest and forged-token table.
-- On the 1 GiB one-line fixture, the first piece is visible before the scan passes the line's end (Z37), further pieces load on demand, and no item exceeds 64 KiB (C2's e2e).
-- Removing the scan mark fails the gate (negative control).
+- On the 1 GiB one-line fixture, the first piece is visible before the scan passes the line's end (Z37), further pieces load on demand, and no item exceeds 64 KiB (C2's e2e). The first-screen clock starts at the later of the open and the page's first frame (Z64).
+- Removing the scan mark, or the page's first-frame mark, fails the gate (negative controls).
 - A same-size write while scrolling freezes the document with nothing new shown, and Reload refuses old-generation pages.
 - Each file state renders.
 - On Windows, Spike C's mutation race (1,000 of 1,000) and its 1,000 append/truncate/rename/delete cycles run against Raw.
@@ -795,6 +796,18 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
     - A freeze left the Ctrl+End `keydown` never painted, waiting for rows that would never load.
   - With the fix, the expansion's click is answered when its four further pieces show (74.7 ms in the first run), and the freeze's keydown when the banner shows (20.2 ms).
   - The pieces' latency is reported, not judged: each piece's token comes from the piece before, so they're fetched one after another.
+- **Z37's test clock starts at the later of the open and the page's first frame (Z64, Zack, 2026-10-23).**
+  - PR 4's 1 GiB one-line test judges the first-screen budget from that start, and the page's first frame (`typose:first-frame`) is a required mark: missing or non-finite fails the gate.
+  - "The first screen comes after the open" and "the line scan comes after the open" are still judged against the real open.
+  - The test waits up to 10 s for every mark rather than reading them once, so a late mark reads as late, not missing.
+  - The veto's controls are rebuilt against the new start. The unit check covers a first frame before the open, after it, and after the scan.
+  - *Why:* on Linux CI the merged head failed this test in 3 of 5 runs, while PR 4's renderer passed 6 of 6.
+    - On those runners the page sometimes renders nothing for 1–1.5 s after it starts. An open inside that gap can't show its first piece until the page's first frame, and the scan can finish first.
+    - That's a startup problem, which Z59's gates measure, not the lens waiting for the line's end. A lens that waits still fails.
+  - *Why a rAF mark, not paint timing's `first-paint`:* the renderer marks `typose:first-frame` in a rAF scheduled when its bundle evaluates.
+    - `first-paint` comes with the window's first presentation. Locally it came 265–349 ms after the open, 150–200 ms after the page's frames had begun (`typose:first-screen`, itself a rAF, at 119–141 ms).
+    - As the clock start, it would have excused ordinary runs: in 2 of 4, the scan finished within 9–15 ms of it, inside the 50 ms budget.
+    - The rAF mark came 72 ms before the open or 113–133 ms after it, 4–5 ms before the first screen.
 
 **Carried requirement from PR 3's review (§7.3 🔒, owner M4's Rendered lens):** a `<link rel="preconnect">` or `<link rel="dns-prefetch">` inserted into the page bypasses both the CSP and `session.webRequest`. The review planted one, and the NetLog showed DNS resolver events.
 - It isn't reachable in M1, because Raw renders text only, never markup.
