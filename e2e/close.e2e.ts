@@ -53,3 +53,35 @@ test('a truncation mid-index freezes the document: 0 jobs and 0 tasks remain, it
   expect(l.pageErrors).toEqual([])
   await finish(l)
 })
+
+test('a double Reload mid-index on 10 GiB keeps one index job, and close then leaves 0 jobs and 0 handles within 50 ms', async () => {
+  const l = await midIndex()
+  // Ctrl+R twice in one task, so the second Reload reaches the core host while the first's first page is being read.
+  await l.win.evaluate(() => {
+    for (let i = 0; i < 2; i++) window.dispatchEvent(new KeyboardEvent('keydown', { key: 'r', ctrlKey: true, cancelable: true }))
+  })
+  await expect(l.win.locator('.raw-host')).toHaveAttribute('data-gen', '3')
+  // While generation 3 indexes (1–3 s), at most one job runs: the superseded generations' end within a block.
+  await l.win.waitForTimeout(100)
+  for (let i = 0; i < 5; i++) {
+    const s = await debugStats(l.win)
+    expect(s.jobs, JSON.stringify(s)).toBeLessThanOrEqual(1)
+    expect(s).toMatchObject({ handles: 1, docs: 1 })
+    await l.win.waitForTimeout(50)
+  }
+  await expect(l.win.locator('.card-status')).toHaveText(/^Indexing /) // still mid-index: close stops it
+  const releasedMs = await l.win.evaluate(async () => {
+    const { core, app } = (window as unknown as { typoseTest: TestHooks }).typoseTest
+    const t0 = performance.now()
+    app.close!()
+    for (;;) {
+      const s = (await core.call('debugStats', {})) as { jobs: number; tasks: number; handles: number; docs: number }
+      if (s.jobs + s.tasks + s.handles + s.docs === 0) return performance.now() - t0
+      if (performance.now() - t0 > 5000) throw new Error(`still held after 5 s: ${JSON.stringify(s)}`)
+    }
+  })
+  console.log(`double Reload, then close: everything released ${releasedMs.toFixed(1)} ms after close`)
+  expect(releasedMs).toBeLessThan(50)
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})

@@ -237,3 +237,23 @@ async function reopen(): Promise<{ onProgress: (p: IndexProgress) => void }> {
   await call('reload', { doc: 1, count: 1 })
   return { onProgress: startIndex.mock.calls.at(-1)![1] }
 }
+
+it('a Reload that another overtakes starts no index job, and close then cancels every job (plan C6)', async () => {
+  const d = doc as unknown as { generation: number }
+  reload.mockImplementation(() => void d.generation++)
+  try {
+    let release = () => {}
+    page.mockImplementationOnce(() => new Promise<Page>((ok) => (release = () => ok({ items: [item()] } as unknown as Page))))
+    const first = dispatch({ id: 70, method: 'reload', params: { doc: 1, count: 1 } }) // generation 2; its first page waits
+    expect(await call('reload', { doc: 1, count: 1 })).toMatchObject({ result: { gen: 3 } })
+    release() // the first page of generation 2 arrives after generation 3 began
+    expect(await first).toMatchObject({ id: 70, error: { code: 'Stale' } })
+    expect(startIndex).toHaveBeenCalledOnce() // generation 3's, alone
+    const jobs = [flags[1], ...startIndex.mock.calls.map((c) => c[0] as unknown as (typeof flags)[number])] // open's, then generation 3's
+    expect(await call('close', { doc: 1 })).toMatchObject({ result: true })
+    expect(jobs.map((f) => f.cancel.mock.calls.length)).toEqual([1, 1])
+  } finally {
+    d.generation = 1
+    reload.mockImplementation(() => {})
+  }
+})

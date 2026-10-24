@@ -62,6 +62,8 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   const reads = new Map<number, { doc: number; cancel: Cancel; cancelledAt?: number }>()
   /** The test-hooks build's account of cancels (plan C5's acceptance). */
   const cancels = { cancels: 0, cancelled: 0, cancelMs: 0 }
+  /** The test-hooks build keeps closed documents referenced, so only `Doc.close()`, never GC, can release them (C6). */
+  const closed: Doc[] = []
   let nextDoc = 1
   const getDoc = (id: number): Doc => {
     const doc = docs.get(id)
@@ -103,6 +105,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   const begin = (id: number, doc: Doc, firstPage: CorePage): Opened => {
     const gen = doc.generation
     const cancel = addon.cancelFlag()
+    jobs.get(id)?.cancel() // the previous generation's job, if it still runs (plan C6)
     jobs.set(id, cancel)
     doc.startIndex(cancel, (e: IndexProgress) => {
       // An index error froze the document (plan C6). An older generation's ends with Reload's freeze, not this one's.
@@ -155,12 +158,16 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const doc = getDoc(id)
       return read(req, id, (cancel) => doc.page(gen, start, count, cancel))
     },
-    // A failed reload (the file is gone, say) leaves the document at its old generation.
+    // A failed reload (the file is gone, say) leaves the document at its old generation. A reload that another
+    // Reload, or close, overtakes while its first page is read is Stale, and starts nothing: the newer one indexes.
     reload: async (p): Promise<Opened> => {
       const [id, count] = [int(p, 'doc'), int(p, 'count')]
       const doc = getDoc(id)
       doc.reload()
-      return begin(id, doc, await doc.page(doc.generation, 0, count, addon.cancelFlag()))
+      const gen = doc.generation
+      const firstPage = await doc.page(gen, 0, count, addon.cancelFlag())
+      if (docs.get(id) !== doc || doc.generation !== gen) throw new Refusal('Stale', `generation ${gen} was replaced while it opened`)
+      return begin(id, doc, firstPage)
     },
     // Plan C6: the index job and the page reads stop, and the document's handle closes once they have.
     close: (p) => {
@@ -170,6 +177,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       jobs.get(id)?.cancel()
       cancelReads(id)
       doc.close()
+      if (__TEST_HOOKS__) closed.push(doc)
       jobs.delete(id)
       return docs.delete(id)
     },
