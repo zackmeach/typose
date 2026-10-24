@@ -301,7 +301,7 @@ The document keeps its explicitly charged state (its floor, checkpoints, hashes,
 - When the title bar was first presented to the still-hidden window, it's `shownPresented`: the presentation of the first frame after the show. Under the TYPOSE_MARKS hook only, main tells the page it has shown, and the page puts in a one-character probe in the background colour, outside React's root, and reads that probe's Element Timing.
 - A run that can't establish a presentation after `show` is invalid, with its reason (Z49).
 - PR 3's control settled the UNVERIFIED point: on Electron 44, `show` doesn't mark on-screen display. `titlebarPainted` (React's first title-bar commit, then rAF + task) is still recorded, for the cost breakdown.
-- The page's own first frame is `typose:first-frame` on the renderer's User Timing timeline: a rAF scheduled when the bundle evaluates. Z37's first-screen gate starts its clock no earlier (Z64), since a page that can't paint yet is this section's problem, not the lens's. A run whose scan ends inside the budget from that start is not judged: that fails on Windows and macOS, and is logged on Linux (Z28).
+- The page's own first frame is `typose:first-frame` on the renderer's User Timing timeline: a rAF scheduled when the bundle evaluates. The same rAF sends the startup mark `firstFrame` (PR 10, plan §7). Z37's first-screen gate starts its clock no earlier (Z64), since a page that can't paint yet is this section's problem, not the lens's. A run whose scan ends inside the budget from that start is not judged: that fails on Windows and macOS, and is logged on Linux (Z28).
 
 **Acceptance,** with accessibility on and off:
 - An injected 30 ms busy-wait during a scroll registers a long frame covering it, and no cadence stall. Its responsiveness is recorded as measured, not asserted: the block adds onto one input's answer. (Amended in PR 3.)
@@ -994,6 +994,32 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
   - The runner's jump rows, each one a first jump after launch, didn't reproduce it in round 4's final 12 runs: answers 29.5–47.7 ms.
   - Nor did the jump control's ten launches since the baseline mark: their first jumps were answered in 37.4–46.6 ms.
   - In the round-5 full pass, drags were answered in 30.6–47.7 ms, except one at 264.5 ms on the 10 GiB file at 66.7% CPU. Its pointerdowns, judged in round 5 and reported apart since ruling A, took up to 52.2 ms, and that 10 GiB one 269.6.
+
+**PR 10's amendments (a startup mark and an implementer call; no Z-decision, 🔒 requirement or gate threshold changes; the evidence is in PR 10's description):**
+- **The page's first frame is also a startup mark, `firstFrame` (C8).** The rAF that marks `typose:first-frame` (Z64) sends it to main, which records it under the TYPOSE_MARKS hook like the other renderer marks. So a launch without CDP, a cold one included, can read it.
+  - *Why:* PR 9 left this mark to the startup remediation (above). It also shows startup's longest wait without a trace: on the packaged build it comes 141–165 ms after `bundleEvaluated` (n = 30), once the GPU process is ready (below).
+- **The cold first screen stays judged from the open request (an implementer call; Zack may veto).** Z64's start can now be read on a cold launch, but there the argv open comes before the page's first frame: 121–147 ms before it, in PR 10's 30 warm runs.
+  - From Z64's start, those first screens read 2–4 ms: the frame after the GPU wait, whatever the lens costs. From the open, they read 123–150 ms.
+  - PR 9 opened the warm rows in-app for the same reason, and a cold launch must open by argv (plan §5). So the cold row still charges startup to the lens, which is stricter than Z64.
+
+**Found in PR 10, carried (an owner decision, Z59):**
+- **On this PC, no change to Typose brings the shell within 200 ms.** The page's first frame waits for the GPU process: `firstFrame` came 340–363 ms after the spawn (medians of PR 10's batches), and the title bar was presented 56–116 ms after it. (The packaged build on this PC; informational, not Z49.)
+  - Chromium launches the GPU process once its browser main loop has made its threads: 104–170 ms after the spawn in 12 traces, which add their own overhead. The process reaches `GpuInit` 32–51 ms later, and `GpuInit` takes 199–250 ms, of which `D3D11CreateDevice` is 173–218 ms.
+  - A bare `D3D11CreateDevice`, in a fresh process outside Electron, takes 143–150 ms here (NVIDIA RTX 3070 Ti, driver 32.0.16.1742). ANGLE's other backends were slower: GL, Vulkan and D3D11on12 added 117–1,397 ms (paired medians, n = 6).
+  - Typose's own code on that path is main's module-level code, which runs inside Chromium's early initialization, before the GPU process is launched. From main's first line to that step's end is 26–41 ms; `crashReporter.start` is 21–36 ms of it, and the single-instance lock 1–4 ms. C9 arms the reporter first: Electron's docs say a renderer created before it isn't monitored, and the GPU process is launched before `ready`. macOS's `registerDefaults` doesn't run on Windows.
+  - **The renderer isn't on the path.** Its bundle, React's render and its first layout end 93–126 ms before its GPU channel arrives, in all 12 traces. A 300 ms mount delay raised the median by 59–88 ms (PR 10's two control runs, n = 5 each).
+    - So the bundle's size (702 kB; 278 kB minified, no measurable change), React Aria (94 kB of it) and the code cache don't move `shellVisible` here.
+    - Even with the GPU off, where the renderer is the path, minifying cut the bundle's load by a median 4.5 ms (paired; lower in 9 of 10) and `shellVisible` by nothing measurable (paired median −1 ms).
+  - After `ready-to-show`, `show()` takes 25–53 ms (the window's activation). The title bar is presented 13–31 ms after the `show` event in 21 of 25 launches on a used profile, and 69–94 ms after it in 110 of 131 on a fresh one, whose GPU shader caches are empty.
+  - **Measured, none adopted** (paired medians against the shipping build, n = 10):
+    - showing the window at creation instead of on `ready-to-show` (§10.1): +15 ms. The first frame still waits for the GPU. Both arms ran with Chromium's window-occlusion tracking off: shown that early, a test launch's window (opened behind the foreground window) was judged occluded, and its page never painted;
+    - the GPU in the browser process (`--in-process-gpu`): −43 ms, without the GPU process's sandbox (§7);
+    - software compositing (`--disable-gpu`): −198 ms, to 260 ms, still over 200. It gives up the GPU compositing that the frame gates rely on.
+  - So under Z59 the miss blocks M1 until Zack changes the budget or what it measures. The Mac (< 400 ms) is unmeasured. There the GPU may start sooner, and if the renderer becomes the path, the bundle and the code cache will count.
+- **The startup instrument launches every run on a new profile (`e2e/packaged.ts`), so it never sees the V8 code cache or the GPU's shader caches.** A user's cold start, after a restart, has its profile.
+  - The code cache works on the packaged, fused build. A profile's second launch produces 194,272 bytes for the bundle, and from its third launch the bundle compiles from them (`consumedCacheSize` 194,272, not rejected).
+  - A used profile read 18 and 63 ms lower in two batches (paired medians, n = 10 and 15; lower in 9 of 10 and 14 of 15), mostly in the title bar's presentation after `show`.
+  - Not changed here: a profile kept across runs would read lower, and an implementer amendment can't loosen what a gate measures (above). Zack rules on it with Z54's batches.
 
 **Implementer proposals Zack may veto (one place):**
 1. **Memory-refused open state** (C1), shown in the card: "Can't open `<file>` · Typose's memory budget is full. Close a file, then Retry." Brief §7.9 has no such state yet.
