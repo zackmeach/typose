@@ -1,10 +1,9 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Button } from 'react-aria-components'
 import type { Limits, Opened } from '../shared/protocol'
 import { type Action, type Card, fileName, view } from './card'
 import { type CoreClient, CoreCallError } from './core'
 import { ROW_HEIGHT, RawLens } from './lenses/raw'
-import { inputMark, markNow, markPainted } from './perf'
 
 /** Z37's scan marks (plan A's veto, `afc58f9`), on the renderer's User Timing timeline: the gate reads them. */
 const MARKS = ['typose:open-start', 'typose:first-screen', 'typose:line-scan', 'typose:index-done']
@@ -40,9 +39,6 @@ export function App({ core }: { core: CoreClient }) {
   useEffect(() => {
     document.title = title
   }, [title])
-
-  // Plan C8's titlebarPainted, for the startup breakdown: React's first commit of the title bar, once that frame is produced.
-  useLayoutEffect(() => markPainted('titlebarPainted'), [])
 
   useEffect(() => {
     const offGone = core.onGone(() => setCard((c) => ({ kind: 'gone', path: 'path' in c ? c.path : undefined })))
@@ -92,8 +88,6 @@ export function App({ core }: { core: CoreClient }) {
     live.current = null
     for (const m of MARKS) performance.clearMarks(m)
     performance.mark('typose:open-start')
-    markNow('openRequested')
-    inputMark('open', performance.now()) // an open-then-scroll interval starts here (plan C8)
     setCard({ kind: 'opening', path, slow: false })
     // Brief §7.9's slow open: "Opening…" only once 300 ms pass without a first screen.
     const slow = setTimeout(() => setCard((c) => (c.kind === 'opening' && attempt.current === mine ? { ...c, slow: true } : c)), 300)
@@ -154,10 +148,7 @@ export function App({ core }: { core: CoreClient }) {
         <span className="glyph" aria-hidden="true">
           ▣
         </span>
-        {/* Element Timing: shellVisible is when this text reaches the screen (plan C8). */}
-        <span className="title" {...{ elementtiming: 'titlebar' }}>
-          {title}
-        </span>
+        <span className="title">{title}</span>
       </header>
       <main className="card">
         <div className="card-header">

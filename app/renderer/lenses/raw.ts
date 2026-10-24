@@ -1,6 +1,5 @@
 import type { Limits, Opened, PageItem, Token } from '../../shared/protocol'
 import { type CoreClient, CoreCallError } from '../core'
-import { inputMark, markPainted, setPaintProbe } from '../perf'
 import { VirtualList } from '../virtual/virtual-list'
 import { type Key, PageCache } from './page-cache'
 
@@ -50,8 +49,6 @@ export class RawLens {
   private scheduled = false
   /** Disposed, or frozen: nothing new is asked for or shown. */
   private stopped = false
-  /** The freeze has reached the screen: App's banner is up (plan C8's paint probe). */
-  private frozen = false
 
   constructor(
     private readonly host: HTMLElement,
@@ -71,12 +68,6 @@ export class RawLens {
     for (const type of ['wheel', 'keydown', 'pointerdown'] as const)
       this.list.element.addEventListener(type, () => (this.atLine = undefined), { passive: true })
     this.setLineCount(opened.lines)
-    // Plan C8: every input that can move the view demands frames until its target rows paint. A click can expand a
-    // long line; it's marked after the button's own handler has added the rows.
-    for (const type of ['wheel', 'keydown', 'pointerdown', 'scroll', 'click'] as const)
-      this.list.element.addEventListener(type, (e) => inputMark(type, e.timeStamp), { passive: true })
-    setPaintProbe(() => this.paintedKey())
-    markPainted('rawUsable') // the first bounded piece is on screen and scrollable (Z37)
     // Z37's first screen: the first frame that shows the first page has painted (rAF, then a task). Once per open.
     if (opened.firstPage.items.length > 0 && performance.getEntriesByName('typose:first-screen').length === 0)
       requestAnimationFrame(() => setTimeout(() => performance.mark('typose:first-screen')))
@@ -103,15 +94,13 @@ export class RawLens {
     if (this.cache.drop((item) => item.more && !item.next && item.rest === undefined) > 0) this.want(this.list.visibleRange())
   }
 
-  /** The document froze (spec §3.1): keep what's shown, ask for nothing more. Called once the banner is up. */
+  /** The document froze (spec §3.1): keep what's shown, ask for nothing more. */
   freeze(): void {
     this.stopped = true
-    this.frozen = true
   }
 
   dispose(): void {
     this.stopped = true
-    setPaintProbe(null)
     this.list.dispose()
   }
 
@@ -175,21 +164,6 @@ export class RawLens {
         this.pump()
       })
     this.pump()
-  }
-
-  /**
-   * What the viewport shows, once settled; else null. That's the scroll position and the row count, which grows as a
-   * long line's pieces expand, once every row in the viewport (not the overscan) has its text: a line's first piece
-   * or a further one. Once the document has frozen and its banner is up, the view is settled as it stands: rows that
-   * never got their text stay blank (spec §3.1).
-   */
-  private paintedKey(): string | null {
-    const { top, geometry } = this.list.state
-    const view = `${top},${this.list.element.scrollLeft},${this.rowCount()}`
-    if (this.frozen) return `${view},frozen`
-    const last = Math.min(geometry.total, top + geometry.viewport) / ROW_HEIGHT
-    for (let row = Math.floor(top / ROW_HEIGHT); row < last; row++) if (!this.cache.has(this.slot(row).key)) return null
-    return view
   }
 
   private async fetchLines(start: number, end: number): Promise<void> {
