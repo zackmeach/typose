@@ -292,7 +292,7 @@ The document keeps its explicitly charged state (its floor, checkpoints, hashes,
 - When the title bar was first presented to the still-hidden window, it's `shownPresented`: the presentation of the first frame after the show. Under the TYPOSE_MARKS hook only, main tells the page it has shown, and the page puts in a one-character probe in the background colour, outside React's root, and reads that probe's Element Timing.
 - A run that can't establish a presentation after `show` is invalid, with its reason (Z49).
 - PR 3's control settled the UNVERIFIED point: on Electron 44, `show` doesn't mark on-screen display. `titlebarPainted` (React's first title-bar commit, then rAF + task) is still recorded, for the cost breakdown.
-- The page's own first frame is `typose:first-frame` on the renderer's User Timing timeline: a rAF scheduled when the bundle evaluates. Z37's first-screen gate starts its clock no earlier (Z64), since a page that can't paint yet is this section's problem, not the lens's.
+- The page's own first frame is `typose:first-frame` on the renderer's User Timing timeline: a rAF scheduled when the bundle evaluates. Z37's first-screen gate starts its clock no earlier (Z64), since a page that can't paint yet is this section's problem, not the lens's. A run whose scan ends inside the budget from that start is not judged: that fails on Windows and macOS, and is logged on Linux (Z28).
 
 **Acceptance,** with accessibility on and off:
 - An injected 30 ms busy-wait during a scroll registers a long frame covering it, and no cadence stall. Its responsiveness is recorded as measured, not asserted: the block adds onto one input's answer. (Amended in PR 3.)
@@ -500,6 +500,7 @@ Each PR's tests land in that PR, and every PR extends C4's table to what it adds
 **Acceptance:**
 - C3's proptest and forged-token table.
 - On the 1 GiB one-line fixture, the first piece is visible before the scan passes the line's end (Z37), further pieces load on demand, and no item exceeds 64 KiB (C2's e2e). The first-screen clock starts at the later of the open and the page's first frame (Z64).
+- The gate's verdict is pass, fail or not judged. A lens that waits for the line's end fails any decisive run. A run whose scan ends inside the budget from the clock's start is not judged: on Windows and macOS that fails the test, and on Linux, smoke-only under Z28, it's logged as "NOT JUDGED (Linux smoke, Z28)".
 - Removing the scan mark, or the page's first-frame mark, fails the gate (negative controls).
 - A same-size write while scrolling freezes the document with nothing new shown, and Reload refuses old-generation pages.
 - Each file state renders.
@@ -794,7 +795,7 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
   - *Why:* the merge state shows the failures, on two traced controls on the packaged build.
     - Expanding a 300 KB line left its `pointerdown` and the scroll it caused never painted. The probe asked the cache for lines 2–4 by row number, where the line's pieces now sit.
     - A freeze left the Ctrl+End `keydown` never painted, waiting for rows that would never load.
-  - With the fix, the expansion's click is answered when its four further pieces show (74.7 ms in the first run), and the freeze's keydown when the banner shows (20.2 ms).
+  - With the fix, the expansion's click is answered when its four further pieces show (45.2–111.6 ms over three runs: 74.7 in the first, 45.2 in the merge gate's, 111.6 in the final review's), and the freeze's keydown when the banner shows (20.2 ms).
   - The pieces' latency is reported, not judged: each piece's token comes from the piece before, so they're fetched one after another.
 - **Z37's test clock starts at the later of the open and the page's first frame (Z64, Zack, 2026-10-23).**
   - PR 4's 1 GiB one-line test judges the first-screen budget from that start, and the page's first frame (`typose:first-frame`) is a required mark: missing or non-finite fails the gate.
@@ -803,7 +804,11 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
   - The veto's controls are rebuilt against the new start. The unit check covers a first frame before the open, after it, and after the scan.
   - *Why:* on Linux CI the merged head failed this test in 3 of 5 runs, while PR 4's renderer passed 6 of 6.
     - On those runners the page sometimes renders nothing for 1–1.5 s after it starts. An open inside that gap can't show its first piece until the page's first frame, and the scan can finish first.
-    - That's a startup problem, which Z59's gates measure, not the lens waiting for the line's end. A lens that waits still fails.
+    - That's a startup problem, which Z59's gates measure, not the lens waiting for the line's end. A lens that waits still fails any decisive run.
+  - **The verdict is pass, fail or not judged (the coordinator's ruling within Z64 and Z28, at the final review).** A run whose scan ends inside the budget from the clock's start can't tell a waiting lens apart, so it's not judged.
+    - On Windows and macOS, the gating platforms, not judged fails the test: a gating run must be decisive, and if one stops being decisive, the fixture must grow.
+    - On Linux, smoke-only under Z28, not judged is logged as "NOT JUDGED (Linux smoke, Z28)" and the test passes. Both Linux CI runs at `705dbec` were like that: the page's first frame came 852 and 499 ms after the open, after the scan's end at 144 and 246 ms.
+    - Missing or misordered marks always fail (the veto). The unit rows cover a decisive pass, a waiting lens and not judged on each platform.
   - *Why a rAF mark, not paint timing's `first-paint`:* the renderer marks `typose:first-frame` in a rAF scheduled when its bundle evaluates.
     - `first-paint` comes with the window's first presentation. Locally it came 265–349 ms after the open, 150–200 ms after the page's frames had begun (`typose:first-screen`, itself a rAF, at 119–141 ms).
     - As the clock start, it would have excused ordinary runs: in 2 of 4, the scan finished within 9–15 ms of it, inside the 50 ms budget.

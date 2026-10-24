@@ -27,30 +27,50 @@ test.afterAll(() => rmSync(ONE_LINE, { force: true })) // generated fixtures are
 /** Z64: Z37's clock starts at the later of the open and the page's first frame. */
 const clockStart = (m: Marks) => Math.max(m['typose:open-start']!, m[FIRST_FRAME]!)
 
+type Verdict = { verdict: 'pass' | 'fail' | 'not judged'; reasons: string[] }
+const ms = (t: number) => t.toFixed(1)
+
 /**
  * Plan A's veto (`afc58f9`) on Z37's gate: a missing, invalid or misordered mark fails it, never passes it or reads
  * as "not judged". The page's first frame is one of the required marks. Then the gate itself: the first piece shows
- * before the scan passes the line's end. Only a scan that finishes inside the first-screen budget is exempt, since
- * there a lens that waits for the line's end can't be told apart. The budget's clock starts at the later of the open
- * and the page's first frame (Z64): a page that can't paint yet is a startup problem (Z59's gates), not the lens's.
- * Returns the failures.
+ * before the scan passes the line's end. A scan that finishes inside the first-screen budget can't tell a lens that
+ * waits for the line's end apart, so that run is not judged. The budget's clock starts at the later of the open and
+ * the page's first frame (Z64): a page that can't paint yet is a startup problem (Z59's gates), not the lens's.
  */
-function scanGate(m: Marks): string[] {
+function scanGate(m: Marks): Verdict {
   const [open, frame, first, scan, done] = MARKS.map((name) => m[name])
-  if (![open, frame, first, scan, done].every((t) => typeof t === 'number' && Number.isFinite(t))) return [`missing or invalid marks: ${JSON.stringify(m)}`]
+  if (![open, frame, first, scan, done].every((t) => typeof t === 'number' && Number.isFinite(t))) return { verdict: 'fail', reasons: [`missing or invalid marks: ${JSON.stringify(m)}`] }
   const [o, f, s, d] = [open!, first!, scan!, done!]
   const start = clockStart(m)
   const failures: string[] = []
   if (!(f > o)) failures.push(`first screen ${f} isn't after the open ${o}`)
   if (!(s > o && s <= d)) failures.push(`line scan ${s} isn't after the open ${o} and no later than index done ${d}`)
-  if (s - start > BUDGET_MS && !(f < s)) failures.push(`the first screen (${f - start} ms) waited for the line's end (${s - start} ms), from ${start === o ? 'the open' : "the page's first frame"}`)
-  return failures
+  if (failures.length) return { verdict: 'fail', reasons: failures }
+  const from = start === o ? 'the open' : "the page's first frame"
+  if (s - start <= BUDGET_MS) {
+    const when = s < start ? `${ms(start - s)} ms before` : `${ms(s - start)} ms after`
+    return { verdict: 'not judged', reasons: [`the scan ended ${when} the clock start (${from}), inside the ${BUDGET_MS} ms budget`] }
+  }
+  if (!(f < s)) return { verdict: 'fail', reasons: [`the first screen (${ms(f - start)} ms) waited for the line's end (${ms(s - start)} ms), from ${from}`] }
+  return { verdict: 'pass', reasons: [`the first screen (${ms(f - start)} ms) came before the line's end (${ms(s - start)} ms), from ${from}`] }
+}
+
+/**
+ * What a verdict means for the test on `platform`. Windows and macOS gate (Z28), so a run there must be decisive: not
+ * judged fails, and the fixture must grow if that ever happens. Linux is smoke-only (Z28): not judged is logged, and
+ * passes.
+ */
+function outcome(v: Verdict, platform: NodeJS.Platform): { fails: boolean; line: string } {
+  const why = v.reasons.join('; ')
+  if (v.verdict !== 'not judged') return { fails: v.verdict === 'fail', line: `${v.verdict.toUpperCase()}: ${why}` }
+  if (platform === 'linux') return { fails: false, line: `NOT JUDGED (Linux smoke, Z28): ${why}` }
+  return { fails: true, line: `NOT JUDGED, which fails on ${platform}, a gating platform (Z28): ${why}` }
 }
 
 /** The veto's negative controls: a run's marks with the scan-completion mark or the first frame missing, the scan
- *  mark after index done, or the scan before the first screen. The last is placed past the budget's exemption from
- *  the clock's start, so it fails however fast the first screen was and wherever the first frame came. The gate must
- *  fail each. */
+ *  mark after index done, or the scan before the first screen. The last is placed past the budget from the clock's
+ *  start, so it's judged, and fails, however fast the first screen was and wherever the first frame came. The gate
+ *  must fail each, on every platform. */
 function vetoControls(m: Marks): [control: string, marks: Marks][] {
   const start = clockStart(m)
   const late = { 'typose:line-scan': start + BUDGET_MS + 2, 'typose:first-screen': start + BUDGET_MS + 3 }
@@ -68,24 +88,49 @@ test("the veto's controls fail the gate wherever the first screen and the page's
     for (const first of [40, 147]) {
       const marks: Marks = { 'typose:open-start': 1000, [FIRST_FRAME]: frame, 'typose:first-screen': 1000 + first, 'typose:line-scan': 1231, 'typose:index-done': 1231 }
       const at = `first screen at ${first} ms, first frame at ${frame - 1000} ms`
-      expect(scanGate(marks), at).toEqual([])
-      for (const [control, m] of vetoControls(marks)) expect(scanGate(m), `${control}, ${at}`).not.toEqual([])
+      expect(scanGate(marks).verdict, at).toBe(frame === 1300 ? 'not judged' : 'pass')
+      for (const [control, m] of vetoControls(marks)) expect(scanGate(m).verdict, `${control}, ${at}`).toBe('fail')
     }
 })
 
 test("Z64: the clock starts at the later of the open and the page's first frame", () => {
   const base: Marks = { 'typose:open-start': 1000, 'typose:line-scan': 1231, 'typose:index-done': 1231 }
-  // A page that couldn't paint until after the scan: its first screen comes with its first frame, not blamed on the lens.
-  expect(scanGate({ ...base, [FIRST_FRAME]: 1300, 'typose:first-screen': 1305 })).toEqual([])
+  // A page that couldn't paint until after the scan: its first screen comes with its first frame, not blamed on the
+  // lens, and the run can't tell a waiting lens apart.
+  expect(scanGate({ ...base, [FIRST_FRAME]: 1300, 'typose:first-screen': 1305 }).verdict).toBe('not judged')
   // A lens that waits for the line's end still fails, with the first frame after the open but well before the scan.
-  expect(scanGate({ ...base, [FIRST_FRAME]: 1100, 'typose:first-screen': 1240 })).not.toEqual([])
+  expect(scanGate({ ...base, [FIRST_FRAME]: 1100, 'typose:first-screen': 1240 }).verdict).toBe('fail')
   // ... and with the first frame before the open.
-  expect(scanGate({ ...base, [FIRST_FRAME]: 990, 'typose:first-screen': 1240 })).not.toEqual([])
+  expect(scanGate({ ...base, [FIRST_FRAME]: 990, 'typose:first-screen': 1240 }).verdict).toBe('fail')
   // The first screen is still judged after the real open, whenever the page's first frame came.
-  expect(scanGate({ ...base, [FIRST_FRAME]: 1300, 'typose:first-screen': 995 })).not.toEqual([])
+  expect(scanGate({ ...base, [FIRST_FRAME]: 1300, 'typose:first-screen': 995 }).verdict).toBe('fail')
   // A first frame that's missing or not a number fails as a missing mark, never passes.
-  for (const frame of [undefined, Number.NaN, Number.POSITIVE_INFINITY])
-    expect(scanGate({ ...base, [FIRST_FRAME]: frame, 'typose:first-screen': 1040 })[0], String(frame)).toMatch(/^missing or invalid marks/)
+  for (const frame of [undefined, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const v = scanGate({ ...base, [FIRST_FRAME]: frame, 'typose:first-screen': 1040 })
+    expect([v.verdict, v.reasons[0]], String(frame)).toEqual(['fail', expect.stringMatching(/^missing or invalid marks/)])
+  }
+})
+
+test("Z37's verdict: Windows and macOS need a decisive run, and Linux may go unjudged (Z28)", () => {
+  const base: Marks = { 'typose:open-start': 1000, [FIRST_FRAME]: 990, 'typose:line-scan': 1231, 'typose:index-done': 1231 }
+  const pass = scanGate({ ...base, 'typose:first-screen': 1040 })
+  const waits = scanGate({ ...base, 'typose:first-screen': 1240 })
+  // Not judged: the page's first frame after the scan, or a scan inside the budget from the open.
+  const unjudged = [
+    scanGate({ ...base, [FIRST_FRAME]: 1300, 'typose:first-screen': 1305 }),
+    scanGate({ ...base, 'typose:first-screen': 1020, 'typose:line-scan': 1030, 'typose:index-done': 1030 })
+  ]
+  expect([pass.verdict, waits.verdict, ...unjudged.map((v) => v.verdict)]).toEqual(['pass', 'fail', 'not judged', 'not judged'])
+  expect(unjudged[0].reasons[0]).toMatch(/^the scan ended 69\.0 ms before the clock start \(the page's first frame\), inside the \d+ ms budget$/)
+  expect(unjudged[1].reasons[0]).toMatch(/^the scan ended 30\.0 ms after the clock start \(the open\), inside the \d+ ms budget$/)
+  for (const platform of ['win32', 'darwin', 'linux'] as const) {
+    expect(outcome(pass, platform).fails, platform).toBe(false)
+    expect(outcome(waits, platform).fails, platform).toBe(true)
+    for (const v of unjudged) expect(outcome(v, platform).fails, `${platform}: ${v.reasons[0]}`).toBe(platform !== 'linux')
+  }
+  expect(outcome(unjudged[0], 'linux').line).toMatch(/^NOT JUDGED \(Linux smoke, Z28\): /)
+  expect(outcome(unjudged[0], 'win32').line).toMatch(/^NOT JUDGED, which fails on win32/)
+  expect(outcome(pass, 'linux').line).toMatch(/^PASS: /)
 })
 
 test('the indexing indicator matches at any count, and no other status does', () => {
@@ -136,9 +181,11 @@ test("1 GiB on one line: the first piece shows before the scan passes the line's
       { names: [...MARKS], timeout: MARKS_TIMEOUT_MS }
     )
     console.log(`scan marks (ms after open): ${MARKS.map((n) => `${n} ${((marks[n] ?? NaN) - marks['typose:open-start']!).toFixed(1)}`).join(', ')}`)
-    expect(scanGate(marks)).toEqual([])
+    const { fails, line } = outcome(scanGate(marks), process.platform)
+    console.log(`scan gate: ${line}`)
+    expect(fails, line).toBe(false)
     // The negative control: without the scan-completion mark, or with it out of order, the same run fails the gate.
-    for (const [control, m] of vetoControls(marks)) expect(scanGate(m), control).not.toEqual([])
+    for (const [control, m] of vetoControls(marks)) expect(scanGate(m).verdict, control).toBe('fail')
   })
 
   await test.step("the line's first MiB loads on demand, piece by piece, then says how much more there is", async () => {
