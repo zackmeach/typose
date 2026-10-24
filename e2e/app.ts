@@ -65,7 +65,6 @@ export async function launch(opts: { file?: string; userData?: string; netlog?: 
   const pid = await app.evaluate(() => process.pid)
   const win = await app.firstWindow().catch(async (e: unknown) => {
     // Killed, so it can't hold up the worker's teardown, as twice in main-macos run 40067408502; and its evidence kept.
-    await diagnose(app, pid, 'no window') // TEMP diagnostics
     kill(pid)
     keepEvidence(userData, pid, await exited, false)
     throw e
@@ -75,46 +74,6 @@ export async function launch(opts: { file?: string; userData?: string; netlog?: 
   const l = { app, win, userData, pid, exited, pageErrors }
   running.add(l)
   return l
-}
-
-// TEMP diagnostics (to be reverted): a launch whose window never comes, or that never exits after its close.
-export const OURS = /Electron\.app|Typose\.app/
-async function diagnose(app: ElectronApplication, pid: number, what: string): Promise<void> {
-  const out = base.info().outputPath()
-  mkdirSync(out, { recursive: true })
-  const state = await Promise.race([
-    app
-      .evaluate(({ app, BrowserWindow, webContents }) => {
-        const safe = (f: () => unknown) => {
-          try {
-            return f()
-          } catch (e) {
-            return String(e)
-          }
-        }
-        return {
-          realReady: safe(() => (Object.getPrototypeOf(app) as { isReady(): boolean }).isReady.call(app)),
-          patchedReady: safe(() => app.isReady()),
-          windows: safe(() => BrowserWindow.getAllWindows().map((w) => ({ id: w.id, visible: w.isVisible() }))),
-          contents: safe(() => webContents.getAllWebContents().map((c) => ({ id: c.id, url: c.getURL(), loading: c.isLoading(), crashed: c.isCrashed(), pid: c.getOSProcessId() }))),
-          metrics: safe(() => app.getAppMetrics().map((m) => ({ pid: m.pid, type: m.type, name: m.name, serviceName: m.serviceName })))
-        }
-      })
-      .catch((e: unknown) => `evaluate failed: ${String(e)}`),
-    new Promise((ok) => setTimeout(() => ok('evaluate timed out after 5 s'), 5000))
-  ])
-  console.log(`TEMP ${what} from pid ${pid}: ${JSON.stringify(state)}`)
-  if (process.platform !== 'darwin') return
-  const ps = spawnSync('ps', ['-axo', 'pid,ppid,pri,stat,lstart,etime,command'], { encoding: 'utf8' }).stdout
-  writeFileSync(join(out, `ps-${pid}.txt`), ps)
-  const rows = ps.trim().split('\n').slice(1).map((l) => l.trim().split(/\s+/))
-  const kids = rows.filter((r) => r[1] === String(pid)).map((r) => r[0])
-  console.log(`TEMP ${rows.length} processes; pid ${pid}'s children: ${kids.join(', ') || 'none'}`)
-  console.log(ps.split('\n').filter((l, i) => i === 0 || OURS.test(l)).join('\n'))
-  for (const p of [String(pid), ...kids.slice(0, 4)]) spawnSync('sample', [p, '2', '-file', join(out, `sample-${p}.txt`)], { encoding: 'utf8', timeout: 20_000 })
-  const predicate = [pid, ...kids].map((p) => `processID == ${p}`).join(' OR ')
-  const logs = spawnSync('log', ['show', '--last', '60s', '--style', 'compact', '--predicate', predicate], { encoding: 'utf8', timeout: 30_000, maxBuffer: 64 << 20 })
-  writeFileSync(join(out, `log-${pid}.txt`), `${logs.stdout}\n${logs.stderr}`)
 }
 
 /** Main's own pid, not the launched process's: on Windows, Playwright launches Electron through a shell. */
@@ -135,7 +94,6 @@ export async function finish(l: Launched, keep = false): Promise<Exit> {
   running.delete(l)
   const closing = l.app.close().catch(() => {})
   const closed = await Promise.race([l.exited, new Promise<null>((ok) => setTimeout(() => ok(null), 15_000))])
-  if (!closed) await diagnose(l.app, l.pid, 'no exit') // TEMP diagnostics
   const exit = closed ?? (kill(l.pid), await l.exited)
   await closing
   keepEvidence(l.userData, l.pid, exit, keep)

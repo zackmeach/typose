@@ -28,15 +28,6 @@ app.commandLine.appendSwitch('no-proxy-server')
 const mark = marksHook(process.env.TYPOSE_MARKS, log)
 mark?.('mainStart', { t: mainStart })
 
-// TEMP diagnostics (to be reverted): AppKit's will-finish-launching, and Electron's own ready, which Playwright's loader
-// holds back from the app until it has attached (the lifecycle log's `ready` is the one it lets through).
-app.on('will-finish-launching', () => log('will-finish-launching'))
-const emit = app.emit.bind(app)
-app.emit = (event: string | symbol, ...args: unknown[]) => {
-  if (event === 'ready') log('ready-native')
-  return emit(event, ...args)
-}
-
 protocol.registerSchemesAsPrivileged([
   { scheme: 'typose', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, codeCache: true } }
 ])
