@@ -39,22 +39,13 @@ test('jump far every frame for 2 s: ≤ 2 requests out, superseded reads end Can
   await waitOpen(win)
   expect(await waitIndexed(win)).toBe(LINES)
 
-  // TEMP DIAGNOSTIC (to be reverted): per-frame timestamps, long tasks and visibility, for Linux CI.
-  const diag = await win.evaluate(async () => {
+  const frames = await win.evaluate(async () => {
     const el = document.querySelector<HTMLElement>('.vl-scroller')!
     const max = el.scrollHeight - el.clientHeight
-    const t0 = performance.now()
-    const until = t0 + 2000
-    const at: number[] = []
-    const longs: string[] = []
-    const po = new PerformanceObserver((list) => {
-      for (const e of list.getEntries()) longs.push(`${Math.round(e.startTime - t0)}+${Math.round(e.duration)}`)
-    })
-    po.observe({ type: 'longtask' })
+    const until = performance.now() + 2000
     let n = 0
     await new Promise<void>((done) => {
       const jump = () => {
-        at.push(Math.round(performance.now() - t0))
         el.scrollTop = Math.random() * max // a scrollbar jump: logical mode maps it across the whole file
         n++
         if (performance.now() < until) requestAnimationFrame(jump)
@@ -62,12 +53,8 @@ test('jump far every frame for 2 s: ≤ 2 requests out, superseded reads end Can
       }
       requestAnimationFrame(jump)
     })
-    await new Promise((ok) => setTimeout(ok, 500))
-    po.disconnect()
-    return { n, at, longs, visibility: document.visibilityState, focus: document.hasFocus(), max, total: Math.round(performance.now() - t0) }
+    return n
   })
-  console.log(`TEMP jump diag: ${JSON.stringify(diag)}`)
-  const frames = diag.n
 
   // The view settles where the last jump left it: every row on screen shows its own line.
   await expect
