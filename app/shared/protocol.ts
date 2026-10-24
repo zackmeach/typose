@@ -41,7 +41,8 @@ export type ErrorCode =
   | 'CoreGone'
   /** The request was cancelled (plan C5): the renderer no longer wanted it. */
   | 'Cancelled'
-  /** The memory budget refused the open (plan C1; the ledger that sends it arrives in PR 6). */
+  /** The memory budget refused it (plan C1): the ledger can't hold a document's floor and its open's temporaries.
+   *  Nothing changed. */
   | 'Memory'
 
 export interface CoreError {
@@ -70,30 +71,37 @@ export interface Opened {
   /** Brief §7.9's empty file: 0 bytes, or only whitespace. */
   blank: boolean
   firstPage: Page
+  /** Plan C1: what the ledger holds for this lens's page cache, at least the `bytes` the open asked for. */
+  reserved: number
 }
 
 export interface Methods {
   hello: { params: { protocol: number }; result: Hello }
-  open: { params: { path: string; count: number }; result: Opened }
+  /** `bytes`: the lens's viewport-only cache cap, reserved with the document's floor (plan C1); refused, `Memory`. */
+  open: { params: { path: string; count: number; bytes: number }; result: Opened }
   /** A window of lines of generation `gen`, or the one piece a continuation token names (plan C3). Cancellable. */
   page: {
     params: { doc: number; lens: 'raw'; gen: number; start: number; count: number } | { doc: number; lens: 'raw'; continuation: Token }
     result: Page
   }
-  /** Ctrl+R (spec §3.1): the document's next generation, opened again, with its first page. */
-  reload: { params: { doc: number; count: number }; result: Opened }
+  /** Ctrl+R (spec §3.1): the document's next generation, opened again, with its first page. `bytes` as for `open`. */
+  reload: { params: { doc: number; count: number; bytes: number }; result: Opened }
   /** Plan C6: cancels the document's index and page reads, and releases it. */
   close: { params: { doc: number }; result: boolean }
   /** Plan C5: cancels request `id`'s page read. True if it was still running: it then rejects with `Cancelled`. */
   cancel: { params: { id: number }; result: boolean }
+  /** Plan C1: sets the ledger's reservation for the page cache of the lens showing generation `gen` of `doc` to
+   *  `bytes`. False when the ledger refuses the growth, which leaves the reservation as it was, and for a lens an open
+   *  or Reload has replaced. */
+  reserve: { params: { doc: number; gen: number; bytes: number }; result: boolean }
   /** The test-hooks build only (plan m8): what's alive in the core host. Elsewhere it's `UnknownMethod`. */
-  debugStats: { params: Record<string, never>; result: DebugStats }
+  debugStats: { params: { gc?: boolean; resetHigh?: boolean; limit?: number }; result: DebugStats }
 }
 
 /** The test-hooks build's debug stats (plan C5, C6): the core's live jobs, tasks and file handles, the longest a chunk
  *  read's delay actually waited since the delay was set (`delayMs`), the documents the core host holds, and how its
  *  cancels went: `cancels` found a read running, `cancelled` reads ended `Cancelled`, at most `cancelMs` after their
- *  cancel. */
+ *  cancel. Plan C1: the ledger, each open document's charges, and the core host's heap. */
 export interface DebugStats {
   jobs: number
   tasks: number
@@ -103,6 +111,25 @@ export interface DebugStats {
   cancels: number
   cancelled: number
   cancelMs: number
+  /** In bytes: the limit; what's charged now, the pool and the renderer cache included; the most it's been; and the
+   *  pool's and the renderer cache's shares. */
+  ledger: { limit: number; used: number; high: number; pool: number; rendererCache: number }
+  /** Each open document's charges in bytes, itemized, by document id. */
+  charges: Record<number, Charges>
+  /** The core host's `process.memoryUsage()`, after a forced GC when the call asked for one (`{ gc: true }`). With
+   *  `{ resetHigh: true }`, the ledger's high-water mark starts again from what's charged; `{ limit }` sets its limit. */
+  heap: { rss: number; heapUsed: number; external: number; arrayBuffers: number }
+}
+
+/** What one document holds charged (plan C1): its floor and what's grown since. */
+export interface Charges {
+  hashes: number
+  checkpoints: number
+  cache: number
+  metadata: number
+  total: number
+  /** The ledger stopped its line checkpoints: only the byte-bound ones were added after that. */
+  linesStopped: boolean
 }
 
 export type Method = keyof Methods

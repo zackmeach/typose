@@ -3,7 +3,7 @@ import { Button } from 'react-aria-components'
 import type { Command, Limits, Opened } from '../shared/protocol'
 import { type Action, type Card, fileName, view } from './card'
 import { type CoreClient, CoreCallError } from './core'
-import { ROW_HEIGHT, RawLens } from './lenses/raw'
+import { ROW_HEIGHT, RawLens, viewportCap } from './lenses/raw'
 import { AppMenu, LINUX } from './menu'
 import { inputMark, markNow, markPainted } from './perf'
 
@@ -38,12 +38,17 @@ export function App({ core }: { core: CoreClient }) {
   latest.current = { card, limits }
   /** The open or reload in progress; a newer one, or Close, abandons it. */
   const attempt = useRef(0)
+  /** A Reload under way: Ctrl+R, F5 and Retry wait for it, so Reloads never overlap at the core (plan C1). */
+  const reloading = useRef(false)
   /** The document and generation on screen, set as soon as its reply arrives (progress events can't wait for React). */
   const live = useRef<{ doc: number; gen: number } | null>(null)
   /** The Raw lens on screen, if any: where Reopen goes back to after a core death (plan C7). */
   const lens = useRef<RawLens | null>(null)
   /** A file chosen before the core first came up: it's opened then, ahead of the command line's. */
   const waiting = useRef<string | null>(null)
+  /** Plan C1: the next lens's viewport-only cache cap, reserved with the open's floor: the shown lens's height, else the
+   *  window's, which bounds the card's. */
+  const floorBytes = (l: Limits) => lens.current?.floorBytes() ?? viewportCap(l, window.innerHeight)
   const path = 'path' in card ? card.path : undefined
   const title = path ? `${fileName(path)} — Typose` : 'Typose'
   const shown = view(card)
@@ -133,7 +138,7 @@ export function App({ core }: { core: CoreClient }) {
     // Brief §7.9's slow open: "Opening…" only once 300 ms pass without a first screen.
     const slow = setTimeout(() => setCard((c) => (c.kind === 'opening' && attempt.current === mine ? { ...c, slow: true } : c)), 300)
     try {
-      const opened = await core.call('open', { path, count: firstCount(l) })
+      const opened = await core.call('open', { path, count: firstCount(l), bytes: floorBytes(l) })
       if (attempt.current !== mine) return void core.call('close', { doc: opened.doc }).catch(() => {}) // closed meanwhile
       show(path, opened, atLine)
     } catch (e) {
@@ -147,14 +152,19 @@ export function App({ core }: { core: CoreClient }) {
   async function reload(): Promise<void> {
     const { card: c, limits: l } = latest.current
     if (c.kind === 'failed') return open(c.path)
-    if (c.kind !== 'open' || !l) return
+    if (c.kind !== 'open' || !l || reloading.current) return
     const mine = ++attempt.current
+    reloading.current = true
     try {
-      const opened = await core.call('reload', { doc: c.opened.doc, count: firstCount(l) })
+      const opened = await core.call('reload', { doc: c.opened.doc, count: firstCount(l), bytes: floorBytes(l) })
       if (attempt.current === mine) show(c.path, opened)
     } catch (e) {
-      // The file is gone, say: the card says so, and Raw unmounting closes the document.
-      if (attempt.current === mine && !(e instanceof CoreCallError && e.code === 'CoreGone')) setCard(failed(c.path, e))
+      if (attempt.current !== mine || (e instanceof CoreCallError && e.code === 'CoreGone')) return // onGone shows that
+      // Plan C1: the ledger refused it. The lens stays at its generation, under a banner offering Retry (Z34's "keeps Raw").
+      if (e instanceof CoreCallError && e.code === 'Memory') setCard((d) => (d.kind === 'open' && d.opened === c.opened ? { ...d, refused: true } : d))
+      else setCard(failed(c.path, e)) // the file is gone, say: the card says so, and Raw unmounting closes the document
+    } finally {
+      reloading.current = false
     }
   }
 
@@ -230,7 +240,7 @@ export function App({ core }: { core: CoreClient }) {
         {shown.progress === null ? null : <ProgressLine value={shown.progress} />}
         {shown.banner ? (
           <div className="banner" role="status" title={frozen}>
-            {`${shown.banner} · `}
+            {`${shown.banner.text} · `}
             <Button
               className="banner-button"
               onPress={() => {
@@ -238,7 +248,7 @@ export function App({ core }: { core: CoreClient }) {
                 void reload()
               }}
             >
-              Reload (Ctrl+R)
+              {shown.banner.action}
             </Button>
           </div>
         ) : null}

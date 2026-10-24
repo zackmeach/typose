@@ -4,14 +4,19 @@ use std::sync::RwLock;
 
 use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE, WINDOWS_1252};
 
-use crate::doc::{DocError, Document};
+use crate::budget::{self, NoSlot, Reservation, Work};
+use crate::doc::{Charges, DocError, Document};
 use crate::encoding::{Sniffed, sniff};
 use crate::index::{IndexConfig, LineIndex, Progress, build};
-use crate::pages::{self, Caps, LinePiece};
-use crate::store::CHUNK;
+use crate::pages::{self, Caps, LinePiece, MAX_PATH_BYTES};
+use crate::store::{CHUNK, cancelled};
 
 /// The chunk cache's size: 64 MiB, `Document::open`'s.
 const CACHE_CHUNKS: usize = 64;
+
+/// Plan C1: an open's own temporaries, reserved while it runs. The head it sniffs, and the chunk read for it on its way
+/// into the cache; a single-byte decode of that head for the blank check (3 bytes per byte at most); the path's copies.
+pub const OPEN_TEMP: u64 = (5 * CHUNK + 16 * MAX_PATH_BYTES + 64 * 1024) as u64;
 
 pub struct Raw {
     doc: Document,
@@ -25,15 +30,30 @@ impl Raw {
         Self::open_with(path, CACHE_CHUNKS, 1)
     }
 
+    /// Plan C1: reserves the document's floor (its hashes, every byte-bound checkpoint, the cache's floor and its
+    /// metadata) and the open's temporaries first. If the ledger can't hold them, the open fails with `Memory` and
+    /// nothing stays charged.
     fn open_with(path: &Path, cache_chunks: usize, generation: u32) -> Result<Raw, DocError> {
+        let _temp = Reservation::new(OPEN_TEMP).map_err(DocError::Memory)?; // declared first, released last
         let doc = Document::open_with(path, cache_chunks, generation)?;
+        let index = LineIndex::new(doc.len(), &IndexConfig::default(), WINDOWS_1252).map_err(DocError::Memory)?;
         let head = doc.verified(doc.generation(), |store| store.read(0, CHUNK as u64))?;
         let encoding = match sniff(&head, doc.len() <= CHUNK as u64, WINDOWS_1252) {
             Sniffed::Text { encoding, .. } => encoding,
             Sniffed::Binary => return Err(DocError::Binary),
         };
         let blank = doc.len() <= CHUNK as u64 && whitespace_only(&head, encoding);
-        Ok(Raw { doc, index: RwLock::new(LineIndex { encoding, ..LineIndex::default() }), blank })
+        Ok(Raw { doc, index: RwLock::new(LineIndex { encoding, ..index }), blank })
+    }
+
+    /// What this document holds charged, itemized (plan C1, C6).
+    pub fn charges(&self) -> Charges {
+        Charges { checkpoints: self.index.read().unwrap().checkpoints.charged(), ..self.doc.charges() }
+    }
+
+    /// Whether the ledger stopped this document's line checkpoints (plan C1's elastic structures).
+    pub fn lines_stopped(&self) -> bool {
+        self.index.read().unwrap().lines_stopped
     }
 
     /// Ctrl+R (spec §3.1): the same path, opened again one generation later, with a new index. This generation
@@ -103,7 +123,15 @@ impl Raw {
     /// Plan C6: after each block, the index goes on only while `on_progress` says to (close cancels it there) and
     /// the document isn't frozen. A failed read or chunk check freezes the document and ends the index with the
     /// reason; a freeze found by a page (or Reload) ends it at its next block. What's indexed so far stays.
+    ///
+    /// Plan C1: the job's buffers take an index slot, which it waits for. A cancel (`store::cancellable`) ends the wait,
+    /// and the job with it.
     pub fn index(&self, mut on_progress: impl FnMut(Progress) -> bool) -> Result<(), String> {
+        let _slot = match budget::slot(Work::Index, &cancelled) {
+            Ok(slot) => slot,
+            Err(NoSlot::Cancelled) => return Ok(()), // closed before it started: nothing indexed, nothing frozen
+            Err(NoSlot::Budget(e)) => return Err(DocError::Memory(e).to_string()),
+        };
         let store = self.doc.store();
         let built = store.reopen().map_err(crate::store::StoreError::Io).and_then(|file| {
             build(&file, store.len(), IndexConfig::default(), &store.hashes(), &self.index, |p| {

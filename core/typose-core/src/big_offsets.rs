@@ -78,7 +78,7 @@ fn offsets_beyond_4_gib_are_exact_in_every_layer() {
     }
 
     // Line index over the whole file: one giant line of zeros per gap, so only byte-bounded checkpoints help.
-    let shared = RwLock::new(LineIndex::default());
+    let shared = RwLock::new(LineIndex::new(LEN, &IndexConfig::default(), encoding_rs::UTF_8).unwrap());
     let t = Instant::now();
     build(&File::open(&path).unwrap(), LEN, IndexConfig::default(), &store.hashes(), &shared, |_| true).unwrap();
     let ms = t.elapsed().as_millis().max(1);
@@ -89,7 +89,7 @@ fn offsets_beyond_4_gib_are_exact_in_every_layer() {
         idx.checkpoints.len()
     );
     assert_eq!(idx.line_count(), want.len() as u64);
-    assert!(idx.checkpoints.windows(2).all(|p| p[1].offset - p[0].offset <= 1 << 20));
+    assert!(idx.checkpoints.iter().collect::<Vec<_>>().windows(2).all(|p| p[1].offset - p[0].offset <= 1 << 20));
     let starts: Vec<u64> = (0..idx.line_count()).map(|l| locate_line(&store, &idx, l).unwrap().unwrap()).collect();
     assert_eq!(starts, want);
 

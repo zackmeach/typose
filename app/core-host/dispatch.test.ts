@@ -16,6 +16,7 @@ const close = vi.fn()
 const startIndex = vi.fn((_cancel: Cancel, _onProgress: (p: IndexProgress) => void) => {})
 const doc = { generation: 1, size: 3, encoding: 'UTF-8', lines: 0, indexed: false, blank: false, page, piece, reload, close, startIndex } as unknown as Doc
 const openDoc = vi.fn(() => doc)
+const reserveCache = vi.fn((_bytes: number) => true)
 /** Every cancel flag the dispatcher made, in order. */
 let flags: { cancel: ReturnType<typeof vi.fn> }[]
 const cancelFlag = () => {
@@ -23,7 +24,7 @@ const cancelFlag = () => {
   flags.push(flag)
   return flag as unknown as Cancel
 }
-const addon: Addon = { coreVersion: () => '0.0.0', limits, openDoc, cancelFlag }
+const addon: Addon = { coreVersion: () => '0.0.0', limits, openDoc, cancelFlag, reserveCache }
 const range = (field: string) => limits().ranges.find((r) => r.field === field)!
 
 let dispatch: (data: unknown) => Promise<Response>
@@ -33,7 +34,7 @@ beforeEach(async () => {
   flags = []
   dispatch = makeDispatcher(addon, 7, () => {})
   nextId = 1
-  expect(await call('open', { path: 'a.txt', count: 1 })).toMatchObject({ result: { doc: 1 } }) // document 1 exists
+  expect(await call('open', { path: 'a.txt', count: 1, bytes: 0 })).toMatchObject({ result: { doc: 1 } }) // document 1 exists
   vi.clearAllMocks()
 })
 
@@ -42,7 +43,8 @@ const token = { session: 7, doc: 1, gen: 1, line: 0, offset: 1 }
 // Each method's numeric fields, with valid values for the others. `continuation.x` is a token's field.
 const TABLE: [method: string, field: string, base: Record<string, unknown>][] = [
   ['hello', 'protocol', {}],
-  ['open', 'count', { path: 'b.txt' }],
+  ['open', 'count', { path: 'b.txt', bytes: 0 }],
+  ['open', 'bytes', { path: 'b.txt', count: 1 }],
   ['page', 'doc', { lens: 'raw', gen: 1, start: 0, count: 1 }],
   ['page', 'gen', { doc: 1, lens: 'raw', start: 0, count: 1 }],
   ['page', 'start', { doc: 1, lens: 'raw', gen: 1, count: 1 }],
@@ -52,10 +54,14 @@ const TABLE: [method: string, field: string, base: Record<string, unknown>][] = 
   ['page', 'continuation.gen', { doc: 1, lens: 'raw', continuation: token }],
   ['page', 'continuation.line', { doc: 1, lens: 'raw', continuation: token }],
   ['page', 'continuation.offset', { doc: 1, lens: 'raw', continuation: token }],
-  ['reload', 'doc', { count: 1 }],
-  ['reload', 'count', { doc: 1 }],
+  ['reload', 'doc', { count: 1, bytes: 0 }],
+  ['reload', 'count', { doc: 1, bytes: 0 }],
+  ['reload', 'bytes', { doc: 1, count: 1 }],
   ['close', 'doc', {}],
-  ['cancel', 'id', {}]
+  ['cancel', 'id', {}],
+  ['reserve', 'doc', { gen: 1, bytes: 0 }],
+  ['reserve', 'gen', { doc: 1, bytes: 0 }],
+  ['reserve', 'bytes', { doc: 1, gen: 1 }]
 ]
 
 /** `base` with `field` (a token's, for `continuation.x`) set to `value`, or missing for `undefined`. */
@@ -80,10 +86,10 @@ describe('every numeric parameter takes only integers in its range', () => {
           return
         }
         expect(response).toMatchObject({ id: nextId - 1, session: 7, error: { code: 'InvalidParams', field } })
-        for (const spy of [openDoc, page, piece, reload, close, startIndex]) expect(spy).not.toHaveBeenCalled()
+        for (const spy of [openDoc, page, piece, reload, close, startIndex, reserveCache]) expect(spy).not.toHaveBeenCalled()
         // No state change: document 1 is still open, and the next open is document 2.
         expect(await call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 })).toHaveProperty('result')
-        expect(await call('open', { path: 'c.txt', count: 1 })).toMatchObject({ result: { doc: 2 } })
+        expect(await call('open', { path: 'c.txt', count: 1, bytes: 0 })).toMatchObject({ result: { doc: 2 } })
       })
     }
   }
@@ -103,7 +109,7 @@ describe('continuation tokens (plan C3)', () => {
   })
 
   it("from another document are refused, and the addon isn't asked (plan C7: tokens carry their doc)", async () => {
-    expect(await call('open', { path: 'b.txt', count: 1 })).toMatchObject({ result: { doc: 2 } })
+    expect(await call('open', { path: 'b.txt', count: 1, bytes: 0 })).toMatchObject({ result: { doc: 2 } })
     vi.clearAllMocks()
     for (const [doc, tokenDoc] of [
       [2, 1],
@@ -123,14 +129,14 @@ describe('continuation tokens (plan C3)', () => {
 })
 
 it('reload opens the next generation, starts its index and returns its first page', async () => {
-  expect(await call('reload', { doc: 1, count: 5 })).toMatchObject({ result: { doc: 1, gen: 1, blank: false, firstPage: { items: [{ next: { session: 7 } }] } } })
+  expect(await call('reload', { doc: 1, count: 5, bytes: 0 })).toMatchObject({ result: { doc: 1, gen: 1, blank: false, firstPage: { items: [{ next: { session: 7 } }] } } })
   expect(reload).toHaveBeenCalledOnce()
   expect(page).toHaveBeenCalledWith(1, 0, 5, expect.anything())
   expect(startIndex).toHaveBeenCalledOnce()
   reload.mockImplementationOnce(() => {
     throw Object.assign(new Error('io: not found'), { code: 'NotFound' })
   })
-  expect(await call('reload', { doc: 1, count: 5 })).toMatchObject({ error: { code: 'NotFound' } })
+  expect(await call('reload', { doc: 1, count: 5, bytes: 0 })).toMatchObject({ error: { code: 'NotFound' } })
   expect(await call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 })).toHaveProperty('result') // still open
 })
 
@@ -152,7 +158,7 @@ it('methods resolve by own property only, and debugStats is the test-hooks build
 it('a lens other than raw, a bad path and an unknown document are typed errors', async () => {
   expect(await call('page', { doc: 1, lens: 'rows', start: 0, count: 1 })).toMatchObject({ error: { code: 'InvalidParams', field: 'lens' } })
   for (const path of ['', 'a\0b', 7, null, 'x'.repeat(32_768)])
-    expect(await call('open', { path, count: 1 })).toMatchObject({ error: { code: 'InvalidParams', field: 'path' } })
+    expect(await call('open', { path, count: 1, bytes: 0 })).toMatchObject({ error: { code: 'InvalidParams', field: 'path' } })
   expect(await call('page', { doc: 9, lens: 'raw', gen: 1, start: 0, count: 1 })).toMatchObject({ error: { code: 'NoDocument' } })
   expect(await call('hello', { protocol: 2 })).toMatchObject({ error: { code: 'Unsupported' } })
   expect(openDoc).not.toHaveBeenCalled()
@@ -162,11 +168,119 @@ it('an addon error keeps its typed code, and anything else is Internal', async (
   openDoc.mockImplementationOnce(() => {
     throw Object.assign(new Error('refused: a device path'), { code: 'Refused' })
   })
-  expect(await call('open', { path: '\\\\.\\NUL', count: 1 })).toMatchObject({ error: { code: 'Refused', message: 'refused: a device path' } })
+  expect(await call('open', { path: '\\\\.\\NUL', count: 1, bytes: 0 })).toMatchObject({ error: { code: 'Refused', message: 'refused: a device path' } })
+  // Plan C1: the ledger's refusal reaches the renderer as `Memory`, which its card shows (plan §7 proposal 1).
+  openDoc.mockImplementationOnce(() => {
+    throw Object.assign(new Error('the memory budget is full: 4523288 bytes asked, 12 free'), { code: 'Memory' })
+  })
+  expect(await call('open', { path: 'big.txt', count: 1, bytes: 0 })).toMatchObject({ error: { code: 'Memory' } })
+  expect(await call('open', { path: 'c.txt', count: 1, bytes: 0 })).toMatchObject({ result: { doc: 2 } }) // the refusal took no id
   openDoc.mockImplementationOnce(() => {
     throw Object.assign(new Error('boom'), { code: 'GenericFailure' })
   })
-  expect(await call('open', { path: 'x', count: 1 })).toMatchObject({ error: { code: 'Internal' } })
+  expect(await call('open', { path: 'x', count: 1, bytes: 0 })).toMatchObject({ error: { code: 'Internal' } })
+})
+
+describe("the renderer cache's reservation (plan C1)", () => {
+  const reserved = () => reserveCache.mock.calls.map(([bytes]) => bytes)
+
+  it("an open takes its view's cap up front; refused, the open is Memory and nothing changes", async () => {
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 500 })).toMatchObject({ result: true })
+    reserveCache.mockReturnValueOnce(false)
+    expect(await call('open', { path: 'b.txt', count: 1, bytes: 900 })).toMatchObject({ error: { code: 'Memory' } })
+    expect(openDoc).not.toHaveBeenCalled()
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 400 })).toMatchObject({ result: true }) // still document 1's lens's
+    expect(await call('open', { path: 'b.txt', count: 1, bytes: 100 })).toMatchObject({ result: { doc: 2, reserved: 400 } }) // the larger
+    expect(reserved()).toEqual([500, 900, 400, 400])
+  })
+
+  it('is held for one lens: the replaced lens is refused, Reload keeps it for the next generation, close releases it', async () => {
+    expect(await call('open', { path: 'b.txt', count: 1, bytes: 100 })).toMatchObject({ result: { doc: 2, reserved: 100 } })
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 0 })).toMatchObject({ result: false }) // document 1's lens is going
+    expect(await call('reserve', { doc: 2, gen: 1, bytes: 300 })).toMatchObject({ result: true })
+    expect(await call('reload', { doc: 2, count: 1, bytes: 100 })).toMatchObject({ result: { doc: 2, reserved: 300 } })
+    expect(await call('close', { doc: 1 })).toMatchObject({ result: true }) // not the lens's document: nothing released
+    expect(await call('close', { doc: 2 })).toMatchObject({ result: true })
+    expect(await call('reserve', { doc: 2, gen: 1, bytes: 300 })).toMatchObject({ result: false })
+    expect(reserved()).toEqual([100, 300, 300, 0])
+  })
+
+  it('an open that fails after taking it releases it, unless a newer one has taken it since', async () => {
+    openDoc.mockImplementationOnce(() => {
+      throw Object.assign(new Error('io: not found'), { code: 'NotFound' })
+    })
+    expect(await call('open', { path: 'gone.txt', count: 1, bytes: 100 })).toMatchObject({ error: { code: 'NotFound' } })
+    const read = pendingRead()
+    const first = dispatch({ id: 80, method: 'open', params: { path: 'b.txt', count: 1, bytes: 200 } }) // its first page waits
+    expect(await call('open', { path: 'c.txt', count: 1, bytes: 300 })).toMatchObject({ result: { doc: 2, reserved: 300 } })
+    read.fail(Object.assign(new Error('frozen: changed while reading'), { code: 'Frozen' }))
+    expect(await first).toMatchObject({ error: { code: 'Frozen' } })
+    expect(await call('reserve', { doc: 2, gen: 1, bytes: 300 })).toMatchObject({ result: true }) // still document 2's lens's
+    expect(reserved()).toEqual([100, 0, 200, 300, 300])
+  })
+
+  it("a Reload that fails gives it back to the lens it would have replaced, with that lens's bytes (Z34: Raw stays)", async () => {
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 300 })).toMatchObject({ result: true })
+    reload.mockImplementationOnce(() => {
+      throw Object.assign(new Error('the memory budget is full: 4523288 bytes asked, 12 free'), { code: 'Memory' })
+    })
+    expect(await call('reload', { doc: 1, count: 1, bytes: 500 })).toMatchObject({ error: { code: 'Memory' } })
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 200 })).toMatchObject({ result: true }) // document 1's lens's again
+    reserveCache.mockReturnValueOnce(false) // refused up front: nothing changes
+    expect(await call('reload', { doc: 1, count: 1, bytes: 900 })).toMatchObject({ error: { code: 'Memory' } })
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 100 })).toMatchObject({ result: true })
+    expect(reserved()).toEqual([300, 500, 300, 200, 900, 100])
+  })
+
+  /** Two Reloads of `id` whose first pages wait: the first ends Stale, then the second fails (`Frozen`, say). */
+  async function overlapping(id: number): Promise<void> {
+    const d = doc as unknown as { generation: number }
+    reload.mockImplementation(() => void d.generation++)
+    try {
+      const [first, second] = [pendingRead(), pendingRead()]
+      const r1 = dispatch({ id: 70, method: 'reload', params: { doc: id, count: 1, bytes: 100 } })
+      const r2 = dispatch({ id: 71, method: 'reload', params: { doc: id, count: 1, bytes: 100 } })
+      first.end({ items: [item()] })
+      expect(await r1).toMatchObject({ id: 70, error: { code: 'Stale' } })
+      second.fail(Object.assign(new Error('frozen: changed while reading'), { code: 'Frozen' }))
+      expect(await r2).toMatchObject({ id: 71, error: { code: 'Frozen' } })
+    } finally {
+      d.generation = 1
+      reload.mockImplementation(() => {})
+    }
+  }
+
+  it("overlapping Reloads that end Stale, then failed, give it back to the document's lens, not to a finished request", async () => {
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 300 })).toMatchObject({ result: true })
+    await overlapping(1)
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 200 })).toMatchObject({ result: true })
+    expect(await call('close', { doc: 1 })).toMatchObject({ result: true })
+    expect(reserved()).toEqual([300, 300, 300, 200, 0])
+  })
+
+  it('…the same with a second document open, its read keeping theirs waiting (G1)', async () => {
+    dispatch = makeDispatcher(addon, 7, () => {})
+    expect(await call('open', { path: 'b.txt', count: 1, bytes: 0 })).toMatchObject({ result: { doc: 1 } }) // the second
+    expect(await call('open', { path: 'a.txt', count: 1, bytes: 300 })).toMatchObject({ result: { doc: 2 } }) // the shown one
+    const other = pendingRead()
+    const reading = dispatch({ id: 60, method: 'page', params: { doc: 1, lens: 'raw', gen: 1, start: 9, count: 1 } })
+    await overlapping(2)
+    expect(await call('reserve', { doc: 2, gen: 1, bytes: 200 })).toMatchObject({ result: true })
+    expect(await call('close', { doc: 2 })).toMatchObject({ result: true })
+    other.end({ items: [item()] })
+    expect(await reading).toHaveProperty('result')
+    expect(reserved()).toEqual([0, 300, 300, 300, 200, 0])
+  })
+
+  it('a Reload whose document closed meanwhile releases it', async () => {
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 300 })).toMatchObject({ result: true })
+    const read = pendingRead()
+    const reloading = dispatch({ id: 90, method: 'reload', params: { doc: 1, count: 1, bytes: 100 } }) // its first page waits
+    expect(await call('close', { doc: 1 })).toMatchObject({ result: true })
+    read.end({ items: [item()] })
+    expect(await reloading).toMatchObject({ error: { code: 'Stale' } })
+    expect(reserved()).toEqual([300, 300, 0])
+  })
 })
 
 /** A page read that runs until the test ends it, with `end` or `fail`. */
@@ -192,7 +306,7 @@ describe('cancels (plan C5, C6)', () => {
 
   it("close cancels the document's index job and its reads, closes it, and forgets it", async () => {
     const job = flags.length // an open makes its first page's flag, then its index job's
-    expect(await call('open', { path: 'b.txt', count: 1 })).toMatchObject({ result: { doc: 2 } })
+    expect(await call('open', { path: 'b.txt', count: 1, bytes: 0 })).toMatchObject({ result: { doc: 2 } })
     const [ownJob, otherJob] = [flags[job + 1], flags[job - 1]] // doc 2's (after its first page's), and doc 1's
     void pendingRead()
     void dispatch({ id: 50, method: 'page', params: { doc: 2, lens: 'raw', gen: 1, start: 9, count: 1 } })
@@ -226,15 +340,15 @@ describe('cancels (plan C5, C6)', () => {
     page.mockImplementationOnce(async () => {
       throw Object.assign(new Error('frozen: changed while reading'), { code: 'Frozen' })
     })
-    expect(await call('open', { path: 'b.txt', count: 1 })).toMatchObject({ error: { code: 'Frozen' } })
+    expect(await call('open', { path: 'b.txt', count: 1, bytes: 0 })).toMatchObject({ error: { code: 'Frozen' } })
     expect(close).toHaveBeenCalledOnce()
-    expect(await call('open', { path: 'c.txt', count: 1 })).toMatchObject({ result: { doc: 2 } })
+    expect(await call('open', { path: 'c.txt', count: 1, bytes: 0 })).toMatchObject({ result: { doc: 2 } })
   })
 })
 
 /** Reloads document 1 and returns its new index job's progress callback. */
 async function reopen(): Promise<{ onProgress: (p: IndexProgress) => void }> {
-  await call('reload', { doc: 1, count: 1 })
+  await call('reload', { doc: 1, count: 1, bytes: 0 })
   return { onProgress: startIndex.mock.calls.at(-1)![1] }
 }
 
@@ -244,8 +358,8 @@ it('a Reload that another overtakes starts no index job, and close then cancels 
   try {
     let release = () => {}
     page.mockImplementationOnce(() => new Promise<Page>((ok) => (release = () => ok({ items: [item()] } as unknown as Page))))
-    const first = dispatch({ id: 70, method: 'reload', params: { doc: 1, count: 1 } }) // generation 2; its first page waits
-    expect(await call('reload', { doc: 1, count: 1 })).toMatchObject({ result: { gen: 3 } })
+    const first = dispatch({ id: 70, method: 'reload', params: { doc: 1, count: 1, bytes: 0 } }) // generation 2; its first page waits
+    expect(await call('reload', { doc: 1, count: 1, bytes: 0 })).toMatchObject({ result: { gen: 3 } })
     release() // the first page of generation 2 arrives after generation 3 began
     expect(await first).toMatchObject({ id: 70, error: { code: 'Stale' } })
     expect(startIndex).toHaveBeenCalledOnce() // generation 3's, alone
