@@ -187,8 +187,9 @@ const fn slot_bytes(work: Work) -> u64 {
 }
 
 /// Plan C1's (c) and (d): the core host's JavaScript page objects and their structured-clone copies, until V8 collects
-/// them. Neither is released when a page is answered, so they're held for the process's life. Measured (plan §7, PR 6):
-/// at most 10.3 MiB above the core host's post-GC heap over 400 pages of the densest maps, answered as fast as they came.
+/// them. Neither is released when a page is answered, so they're held for the process's life. Measured (plan §7, PR 6)
+/// as the core host's `heapUsed + external` (`process.memoryUsage()`), not its private bytes: at most 10.3 MiB above
+/// the post-GC value over 400 pages of the densest maps, answered as fast as they came.
 pub const JS_PAGES: u64 = 32 << 20;
 
 pub const fn pool_bytes() -> u64 {

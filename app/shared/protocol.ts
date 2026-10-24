@@ -71,27 +71,31 @@ export interface Opened {
   /** Brief §7.9's empty file: 0 bytes, or only whitespace. */
   blank: boolean
   firstPage: Page
+  /** Plan C1: what the ledger holds for this lens's page cache, at least the `bytes` the open asked for. */
+  reserved: number
 }
 
 export interface Methods {
   hello: { params: { protocol: number }; result: Hello }
-  open: { params: { path: string; count: number }; result: Opened }
+  /** `bytes`: the lens's viewport-only cache cap, reserved with the document's floor (plan C1); refused, `Memory`. */
+  open: { params: { path: string; count: number; bytes: number }; result: Opened }
   /** A window of lines of generation `gen`, or the one piece a continuation token names (plan C3). Cancellable. */
   page: {
     params: { doc: number; lens: 'raw'; gen: number; start: number; count: number } | { doc: number; lens: 'raw'; continuation: Token }
     result: Page
   }
-  /** Ctrl+R (spec §3.1): the document's next generation, opened again, with its first page. */
-  reload: { params: { doc: number; count: number }; result: Opened }
+  /** Ctrl+R (spec §3.1): the document's next generation, opened again, with its first page. `bytes` as for `open`. */
+  reload: { params: { doc: number; count: number; bytes: number }; result: Opened }
   /** Plan C6: cancels the document's index and page reads, and releases it. */
   close: { params: { doc: number }; result: boolean }
   /** Plan C5: cancels request `id`'s page read. True if it was still running: it then rejects with `Cancelled`. */
   cancel: { params: { id: number }; result: boolean }
-  /** Plan C1: sets the ledger's reservation for the renderer's page cache to `bytes`. False when the ledger refuses
-   *  the growth, which leaves the reservation as it was. */
-  reserve: { params: { bytes: number }; result: boolean }
+  /** Plan C1: sets the ledger's reservation for the page cache of the lens showing generation `gen` of `doc` to
+   *  `bytes`. False when the ledger refuses the growth, which leaves the reservation as it was, and for a lens an open
+   *  or Reload has replaced. */
+  reserve: { params: { doc: number; gen: number; bytes: number }; result: boolean }
   /** The test-hooks build only (plan m8): what's alive in the core host. Elsewhere it's `UnknownMethod`. */
-  debugStats: { params: { gc?: boolean; resetHigh?: boolean }; result: DebugStats }
+  debugStats: { params: { gc?: boolean; resetHigh?: boolean; limit?: number }; result: DebugStats }
 }
 
 /** The test-hooks build's debug stats (plan C5, C6): the core's live jobs, tasks and file handles, the documents the
@@ -111,7 +115,7 @@ export interface DebugStats {
   /** Each open document's charges in bytes, itemized, by document id. */
   charges: Record<number, Charges>
   /** The core host's `process.memoryUsage()`, after a forced GC when the call asked for one (`{ gc: true }`). With
-   *  `{ resetHigh: true }`, the ledger's high-water mark starts again from what's charged. */
+   *  `{ resetHigh: true }`, the ledger's high-water mark starts again from what's charged; `{ limit }` sets its limit. */
   heap: { rss: number; heapUsed: number; external: number; arrayBuffers: number }
 }
 

@@ -57,7 +57,9 @@ pub const MAX_PATH_BYTES: usize = 3 * 32_767;
 ///   3 of 16 bytes per 4 bytes), and the wire map napi makes from it, 6; with the item arrays, Rust's and napi's;
 /// - the identity check's copies of the path (`Document::verified`), and the decoder's scratch.
 ///
-/// The counting-allocator test (`tests/ledger.rs`) checks that no page read's live memory ever passes it.
+/// The counting-allocator test (`tests/ledger.rs`) checks a sum, at every allocation: the heap's live bytes past its
+/// baseline, page reads' included, never pass what the ledger has charged, less the pool's free slots
+/// (`budget::in_use`). It doesn't attribute memory to one read, so it doesn't check this bound on its own.
 pub const PAGE_TEMP: usize = {
     let reads = (LINE_SHOWN + LOOKAHEAD) + (PIECE_BYTES + LOOKAHEAD) + 2 * crate::store::CHUNK;
     let source = PAGE_BYTES + PIECE_BYTES + (MAX_ELEMENT - 1) * (MAX_ITEMS + 1);

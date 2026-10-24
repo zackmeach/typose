@@ -1,14 +1,18 @@
-import type { PageItem } from '../../shared/protocol'
+import type { Limits, PageItem } from '../../shared/protocol'
 
 /** What an item costs in the renderer (plan C1): its text at 2 bytes per UTF-16 unit, plus its map's bytes. */
 export const charge = (item: PageItem): number => 2 * item.text.length + item.map.points.byteLength
 
 /**
  * What a mounted item costs besides, per UTF-16 unit: the DOM's copy of its text, its layout and paint, and the garbage
- * scrolling leaves until a GC. Measured on 64 KiB rows at 2,160 px (plan §7, PR 6): 64–66 bytes at the peak for CJK and
- * ASCII, and less for emoji, Arabic and Devanagari; 80 leaves a fifth to spare.
+ * scrolling leaves until a GC. Measured on 64 KiB rows at 2,160 px (plan §7, PR 6), at the peak: 63.7 bytes for CJK,
+ * 64.5 for ASCII and 49.1 for emoji; 80 leaves a fifth to spare there. It doesn't bound Arabic or Devanagari (230–710
+ * bytes, PR 6's review), nor ASCII in a 400 px window (117–154 bytes in all): PR 6b bounds a mounted row's layout.
  */
 export const MOUNTED_PER_UNIT = 80
+
+/** The most one mounted row costs (plan C1): its item, a UTF-16 unit per source byte at most (C2), and its layout. */
+export const rowCost = (l: Pick<Limits, 'pieceBytes' | 'mapMax'>): number => 2 * l.pieceBytes + l.mapMax + MOUNTED_PER_UNIT * l.pieceBytes
 
 /** A mounted item's charge besides its cached one. */
 const mountedCharge = (item: PageItem): number => MOUNTED_PER_UNIT * item.text.length
@@ -32,11 +36,8 @@ export class PageCache {
   private mountedCharge = 0
   cap = ELASTIC
 
-  /** `maxItemCharge` and `maxItemUnits` bound one item (plan C2): its charge, and its UTF-16 units. */
-  constructor(
-    private readonly maxItemCharge: number,
-    private readonly maxItemUnits: number
-  ) {}
+  /** `rowCost`: the most one mounted row costs, `rowCost` of the core's limits. */
+  constructor(private readonly rowCost: number) {}
 
   get(key: Key): PageItem | undefined {
     return this.items.get(key)
@@ -53,18 +54,13 @@ export class PageCache {
 
   /** The cap for a mounted window of `rows` rows (the C1 formula), with its elastic part or without. */
   capFor(rows: number, elastic = true): number {
-    return rows * (this.maxItemCharge + MOUNTED_PER_UNIT * this.maxItemUnits) + (elastic ? ELASTIC : 0)
+    return rows * this.rowCost + (elastic ? ELASTIC : 0)
   }
 
   /** Sets the cap, then evicts down to it. */
   setCap(cap: number): void {
     this.cap = cap
     this.evict()
-  }
-
-  /** Sizes the cap for a mounted window of `rows` rows, then evicts down to it. */
-  setMountedRows(rows: number): void {
-    this.setCap(this.capFor(rows))
   }
 
   /** The keys of the items now mounted, one per mounted row. */

@@ -49,7 +49,7 @@ process.parentPort.once('message', (e) => {
     cancelFlag: () => new addon.Cancel(),
     reserveCache: addon.reserveCache
   }
-  const hooks = __TEST_HOOKS__ ? { debugStats: addon.debugStats, docCharges: addon.docCharges, gc: exposeGc(), resetHigh: addon.resetHigh } : {}
+  const hooks = __TEST_HOOKS__ ? { debugStats: addon.debugStats, docCharges: addon.docCharges, gc: exposeGc(), resetHigh: addon.resetHigh, setLimit: addon.setLimit } : {}
   const dispatch = makeDispatcher({ ...core, ...hooks }, session, (event) => port.postMessage(event))
   port.on('message', ({ data }) => void dispatch(data).then((response) => port.postMessage(response)))
   port.start()

@@ -14,6 +14,7 @@ const opened = (over: Partial<Opened> = {}): Opened => ({
   indexed: false,
   blank: false,
   firstPage: { items: [] },
+  reserved: 0,
   ...over
 })
 const open = (over: Partial<Extract<Card, { kind: 'open' }>> = {}): Card => ({

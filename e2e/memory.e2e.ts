@@ -1,39 +1,61 @@
-// Plan C1 and PR 6's memory acceptance, on the test-hooks build: the renderer cache's reservation, the deterministic
-// multi-document exhaustion test, the memory metrics, and the refusal on open. Memory is read per process
-// (`memory.ts`), every metric on its own.
+// Plan C1 and PR 6's memory acceptance, on the test-hooks build: the renderer cache's reservation, under a budget that
+// holds only the viewport too, the deterministic multi-document exhaustion test, the memory metrics, and the refusal on
+// open. Memory is read per process (`memory.ts`), every metric on its own.
 import { type Page, expect } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
-import { rmSync, truncateSync } from 'node:fs'
+import { rmSync, statSync, truncateSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { MOUNTED_PER_UNIT } from '../app/renderer/lenses/page-cache'
 import type { Opened, Page as CorePage } from '../app/shared/protocol'
-import { FIXTURES, type TestHooks, debugStats, finish, fixture, launch, sparseFixture, test, visibleRows, waitIndexed, waitOpen } from './app'
+import { FIXTURES, type Launched, type TestHooks, debugStats, finish, fixture, launch, sparseFixture, test, visibleRows, waitIndexed, waitOpen } from './app'
 import { mib, processMemory, summed } from './memory'
 
 type CacheStats = { charged: number; cap: number; reserved: number }
 type Hooked = { typoseTest: TestHooks & { client: { cache: (() => CacheStats) | null } } }
 const cacheStats = (win: Page) => win.evaluate(() => (window as unknown as Hooked).typoseTest.client.cache?.() ?? null)
 
-test("10 viewports of 64 KiB CJK lines in a 2160 px window raise the renderer's private bytes by ≤ its cache's reservation + 32 MiB", async () => {
-  test.setTimeout(5 * 60_000)
+/** The most a mounted row costs (plan C1's formula, with C2's bounds): a whole 64 KiB piece and its layout. */
+const ROW = 2 * 65_536 + 393_224 + MOUNTED_PER_UNIT * 65_536
+/** 400 lines of 70,000 ASCII bytes: each row shows a first piece of 65,536 units, the most a row holds. */
+const ascii64k = () => fixture('ascii-64k.txt', Array.from({ length: 400 }, () => 'a'.repeat(70_000)).join('\n') + '\n')
+
+/** Sets the window's size; returns its content size and the screen's work area, which may hold it smaller. */
+const resize = (l: Launched, width: number, height: number) =>
+  l.app.evaluate(
+    ({ BrowserWindow, screen }, [width, height]) => {
+      const w = BrowserWindow.getAllWindows()[0]
+      w.setSize(width, height)
+      return { content: w.getContentSize(), screen: screen.getPrimaryDisplay().workAreaSize }
+    },
+    [width, height] as const
+  )
+
+const GATES: { title: string; height: number; units: number; file: () => string; fails?: string }[] = [
   // 1,300 lines of 65,535 bytes: 21,845 three-byte characters each, so every line is one whole piece.
-  const path = fixture('cjk-64k.txt', Array.from({ length: 1300 }, () => '語'.repeat(21_845)).join('\n') + '\n')
+  { title: '64 KiB CJK lines in a 2160 px window', height: 2160, units: 21_845, file: () => fixture('cjk-64k.txt', Array.from({ length: 1300 }, () => '語'.repeat(21_845)).join('\n') + '\n') },
+  // A unit a byte, so a row holds 65,536 units: the most C2 allows. A small window keeps CI's layout time down. Expected
+  // to fail: on Windows 11 it rose 359–471 MiB against 317.5 MiB in 8 runs, and 368–499 MiB in 3 on PR 6's first version.
+  { title: '64 KiB ASCII rows in a 400 px window', height: 400, units: 65_536, file: ascii64k, fails: 'PR 6b: a mounted row costs more than MOUNTED_PER_UNIT' }
+]
+
+for (const g of GATES) test(`10 viewports of ${g.title} raise the renderer's private bytes by ≤ its cache's reservation + 32 MiB`, () => rendererGate(g))
+
+async function rendererGate(g: (typeof GATES)[number]): Promise<void> {
+  test.setTimeout(5 * 60_000)
+  test.fail(g.fails !== undefined, g.fails)
+  const path = g.file()
   const l = await launch({ hooks: true, file: path })
   try {
     const { win } = l
     // The tallest the rig allows, recorded: the OS may hold a window to its screen.
-    const size = await l.app.evaluate(({ BrowserWindow, screen }) => {
-      const w = BrowserWindow.getAllWindows()[0]
-      w.setSize(1280, 2160)
-      return { content: w.getContentSize(), screen: screen.getPrimaryDisplay().workAreaSize }
-    })
+    const size = await resize(l, 1280, g.height)
     await waitOpen(win)
     await waitIndexed(win)
     const host = await win.evaluate(() => document.querySelector('.raw-host')!.clientHeight)
     console.log(`window content ${size.content.join('×')} px (screen work area ${size.screen.width}×${size.screen.height}); Raw ${host} px tall`)
     // The cap for a viewport and one more each way (plan C1), once the lens has reserved it for this height.
     const rows = 3 * Math.ceil(host / 20) + 1
-    const cap = rows * (2 * 65_536 + 393_224 + MOUNTED_PER_UNIT * 65_536) + (16 << 20)
+    const cap = rows * ROW + (16 << 20)
     await expect.poll(async () => (await cacheStats(win))?.reserved, { timeout: 10_000 }).toBe(cap)
     expect((await debugStats(win)).ledger.rendererCache).toBe(cap) // the core holds it in the ledger
     const cdp = await win.context().newCDPSession(win)
@@ -44,8 +66,8 @@ test("10 viewports of 64 KiB CJK lines in a 2160 px window raise the renderer's 
     await win.locator('.vl-scroller').focus()
     for (let i = 0; i < 10; i++) {
       await win.keyboard.press('PageDown')
-      // Each 64 KiB CJK row is a long run of text to lay out: a viewport of them takes seconds to fill here.
-      await expect.poll(async () => (await visibleRows(win)).filter((r) => r.text.length !== 21_845).length, { timeout: 60_000 }).toBe(0)
+      // Each 64 KiB row is a long run of text to lay out: a viewport of them takes seconds to fill here.
+      await expect.poll(async () => (await visibleRows(win)).filter((r) => r.text.length !== g.units).length, { timeout: 60_000 }).toBe(0)
       const s = (await cacheStats(win))!
       expect(s.charged, JSON.stringify(s)).toBeLessThanOrEqual(s.cap)
       peak = Math.max(peak, (await renderer()).private ?? 0)
@@ -60,6 +82,79 @@ test("10 viewports of 64 KiB CJK lines in a 2160 px window raise the renderer's 
     expect(l.pageErrors).toEqual([])
   } finally {
     await finish(l)
+    rmSync(path, { force: true })
+  }
+}
+
+/**
+ * Waits for Raw to hold the viewport-only reservation for its height and show the viewport's rows, then checks it
+ * mounts the viewport and no overscan, and its cache is charged within the reservation, which the core holds.
+ */
+async function viewportOnly(win: Page, step: string): Promise<void> {
+  const view = () =>
+    win.evaluate(() => ({
+      host: document.querySelector('.raw-host')!.clientHeight,
+      viewport: document.querySelector('.vl-scroller')!.clientHeight,
+      mounted: document.querySelectorAll('.vl-row').length
+    }))
+  await expect.poll(async () => (await cacheStats(win))?.reserved === (Math.ceil((await view()).host / 20) + 1) * ROW, { timeout: 30_000 }).toBe(true)
+  const shown = async () => {
+    const rows = await visibleRows(win)
+    return rows.length >= Math.floor((await view()).viewport / 20) && rows.every((r) => r.text.length === 65_536)
+  }
+  await expect.poll(shown, { timeout: 60_000 }).toBe(true)
+  const { host, viewport, mounted } = await view()
+  const s = (await cacheStats(win))!
+  console.log(`${step}: Raw ${host} px (${viewport} px of rows), ${mounted} rows mounted; cache charged ${mib(s.charged)} of ${mib(s.reserved)} reserved`)
+  expect(mounted, step).toBeLessThanOrEqual(Math.ceil(viewport / 20) + 1) // the viewport's rows, no overscan
+  expect(s.charged, step).toBeLessThanOrEqual(s.reserved)
+  expect((await debugStats(win)).ledger.rendererCache, step).toBe(s.reserved)
+}
+
+/**
+ * Plan C1's refusals, under a budget that holds the pool, the document and the open's viewport-only floor, with room for
+ * the document's cache to grow, and not the overscan: Raw mounts only the viewport and is charged within its
+ * reservation, after the open, a Reload, and a resize down and back up. Once the ledger has room, the next resize, even
+ * one that doesn't change the row count, reserves the overscan again.
+ */
+test('under a budget that holds only the viewport, Raw mounts only the viewport, within its reservation, after open, Reload and resize', async () => {
+  test.setTimeout(5 * 60_000)
+  const path = ascii64k()
+  try {
+    // Calibration, without the override: the pool, the document's charges once indexed, and the window's height.
+    const probe = await launch({ hooks: true, file: path })
+    await waitOpen(probe.win)
+    await waitIndexed(probe.win)
+    const hello = await core<{ limits: { openTemp: number } }>(probe.win, 'hello', { protocol: 1 })
+    if (!('ok' in hello)) throw new Error(`hello: ${hello.code}`)
+    const { ledger, charges } = await debugStats(probe.win)
+    const inner = await probe.win.evaluate(() => window.innerHeight)
+    await finish(probe)
+    const floor = (Math.ceil(inner / 20) + 1) * ROW // the open's viewport-only cap, at the window's height
+    const budget = ledger.pool + charges[1].total + hello.ok.limits.openTemp + floor + statSync(path).size + ROW
+    console.log(`budget ${mib(budget)}: pool ${mib(ledger.pool)}, document ${mib(charges[1].total)}, view ${mib(floor)} (${inner} px of window)`)
+    const l = await launch({ hooks: true, file: path, env: { TYPOSE_TEST_BUDGET: String(budget) } })
+    const { win } = l
+    await waitOpen(win)
+    await viewportOnly(win, 'open')
+    await win.locator('.vl-scroller').focus()
+    await win.keyboard.press('F5')
+    await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '2')
+    await viewportOnly(win, 'Reload')
+    console.log(`window ${(await resize(l, 1280, 600)).content.join('×')} px`)
+    await viewportOnly(win, 'resized down')
+    console.log(`window ${(await resize(l, 1280, 800)).content.join('×')} px`)
+    await viewportOnly(win, 'resized up')
+    // Room again: a resize that keeps the row count reserves the overscan and the elastic part, and mounts them.
+    await debugStats(win, { limit: 2 * budget })
+    await resize(l, 1200, 800)
+    const host = await win.evaluate(() => document.querySelector('.raw-host')!.clientHeight)
+    const full = (3 * Math.ceil(host / 20) + 1) * ROW + (16 << 20)
+    await expect.poll(async () => (await cacheStats(win))?.reserved, { timeout: 30_000 }).toBe(full)
+    await expect.poll(() => win.evaluate(() => document.querySelectorAll('.vl-row').length)).toBeGreaterThan(Math.ceil(host / 20) + 1)
+    expect(l.pageErrors).toEqual([])
+    await finish(l)
+  } finally {
     rmSync(path, { force: true })
   }
 })
@@ -107,7 +202,7 @@ async function exhaust(docs: string[], budget: number | null, cycles: number): P
   const hello = await core<{ limits: { openTemp: number } }>(win, 'hello', { protocol: 1 })
   if (!('ok' in hello)) throw new Error(`hello: ${hello.code}`)
   const open = async (path: string) => {
-    const opened = await core<Opened>(win, 'open', { path, count: 64 })
+    const opened = await core<Opened>(win, 'open', { path, count: 64, bytes: 0 }) // no lens: no view to reserve
     return 'ok' in opened ? opened.ok : opened.code
   }
   const jobs = (n: number) => expect.poll(async () => (await debugStats(win)).jobs, { intervals: [5], timeout: 30_000 }).toBe(n)
@@ -250,16 +345,20 @@ for (const size of ['1 GiB', '10 GiB'] as const) {
 
 /**
  * Plan C1: an open the ledger can't hold is refused with `Memory`, and the card says so (plan §7 proposal 1, PR 4's
- * card). The budget override holds the pool and 1 MiB more, so a 10 GiB document's floor (≈ 4.31 MiB) doesn't fit.
+ * card). The budget override holds the pool and 1 MiB more, so neither a 10 GiB document's floor (≈ 4.31 MiB) nor its
+ * view's fits; or 40 MiB more, so the document's would, and only the view's floor, the viewport-only cache cap, doesn't.
  */
-test("an open past the budget shows the memory-refused card, and the ledger doesn't change", async () => {
+for (const over of [1, 40])
+  test(`an open with the pool and ${over} MiB as its budget shows the memory-refused card, and the ledger doesn't change`, () => refusedOpen(over))
+
+async function refusedOpen(over: number): Promise<void> {
   const probe = await launch({ hooks: true })
   await expect(probe.win.locator('.open-button')).toHaveText('Open file…')
   const pool = (await debugStats(probe.win)).ledger.pool
   await finish(probe)
   const path = sparseFixture('memory-refused.txt', 10 * GIB, HEAD)
   try {
-    const l = await launch({ hooks: true, file: path, env: { TYPOSE_TEST_BUDGET: String(pool + (1 << 20)) } })
+    const l = await launch({ hooks: true, file: path, env: { TYPOSE_TEST_BUDGET: String(pool + over * (1 << 20)) } })
     await expect(l.win.locator('.card-state p')).toHaveText("Can't open memory-refused.txt · Typose's memory budget is full. Close a file, then Retry.")
     await expect(l.win.locator('.card-state .open-button')).toHaveText(['Retry', 'Close'])
     expect(await debugStats(l.win)).toMatchObject({ docs: 0, handles: 0, jobs: 0, ledger: { used: pool, rendererCache: 0 } })
@@ -268,4 +367,4 @@ test("an open past the budget shows the memory-refused card, and the ledger does
   } finally {
     rmSync(path, { force: true })
   }
-})
+}

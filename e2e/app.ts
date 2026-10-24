@@ -180,7 +180,7 @@ export interface TestHooks {
 }
 
 /** The core host's debug stats, on the test-hooks build (plan C5, C6). */
-export const debugStats = (win: Page, params: { gc?: boolean; resetHigh?: boolean } = {}): Promise<DebugStats> =>
+export const debugStats = (win: Page, params: { gc?: boolean; resetHigh?: boolean; limit?: number } = {}): Promise<DebugStats> =>
   win.evaluate((p) => (window as unknown as { typoseTest: TestHooks }).typoseTest.core.call('debugStats', p) as Promise<DebugStats>, params)
 
 /** The rows on screen, top to bottom: their line numbers (from the gutter) and their text. */
