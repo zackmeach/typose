@@ -77,7 +77,7 @@ test('during a pending page: it rejects with CoreGone within 1 s, and nothing go
   await waitOpen(win)
   await waitIndexed(win)
   await win.locator('.vl-scroller').focus()
-  await win.keyboard.press('Control+End') // the last lines are in chunk 6, not read yet
+  await win.keyboard.press('Control+End') // the last lines are in chunk 11 of the 11.9 MB, not read yet
   await expect.poll(async () => (await debugStats(win)).tasks).toBe(1)
   const death = killCore(l)
   expect(await diedWithin1s(l, death)).toBeGreaterThanOrEqual(1)
