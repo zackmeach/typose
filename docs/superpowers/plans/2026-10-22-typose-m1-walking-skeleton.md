@@ -263,11 +263,13 @@ The document keeps its explicitly charged state (its floor, checkpoints, hashes,
 **Frames (from a Chromium trace taken over CDP's `Tracing` domain on the fused build; amended in PR 3, plan §7):**
 - **Demanded frames:** a frame is demanded from an input (a wheel, a key, a scrollbar drag, a jump, an open, a click that expands a long line) until the view settles, meaning the scroll has stopped and the target rows have painted. Idle time isn't demanded, so an idle tail is never a gap.
   - Concretely: an input demands frames from its own timestamp until the first presented frame after the renderer marks its target rows painted. Overlapping demands merge, so a continuous gesture is one demanded interval.
+  - A scroll event the list caused itself isn't an input (PR 9). That covers a wheel or key in logical mode, whose own mark is the input, and the position re-applied as the index grows, which no one asked for.
   - An input that changes nothing on screen (its painted mark repeats the previous one) owes no frame. It's timed to its mark and reported apart (`unanswered`), outside the latency figure, and it's a stall if its mark comes over 50 ms after the input.
 - **Presented frames:** the renderer's `PipelineReporter` slices whose state is `STATE_PRESENTED_ALL`, at their end. A `STATE_PRESENTED_PARTIAL` frame (a compositor-only update, such as the scrollbar thumb moving, shown while the main thread's update is still pending) shows stale rows, so it doesn't end a gap.
   - One present is one frame. Two `STATE_PRESENTED_ALL` slices, for different `frame_sequence`s, can end at the same timestamp. The earlier sequence often also has a slice of type `FORKED`. Why Chromium reports one present twice is unverified. The present counts once, begun when its earliest slice began.
 - **Frame rule (ruling OQ-6, scoped by Z62): the 16.7 ms / ≥ 99% gate judges cadence.** Within each merged demanded interval, every presented frame after the first is judged on its gap from the presented frame before it, and passes if that gap is < 16.7 ms. That's §10.2's absolute threshold, at the panel's native refresh (164 Hz on the PC, `snap1/lanes/b2/REPORT.md:60`; Electron reports 165), with the Hz recorded.
-  - Every frame after the first counts in the ≥ 99% denominator. None is exempt.
+  - **A present belongs to a demanded interval only if it began at or after the interval's first input** (the coordinator's clarification of Z62, PR 9). A frame already in the pipeline when the input came can't contain it, so it neither anchors nor ends a judged gap. A present reported by two slices belongs if either slice began then. The interval still needs a present to be valid.
+  - Every frame that belongs, after the first, counts in the ≥ 99% denominator. None is exempt.
   - The first presented frame after an input isn't judged on cadence. It's judged by responsiveness.
   - A run where no interval has a second frame reports cadence as `n/a`, never as passed. That's a run of discrete keypresses, each answered by one frame. Responsiveness is still judged.
 - **Responsiveness (Z62):** each input that changes the view is timed from its own timestamp to its answer: the first present after its target rows painted (input → target paint, below). Over 50 ms it's a stall, and plan §5's input-latency gate (< 50 ms) applies. Every run records the distribution over these answered inputs: n, p50, p95 and max.
@@ -838,37 +840,53 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 - "Empty file (0 bytes, or only whitespace)" is judged on the first chunk, so only for files up to 1 MiB. A bigger whitespace-only file shows its blank lines, since telling would take a full scan.
 - Every freeze shows brief §7.9's "Changed on disk · Reload (Ctrl+R)" banner, with the reason in its tooltip. That includes an I/O error, which C6 freezes on too.
 
-**PR 9's amendments (the runner's mechanisms and test details; no Z-decision, 🔒 requirement or gate threshold changes; the evidence is in PR 9's description):**
-- **The warm first-screen rows open by argv, one launch per sample: 30 after one warm-up launch that isn't kept.** Spike A opened in a window that was already up (`spike/a spikes/app/perf/spike-a.e2e.ts:47-51`). *Why:* M1 has no in-app open a test driver can reach.
-  - The preload's API is frozen and non-configurable (contextBridge; read back over CDP), so it can't be stubbed.
-  - Open file… shows the native dialog. PR 8's second-instance open will be an in-app path.
-  - An argv open comes before the page's first frame: 91–179 ms before it, over PR 9's 300 first-screen runs. Z64's clock start (the later of the two) decides the judged figure, and the time from the open itself is recorded beside it.
-- **On the huge-first file, a run whose scan ends inside the budget from the clock's start isn't judged on order and doesn't fail the row.** That's the exemption plan A's veto keeps (packet:476-478). PR 4's ruling (a run that isn't judged fails on Windows and macOS) stays the 1 GiB line's: that fixture exists to be decisive.
-  - *Why:* the 200 MiB record's scan took 42.9 ms from the open (p50; p95 51.1, max 58.5), under the budget at the median even from the open. With argv opens, it ended 59.7–98.6 ms before the page's first frame in all 30 runs. So the order is never observable there.
+**PR 9's amendments (the runner's mechanisms and test details, and the coordinator's rulings in its fix round; the cadence rule clarifies Z62; no Z-decision, 🔒 requirement or gate threshold changes; the evidence is in PR 9's description):**
+- **The warm rows that open a file open it in a running app (the coordinator's ruling).** That's the first screen on 1 GiB and 10 GiB, the named set, huge-first, the 1 GiB line, and open-then-scroll.
+  - The app is launched by argv at the file's path while the file is parked under another name. Once its card shows "File not found", the file goes back, and Ctrl+R opens it: `App.tsx` reloads a failed card by opening its path, as `e2e/states.e2e.ts` drives it. No dialog opens.
+  - Cold launches keep argv, as plan §5 requires.
+  - *Why:* an argv open comes before the page's first frame (91–179 ms in PR 9's first pass). With Z64's clock, the argv runs measured only the page's first frame to its next, 2.6–8.3 ms, whatever the open cost.
+  - In-app, the page's first frame came 212–473 ms before the open, so the clock starts at the open.
+  - The control: the page's open request is held 60 ms over CDP. Every first screen reads 84.7–93.9 ms, and the row fails.
+- **On the huge-first file, a run whose scan ends inside the budget from the clock's start isn't judged on order, and doesn't fail the row.** That's the exemption plan A's veto keeps (packet:476-478). PR 4's ruling (a run that isn't judged fails on Windows and macOS) stays the 1 GiB line's: that fixture exists to be decisive.
+  - *Why:* the 200 MiB record's scan takes 44.1 ms from the open (p50; p95 60.6, max 80.2), so in-app it outlasts the budget in only some runs: 6 of 30 were decisive (all passed), and 24 weren't judged.
   - The row rests on the budget, the small records following, and no item over 64 KiB.
-  - Growing the record until the scan outlasts the first frame by 50 ms would take about 1 GiB at this PC's scan rate, which is the 1 GiB line's case again.
-- **The 64 KiB fetch is timed on the app's own core port.** The runner takes the port and the document from the app's next page request over CDP, by patching `MessagePort.prototype.postMessage` as PR 3's suppression control does. Then it times 300 random 327-line pages on the port, renderer to core host and back. *Why:* the renderer's `CoreClient` is private, and a hook would be product code for what CDP already reaches.
-- **Line index throughput is decimal bytes over `typose:open-start` → `typose:index-done`, from the 30 first-screen runs on the 10 GiB file, judged at the p95 time.** *Why:* the core reports no elapsed time, and the renderer's marks bracket it. The span includes the open's round trip, so it under-reads the index's rate.
+  - The 1 GiB line was decisive in 30 of 30 in-app runs, against 29 of 30 by argv.
+- **Cadence: a present belongs to a demanded interval only if it began at or after the interval's first input (the coordinator's clarification of Z62; C8).**
+  - *Why:* the review found that in PR 9's first pass, every jump run's first present began 3.1–8.8 ms before the pointerdown. So the answer was judged against a frame that couldn't contain the input. That decided 2 of the 4 failing jump cases, and identical runs flipped between `n/a` and `fail`. Discrete keys on the indexing 10 GiB file read cadence `pass` in 4 of 6 runs.
+  - With the rule, the second pass reads every runner jump `n/a` (12 of 12) and every keys run `n/a` (6 of 6).
+  - A present reported by two slices belongs if either slice began after the input. That's stricter than using its earliest begin, which would drop a present the input is in.
+- **Raw doesn't mark a scroll its list applied itself (`VirtualList.ownScroll`).** That covers a wheel or key in logical mode, whose own mark is the input, and the position re-applied as the index grows.
+  - *Why:* the review found that on the indexing 10 GiB file, 15 of 21 jump-row answers came from the list re-applying its own position.
+  - The second pass marks one `scroll` per jump, indexing or not (12 of 12 runs).
+- **The 64 KiB fetch is timed on the app's own core port, 300 pages over 3 launches.** The runner takes the port and the document from the app's next page request over CDP, by patching `MessagePort.prototype.postMessage` as PR 3's suppression control does. Then it times 100 random 327-line pages a launch, renderer to core host and back.
+  - *Why:* the renderer's `CoreClient` is private, and a hook would be product code for what CDP already reaches.
+- **Line index throughput is decimal bytes over `typose:open-start` → `typose:index-done`, from the 30 first-screen runs on the 10 GiB file, judged at the p95 time.**
+  - Off NTFS, or with real-time protection off, the row is "not qualification-grade", never a pass. Defender's exclusions can't be read without admin (they read "N/A: Must be an administrator"), so they're recorded as unknown.
+  - *Why:* the core reports no elapsed time, and the renderer's marks bracket it. The span includes the open's round trip, so it under-reads the index's rate.
 - **Scrolling while indexing is two cases, each in its own launch: a 2 s wheel gesture, and PR 3's 21 discrete keys.**
   - A run whose index was done before its drive began is invalid ("not while indexing"). A drive that outlasts the index is judged whole, with its overlap recorded.
   - Input latency while indexing is every answered input of both cases, judged by C8's responsiveness: each under 50 ms, and every target painted.
-  - *Why:* the 10 GiB index took 2.1–2.5 s here, which doesn't hold both drives after the trace's 500 ms lead-in. Each drive overlapped the index for its first 1.35–1.69 s.
-- **A frames run with an input its drive didn't send is invalid, with the inputs named.** *Why:* the runs take focus on a PC its owner may be using. `Control+End` is two keydowns, Control's and End's.
-- **A launch that doesn't quit cleanly fails its test, and never invalidates its run** (plan §5's exit integrity, OQ-3).
+  - *Why:* the 10 GiB index took 2.0–2.1 s here, which doesn't hold both drives after the trace's 500 ms lead-in. Each drive overlapped the index for its first 1.30–1.48 s, of 2.06–2.31 s.
+- **A frames run with an input its drive didn't send is invalid, with the inputs named.** *Why:* the runs take focus on a PC its owner may be using.
+  - `Control+End` is two keydowns, Control's and End's.
+  - A wheel drive also marks `scroll` while the document still scrolls natively, under 16M px: a young index's first moments after an open.
+- **Exit integrity (plan §5, OQ-3):** a launch that doesn't quit cleanly fails its test, and never invalidates its run. That's in the runner and in `startup.perf.ts`.
+  - So does anything its kept `lifecycle.jsonl` shows the test didn't ask for: `render-process-gone`, `child-process-gone`, an `uncaughtException`, or the core host exiting before the quit.
 - **Plan §5's cold first screen is judged from the open request.** *Why:* a cold launch passes no debugging switch, and the TYPOSE_MARKS hook carries no first-frame mark, so Z64's later clock start can't be read there.
-  - That's stricter than Z64. With the page's first frame 91–179 ms after an argv open, it charges startup to the lens.
+  - That's stricter than Z64: with the page's first frame 91–179 ms after an argv open, it charges startup to the lens.
   - Reading Z64's start needs a first-frame startup mark in the renderer. That's a product change, left to the startup remediation (PR 10+).
+  - The batch verdict (`e2e/perf/cold.mjs`) is the worst of five valid restarts, taking only each restart's first launch. Until there are five, it's pending.
+- **Z49 is a record field.** `qualification` is true only when QUALIFY=1 measured a minute of CPU under 10% before the row; QUALIFY=1 is also the operator saying there's no other heavy work and Defender is on. Every row of PR 9's passes is `qualification: false`.
+- **Deep reading requires the thumb to land within 5 lines of line 40M**, and §13.1's ±1 line equality with line 0, not a pinned count.
 
-**Found in PR 9, carried (instrument and owner questions; no product change in PR 9):**
-- **While a logical-mode document indexes, Raw's own re-applied scroll position is marked as input.**
-  - As the total grows, `VirtualList.setRowCount` re-applies the logical top, which moves `scrollTop`, and Raw marks every `scroll` event (`raw.ts`). Those marks demand frames, and their answers are timed as inputs.
-  - A scrollbar jump or Ctrl+End came with 6 `scroll` marks on the indexing 10 GiB file, against 1 on the indexed 1 GiB file.
-  - The fix belongs in the renderer: don't mark a scroll the list applied itself. Until then, the while-indexing frames rows include those marks, and each run lists its slow answers by kind.
-- **Open-then-scroll, with the open argv's, measures startup.**
-  - C8 starts its interval at the open request. That comes 111–144 ms before the page's first frame, so the open was answered 185–297 ms after its request in all 12 runs. Z64 moves Z37's first-screen clock for the same reason, but C8's open interval has no such rule.
-  - Zack decides whether Z64's start applies to the open's answer, or whether open-then-scroll waits for an in-app open (PR 8). Until then it's measured as written.
-  - The scroll right after it stalls too, which a different start wouldn't excuse: its slowest answer was 73–94 ms in each run.
-- **The 1 GiB line wasn't decisive in 1 of 30 argv runs, so its row fails under PR 4's ruling.** The page's first frame came 170.7 ms after the open and the scan's end at 211.8 ms, 41.0 ms from the clock's start. The ruling says the fixture must grow. Plan §5 names the 1 GiB line, so the size is the coordinator's or Zack's call. An in-app open (PR 8) takes the first frame out of the clock: the scan's end came 211.8–249.1 ms after the open.
+**Found in PR 9, not settled (for the coordinator):**
+- **The first far jump after launch fails the ruled jump control.**
+  - The control: ten uninjected scrollbar jumps per launch, from the top, must each read cadence `n/a` or `pass`. Jumps 2–10 read `n/a` in all 90 of the fix round's runs. The first jump failed in 6 of 10 runs of the control (a11y on 1 of 5, off 5 of 5).
+  - All six failing traces have the same shape. A frame begins 4.4–5.6 ms after the pointerdown, before the drag's `scroll` (6.4–7.7 ms), and presents. The rows' frame comes 23.5–31.2 ms after it.
+  - Under the rule as ruled, anchored on the interval's first input (the pointerdown), that gap is a long frame. Anchored on the input that moves the view (the drag's `scroll`), it would be `n/a`.
+- **Responsiveness can take a pipeline frame as the answer.** The answer is the first present after the target painted. When a frame begun before the paint presents first, that frame is taken.
+  - In the three passing first-jump traces that were kept, the answer was such a present, 20.0, 27.6 and 21.0 ms after the pointerdown. The rows presented at 43.2, 43.0 and 44.2 ms.
+  - So those jumps read cadence `n/a` with the same shape as the failing ones.
 
 **Implementer proposals Zack may veto (one place):**
 1. **Memory-refused open state** (C1), shown in the card: "Can't open `<file>` · Typose's memory budget is full. Close a file, then Retry." Brief §7.9 has no such state yet.
