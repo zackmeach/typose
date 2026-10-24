@@ -59,6 +59,14 @@ export function setPaintProbe(p: (() => string | null) | null): void {
   probe = p
 }
 
+// The trace's baseline (PR 9): a test driver that has just started a trace dispatches `typose:baseline` on the window,
+// and the view as it stands is marked painted as sequence 0. The analyzer then judges the trace's first input against
+// it, so a first input that changes nothing is told apart. Inert otherwise: console.timeStamp only reaches a trace.
+window.addEventListener('typose:baseline', () => {
+  const key = probe?.() ?? null
+  if (key !== null) console.timeStamp(`typose:painted 0 ${key}`)
+})
+
 /**
  * An input that demands frames, at its own timestamp (performance.now() ms). Each animation frame after it checks
  * the probe, and the first that finds the target painted marks it; after 2 s it stops looking (never painted).

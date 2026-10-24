@@ -34,6 +34,8 @@ export async function traced(l: PackagedLaunch, drive: (page: Page, cdp: CDPSess
   const from = cpuTimes()
   await l.browser!.startTracing(page, { categories: CATEGORIES })
   await page.waitForTimeout(500) // the first frame after tracing starts can take 120 ms: keep it out of the run
+  // The baseline: the view as it stands, marked painted, so the drive's first input is judged against it (C8).
+  await page.evaluate(() => window.dispatchEvent(new Event('typose:baseline')))
   await drive(page, cdp)
   await page.waitForTimeout(500) // let the last input settle inside the trace
   const trace = await l.browser!.stopTracing()

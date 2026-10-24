@@ -191,8 +191,9 @@ test("a pointerdown folded into the drag's scroll doesn't anchor the interval: t
   assert.equal(r.frames, 0)
   assert.deepEqual(r.long, [])
   assert.equal(r.cadence, 'n/a')
-  // Both are still timed to the rows' frame: the pointerdown 40 ms, the scroll 33 ms.
-  assert.deepEqual(r.inputToPaint.map((p) => [p.kind, p.ms]), [['pointerdown', 40], ['scroll', 33]])
+  // The scroll is judged on its answer (33 ms); the pointerdown is timed to the scroll's mark (21 ms) and reported apart.
+  assert.deepEqual(r.inputToPaint.map((p) => [p.kind, p.ms]), [['scroll', 33]])
+  assert.deepEqual(r.unanswered, { n: 1, max: 21 })
   // Control before End (Ctrl+End) folds the same way, and a discrete keypress stays n/a.
   const key = analyze(input(100, null, 'y', 1, 'keydown'), input(101, 104, 'end', 1, 'keydown'), frame(108, { began: 102 }))
   assert.deepEqual([key.folded, key.frames, key.cadence], [1, 0, 'n/a'])
@@ -218,7 +219,8 @@ test('the first jump after launch is answered by its paint\'s frame, and the com
     frame(19.8, { began: 12.6, seq: 150, state: 'STATE_DROPPED' }),
     frame(44.0, { began: 12.6, seq: 150 })
   )
-  assert.deepEqual(r.inputToPaint.map((p) => [p.kind, p.ms]), [['pointerdown', 44], ['scroll', 36.2]])
+  assert.deepEqual(r.inputToPaint.map((p) => [p.kind, p.ms]), [['scroll', 36.2]])
+  assert.deepEqual(r.unanswered, { n: 1, max: 19.8 })
   assert.deepEqual([r.folded, r.frames, r.cadence, r.ownerUnpresented], [1, 0, 'n/a', 0])
   assert.deepEqual(r.long, [])
 })
@@ -234,6 +236,30 @@ test('a paint mark with no AnimationFrame around it makes the run invalid: its a
   assert.equal(r.valid, false)
   assert.match(r.reason, /^no AnimationFrame around input \d+'s paint mark/)
   assert.deepEqual([r.cadence, r.responsiveness], ['invalid', 'invalid'])
+})
+
+test("the baseline mark: a first input whose mark repeats it changes nothing, and doesn't open an interval", () => {
+  // PR 9's third round: the jump control's failing trace. The view was painted before the trace began (Ctrl+Home), so
+  // the pointerdown's own mark repeats it. The drag's scroll comes 30 ms later, and its paint's frame (208) answers at
+  // 106. A frame presents at 54.6 in between.
+  const run = (baseline) =>
+    analyze(
+      baseline ? [stamp(-5, 'typose:painted 0 top')] : [],
+      input(0, 3, 'top', 1, 'pointerdown'),
+      input(30, 46, 'moved', 1, 'scroll', { owner: 208 }),
+      frame(54.6, { began: 33, seq: 207 }),
+      frame(106, { began: 40, seq: 208 })
+    )
+  const r = run(true)
+  assert.deepEqual(r.unanswered, { n: 1, max: 3 })
+  assert.deepEqual(r.inputToPaint.map((p) => [p.kind, p.ms]), [['scroll', 76]])
+  assert.deepEqual([r.frames, r.cadence], [0, 'n/a'])
+  // The 76 ms answer is the scroll's own: a responsiveness stall, which the row judges.
+  assert.equal(r.responsiveness, 'fail')
+  // Without the baseline, the pointerdown's mark is the trace's first: it opens an interval, which merges with the
+  // scroll's and judges the 51.4 ms gap from 54.6 as a cadence stall.
+  const blind = run(false)
+  assert.deepEqual([blind.unanswered.n, blind.cadence], [0, 'fail'])
 })
 
 test("a real long frame after the scroll's answer still fails cadence", () => {

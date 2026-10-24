@@ -12,6 +12,8 @@
 //   (`begin_frame_id`: sequence and source). A paint mark fires inside one; that frame's presented slice is the answer.
 // - TimeStamp (devtools.timeline): the renderer's console.timeStamp() marks from app/renderer/perf.ts:
 //   `typose:input <seq> <kind> <inputMs> <dispatchMs>` and `typose:painted <seq> <key>`, both in performance.now() ms.
+//   `typose:painted 0 <key>` is the baseline: the view as it stood when the trace began (drive.ts), so the first input's
+//   mark is judged against it.
 // - FireAnimationFrame (devtools.timeline): rAF callbacks, printed beside the judged figures and never judged.
 export const CATEGORIES = ['devtools.timeline', 'disabled-by-default-devtools.timeline.frame']
 
@@ -84,7 +86,8 @@ const percentile = (values, p) => {
  *   trace with no AnimationFrame around a mark is invalid: the answer can't be told, and nothing falls back.
  * - A frame is demanded from an input until its answer. Demanded intervals that overlap merge, so a continuous gesture
  *   is one interval. Only an input that changes the view opens one: an input whose first mark is a later input's is
- *   folded into it (`folded`), timed to the same answer.
+ *   folded into it (`folded`). Like an input that changes nothing, it's timed to that mark and reported apart in
+ *   `unanswered`: the later input is the one judged on its answer.
  * - Cadence: a merged interval's frames start at its first answer. Presents between an input and its answer are
  *   compositor or pipeline frames that can't carry the response, and the input's latency covers that span. Every
  *   present after the first answer is judged on its gap from the one before it: long at ≥ 16.7 ms, a stall over
@@ -156,6 +159,17 @@ export function analyzeFrames(events) {
       if (late > STALL_MS * 1000) stalls.push({ from: ms(input.at), to: ms(mark.ts), ms: ms(late), began: ms(input.at), first: true })
       continue
     }
+    if (mark && mark.seq !== input.seq) {
+      // Only an input that changes the view opens a demanded interval (the coordinator's rulings, PR 9). This one's first
+      // mark is a later input's: nothing of its own reached the screen before that input came (a scrollbar pointerdown
+      // before the drag's scroll, or Control before End). It's folded into the later input, which is the one judged on
+      // its answer; like an input that changes nothing, it's timed to the mark, reported apart, and a stall if late.
+      folded++
+      const late = mark.ts - input.at
+      unanswered.push(ms(late))
+      if (late > STALL_MS * 1000) stalls.push({ from: ms(input.at), to: ms(mark.ts), ms: ms(late), began: ms(input.at), first: true })
+      continue
+    }
     const answer = mark ? answerOf(mark) : {}
     if (answer.missing) return invalid(`no AnimationFrame around input ${input.seq}'s paint mark at ${ms(mark.ts)} ms: its answer's frame can't be told`)
     if (answer.unpresented) ownerUnpresented++
@@ -167,12 +181,7 @@ export function analyzeFrames(events) {
     // Responsiveness: the input is answered by the frame that owns its paint (plan §5's input latency).
     const latency = settle - input.at
     inputToPaint.push({ seq: input.seq, kind: input.kind, ms: ms(latency) })
-    // Only an input that changes the view opens a demanded interval (the coordinator's clarification of Z62). An input
-    // whose first mark is a later input's had nothing of its own on screen before that input came (a scrollbar
-    // pointerdown before the drag's scroll, or Control before End): it's folded into the later input, timed to the
-    // same answer, and doesn't open or anchor the interval.
-    if (mark.seq === input.seq) demanded.push([input.at, settle])
-    else folded++
+    demanded.push([input.at, settle])
     if (latency > STALL_MS * 1000) stalls.push({ from: ms(input.at), to: ms(settle), ms: ms(latency), began: ms(input.at), first: true })
   }
   if (demanded.length === 0 && neverPainted.length === 0) return invalid('nothing was demanded: every input changed nothing')
