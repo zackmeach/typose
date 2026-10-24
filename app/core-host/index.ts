@@ -11,8 +11,16 @@ interface Hooks {
   setReadDelay(ms: number): void
 }
 
-// The test-hooks build loads the test-hooks addon, which the release build neither loads nor ships.
-const addon: typeof Core & Partial<Hooks> = __TEST_HOOKS__ ? require('typose-node/hooks') : require('typose-node')
+/** napi-rs's `--platform` name for each build target (spec §12.1). */
+const TARGETS: Record<string, string> = { 'win32-x64': 'win32-x64-msvc', 'darwin-arm64': 'darwin-arm64', 'linux-x64': 'linux-x64-gnu' }
+const target = TARGETS[`${process.platform}-${process.arch}`]
+if (!target) throw new Error(`no Typose core is built for ${process.platform}-${process.arch}`)
+// The addon's own binary, by its known name, not through napi-rs's generated index.js: that loader would load whatever
+// NAPI_RS_NATIVE_LIBRARY_PATH names, or go looking for a WASI build (spec §7.1). It sits unpacked beside the asar,
+// outside its integrity check, and is no longer read. The test-hooks build loads the test-hooks addon, which the release
+// build neither loads nor ships.
+const binary = `typose-node/${__TEST_HOOKS__ ? 'hooks/' : ''}typose-node.${target}.node`
+const addon: typeof Core & Partial<Hooks> = require(binary)
 
 process.parentPort.once('message', (e) => {
   const { session } = e.data as { session: number }

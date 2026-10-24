@@ -22,6 +22,16 @@ test('no test-hooks code ships: the asar holds none of its names, and the addon 
   expect(existsSync(join(addon, 'hooks'))).toBe(false)
 })
 
+// Spec §7.1: napi-rs's generated loader (typose-node/index.js, unpacked beside the asar) would load whatever
+// NAPI_RS_NATIVE_LIBRARY_PATH names, or go looking for a WASI build. The core host requires its own binary instead.
+test("the environment can't choose the core's addon: NAPI_RS_NATIVE_LIBRARY_PATH and NAPI_RS_FORCE_WASI are ignored", async () => {
+  const env = { NAPI_RS_NATIVE_LIBRARY_PATH: join(tmpdir(), 'typose-no-such-addon.node'), NAPI_RS_FORCE_WASI: 'error' }
+  const l = await launchPackaged({ cdp: true, env, file: fixture('packaged-loader.txt', 'one\ntwo\n') })
+  await waitOpen(l.page!)
+  expect((await visibleRows(l.page!))[0]).toEqual({ line: 1, text: 'one' })
+  expect(await closePackaged(l)).toEqual({ code: 0, signal: null })
+})
+
 /** The fuse wire, read straight from the binary rather than through @electron/fuses, which wrote it. */
 function fuseWire(binary: string): number[] {
   const bytes = readFileSync(binary)
