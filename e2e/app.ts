@@ -44,62 +44,11 @@ export const test = base.extend<{ finishLaunches: void }>({
         for (const l of running) await finish(l)
       } finally {
         for (const cleanup of cleanups) await cleanup().catch(() => {}) // each removes itself, which a Set allows mid-loop
-        census() // TEMP diagnostics
       }
     },
     { auto: true }
   ]
 })
-
-// TEMP diagnostics (to be reverted): the macOS launch whose window never comes, and processes left between tests.
-const OURS = /Electron\.app|Typose\.app/
-function census(): void {
-  if (process.platform !== 'darwin') return
-  const lines = spawnSync('ps', ['-axo', 'pid,ppid,stat,etime,command'], { encoding: 'utf8' }).stdout.trim().split('\n').slice(1)
-  const left = lines.filter((l) => OURS.test(l) || /^\s*\d+\s+\d+\s+Z/.test(l))
-  console.log(`TEMP census after "${base.info().title}": ${lines.length} processes, ${left.length} ours or zombies${left.length ? `:\n${left.join('\n')}` : ''}`)
-}
-
-async function diagnoseNoWindow(app: ElectronApplication, pid: number): Promise<void> {
-  const out = base.info().outputPath()
-  mkdirSync(out, { recursive: true })
-  const state = await Promise.race([
-    app
-      .evaluate(({ app, BrowserWindow, webContents }) => {
-        const safe = (f: () => unknown) => {
-          try {
-            return f()
-          } catch (e) {
-            return String(e)
-          }
-        }
-        return {
-          realReady: safe(() => (Object.getPrototypeOf(app) as { isReady(): boolean }).isReady.call(app)),
-          patchedReady: safe(() => app.isReady()),
-          windows: safe(() => BrowserWindow.getAllWindows().map((w) => ({ id: w.id, visible: w.isVisible() }))),
-          contents: safe(() => webContents.getAllWebContents().map((c) => ({ id: c.id, url: c.getURL(), loading: c.isLoading(), crashed: c.isCrashed(), pid: c.getOSProcessId() }))),
-          metrics: safe(() => app.getAppMetrics().map((m) => ({ pid: m.pid, type: m.type, name: m.name, serviceName: m.serviceName })))
-        }
-      })
-      .catch((e: unknown) => `evaluate failed: ${String(e)}`),
-    new Promise((ok) => setTimeout(() => ok('evaluate timed out after 5 s'), 5000))
-  ])
-  console.log(`TEMP no window from pid ${pid}: ${JSON.stringify(state)}`)
-  if (process.platform !== 'darwin') return
-  const ps = spawnSync('ps', ['-axo', 'pid,ppid,pri,stat,lstart,etime,command'], { encoding: 'utf8' }).stdout
-  writeFileSync(join(out, `ps-${pid}.txt`), ps)
-  const rows = ps.trim().split('\n').slice(1).map((l) => l.trim().split(/\s+/))
-  const kids = rows.filter((r) => r[1] === String(pid)).map((r) => r[0])
-  console.log(`TEMP ${rows.length} processes; pid ${pid}'s children: ${kids.join(', ') || 'none'}`)
-  console.log(ps.split('\n').filter((l, i) => i === 0 || OURS.test(l)).join('\n'))
-  for (const p of [String(pid), ...kids.slice(0, 6)]) spawnSync('sample', [p, '2', '-file', join(out, `sample-${p}.txt`)], { encoding: 'utf8', timeout: 60_000 })
-  const predicate = [pid, ...kids].map((p) => `processID == ${p}`).join(' OR ')
-  const logs = spawnSync('log', ['show', '--last', '45s', '--style', 'compact', '--predicate', predicate], { encoding: 'utf8', timeout: 60_000, maxBuffer: 64 << 20 })
-  writeFileSync(join(out, `log-${pid}.txt`), `${logs.stdout}\n${logs.stderr}`)
-  const wide = spawnSync('log', ['show', '--last', '45s', '--style', 'compact', '--predicate', 'messageType == error OR messageType == fault'], { encoding: 'utf8', timeout: 60_000, maxBuffer: 64 << 20 })
-  writeFileSync(join(out, `log-errors.txt`), `${wide.stdout}\n${wide.stderr}`)
-  process.kill(pid, 'SIGKILL') // so the worker's teardown doesn't wait 5 min on it
-}
 
 /** `hooks` launches the test-hooks build (`npm run build:hooks`, plan m8), with `env` added to the environment. */
 export async function launch(opts: { file?: string; userData?: string; netlog?: string; hooks?: boolean; env?: Record<string, string> } = {}): Promise<Launched> {
@@ -114,10 +63,7 @@ export async function launch(opts: { file?: string; userData?: string; netlog?: 
     else proc.once('exit', (code, signal) => ok({ code, signal }))
   })
   const pid = await app.evaluate(() => process.pid)
-  const win = await app.firstWindow().catch(async (e: unknown) => {
-    await diagnoseNoWindow(app, pid) // TEMP diagnostics
-    throw e
-  })
+  const win = await app.firstWindow()
   const pageErrors: string[] = []
   win.on('pageerror', (e) => pageErrors.push(e.message))
   const l = { app, win, userData, pid, exited, pageErrors }

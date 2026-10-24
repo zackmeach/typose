@@ -215,8 +215,6 @@ pub struct Read {
     cancel: Arc<AtomicBool>,
     #[cfg(feature = "test-hooks")]
     _task: hooks::Live,
-    #[cfg(feature = "test-hooks")]
-    computed: Option<Instant>, // TEMP diagnostics
 }
 
 impl Read {
@@ -228,8 +226,6 @@ impl Read {
             cancel: cancel.flag.clone(),
             #[cfg(feature = "test-hooks")]
             _task: hooks::Live::new(&hooks::TASKS),
-            #[cfg(feature = "test-hooks")]
-            computed: None,
         })
     }
 }
@@ -240,24 +236,15 @@ impl Task for Read {
 
     fn compute(&mut self) -> Result<Self::Output> {
         let (raw, generation) = (&self.raw, self.generation);
-        let out = cancellable(&self.cancel, || match self.want {
+        Ok(cancellable(&self.cancel, || match self.want {
             Want::Lines { start, count } => raw.page(generation, start, count),
             Want::Piece { line, offset } => raw.piece(generation, line, offset).map(|p| vec![p]),
-        });
-        #[cfg(feature = "test-hooks")]
-        {
-            self.computed = Some(Instant::now());
-        }
-        Ok(out)
+        }))
     }
 
     /// A cancel that arrives after the reads, while the result is on its way to JS, still ends the read: once the
     /// core host has cancelled a read, it never resolves.
     fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Page> {
-        #[cfg(feature = "test-hooks")]
-        if let Some(t) = self.computed {
-            hooks::DELIVER_MAX_US.fetch_max(t.elapsed().as_micros() as u64, Ordering::Relaxed);
-        }
         let output = if self.cancel.load(Ordering::Relaxed) { Err(DocError::Cancelled) } else { output };
         match output {
             Ok(pieces) => Ok(Page { items: pieces.into_iter().map(|p| item(self.generation, p)).collect() }),
@@ -424,29 +411,12 @@ pub mod test_hooks {
         pub jobs: u32,
         pub tasks: u32,
         pub handles: u32,
-        // TEMP diagnostics
-        pub sleeps: f64,
-        pub sleep_avg_ms: f64,
-        pub sleep_max_ms: f64,
-        pub deliver_max_ms: f64,
-        pub qos: String,
     }
 
     #[napi]
     pub fn debug_stats() -> DebugStats {
         let count = |c| hooks::count(c) as u32;
-        let n = hooks::SLEEPS.load(Ordering::Relaxed);
-        let us = |a: &std::sync::atomic::AtomicU64| a.load(Ordering::Relaxed) as f64 / 1000.0;
-        DebugStats {
-            jobs: count(&hooks::JOBS),
-            tasks: count(&hooks::TASKS),
-            handles: count(&hooks::HANDLES),
-            sleeps: n as f64,
-            sleep_avg_ms: if n > 0 { us(&hooks::SLEEP_TOTAL_US) / n as f64 } else { 0.0 },
-            sleep_max_ms: us(&hooks::SLEEP_MAX_US),
-            deliver_max_ms: us(&hooks::DELIVER_MAX_US),
-            qos: format!("{:#x}", hooks::QOS.load(Ordering::Relaxed)),
-        }
+        DebugStats { jobs: count(&hooks::JOBS), tasks: count(&hooks::TASKS), handles: count(&hooks::HANDLES) }
     }
 
     /// Plan C5's per-read delay: every chunk read from disk waits `ms` first.

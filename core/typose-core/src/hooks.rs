@@ -48,34 +48,9 @@ fn delay_ms(ms: f64) -> Result<u64, String> {
 pub(crate) fn read_delay() {
     let ms = READ_DELAY_MS.load(Ordering::Relaxed);
     if ms > 0 {
-        let t = std::time::Instant::now(); // TEMP diagnostics
         std::thread::sleep(Duration::from_millis(ms));
-        let us = t.elapsed().as_micros() as u64;
-        SLEEPS.fetch_add(1, Ordering::Relaxed);
-        SLEEP_TOTAL_US.fetch_add(us, Ordering::Relaxed);
-        SLEEP_MAX_US.fetch_max(us, Ordering::Relaxed);
-        #[cfg(target_os = "macos")]
-        {
-            let mut qos: libc::qos_class_t = libc::qos_class_t::QOS_CLASS_UNSPECIFIED;
-            let mut rel: libc::c_int = 0;
-            let q = unsafe {
-                libc::pthread_get_qos_class_np(libc::pthread_self(), &mut qos, &mut rel);
-                let thread_bg = libc::getpriority(libc::PRIO_DARWIN_THREAD, 0) as u64 & 1;
-                let process_bg = libc::getpriority(libc::PRIO_DARWIN_PROCESS, 0) as u64 & 1;
-                (qos as u64) << 8 | thread_bg << 1 | process_bg | 1 << 63
-            };
-            QOS.store(q, Ordering::Relaxed);
-        }
     }
 }
-
-// TEMP diagnostics (to be reverted): how long each delay's sleep really took, and on macOS the sleeping thread's QoS.
-pub static SLEEPS: AtomicU64 = AtomicU64::new(0);
-pub static SLEEP_TOTAL_US: AtomicU64 = AtomicU64::new(0);
-pub static SLEEP_MAX_US: AtomicU64 = AtomicU64::new(0);
-pub static QOS: AtomicU64 = AtomicU64::new(0);
-/// The longest wait between a read's compute ending and its resolve starting on the JS thread.
-pub static DELIVER_MAX_US: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(test)]
 mod tests {
