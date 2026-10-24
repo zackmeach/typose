@@ -52,6 +52,10 @@ jobs:
         if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
         run: cargo clippy --all-targets --locked --target x86_64-pc-windows-msvc -- -D warnings
         working-directory: core
+      - name: clippy with the test-hooks feature (the test-hooks addon's code, plan m8)
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
+        run: cargo clippy --all-targets --locked --features typose-node/test-hooks -- -D warnings
+        working-directory: core
       - name: oxlint (app, e2e and .github/scripts)
         if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
         run: npm run lint -- .github/scripts
@@ -108,6 +112,11 @@ jobs:
         name: npm run build
         if: ${{ !cancelled() && steps.napi.outcome == 'success' }}
         run: npm run build
+      # Before the package step, so core/typose-node/hooks/ exists when it packages: packaged.e2e.ts then checks
+      # that the package leaves it out (plan m8).
+      - name: npm run test:hooks (builds the test-hooks addon, then its Rust and napi tests)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.rust.outcome == 'success' }}
+        run: npm run test:hooks
       - id: package
         name: Package the fused --dir build (packaged.e2e.ts drives it)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}

@@ -39,6 +39,8 @@ export type ErrorCode =
   | 'Io'
   | 'Internal'
   | 'CoreGone'
+  /** The request was cancelled (plan C5): the renderer no longer wanted it. */
+  | 'Cancelled'
   /** The memory budget refused the open (plan C1; the ledger that sends it arrives in PR 6). */
   | 'Memory'
 
@@ -73,14 +75,32 @@ export interface Opened {
 export interface Methods {
   hello: { params: { protocol: number }; result: Hello }
   open: { params: { path: string; count: number }; result: Opened }
-  /** A window of lines of generation `gen`, or the one piece a continuation token names (plan C3). */
+  /** A window of lines of generation `gen`, or the one piece a continuation token names (plan C3). Cancellable. */
   page: {
     params: { doc: number; lens: 'raw'; gen: number; start: number; count: number } | { doc: number; lens: 'raw'; continuation: Token }
     result: Page
   }
   /** Ctrl+R (spec §3.1): the document's next generation, opened again, with its first page. */
   reload: { params: { doc: number; count: number }; result: Opened }
+  /** Plan C6: cancels the document's index and page reads, and releases it. */
   close: { params: { doc: number }; result: boolean }
+  /** Plan C5: cancels request `id`'s page read. True if it was still running: it then rejects with `Cancelled`. */
+  cancel: { params: { id: number }; result: boolean }
+  /** The test-hooks build only (plan m8): what's alive in the core host. Elsewhere it's `UnknownMethod`. */
+  debugStats: { params: Record<string, never>; result: DebugStats }
+}
+
+/** The test-hooks build's debug stats (plan C5, C6): the core's live jobs, tasks and file handles, the documents the
+ *  core host holds, and how its cancels went: `cancels` found a read running, `cancelled` reads ended `Cancelled`,
+ *  at most `cancelMs` after their cancel. */
+export interface DebugStats {
+  jobs: number
+  tasks: number
+  handles: number
+  docs: number
+  cancels: number
+  cancelled: number
+  cancelMs: number
 }
 
 export type Method = keyof Methods

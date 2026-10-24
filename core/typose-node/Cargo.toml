@@ -21,3 +21,7 @@ typose-core = { path = "../typose-core" }
 
 [build-dependencies]
 napi-build = "=2.6.0"
+
+[features]
+# Plan m8: builds the test-hooks addon (`npm run build:addon:hooks`), with a per-read delay and debug stats.
+test-hooks = ["typose-core/test-hooks"]

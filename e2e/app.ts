@@ -4,9 +4,10 @@
 // that fails before calling it gets the same from the `test` exported here.
 import { type ElectronApplication, type Page, test as base, _electron as electron, expect } from '@playwright/test'
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
+import type { DebugStats } from '../app/shared/protocol'
 
 export const APP_DIR = resolve(__dirname, '../app')
 /** Generated fixtures; gitignored, and the big ones are deleted after their tests. */
@@ -49,12 +50,13 @@ export const test = base.extend<{ finishLaunches: void }>({
   ]
 })
 
-export async function launch(opts: { file?: string; userData?: string; netlog?: string } = {}): Promise<Launched> {
+/** `hooks` launches the test-hooks build (`npm run build:hooks`, plan m8), with `env` added to the environment. */
+export async function launch(opts: { file?: string; userData?: string; netlog?: string; hooks?: boolean; env?: Record<string, string> } = {}): Promise<Launched> {
   const userData = opts.userData ?? mkdtempSync(join(tmpdir(), 'typose-e2e-'))
-  const args = [APP_DIR, `--user-data-dir=${userData}`]
+  const args = [opts.hooks ? join(APP_DIR, 'out-hooks/main/index.js') : APP_DIR, `--user-data-dir=${userData}`]
   if (opts.netlog) args.push(`--log-net-log=${opts.netlog}`)
   if (opts.file) args.push(opts.file)
-  const app = await electron.launch({ args })
+  const app = await electron.launch({ args, ...(opts.env ? { env: { ...process.env, ...opts.env } as Record<string, string> } : {}) })
   const proc = app.process()
   const exited = new Promise<Exit>((ok) => {
     if (proc.exitCode !== null) ok({ code: proc.exitCode, signal: proc.signalCode })
@@ -147,6 +149,39 @@ export function fixture(name: string, bytes: string | Uint8Array): string {
   writeFileSync(path, bytes)
   return path
 }
+
+/**
+ * A file of `size` bytes that takes almost no disk: `head`, then zeros, which a sparse file doesn't store. The index
+ * still reads every byte of it (zeros, a single long line). On Windows the file is marked sparse first (FSCTL_SET_SPARSE,
+ * through fsutil, which needs no elevation); elsewhere growing a file with truncate leaves a hole.
+ */
+export function sparseFixture(name: string, size: number, head: string): string {
+  const path = fixture(name, head)
+  if (process.platform === 'win32') {
+    const run = spawnSync('fsutil', ['sparse', 'setflag', path], { encoding: 'utf8' })
+    expect(run.status, run.stdout + run.stderr).toBe(0)
+  }
+  truncateSync(path, size)
+  return path
+}
+
+/** The test-hooks build's `window.typoseTest` (plan m8): the core client, its hooks' state, and App's close. */
+export interface TestHooks {
+  core: { call(method: string, params: object): Promise<unknown> }
+  client: {
+    holding: number
+    held: (() => void)[]
+    maxPendingPages: number
+    aborts: number
+    gone: { at: number; rejected: number } | null
+    dropped: ('event' | 'response')[]
+  }
+  app: { close?: () => void }
+}
+
+/** The core host's debug stats, on the test-hooks build (plan C5, C6). */
+export const debugStats = (win: Page): Promise<DebugStats> =>
+  win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.core.call('debugStats', {}) as Promise<DebugStats>)
 
 /** The rows on screen, top to bottom: their line numbers (from the gutter) and their text. */
 export async function visibleRows(win: Page): Promise<{ line: number; text: string }[]> {

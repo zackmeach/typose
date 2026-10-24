@@ -65,6 +65,11 @@ jobs:
         name: npm run build
         if: ${{ !cancelled() && steps.napi.outcome == 'success' }}
         run: npm run build
+      # Before the package step, so core/typose-node/hooks/ exists when it packages: packaged.e2e.ts then checks
+      # that the package leaves it out (plan m8).
+      - name: npm run test:hooks (builds the test-hooks addon, then its Rust and napi tests)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.rust.outcome == 'success' }}
+        run: npm run test:hooks
       - id: package
         name: Package the fused --dir build, the arm64 .app (packaged.e2e.ts drives it)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}

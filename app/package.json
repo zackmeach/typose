@@ -21,7 +21,7 @@
   },
   "build": {
     "appId": "dev.typose.app",
-    "files": ["out/**"],
+    "files": ["out/**", "!**/node_modules/typose-node/hooks{,/**}"],
     "asarUnpack": ["**/*.node"],
     "electronDist": "../node_modules/electron/dist",
     "npmRebuild": false,

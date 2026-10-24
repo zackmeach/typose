@@ -7,6 +7,8 @@
 pub mod bytemap;
 pub mod doc;
 pub mod encoding;
+#[cfg(feature = "test-hooks")]
+pub mod hooks;
 pub mod index;
 pub mod limits;
 pub mod pages;
