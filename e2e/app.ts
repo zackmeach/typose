@@ -65,7 +65,8 @@ export async function launch(opts: { file?: string; userData?: string; netlog?: 
   const pid = await app.evaluate(() => process.pid)
   const win = await app.firstWindow().catch(async (e: unknown) => {
     // Killed, so it can't hold up the worker's teardown, as twice in main-macos run 40067408502; and its evidence kept.
-    kill(pid)
+    // Only while it runs: once it has exited, its pid may be another process's.
+    if (proc.exitCode === null && proc.signalCode === null) kill(pid)
     keepEvidence(userData, pid, await exited, false)
     throw e
   })
