@@ -6,23 +6,55 @@ import { analyzeFrames } from './frames.mjs'
 // Builders, in ms on one clock (the renderer's performance.now() is the trace clock here, offset 0).
 const renderer = (pid) => ({ ph: 'M', name: 'process_name', pid, args: { name: 'Renderer' } })
 let ids = 0
-/** A renderer frame presented at `t`: its PipelineReporter slice, begun at `began` (one refresh earlier by default). */
-const frame = (t, { state = 'STATE_PRESENTED_ALL', pid = 1, began = t - 6 } = {}) => {
+let frameSeq = 0
+/** A renderer frame presented at `t`: its PipelineReporter slice, begun at `began` (one refresh earlier by default), as
+ *  frame `seq` (the next by default). */
+const frame = (t, { state = 'STATE_PRESENTED_ALL', pid = 1, began = t - 6, seq = ++frameSeq } = {}) => {
   const id2 = { local: `0x${(++ids).toString(16)}` }
   return [
-    { name: 'PipelineReporter', ph: 'b', pid, id2, ts: began * 1000, args: { frame_reporter: { state } } },
+    { name: 'PipelineReporter', ph: 'b', pid, id2, ts: began * 1000, args: { frame_reporter: { state, frame_sequence: seq, frame_source: 1 } } },
     { name: 'PipelineReporter', ph: 'e', pid, id2, ts: t * 1000 }
   ]
 }
 const stamp = (t, message) => ({ name: 'TimeStamp', ts: t * 1000, args: { data: { message } } })
+/** The main thread's AnimationFrame for frame `seq`, from `from` to `to`: a paint mark inside it is that frame's. */
+const animationFrame = (from, to, seq) => {
+  const id2 = { local: `0x${(++ids).toString(16)}` }
+  return [
+    { name: 'AnimationFrame', ph: 'b', pid: 1, id2, ts: from * 1000, args: { animation_frame_timing_info: { begin_frame_id: { sequence_number: seq, source_id: 1 } } } },
+    { name: 'AnimationFrame', ph: 'e', pid: 1, id2, ts: to * 1000 }
+  ]
+}
 let seq = 0
-/** An input at `t` (dispatched `lag` ms later), painted at `paintAt` with view key `key`. */
-const input = (t, paintAt, key = String(t), lag = 1, kind = 'wheel') => {
+/**
+ * An input at `t` (dispatched `lag` ms later), painted at `paintAt` with view key `key`. The paint mark sits in the
+ * AnimationFrame of frame `owner`; left out, analyze() gives it the first frame presented after the mark (the old
+ * answer, so the older cases keep their timing), and `owner: null` gives it none (a trace without the linkage).
+ */
+const input = (t, paintAt, key = String(t), lag = 1, kind = 'wheel', { owner } = {}) => {
   seq++
-  return [stamp(t + lag, `typose:input ${seq} ${kind} ${t} ${t + lag}`), ...(paintAt === null ? [] : [stamp(paintAt, `typose:painted ${seq} ${key}`)])]
+  const marks = [stamp(t + lag, `typose:input ${seq} ${kind} ${t} ${t + lag}`)]
+  if (paintAt === null) return marks
+  const paint = stamp(paintAt, `typose:painted ${seq} ${key}`)
+  if (owner === undefined) return [...marks, Object.assign(paint, { owner: 'auto' })]
+  return [...marks, paint, ...(owner === null ? [] : animationFrame(paintAt - 0.5, paintAt + 0.1, owner))]
 }
 const frames = (from, to, every) => Array.from({ length: Math.floor((to - from) / every) + 1 }, (_, i) => frame(from + i * every))
-const analyze = (...parts) => analyzeFrames([renderer(1), ...parts.flat(3)])
+/** Analyzes a synthetic trace, giving each paint mark left without an owner the first full frame presented after it. */
+const analyze = (...parts) => {
+  const events = [renderer(1), ...parts.flat(3)]
+  const states = new Map(events.filter((e) => e.name === 'PipelineReporter' && e.ph === 'b').map((e) => [e.id2.local, e.args.frame_reporter]))
+  const presents = events
+    .filter((e) => e.name === 'PipelineReporter' && e.ph === 'e' && states.get(e.id2.local).state === 'STATE_PRESENTED_ALL')
+    .map((e) => ({ at: e.ts, seq: states.get(e.id2.local).frame_sequence }))
+    .sort((a, b) => a.at - b.at)
+  for (const paint of events.filter((e) => e.owner === 'auto')) {
+    // No frame after it: a frame that never presents, so the target never paints.
+    const next = presents.find((f) => f.at > paint.ts)
+    events.push(...animationFrame(paint.ts / 1000 - 0.5, paint.ts / 1000 + 0.1, next ? next.seq : 1e9))
+  }
+  return analyzeFrames(events)
+}
 
 /** A continuous scroll: an input every 5 ms from 0 to `until`, each painted 4 ms later, so each demand overlaps the next. */
 const scroll = (until) => Array.from({ length: until / 5 + 1 }, (_, i) => input(i * 5, i * 5 + 4))
@@ -139,47 +171,22 @@ test('the first frame is judged on input to present, never on its slice: a frame
   assert.deepEqual(r.firstFrame, { n: 1, p50: 26, p95: 26, max: 26 })
 })
 
-test('but every later frame of the same demand is judged on its gap: a page 20 ms after the jump frame is long', () => {
-  // The jump presents its first frame at 110 (rows still blank), then the rows' frame at 130.
+test("a frame presented between a jump and its answer isn't judged: the interval starts at the answer", () => {
+  // The coordinator's ruling (PR 9): the jump presents a frame at 110 with its rows still blank, then the rows' frame
+  // at 130, its answer. The 110 frame can't carry the response, and the 30 ms latency covers it. (PR 3's version judged
+  // the 20 ms gap from 110 as long.)
   const r = analyze(input(100, 125), frame(110), frame(130))
-  assert.equal(r.longFrames, 1)
-  assert.deepEqual(r.long, [{ from: 110, to: 130, ms: 20, began: 104 }])
-  assert.equal(r.cadence, 'fail')
-  assert.equal(r.responsiveness, 'pass')
-})
-
-test("a frame already in the pipeline at the input isn't the interval's: a jump answered by the next frame is n/a", () => {
-  // The coordinator's Z62 clarification (PR 9): a present begun before the interval's first input can't contain it.
-  // The jump at 100: the frame begun at 95 presents at 105 with the old rows, then the rows' frame at 130.
-  const r = analyze(input(100, 125), frame(105, { began: 95 }), frame(130, { began: 124 }))
   assert.equal(r.frames, 0)
   assert.deepEqual(r.long, [])
   assert.equal(r.cadence, 'n/a')
   assert.deepEqual(r.firstFrame, { n: 1, p50: 30, p95: 30, max: 30 })
-  // Without the rule, the same trace read 25 ms long on cadence: the pipeline frame anchored the gap.
-})
-
-test('a real long frame after the input still fails cadence, with a pipeline frame before it', () => {
-  // The frame begun at 94 is excluded; the jump's own frame (begun 104, presented 110) and the rows' 20 ms later aren't.
-  const r = analyze(input(100, 125), frame(103, { began: 94 }), frame(110, { began: 104 }), frame(130, { began: 124 }))
-  assert.equal(r.frames, 1)
-  assert.deepEqual(r.long, [{ from: 110, to: 130, ms: 20, began: 104 }])
-  assert.equal(r.cadence, 'fail')
-})
-
-test("a present reported by two slices belongs to the interval if either slice began after its input", () => {
-  // One slice began 5 ms before the jump and the jump's own 3 ms after it: the present at 110 contains the input, and
-  // the rows' frame 20 ms later is long.
-  const r = analyze(input(100, 125), frame(110, { began: 95 }), frame(110, { began: 103 }), frame(130, { began: 124 }))
-  assert.equal(r.frames, 1)
-  assert.deepEqual(r.long, [{ from: 110, to: 130, ms: 20, began: 95 }])
-  assert.equal(r.cadence, 'fail')
+  assert.equal(r.responsiveness, 'pass')
 })
 
 test("a pointerdown folded into the drag's scroll doesn't anchor the interval: the thumb frame between them isn't judged", () => {
   // The coordinator's anchoring ruling (PR 9). The pointerdown at 0 has no mark of its own: the drag's scroll at 7 came
-  // first. A frame begun at 5 presents the thumb at 12; the rows' frame (begun 20) presents at 40.
-  const r = analyze(input(0, null, 'x', 1, 'pointerdown'), input(7, 21, 'k', 1, 'scroll'), frame(12, { began: 5 }), frame(40, { began: 20 }))
+  // first. A frame begun at 5 presents the thumb at 12; the rows' frame (begun 20), which owns the paint, at 40.
+  const r = analyze(input(0, null, 'x', 1, 'pointerdown'), input(7, 21, 'k', 1, 'scroll', { owner: 41 }), frame(12, { began: 5, seq: 40 }), frame(40, { began: 20, seq: 41 }))
   assert.equal(r.folded, 1)
   assert.equal(r.frames, 0)
   assert.deepEqual(r.long, [])
@@ -191,9 +198,55 @@ test("a pointerdown folded into the drag's scroll doesn't anchor the interval: t
   assert.deepEqual([key.folded, key.frames, key.cadence], [1, 0, 'n/a'])
 })
 
+test('the answer is the frame that owns the paint: a keypress answered by its own frame, begun before the paint', () => {
+  // As in PR 3's keypress control: the key at 0, its paint at 0.3 inside frame 101's AnimationFrame. Frame 101 began at
+  // -1.6 and presents at 6.2. A pipeline frame presents at 2 before the paint, and frame 102, begun after it, at 12.
+  const r = analyze(input(0, 0.3, 'k', 0.1, 'keydown', { owner: 101 }), frame(2, { began: -8, seq: 100 }), frame(6.2, { began: -1.6, seq: 101 }), frame(12, { began: 5, seq: 102 }))
+  assert.deepEqual(r.firstFrame, { n: 1, p50: 6.2, p95: 6.2, max: 6.2 })
+  assert.equal(r.cadence, 'n/a')
+})
+
+test('the first jump after launch is answered by its paint\'s frame, and the compositor frame before it is not judged', () => {
+  // A trace kept from PR 9's jump control (ms from the pointerdown): the drag's scroll at 7.8, its paint at 19.8 in
+  // frame 150's AnimationFrame. Frame 149 (begun 5.3) presents at 20.8 without the rows; frame 150 has a dropped slice
+  // and its presented one, at 44.0. The first present after the paint, at 20.8, isn't the answer.
+  const r = analyze(
+    input(0, null, 'x', 0.3, 'pointerdown'),
+    input(7.8, 19.8, 'k', 0.3, 'scroll', { owner: 150 }),
+    frame(5.3, { began: -4.7, seq: 148 }),
+    frame(20.8, { began: 5.3, seq: 149 }),
+    frame(19.8, { began: 12.6, seq: 150, state: 'STATE_DROPPED' }),
+    frame(44.0, { began: 12.6, seq: 150 })
+  )
+  assert.deepEqual(r.inputToPaint.map((p) => [p.kind, p.ms]), [['pointerdown', 44], ['scroll', 36.2]])
+  assert.deepEqual([r.folded, r.frames, r.cadence, r.ownerUnpresented], [1, 0, 'n/a', 0])
+  assert.deepEqual(r.long, [])
+})
+
+test("a frame that never presents: the next presented frame carries the change, and it's counted", () => {
+  const r = analyze(input(0, 3, 'k', 1, 'wheel', { owner: 301 }), frame(8, { began: 2, seq: 301, state: 'STATE_DROPPED' }), frame(14, { began: 8, seq: 302 }))
+  assert.deepEqual(r.firstFrame, { n: 1, p50: 14, p95: 14, max: 14 })
+  assert.equal(r.ownerUnpresented, 1)
+})
+
+test('a paint mark with no AnimationFrame around it makes the run invalid: its answer is never guessed', () => {
+  const r = analyze(input(0, 3, 'k', 1, 'wheel', { owner: null }), frame(6), frame(12))
+  assert.equal(r.valid, false)
+  assert.match(r.reason, /^no AnimationFrame around input \d+'s paint mark/)
+  assert.deepEqual([r.cadence, r.responsiveness], ['invalid', 'invalid'])
+})
+
 test("a real long frame after the scroll's answer still fails cadence", () => {
-  // The scroll at 7 is answered at 15; a second scroll at 14 overlaps it, and its rows' frame comes 25 ms later.
-  const r = analyze(input(0, null, 'x', 1, 'pointerdown'), input(7, 13, 'k1', 1, 'scroll'), input(14, 34, 'k2', 1, 'scroll'), frame(15, { began: 8 }), frame(40, { began: 30 }))
+  // The scroll at 7 is answered at 15 by its paint's frame; a second scroll at 14 overlaps it, and its rows' frame comes
+  // 25 ms later. A compositor frame between the first scroll and its answer (at 10) isn't judged.
+  const r = analyze(
+    input(0, null, 'x', 1, 'pointerdown'),
+    input(7, 13, 'k1', 1, 'scroll', { owner: 202 }),
+    input(14, 34, 'k2', 1, 'scroll', { owner: 203 }),
+    frame(10, { began: 4, seq: 201 }),
+    frame(15, { began: 8, seq: 202 }),
+    frame(40, { began: 30, seq: 203 })
+  )
   assert.equal(r.folded, 1)
   assert.deepEqual(r.long, [{ from: 15, to: 40, ms: 25, began: 8 }])
   assert.equal(r.cadence, 'fail')

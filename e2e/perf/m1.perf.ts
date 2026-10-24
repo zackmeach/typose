@@ -383,6 +383,8 @@ async function framesRow(file: string, label: string, drive: Drive, a11y: string
       longShare: a.longShare,
       firstFrame: a.firstFrame,
       unanswered: a.unanswered,
+      folded: a.folded,
+      ownerUnpresented: a.ownerUnpresented,
       stalls: a.stalls,
       neverPainted: a.neverPainted.length,
       long: a.long.slice(0, 10),

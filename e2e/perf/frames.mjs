@@ -7,7 +7,9 @@
 //   show stale rows, so they don't end a gap. These ends coincide with viz's Display::FrameDisplayed. Two
 //   STATE_PRESENTED_ALL slices, for different frame_sequences, can end at the same ts; the earlier sequence often also
 //   has a FORKED slice. Why Chromium reports one present twice is unverified. One present is one frame, begun when its
-//   earliest slice began; `lastBegan` is when its latest slice began, for demanded-interval membership (below).
+//   earliest slice began. Each slice carries its `frame_sequence` and `frame_source`.
+// - AnimationFrame (devtools.timeline): the renderer main thread's animation frames, each naming the frame it renders
+//   (`begin_frame_id`: sequence and source). A paint mark fires inside one; that frame's presented slice is the answer.
 // - TimeStamp (devtools.timeline): the renderer's console.timeStamp() marks from app/renderer/perf.ts:
 //   `typose:input <seq> <kind> <inputMs> <dispatchMs>` and `typose:painted <seq> <key>`, both in performance.now() ms.
 // - FireAnimationFrame (devtools.timeline): rAF callbacks, printed beside the judged figures and never judged.
@@ -17,10 +19,12 @@ const LONG_MS = 16.7 // §10.2's frame threshold, absolute (ruling OQ-6)
 const STALL_MS = 50
 const NEVER_MS = 1000
 
-/** The renderer's fully presented frames (trace µs), one per present: when it was presented, and its earliest and latest
- *  begins. */
+const rendererPids = (events) => new Set(events.filter((e) => e.ph === 'M' && e.name === 'process_name' && e.args?.name === 'Renderer').map((e) => e.pid))
+
+/** The renderer's fully presented frames (trace µs), one per present: when it was presented, its earliest begin, and
+ *  the frames (sequence and source) it presents. */
 export function presentedFrames(events) {
-  const renderers = new Set(events.filter((e) => e.ph === 'M' && e.name === 'process_name' && e.args?.name === 'Renderer').map((e) => e.pid))
+  const renderers = rendererPids(events)
   const reporters = events.filter((e) => e.name === 'PipelineReporter' && renderers.has(e.pid)).sort((a, b) => a.ts - b.ts)
   const pids = new Set(reporters.map((e) => e.pid))
   if (pids.size !== 1) throw new Error(`expected one renderer reporting frames, found ${pids.size}`)
@@ -28,10 +32,11 @@ export function presentedFrames(events) {
   const frames = []
   for (const e of reporters) {
     const key = e.id2?.local ?? e.id
-    if (e.ph === 'b') open.set(key, { state: e.args?.frame_reporter?.state, began: e.ts })
+    const r = e.args?.frame_reporter
+    if (e.ph === 'b') open.set(key, { state: r?.state, began: e.ts, seq: { seq: r?.frame_sequence, source: r?.frame_source } })
     else if (e.ph === 'e' && open.has(key)) {
-      const { state, began } = open.get(key)
-      if (state === 'STATE_PRESENTED_ALL') frames.push({ at: e.ts, began, lastBegan: began })
+      const { state, began, seq } = open.get(key)
+      if (state === 'STATE_PRESENTED_ALL') frames.push({ at: e.ts, began, seqs: [seq] })
       open.delete(key)
     }
   }
@@ -41,10 +46,27 @@ export function presentedFrames(events) {
     const last = presents.at(-1)
     if (last && last.at === f.at) {
       last.began = Math.min(last.began, f.began)
-      last.lastBegan = Math.max(last.lastBegan, f.lastBegan)
+      last.seqs.push(...f.seqs)
     } else presents.push(f)
   }
   return presents
+}
+
+/** The renderer main thread's animation frames (trace µs): when each ran, and the frame it renders. */
+function animationFrames(events) {
+  const renderers = rendererPids(events)
+  const open = new Map()
+  const out = []
+  for (const e of events.filter((e) => e.name === 'AnimationFrame' && renderers.has(e.pid)).sort((a, b) => a.ts - b.ts)) {
+    const key = e.id2?.local ?? e.id
+    const frame = e.args?.animation_frame_timing_info?.begin_frame_id
+    if (e.ph === 'b') open.set(key, { b: e.ts, seq: frame?.sequence_number, source: frame?.source_id })
+    else if (e.ph === 'e' && open.has(key)) {
+      out.push({ ...open.get(key), e: e.ts })
+      open.delete(key)
+    }
+  }
+  return out
 }
 
 /** Nearest-rank percentile of `values` (ms), or undefined when there are none. */
@@ -55,20 +77,24 @@ const percentile = (values, p) => {
 
 /**
  * Z62: the 16.7 ms / ≥ 99% frame gate judges cadence, and the first frame after an input is judged by responsiveness.
- * - A frame is demanded from an input until the view settles: the first presented frame after the renderer marked the
- *   input's target rows painted. Demanded intervals that overlap merge, so a continuous gesture is one interval. Only
- *   an input that changes the view opens one: an input whose first mark is a later input's is folded into it (`folded`).
- * - Cadence: a present belongs to a merged interval only if it began at or after the interval's first input (the
- *   coordinator's Z62 clarification, PR 9): a frame already in the pipeline can't contain the input. A present reported
- *   by two slices belongs if either began then (`lastBegan`). Every such present after the first is judged on its gap
- *   from the one before it: long at ≥ 16.7 ms, a stall over 50 ms. A run where no interval has a second such present
- *   (discrete keypresses, each answered by one frame) reports cadence as 'n/a', never as passed.
- * - Responsiveness: each input that changes the view is answered by the first present after its target rows painted,
- *   and judged on input → that present, a stall over 50 ms (plan §5's input latency, `inputToPaint`). The distribution
- *   of these answered inputs is reported (`firstFrame`). The next present after an input isn't its answer: while frames
- *   flow, it comes within a refresh whatever it shows. An input whose target isn't painted within 1 s fails as never
- *   painted. An input that changes nothing on screen (its painted mark repeats the previous one) owes no frame: it's
- *   timed to its mark and reported apart (`unanswered`), and is a stall if the mark is over 50 ms late.
+ * - An input's answer is the frame that owns its paint (the coordinator's rulings, PR 9): the presented slice of the
+ *   frame whose main-thread AnimationFrame contains the input's painted mark (`begin_frame_id` = `frame_sequence`). The
+ *   mark fires inside its own frame, which began before it. If that frame never presents (dropped, or partial only),
+ *   the answer is the next presented frame after it, which carries the change (`ownerUnpresented` counts them). A
+ *   trace with no AnimationFrame around a mark is invalid: the answer can't be told, and nothing falls back.
+ * - A frame is demanded from an input until its answer. Demanded intervals that overlap merge, so a continuous gesture
+ *   is one interval. Only an input that changes the view opens one: an input whose first mark is a later input's is
+ *   folded into it (`folded`), timed to the same answer.
+ * - Cadence: a merged interval's frames start at its first answer. Presents between an input and its answer are
+ *   compositor or pipeline frames that can't carry the response, and the input's latency covers that span. Every
+ *   present after the first answer is judged on its gap from the one before it: long at ≥ 16.7 ms, a stall over
+ *   50 ms. A run where no interval has a present after its first answer (discrete keypresses, each answered by one
+ *   frame) reports cadence as 'n/a', never as passed.
+ * - Responsiveness: each input that changes the view is judged on input → its answer, a stall over 50 ms (plan §5's
+ *   input latency, `inputToPaint`). The distribution of these answered inputs is reported (`firstFrame`). An input
+ *   whose target isn't painted within 1 s fails as never painted. An input that changes nothing on screen (its painted
+ *   mark repeats the previous one) owes no frame: it's timed to its mark and reported apart (`unanswered`), and is a
+ *   stall if the mark is over 50 ms late.
  * - Each long frame and stall says when the work behind it began (`began`): a frame begun before a block can still
  *   present during it.
  * - A trace that can't be judged (no renderer frames, more than one renderer, no inputs, nothing demanded, a demanded
@@ -76,7 +102,7 @@ const percentile = (values, p) => {
  */
 export function analyzeFrames(events) {
   const ms = (us) => Math.round(us) / 1000
-  const none = { inputs: 0, unanswered: { n: 0 }, demandedMs: 0, frames: 0, longFrames: 0, longShare: 0, long: [], stalls: [], neverPainted: [], inputToPaint: [], firstFrame: { n: 0 }, raf: { maxGapMs: 0 } }
+  const none = { inputs: 0, folded: 0, ownerUnpresented: 0, unanswered: { n: 0 }, demandedMs: 0, frames: 0, longFrames: 0, longShare: 0, long: [], stalls: [], neverPainted: [], inputToPaint: [], firstFrame: { n: 0 }, raf: { maxGapMs: 0 } }
   const invalid = (reason) => ({ ...none, valid: false, reason, cadence: 'invalid', responsiveness: 'invalid' })
   let presented
   try {
@@ -84,7 +110,17 @@ export function analyzeFrames(events) {
   } catch (e) {
     return invalid(e.message)
   }
-  const frames = presented.map((f) => f.at)
+  const owners = animationFrames(events)
+  /** The answer to a paint mark: its owning frame's present, or the next present after an owner that never presented. */
+  const answerOf = (mark) => {
+    const af = owners.filter((o) => o.b <= mark.ts && mark.ts <= o.e && o.seq !== undefined).sort((x, y) => y.b - x.b)[0]
+    if (!af) return { missing: true }
+    const sameSource = (f) => f.source === undefined || af.source === undefined || f.source === af.source
+    const own = presented.find((p) => p.seqs.some((f) => f.seq === af.seq && sameSource(f)))
+    if (own) return { at: own.at }
+    const next = presented.find((p) => p.at > mark.ts && p.seqs.some((f) => f.seq > af.seq && sameSource(f)))
+    return next ? { at: next.at, unpresented: true } : {}
+  }
 
   const inputs = []
   const painted = []
@@ -109,6 +145,7 @@ export function analyzeFrames(events) {
   const demanded = []
   const stalls = []
   let folded = 0
+  let ownerUnpresented = 0
   for (const input of inputs) {
     const i = painted.findIndex((p) => p.seq >= input.seq && p.ts >= input.dispatch)
     const mark = painted[i]
@@ -119,12 +156,15 @@ export function analyzeFrames(events) {
       if (late > STALL_MS * 1000) stalls.push({ from: ms(input.at), to: ms(mark.ts), ms: ms(late), began: ms(input.at), first: true })
       continue
     }
-    const settle = mark && frames.find((f) => f > mark.ts)
+    const answer = mark ? answerOf(mark) : {}
+    if (answer.missing) return invalid(`no AnimationFrame around input ${input.seq}'s paint mark at ${ms(mark.ts)} ms: its answer's frame can't be told`)
+    if (answer.unpresented) ownerUnpresented++
+    const settle = answer.at
     if (settle === undefined || settle - input.at > NEVER_MS * 1000) {
       neverPainted.push({ seq: input.seq, kind: input.kind, at: ms(input.at) })
       continue
     }
-    // Responsiveness: the input is answered by the first present after its target painted (plan §5's input latency).
+    // Responsiveness: the input is answered by the frame that owns its paint (plan §5's input latency).
     const latency = settle - input.at
     inputToPaint.push({ seq: input.seq, kind: input.kind, ms: ms(latency) })
     // Only an input that changes the view opens a demanded interval (the coordinator's clarification of Z62). An input
@@ -137,25 +177,26 @@ export function analyzeFrames(events) {
   }
   if (demanded.length === 0 && neverPainted.length === 0) return invalid('nothing was demanded: every input changed nothing')
 
-  // Merge overlapping demanded intervals.
+  // Merge overlapping demanded intervals, each from its input to its answer; a merged interval's frames start at its
+  // first answer.
   demanded.sort((x, y) => x[0] - y[0])
   const merged = []
   for (const [a, s] of demanded) {
     const last = merged.at(-1)
-    if (last && a <= last[1]) last[1] = Math.max(last[1], s)
-    else merged.push([a, s])
+    if (last && a <= last[1]) {
+      last[1] = Math.max(last[1], s)
+      last[2] = Math.min(last[2], s)
+    } else merged.push([a, s, s])
   }
 
-  // Cadence: the presents begun at or after each merged interval's first input, each after the first on its gap from
-  // the one before it. A present begun before the input was already in the pipeline: it can't contain the input.
+  // Cadence: each present after a merged interval's first answer, on its gap from the one before it.
   let judged = 0
   const long = []
   let demandedUs = 0
-  for (const [a, s] of merged) {
+  for (const [a, s, first] of merged) {
     demandedUs += s - a
-    const ending = presented.filter((f) => f.at > a && f.at <= s)
-    if (ending.length === 0) return invalid(`the demanded interval ${ms(a)}..${ms(s)} ms has no presented frame`)
-    const inside = ending.filter((f) => f.lastBegan >= a)
+    const inside = presented.filter((f) => f.at >= first && f.at <= s)
+    if (inside.length === 0) return invalid(`the demanded interval ${ms(a)}..${ms(s)} ms has no presented frame`)
     for (let k = 1; k < inside.length; k++) {
       const gap = inside[k].at - inside[k - 1].at
       const span = { from: ms(inside[k - 1].at), to: ms(inside[k].at), ms: ms(gap), began: ms(inside[k - 1].began) }
@@ -181,6 +222,7 @@ export function analyzeFrames(events) {
     reason: undefined,
     inputs: inputs.length,
     folded,
+    ownerUnpresented,
     unanswered: { n: unanswered.length, max: unanswered.length ? Math.max(...unanswered) : undefined },
     demandedMs: ms(demandedUs),
     frames: judged,
