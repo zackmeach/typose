@@ -15,6 +15,9 @@ declare const __TEST_HOOKS__: boolean
 
 markBundleEvaluated()
 markPresentations()
+// Z64: the page's own first frame, on the User Timing clock beside Z37's marks. Z37's first-screen clock starts no
+// earlier. Paint timing's first-paint isn't used: it comes with the window's first presentation, frames later.
+requestAnimationFrame(() => performance.mark('typose:first-frame'))
 const mount = () => createRoot(document.getElementById('root')!).render(<App core={new CoreClient()} />)
 // Plan C8's startup control: main passes the delay in the URL, from TYPOSE_TEST_DELAY_MOUNT.
 const delay = __TEST_HOOKS__ ? Number(new URLSearchParams(location.search).get('delayMount') ?? 0) : 0
