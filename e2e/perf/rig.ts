@@ -4,6 +4,7 @@ import { type TestInfo } from '@playwright/test'
 import { appendFileSync, mkdirSync } from 'node:fs'
 import { cpus, hostname } from 'node:os'
 import { join, resolve } from 'node:path'
+import { stripVTControlCharacters } from 'node:util'
 
 /** Outside test-results/, which every Playwright run empties: cold samples accumulate across restarts. */
 export const RESULTS = resolve(__dirname, '../../.evidence/m1/perf')
@@ -54,9 +55,12 @@ export function record(key: string, value: Record<string, unknown>): void {
 
 /**
  * Records a test's run once it has ended, with Playwright's verdict as its status and its failure as `testError`: the
- * value's own `reason` (why a run is invalid) is a different fact, and neither overwrites the other.
+ * value's own `reason` (why a run is invalid) is a different fact, and neither overwrites the other. Each error is
+ * kept whole, with its expected and received lines and without terminal colour codes, up to 4,000 characters (a
+ * coverage assertion's message carries the whole run).
  */
 export function recordOutcome(info: TestInfo, key: string, value: Record<string, unknown>): void {
-  const testError = info.errors.map((e) => e.message?.split('\n')[0]).filter(Boolean).join('; ') || undefined
+  const errors = info.errors.map((e) => stripVTControlCharacters(e.message ?? '').trim().slice(0, 4000)).filter(Boolean)
+  const testError = errors.join('\n\n') || undefined
   record(key, { ...value, status: info.status, testError })
 }

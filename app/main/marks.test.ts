@@ -49,6 +49,11 @@ describe('TYPOSE_MARKS', () => {
       expect(marksHook(`C:\\typose-no-such-dir/sub\\${name}`, log, 'win32')).toBeUndefined()
       expect(logged).toEqual([{ event: 'hook-refused', data: { hook: 'TYPOSE_MARKS', reason: expect.stringMatching(/reserved device/) } }])
     })
+  for (const name of ['NUL:stream', 'marks.jsonl:ads', 'marks.jsonl::$DATA', 'sub:x\\marks.jsonl'])
+    it(`refuses ${JSON.stringify(name)} on Windows: a ':' after the drive is an alternate data stream`, () => {
+      expect(marksHook(`C:\\typose-no-such-dir\\${name}`, log, 'win32')).toBeUndefined()
+      expect(logged).toEqual([{ event: 'hook-refused', data: { hook: 'TYPOSE_MARKS', reason: expect.stringMatching(/alternate data stream/) } }])
+    })
   for (const name of ['CONSOLE.jsonl', 'COM10.jsonl', 'marks.con', 'nul-marks.jsonl'])
     it(`takes ${JSON.stringify(name)}: a device name only as part of the file name`, () => {
       expect(marksHook(`C:\\typose-no-such-dir\\${name}`, log, 'win32')).toBeTypeOf('function')

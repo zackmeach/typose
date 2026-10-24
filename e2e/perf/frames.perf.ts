@@ -157,7 +157,7 @@ for (const a11y of ['on', 'off'] as const) {
       expect(r.analysis.cadence).toBe('n/a') // Z62: each key is answered by one frame, so the frame gate doesn't apply
     })
 
-    test('a 30 ms busy-wait during a scroll registers a long frame covering it, and no stall', async () => {
+    test('a 30 ms busy-wait during a scroll registers a long frame covering it, and no cadence stall', async () => {
       const r = await traced(l, async (page, cdp) => {
         await busyOn(page, 'wheel', 20, 30)
         await scroll(cdp)
@@ -166,7 +166,9 @@ for (const a11y of ['on', 'off'] as const) {
       valid(r)
       expect(r.busy).toHaveLength(1)
       expect(r.analysis.long.some((s) => covers(s, r.busy[0])), JSON.stringify(r)).toBe(true)
-      expect(r.analysis.stalls).toEqual([])
+      // The block also adds onto one input's answer (about 42 ms here), so responsiveness is recorded as measured, not
+      // asserted: on a 60 Hz panel the same answer is a refresh or two later and would cross 50 ms with the instrument right.
+      expect(r.analysis.stalls.filter((s) => !s.first)).toEqual([])
     })
 
     test('a 60 ms busy-wait in the handler of one discrete keypress is detected as a stall covering it', async () => {
@@ -189,7 +191,8 @@ for (const a11y of ['on', 'off'] as const) {
       keep('busy60', r)
       valid(r)
       expect(r.busy).toHaveLength(1)
-      expect(r.analysis.stalls.some((s) => covers(s, r.busy[0])), JSON.stringify(r)).toBe(true)
+      // A cadence stall: the assertion the 30 ms control makes fails once the injection is 60 ms.
+      expect(r.analysis.stalls.some((s) => !s.first && covers(s, r.busy[0])), JSON.stringify(r)).toBe(true)
     })
 
     test('a 60 ms busy-wait in the first frame after a scrollbar jump is detected as a stall covering it', async () => {

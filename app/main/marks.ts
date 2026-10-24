@@ -13,6 +13,8 @@ function refusal(path: string, platform: NodeJS.Platform): string | null {
   if (platform === 'win32') {
     // A drive path only: `\\server\share` would connect over SMB (spec §7.3, Z43), and `\\.\` and `\\?\` reach devices.
     if (!/^[A-Za-z]:[\\/]/.test(path)) return 'must be a drive path (X:\\…), not UNC, device, drive-relative or relative'
+    // Any ':' after the drive names an alternate data stream (marks.jsonl:ads, NUL:stream), not a plain file.
+    if (path.slice(2).includes(':')) return "names an alternate data stream (a ':' after the drive), not a file"
     // A reserved device name as the file (CON, NUL.jsonl, COM1 .txt) opens the device, not a file, in any directory.
     const stem = path.split(/[\\/]/).at(-1)!.split('.')[0].trimEnd()
     if (/^(CON|PRN|AUX|NUL|COM[0-9¹²³]|LPT[0-9¹²³])$/i.test(stem)) return `names the reserved device ${stem.toUpperCase()}, not a file`
