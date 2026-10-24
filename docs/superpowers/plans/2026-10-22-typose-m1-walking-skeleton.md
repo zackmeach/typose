@@ -398,7 +398,7 @@ Each PR's tests land in that PR, and every PR extends C4's table to what it adds
 - **Minutes [Z61]:** GitHub Free's included minutes, with the $0 spending limit. Windows minutes count 2× and macOS 10×.
   - Caches for cargo, npm and the Electron binary.
   - `paths-ignore` for docs-only changes (`docs/**`, `*.md`). *(Amended in PR 2: `*.md` is root-level, and a PR is judged on its whole diff; plan §7.)*
-  - `concurrency` with `cancel-in-progress: true` per ref.
+  - `concurrency` with `cancel-in-progress: true` per ref. *(Amended in PR 2: not for pushes to `main`, which keep one macOS run each; plan §7.)*
   - Platform-independent steps (fmt and lint) run on Linux only. (PR 1 dropped the range staleness check: there's no generated table.) *(PR 2 adds clippy for the Windows target there, plan §7.)*
   - **If the quota runs out,** the $0 limit pauses CI, and gated merges wait until it resets or Zack changes the policy. There's no automatic downgrade of the macOS job.
 - **Artifacts and storage [Z61]:**
@@ -411,8 +411,9 @@ Each PR's tests land in that PR, and every PR extends C4's table to what it adds
 - **Measured minutes (PR 2's runs on 2026-10-23, replacing the estimate).** Billed means each job rounded up to the whole minute, then Windows ×2, Linux ×1 and macOS ×10.
   - **A PR's first run, with cold caches** (pr run 39981985343): Windows 5m46s (12 billed), Linux 3m02s (4) and lint 1m06s (2), so 18 billed.
   - **A later push to the same PR, with warm caches** (pr run 39983589063, which ran every step): Windows 3m03s (8 billed), Linux 2m12s (3) and lint 54s (1), so 12 billed. The warm cache cut Windows' napi build from 84 s to 22 s and its `cargo test` from 91 s to 37 s.
-  - **A macOS merge run** took 1m34s and 1m28s before PR 2's caches (main-macos runs 39977019396 and 39979583756), so 20 billed.
+  - **A macOS merge run** took 1m37s and 1m24s, the job times of main-macos runs 39977019396 and 39979583756, before PR 2's caches. So 20 billed each.
   - So a merged PR with ~3 runs costs about 18 + 12 + 12 + 20 ≈ 62 billed minutes, or about 32 merged PRs a month on the 2,000-minute quota (`reply3.md:61`). The estimate said 250 and 8.
+  - Manual `workflow_dispatch` macOS runs aren't in that figure: about 20 billed each, and there were three on 2026-10-23.
   - A PR's first run is always cold: `main` runs only macOS, so Windows and Linux caches are saved on each PR's own ref, which other PRs can't read.
 - **Additions to the steps:**
   - `cargo fmt --check` and `clippy -D warnings`;
@@ -699,9 +700,12 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 - **`*.md` matches root-level Markdown only** (GitHub's `*` doesn't cross `/`); `docs/**` covers the docs tree. *Why:* Typose's own tests will carry Markdown inputs under `app/`, `core/` and `e2e/`, and `**/*.md` would let a fixture-only PR skip CI.
 - **Clippy also checks `x86_64-pc-windows-msvc`, from Linux.** *Why:* clippy runs on Linux only, so `cfg(windows)` code, such as §3.3's pipe and device refusals in `store.rs`, would never be linted. The cross-check lints it at Linux's rate.
 - **Within a job, a step runs when what it needs succeeded,** not only when every earlier step did; the job still fails. *Why:* one run reports every failure (fmt, both clippies and oxlint; `cargo test`, `check` and the e2e) instead of one per push.
-- **Every job is time-boxed** (`timeout-minutes`: lint 15, test 25, macOS 20, and 12 for the e2e step). *Why:* GitHub's default is 360 minutes, so one hung macOS job would bill 3,600 of the 2,000 included minutes. The e2e step's 12 is past Playwright's 10-minute test timeout and leaves room in each job's limit, so a hung e2e fails its own step and its evidence still uploads (a job timeout cancels the job, skipping the upload).
+- **Every job is time-boxed** (`timeout-minutes`: lint 15, test 25, macOS 20, and 12 for the e2e step). *Why:* GitHub's default is 360 minutes, so one hung macOS job would bill 3,600 of the 2,000 included minutes. The e2e step's 12 is past the longest test's own limit (10 minutes in `large.e2e.ts` and `long-line.e2e.ts`; the config's is 5) and leaves room in each job's limit, so a hung e2e fails its own step and its evidence still uploads (a job timeout cancels the job, skipping the upload).
 - **Rust is pinned in a root `rust-toolchain.toml`** (1.96.0, minimal profile, with rustfmt and clippy), which rustup reads locally and in CI. *Why:* one place; at the root it also covers `npm run fixtures`, which runs cargo from the root.
 - **The Electron binary is fetched in its own step** (`npx --no install-electron`), from a cache keyed per lockfile and OS. *Why:* Electron 44 installs no binary at `npm ci`; the first `require('electron')` downloads it, which would otherwise land inside the e2e step.
+- **`main-macos.yml` keeps one run per merge.** A push to `main` gets a concurrency group of its own (its sha), so a later merge neither cancels it nor replaces it while it waits. Only `workflow_dispatch` runs on one branch cancel each other. *Why:* a red macOS run must name its merge, since Z60's macOS break is fixed in the next PR, and a cancelled or replaced run leaves that merge with no verdict. It costs at most one more macOS run per overlapping merge, about 20 billed minutes.
+- **Z57's green CI, for a docs-only PR.** `paths-ignore` gives a PR whose files are all under `docs/**` or root-level `*.md` no checks at all. Its CI counts as green when its file list shows nothing else, which the review confirms. Z57 itself is unchanged.
+- **Failure evidence is capped by stored size** (deflated at level 9, as the artifact zip stores it): 16 MiB a file and 32 MiB in all. *Why:* a raw-byte cap dropped C9's 35 MB Windows main-process dump, which stores at a few MB (pr run 39983589063).
 
 **PR 4's amendments (mechanisms only; no gate change. The after-only check amends §3.1's 🔒 text by Z63):**
 - **One identity check per `page()` or `piece()`, after the reads, and it walks the path first.** PR 1 checked before and after.
