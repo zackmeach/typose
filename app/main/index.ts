@@ -1,9 +1,10 @@
-import { BrowserWindow, MessageChannelMain, app, crashReporter, dialog, ipcMain, protocol, screen, session, systemPreferences, utilityProcess } from 'electron'
+import { BrowserWindow, Menu, MessageChannelMain, app, crashReporter, dialog, ipcMain, protocol, screen, session, systemPreferences, utilityProcess } from 'electron'
 import type { IpcMainEvent, IpcMainInvokeEvent } from 'electron'
 import { once } from 'node:events'
 import { readFile } from 'node:fs/promises'
 import { extname, join, sep } from 'node:path'
 import coreHostPath from '../core-host/index?modulePath'
+import type { Command } from '../shared/protocol'
 import { handoff, launchPath } from './launch'
 import { startLifecycle } from './lifecycle'
 import { delayHook, isMark, marksHook } from './marks'
@@ -130,17 +131,28 @@ function spawnCore(win: BrowserWindow, loaded: Promise<void>): void {
   })
 }
 
+/** Brief §3.1's bar, in logical px. macOS centres its traffic lights in it: AppKit's are 14 px tall (spike A's 13). */
+const TITLE_BAR = 40
+const TRAFFIC_LIGHTS = { x: 14, y: (TITLE_BAR - 14) / 2 }
+
 function createWindow(): BrowserWindow {
   const isMac = process.platform === 'darwin'
+  const isLinux = process.platform === 'linux'
   const win = new BrowserWindow({
     width: 1280,
     height: 800,
+    minWidth: 720, // brief §9's minimum window
+    minHeight: 480,
     show: false,
     backgroundColor: '#111113',
-    titleBarStyle: 'hidden',
+    // Spec §9: on Windows the native caption buttons overlay the bar (WCO, whose maximize button gives Snap Layouts);
+    // macOS insets its traffic lights; Linux keeps the native frame, best effort (Z28).
+    titleBarStyle: isLinux ? 'default' : 'hidden',
     ...(isMac
-      ? { trafficLightPosition: { x: 14, y: 13 } }
-      : { titleBarOverlay: { color: '#111113', symbolColor: '#EDEDED', height: 40 } }),
+      ? { trafficLightPosition: TRAFFIC_LIGHTS }
+      : isLinux
+        ? {}
+        : { titleBarOverlay: { color: '#111113', symbolColor: '#EDEDED', height: TITLE_BAR } }),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: true,
@@ -173,6 +185,21 @@ function createWindow(): BrowserWindow {
   return win
 }
 
+/**
+ * macOS's native menu (spec §9): ☰'s commands, which the page runs as ☰'s do, and the app, Edit and Window menus
+ * of every Mac app (Edit's Copy and Select All are how Cmd+C and Cmd+A reach the page). The page keeps Cmd+R (PR 4),
+ * so Reload has no accelerator here.
+ */
+function macMenu(win: BrowserWindow): Menu {
+  const run = (command: Command) => () => win.isDestroyed() || win.webContents.send('command', command)
+  return Menu.buildFromTemplate([
+    { role: 'appMenu' },
+    { label: 'File', submenu: [{ label: 'Open File…', click: run('open') }, { label: 'Reload', click: run('reload') }] },
+    { role: 'editMenu' },
+    { role: 'windowMenu' }
+  ])
+}
+
 const fromApp = (win: BrowserWindow, event: IpcMainEvent | IpcMainInvokeEvent): boolean =>
   event.sender === win.webContents && !!event.senderFrame?.url.startsWith(`${ORIGIN}/`)
 
@@ -194,6 +221,16 @@ void app.whenReady().then(() => {
   session.defaultSession.setSpellCheckerEnabled(false)
   serveApp()
   const win = createWindow()
+  // Electron's default menu goes (PR 4's residual): its accelerators, Force Reload's Ctrl+Shift+R among them, were live
+  // even with its bar hidden. ☰ is the menu on Windows and Linux; macOS gets a minimal native one (spec §9).
+  Menu.setApplicationMenu(process.platform === 'darwin' ? macMenu(win) : null)
+  // Spec §6.2's accessibility mode: Electron's accessibility support, at each load and on every change. Electron has it
+  // on macOS and Windows only, where Z28 gates accessibility.
+  if (process.platform !== 'linux') {
+    const sendA11y = () => win.isDestroyed() || win.webContents.send('a11y', app.isAccessibilitySupportEnabled())
+    win.webContents.on('did-finish-load', sendA11y)
+    app.on('accessibility-support-changed', sendA11y)
+  }
   // The renderer's startup marks (plan C8): a known name and a whole-ms time, from this window's app page (C4).
   ipcMain.on('mark', (event, name: unknown, t: unknown) => {
     if (!fromApp(win, event) || !isMark(name, t)) return

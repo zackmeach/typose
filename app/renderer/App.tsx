@@ -1,10 +1,14 @@
 import { type RefObject, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Button } from 'react-aria-components'
-import type { Limits, Opened } from '../shared/protocol'
+import type { Command, Limits, Opened } from '../shared/protocol'
 import { type Action, type Card, fileName, view } from './card'
 import { type CoreClient, CoreCallError } from './core'
 import { ROW_HEIGHT, RawLens } from './lenses/raw'
+import { AppMenu } from './menu'
 import { inputMark, markNow, markPainted } from './perf'
+
+/** macOS has its native menu bar and traffic lights in place of the glyph and ☰ (brief §3.1). */
+const MAC = navigator.platform.startsWith('Mac')
 
 /** Z37's scan marks (plan A's veto, `afc58f9`), on the renderer's User Timing timeline: the gate reads them. */
 const MARKS = ['typose:open-start', 'typose:first-screen', 'typose:line-scan', 'typose:index-done']
@@ -73,8 +77,8 @@ export function App({ core }: { core: CoreClient }) {
           : c
       )
     })
-    // Ctrl+R and F5 are Reload (spec §3.1, brief §7.2), not the page reload Electron's default menu binds to
-    // Ctrl+R. Ctrl+Shift+R isn't taken over here: the menu is PR 7's.
+    // Ctrl+R and F5 are Reload (spec §3.1, brief §7.2). Electron's default menu, whose Ctrl+R and Ctrl+Shift+R
+    // reloaded the page, is gone (main).
     const onKey = (e: KeyboardEvent) => {
       const modified = e.ctrlKey || e.metaKey || e.shiftKey || e.altKey
       const ctrlR = e.key.toLowerCase() === 'r' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey
@@ -89,6 +93,7 @@ export function App({ core }: { core: CoreClient }) {
       if (latest.current.card.kind === 'gone') setCard((c) => (c.kind === 'gone' ? { ...c, path, line: undefined } : c))
       else void open(path)
     })
+    const offCommand = window.typose.onCommand(run) // macOS's native menu
     void core.connect().then(
       async (hello) => {
         setLimits(hello.limits)
@@ -108,6 +113,7 @@ export function App({ core }: { core: CoreClient }) {
       offReady()
       offProgress()
       offOpenPath()
+      offCommand()
       window.removeEventListener('keydown', onKey)
     }
   }, [core])
@@ -161,6 +167,13 @@ export function App({ core }: { core: CoreClient }) {
     if (chosen) void open(chosen)
   }
 
+  /** The menu's commands: ☰'s, and macOS's native menu's (spec §9). */
+  function run(command: Command): void {
+    if (command === 'open') void pick()
+    else if (command === 'reload') void reload()
+    else if (command === 'exit') window.close() // the last window's close quits (main's window-all-closed)
+  }
+
   /** Close leaves the empty card; an open still on its way is closed when it arrives. */
   function close(): void {
     attempt.current++
@@ -181,9 +194,14 @@ export function App({ core }: { core: CoreClient }) {
   return (
     <>
       <header className="titlebar">
-        <span className="glyph" aria-hidden="true">
-          ▣
-        </span>
+        {MAC ? null : (
+          <span className="titlebar-start">
+            <span className="glyph" aria-hidden="true">
+              ▣
+            </span>
+            <AppMenu run={run} />
+          </span>
+        )}
         {/* Element Timing: shellVisible is when this text reaches the screen (plan C8). */}
         <span className="title" {...{ elementtiming: 'titlebar' }}>
           {title}
@@ -277,6 +295,8 @@ function RawHost({ core, lens, atLine, opened, name, lines, indexed, limits, fro
   const host = useRef<HTMLDivElement>(null)
   const onFrozenNow = useRef(onFrozen)
   onFrozenNow.current = onFrozen
+  /** Whether the lens Reload just replaced had the focus, which the new one then takes (plan PR 7's focus gate). */
+  const hadFocus = useRef(false)
   const doc = opened.doc
   // The document closes when the card stops showing it, not when Reload replaces its generation.
   useEffect(
@@ -290,7 +310,11 @@ function RawHost({ core, lens, atLine, opened, name, lines, indexed, limits, fro
     // Reload keeps the reading position; a new lens starts where it's told to.
     const raw = new RawLens(host.current!, core, opened, name, limits, { onFrozen: (why) => onFrozenNow.current(why), atLine: lens.current?.topLine() ?? atLine })
     lens.current = raw
-    return () => raw.dispose()
+    if (hadFocus.current) raw.list.element.focus()
+    return () => {
+      hadFocus.current = raw.list.element.contains(document.activeElement)
+      raw.dispose()
+    }
   }, [core, opened, name, limits, lens, atLine])
   useEffect(() => lens.current?.setLineCount(lines), [lines])
   useEffect(() => {

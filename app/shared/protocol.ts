@@ -144,7 +144,13 @@ export interface TyposeApi {
   mark(name: StartupMark, t: number): void
   /** Called once, when main has shown the window; main only tells the page under the TYPOSE_MARKS hook (plan C8). */
   onShown(cb: () => void): void
+  /** Called with each command chosen in macOS's native menu, which the page runs as ☰ does (spec §9). Returns the
+   *  unsubscribe. */
+  onCommand(cb: (command: Command) => void): () => void
 }
+
+/** The menu's commands (brief §3.2's M1 subset): ☰ on Windows and Linux, the native menu on macOS. */
+export type Command = 'open' | 'reload' | 'exit'
 
 /** The renderer's startup marks (plan C8, §5). */
 export const STARTUP_MARKS = [
