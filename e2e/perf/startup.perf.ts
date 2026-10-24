@@ -4,17 +4,22 @@
 // Raw's first screen. No launch here passes a debugging switch: every mark comes from the TYPOSE_MARKS hook (plan §5).
 //   Controls:  npm run build:hooks && npm run package, then `npm run perf -- -g control`
 //   Warm:      npm run package, then `npm run perf -- -g warm` (RUNS=30 by default)
-//   Cold:      COLD=1 RUNS=1 `npm run perf -- -g warm`, as the first launch after each OS restart (Z54).
+//   Cold:      COLD=1 RUNS=1 `npm run perf -- -g warm`, as the first launch after each OS restart (Z54). Plan §5's
+//              batches name their file: FILE=.fixtures/10gib.jsonl (batch A) or FILE=.fixtures/1gib.jsonl (batch B).
 // Every run is appended to .evidence/m1/perf/, valid or not.
 import { expect } from '@playwright/test'
+import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { hostname, uptime } from 'node:os'
+import { join, resolve } from 'node:path'
 import { APP_DIR, FIXTURES, fixture, test } from '../app'
-import { type LaunchOptions, closePackaged, launchPackaged, readMarks, waitMarks } from '../packaged'
-import { cpuLoad, cpuTimes, idleLoad, percentile, recordOutcome, summary } from './rig'
+import { type LaunchOptions, PACKAGED, closePackaged, launchPackaged, readMarks, unrequested, waitMarks } from '../packaged'
+import { coldVerdict } from './cold.mjs'
+import { RESULTS, cpuLoad, cpuTimes, idleLoad, percentile, recordOutcome, summary } from './rig'
 
 const RUNS = Number(process.env.RUNS ?? 30)
 const COLD = process.env.COLD === '1'
+const sha256 = (file: string) => createHash('sha256').update(readFileSync(file)).digest('hex')
 
 let outcome: { key: string; value: Record<string, unknown> } | null = null
 test.beforeEach(() => void (outcome = null))
@@ -37,10 +42,10 @@ async function startup(opts: LaunchOptions) {
     reason = (e as Error).message
   }
   const m = readMarks(l)
-  // A launch that had to be killed is this run's invalidity, never the batch's end: every sample is kept.
+  // A launch that didn't quit cleanly, or lost a process, is a failure to explain (plan §5's exit integrity, Z56),
+  // never an invalid run. Every sample is still kept, and the batch goes on.
   const exit = await closePackaged(l).catch((e: Error) => e)
-  if (exit instanceof Error) reason ??= `the launch didn't quit cleanly: ${exit.message}`
-  else if (!reason && (exit.code !== 0 || exit.signal !== null)) reason = `the launch didn't quit cleanly: ${JSON.stringify(exit)}`
+  const exits = exit instanceof Error ? [`pid ${l.pid}: ${exit.message}`] : unrequested(l, exit)
   const at = (name: string) => (m[name] ? m[name].t - l.spawnedAt : NaN)
   const presentedBy = at('titlebarPresented') >= at('show') ? 'titlebarPresented' : 'shownPresented'
   const shellVisible = at(presentedBy)
@@ -54,9 +59,12 @@ async function startup(opts: LaunchOptions) {
     openToUsable: opts.file && !reason ? m.rawUsable.t - m.openRequested.t : undefined,
     marks: Object.fromEntries(Object.keys(m).map((k) => [k, at(k)])),
     hz: m.show?.hz as number | undefined,
-    load: cpuLoad(from)
+    load: cpuLoad(from),
+    exits
   }
 }
+/** Fails the test on any launch that didn't quit cleanly (Z56), naming each. */
+const noExits = (samples: Sample[]) => expect(samples.flatMap((s) => s.exits), "a launch that didn't quit cleanly (Z56)").toEqual([])
 type Sample = Awaited<ReturnType<typeof startup>>
 
 /** The dev layout of `npm run build:hooks`, on the same Electron: only it has the startup controls' hooks. */
@@ -87,6 +95,7 @@ test.describe('startup controls', () => {
       outcome = { key: `control:${key}`, value: { raisedBy: med(delayed) - med(base), base, delayed } }
       console.log(control, JSON.stringify({ base: med(base), delayed: med(delayed), presentedBy: delayed.map((s) => s.presentedBy) }))
       // Every run establishes the presentation after the show; an invalid one fails the control with its reason.
+      noExits([...base, ...delayed])
       for (const s of [...base, ...delayed]) expect(s.valid, s.reason).toBe(true)
       // Each delayed run's presentation lands ≥ 300 ms after the instant its delay started from (plan C8 as amended):
       // max(ready-to-show, titlebarPainted) for show(), the bundle's evaluation for the mount.
@@ -131,8 +140,10 @@ test.describe('startup controls', () => {
 
 test(`warm startup on the packaged build, n = ${RUNS} (informational)`, async () => {
   test.setTimeout(30 * 60_000)
-  // Plan §5's batches open 1 GiB and 10 GiB files; this informational run opens a small one.
-  const file = fixture('startup.jsonl', Array.from({ length: 200_000 }, (_, i) => `{"n":${i},"msg":"startup line ${i}"}`).join('\n'))
+  // Plan §5's batches open 1 GiB and 10 GiB files, named by FILE; unset, this informational run opens a small one.
+  const file = process.env.FILE
+    ? resolve(process.env.FILE)
+    : fixture('startup.jsonl', Array.from({ length: 200_000 }, (_, i) => `{"n":${i},"msg":"startup line ${i}"}`).join('\n'))
   const before = await idleLoad()
   const from = cpuTimes()
   if (!COLD) await startup({ file }) // one warm-up launch, not kept
@@ -153,11 +164,18 @@ test(`warm startup on the packaged build, n = ${RUNS} (informational)`, async ()
     loadDuring: cpuLoad(from),
     loadPerRun: samples.map((s) => s.load),
     samples,
-    file: file.replace(FIXTURES, '.fixtures')
+    file: file.replace(FIXTURES, '.fixtures'),
+    // A cold batch is one build's restarts, one record per boot (cold.mjs).
+    ...(COLD ? { build: { exe: sha256(PACKAGED.exe), asar: sha256(PACKAGED.asar) }, boot: new Date(Date.now() - uptime() * 1000).toISOString() } : {})
   }
-  outcome = { key: COLD ? 'cold:startup' : 'warm:startup', value: result }
+  // A cold run is one restart of a batch: its verdict reads the batch's earlier restarts back from the log (cold.mjs).
+  const log = join(RESULTS, `m1-${hostname()}.jsonl`)
+  const earlier = COLD && existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line) as { key: string; file?: string }) : []
+  const batch = COLD ? coldVerdict([...earlier.filter((r) => r.key === 'cold:startup' && r.file === result.file), { key: 'cold:startup', samples, build: result.build, boot: result.boot }]) : undefined
+  outcome = { key: COLD ? 'cold:startup' : 'warm:startup', value: { ...result, batch } }
   const brief = (s?: { n: number; p50: number; p95: number; max: number }) => s && { n: s.n, p50: s.p50, p95: s.p95, max: s.max }
   const { samples: _all, ...shown } = result
-  console.log(JSON.stringify({ ...shown, shellVisible: brief(result.shellVisible), firstContent: brief(result.firstContent), openToUsable: brief(result.openToUsable) }, null, 1))
+  console.log(JSON.stringify({ ...shown, shellVisible: brief(result.shellVisible), firstContent: brief(result.firstContent), openToUsable: brief(result.openToUsable), batch }, null, 1))
+  noExits(samples)
   expect(result.invalid, 'invalid runs are kept with their reasons above').toEqual([])
 })
