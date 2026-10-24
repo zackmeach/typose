@@ -204,11 +204,11 @@ The spike trusted the caller's offset and clamped negatives to 0 (`spike/a spike
 
 **Mechanics:** `page` runs as an async napi task with its own cancel flag, checked before each chunk read and between items. The core host's JS thread stays free, so `cancel(id)` arrives while the task runs. The spike's calls were synchronous (`spike/a core-host.ts:28-37`) and never cancelled (plan A:3616).
 
-**Renderer (`DocHandle`):** keeps ≤ 2 outstanding requests per lens, coalesced to one per frame (port `lens-view.ts:47-61`). It cancels the oldest request whose range no longer meets the wanted range, and ignores late results.
+**Renderer (`DocHandle`):** keeps ≤ 2 outstanding requests per lens, coalesced to one per frame (port `lens-view.ts:47-61`). It cancels the oldest request whose range no longer meets the wanted range, and ignores late results. *(Amended in PR 5: it cancels every such request, and the lens's own request loop is the `DocHandle` until a second lens needs one; plan §7.)*
 
 **Acceptance:** with the `test-hooks` per-read delay (m8), jump far every frame for 2 s.
 - Outstanding requests stay ≤ 2 per lens throughout (debug stats).
-- Every superseded request ends `Cancelled` within one chunk read of its cancel.
+- Every superseded request ends `Cancelled` within one chunk read of its cancel. *(Amended in PR 5: superseded means cancelled while its read runs; plan §7.)*
 - The final viewport's page arrives, and 0 tasks are running after the view settles.
 
 ### C6 · Close, freeze and failure: what each releases
@@ -229,7 +229,7 @@ The spike trusted the caller's offset and clamped negatives to 0 (`spike/a spike
 The document keeps its explicitly charged state (its floor, checkpoints, hashes, cache and metadata) until close or Reload, as the ported `Document` keeps its store and frozen reason (`spike/c doc.rs:74-81,139-153`). Raw keeps showing what it has.
 
 **Acceptance:**
-- Close mid-index on the 10 GiB fixture: the job stops within 50 ms (proposal, from Spike C's cancel gate, §13.1). The ledger returns to baseline, with 0 jobs, 0 tasks and 0 handles for that document.
+- Close mid-index on the 10 GiB fixture: the job stops within 50 ms (proposal, from Spike C's cancel gate, §13.1). The ledger returns to baseline, with 0 jobs, 0 tasks and 0 handles for that document. *(Amended in PR 5: the ledger clauses here are checked from PR 6, which builds the ledger; plan §7.)*
 - Truncate a file mid-index: the error event arrives, the document freezes, and 0 jobs and 0 tasks remain.
   - The ledger equals the baseline plus exactly that document's retained charges, as debug stats itemize them.
   - A later close returns it to baseline.
@@ -248,13 +248,13 @@ The document keeps its explicitly charged state (its floor, checkpoints, hashes,
 
 **Reopen:**
 - Reopen opens the path again in the new session, as a new document at generation 1, at the same line. There's no automatic reopen in M1.
-- After a second death within 60 s, the core isn't respawned and the app shows the stopped state. Once 60 s have passed, Reopen respawns the core (proposal, plan §7).
+- After a second death within 60 s, the core isn't respawned and the app shows the stopped state. Once 60 s have passed, Reopen respawns the core (proposal, plan §7). *(Amended in PR 5: main respawns it then, and the card offers Reopen; plan §7.)*
 
 **Acceptance:** kill the core host by its pid while idle, during a pending page, and mid-index on 10 GiB.
 - Every pending promise rejects with `CoreGone` within 1 s, with no unhandled rejection.
 - Main stays alive, and the log records the exit code and reason.
 - Reopen restores the line. A second kill within 60 s leaves the app in the stopped state.
-- A page and a progress event from the old session, delayed (`test-hooks`) until after Reopen, are rejected, and the reopened view is unchanged.
+- A page and a progress event from the old session, delayed (`test-hooks`) until after Reopen, are rejected, and the reopened view is unchanged. *(PR 5: the hook holds them on their way into the renderer's client; plan §7.)*
 
 ### C8 · The perf instruments, reconciled with §10.2
 
@@ -832,6 +832,16 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 - **The index reads through a handle reopened from the document's** (`ReOpenFile` on Windows, `dup` on Unix), not through the path. *Why:* the same swap would otherwise connect the index's own open, and the reopened handle indexes the file the document actually has open.
 - **Stopping an index:** `index::build`'s progress callback returns whether to go on, once per block. The freeze half stops through it: when a page finds a change, or Reload supersedes the generation, the job ends at its next block. *For PR 5:* C6's cancel flag can return through the same callback, with no new parameter.
 
+**PR 5's amendments (mechanisms and test details; no Z-decision, 🔒 requirement or gate changes):**
+- **C6's ledger clauses are checked from PR 6.** PR 5 checks the rest of C6 by the test-hooks build's debug stats: after close, 0 jobs, 0 tasks, 0 handles and 0 documents; after a truncation, 0 jobs and 0 tasks, the document's handle kept, and none after close. *Why:* the ledger is PR 6's (C1), so PR 5 has no ledger to compare with a baseline. C1's exhaustion test already cancels an index mid-run, truncates another and closes all, against the byte-exact baseline, so Z47's "releases on close, cancellation and failure" stays tested in M1.
+- **C5: the lens cancels every request the wanted range no longer meets, not only the oldest.** A cancelled request keeps its place among the 2 until it ends, within one chunk read, so the core never runs more than 2 reads for a lens. *Why:* §3.4 🔒 says "stale requests are cancelled"; cancelling only the oldest would leave a stale read running while a wanted one waits. In one PR 5 run, 328 jumps in 2 s gave 38 cancels, with at most 2 requests out.
+- **C5's `DocHandle` is the lens's own request loop for now:** each frame it cancels stale requests (an `AbortSignal` per call, which `CoreClient` turns into `cancel(id)`), then sends at most one request. *Why:* M1 has one lens and the rules are per lens; a shared class with one user would only move the loop. It's extracted when M3's second lens needs it.
+- **C5: "superseded" means cancelled while its read runs.** The core host answers `cancel(id)` with whether the read was still running, and from then on it never resolves: a cancel that lands after the reads, while the result is on its way to JS, still rejects it with `Cancelled`. A request whose answer had already left the core host when the renderer cancelled it can't end `Cancelled`; the lens ignores it as a late result. The test checks that every cancel that found its read running ended it `Cancelled`, the slowest within one chunk read (97 ms with a 100 ms delay per read, in that run), and reports the late ones (0 of 38 there). *Why:* the race is inherent: the answer and the cancel cross on the port.
+- **C7's delayed old-session events are held on their way into the renderer's client.** The test hook holds everything one session's port delivers, from before the kill until the test releases it after Reopen. *Why:* a killed core host sends nothing late. The only place an old session's page or progress event can arrive late is between its port and the client: a message already queued or in delivery when the death is reported. Released there, a progress event of the old session's document 1 at generation 1 would match the reopened document (ids and generations restart), so only the session check stops it; removing that check changes the reopened card's status (PR 5's negative control).
+- **Proposal 2 (C7): once 60 s have passed since the last respawn, main respawns the core itself, and the card then offers Reopen.** Until then, the stopped state offers nothing. *Why:* the same outcome as Reopen respawning the core, without a renderer-to-main restart call or a "try again in N s" state for a click that comes too early. Main still respawns at most once per 60 s, and there's still no automatic reopen.
+- **C7's port teardown:** on a death, main closes its handles to both ends of the session's channel and removes the utility process's listeners. Both ends were transferred: the core host's died with it, and the renderer detaches and closes its own when it hears `core-gone`. The renderer takes a port only from its own window and only for a newer session than the last.
+- **C6's debug stats count:** `handles`, the documents' open byte stores (each one file handle); `jobs`, index threads not yet ended (a job's own reopened handle closes before its thread ends); `tasks`, page reads not yet settled. They exist only in the `test-hooks` addon, with the per-read delay.
+
 **Implementer calls in PR 4 (brief gaps):**
 - Brief §5.1's "1MB" per line is 1 MiB: 16 pieces of 64 KiB, in C2's source bytes. A continuation is issued only while at least 4 bytes (the longest element) are left before the line's first MiB ends, so no piece is ever empty.
 - "Further pieces mount on demand": the first piece ends in a "↪ more" button. Activating it gives the line one row per piece, each fetched when it comes into view. Expanding every long line on its own would shift every row below whenever a page revealed one. Until it's expanded, a long line shows its first 64 KiB, where brief §5.1 says lines over 1MB "show their first 1MB" (Zack may veto).
@@ -840,7 +850,7 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
 
 **Implementer proposals Zack may veto (one place):**
 1. **Memory-refused open state** (C1), shown in the card: "Can't open `<file>` · Typose's memory budget is full. Close a file, then Retry." Brief §7.9 has no such state yet.
-2. **After a second core death within 60 s,** Reopen respawns the core once 60 s have passed (C7).
+2. **After a second core death within 60 s,** the core is respawned once 60 s have passed, and Reopen is offered then (C7; amended in PR 5, above).
 3. **Raw wrapping** (brief §5.1's wrap rules) is deferred to M4, with horizontal scrolling meanwhile (plan §6).
 4. **Raw's accessibility pattern:** a labelled, focusable region with an `aria-hidden` gutter (PR 1, checked in PR 7). Neither §6.1 nor brief §9 defines one. If Zack accepts it, it becomes a row in §6.1's 🔒 table.
 
