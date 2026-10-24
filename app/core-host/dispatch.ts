@@ -84,9 +84,9 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   /**
    * Plan C1: the renderer cache's reservation. One renderer talks to a core host and shows one lens at a time, so it's
    * held for one lens: `doc:gen`. An open or Reload takes it at its first step for the lens it opens (`#id` while it's
-   * under way), with at least that lens's viewport-only cap, `bytes`: part of the open's floor. The lens it replaces is
-   * unmounted in the renderer commit that mounts the new one, so it holds the larger of the two, not their sum, and what
-   * the replaced lens asks for is refused.
+   * under way), with at least that lens's viewport-only cap, `bytes`: part of the open's floor. The renderer unmounts the
+   * lens it replaces one commit before an open's reply, and in the commit that mounts a Reload's new lens, so it holds
+   * the larger of the two, not their sum, and what the replaced lens asks for is refused.
    */
   let holder: string | null = null
   let held = 0
@@ -95,16 +95,22 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     held = bytes
     return true
   }
-  /** Request `req` takes the reservation for the lens it opens; refused, it's `Memory` and nothing has changed. */
-  const take = (req: number, bytes: number): string => {
+  /**
+   * Request `req` takes the reservation for the lens it opens; refused, it's `Memory` and nothing has changed. Returns
+   * its key, and who held it before with how much: a failed Reload gives it back to them.
+   */
+  const take = (req: number, bytes: number): { key: string; holder: string | null; held: number } => {
+    const before = { holder, held }
     if (!hold(Math.max(held, bytes))) throw new Refusal('Memory', `the memory budget can't hold the view's ${bytes} bytes`)
-    return (holder = `#${req}`)
+    holder = `#${req}`
+    return { key: holder, ...before }
   }
-  /** The open or Reload holding the reservation as `pending` hands it to its lens; failed (`null`), it releases it. */
-  const settle = (pending: string, lens: string | null): void => {
-    if (holder !== pending) return // a newer one has taken it
-    holder = lens
-    if (lens === null) hold(0)
+  /** The open or Reload holding the reservation as `key` hands it on: to its lens, or, failed, to nobody (released) or
+   *  back to the lens it would have replaced, with `bytes`. */
+  const settle = (key: string, to: string | null, bytes = to === null ? 0 : held): void => {
+    if (holder !== key) return // a newer one has taken it
+    holder = to
+    if (bytes !== held) hold(bytes) // never more than it holds: this can't be refused
   }
   /** Plan C6: close and a freeze cancel the document's page reads in flight. */
   const cancelReads = (doc: number) => {
@@ -164,7 +170,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const [count, bytes] = [int(p, 'count'), int(p, 'bytes')]
       if (typeof p.path !== 'string' || p.path.length === 0 || p.path.length > 32_767 || p.path.includes('\0'))
         throw new Refusal('InvalidParams', 'path must be a non-empty string of at most 32,767 characters, without NUL', 'path')
-      const pending = take(req, bytes)
+      const pending = take(req, bytes).key
       let doc: Doc
       try {
         doc = addon.openDoc(p.path)
@@ -203,21 +209,23 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const doc = getDoc(id)
       return read(req, id, (cancel) => doc.page(gen, start, count, cancel))
     },
-    // A failed reload (the file is gone, say) leaves the document at its old generation. A reload that another
-    // Reload, or close, overtakes while its first page is read is Stale, and starts nothing: the newer one indexes.
+    // A failed reload (the file is gone, say) leaves the document at its old generation, and gives the renderer cache's
+    // reservation back to that generation's lens (Z34's "keeps Raw"). A reload that another Reload, or close, overtakes
+    // while its first page is read is Stale, and starts nothing: the newer one indexes.
     reload: async (p, req): Promise<Opened> => {
       const [id, count, bytes] = [int(p, 'doc'), int(p, 'count'), int(p, 'bytes')]
       const doc = getDoc(id)
-      const pending = take(req, bytes)
+      const taken = take(req, bytes)
       try {
         doc.reload()
         const gen = doc.generation
         const firstPage = await doc.page(gen, 0, count, addon.cancelFlag())
         if (docs.get(id) !== doc || doc.generation !== gen) throw new Refusal('Stale', `generation ${gen} was replaced while it opened`)
-        settle(pending, `${id}:${gen}`)
+        settle(taken.key, `${id}:${gen}`)
         return { ...begin(id, doc, firstPage), reserved: held }
       } catch (e) {
-        settle(pending, null)
+        if (docs.get(id) === doc) settle(taken.key, taken.holder, taken.held)
+        else settle(taken.key, null) // closed meanwhile: its lens is gone
         throw e
       }
     },

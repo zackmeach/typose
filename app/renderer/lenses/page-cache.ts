@@ -7,7 +7,8 @@ export const charge = (item: PageItem): number => 2 * item.text.length + item.ma
  * What a mounted item costs besides, per UTF-16 unit: the DOM's copy of its text, its layout and paint, and the garbage
  * scrolling leaves until a GC. Measured on 64 KiB rows at 2,160 px (plan §7, PR 6), at the peak: 63.7 bytes for CJK,
  * 64.5 for ASCII and 49.1 for emoji; 80 leaves a fifth to spare there. It doesn't bound Arabic or Devanagari (230–710
- * bytes, PR 6's review), nor ASCII in a 400 px window (117–154 bytes in all): PR 6b bounds a mounted row's layout.
+ * bytes, PR 6's review), nor ASCII's peak without a GC in a small window (94–169 bytes in all, the review's; about 37
+ * for layout once collected): PR 6b bounds a mounted row's layout.
  */
 export const MOUNTED_PER_UNIT = 80
 

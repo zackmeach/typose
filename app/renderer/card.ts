@@ -6,9 +6,10 @@ export type Card =
   | { kind: 'empty' }
   /** `slow`: no first screen after 300 ms (brief §7.9's slow open). `atLine`: where a Reopen will put the view. */
   | { kind: 'opening'; path: string; slow: boolean; atLine?: number }
-  /** `frozen`: why the document stopped reading (spec §3.1); nothing new shows until Reload. `atLine`: where
-   *  Reopen puts the view (plan C7). */
-  | { kind: 'open'; path: string; opened: Opened; lines: number; bytes: number; indexed: boolean; frozen?: string; atLine?: number }
+  /** `frozen`: why the document stopped reading (spec §3.1); nothing new shows until Reload. `refused`: the ledger
+   *  refused a Reload, so the lens stays at its generation (plan C1, Z34's "keeps Raw"). `atLine`: where Reopen puts
+   *  the view (plan C7). */
+  | { kind: 'open'; path: string; opened: Opened; lines: number; bytes: number; indexed: boolean; frozen?: string; refused?: true; atLine?: number }
   | { kind: 'failed'; path: string; code: ErrorCode; message: string }
   /** Plan C7: the core died. `line` is where its view was; `ready` once a new core is up to Reopen it in. */
   | { kind: 'gone'; path?: string; line?: number; ready: boolean }
@@ -20,7 +21,8 @@ export interface CardView {
   status: string
   /** The thin line under the header: indexing's share done (0–1), indeterminate while opening, or none. */
   progress: number | 'indeterminate' | null
-  banner: string | null
+  /** A banner under the header, and its button's label. The button reloads, as Ctrl+R does. */
+  banner: { text: string; action: string } | null
   /** The Raw lens, or a message with its actions. */
   body: { raw: true } | { message: string; actions: Action[] }
 }
@@ -50,7 +52,11 @@ export function view(card: Card): CardView {
       return {
         status,
         progress: card.indexed || frozen ? null : opened.size > 0 ? card.bytes / opened.size : 0,
-        banner: frozen ? 'Changed on disk' : null, // followed by the Reload (Ctrl+R) button
+        banner: card.refused
+          ? { text: "Can't reload: Typose's memory budget is full", action: 'Retry (Ctrl+R)' }
+          : frozen
+            ? { text: 'Changed on disk', action: 'Reload (Ctrl+R)' }
+            : null,
         body: opened.blank ? { message: 'Empty file', actions: [] } : { raw: true }
       }
     }

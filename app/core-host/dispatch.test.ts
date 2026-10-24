@@ -218,6 +218,29 @@ describe("the renderer cache's reservation (plan C1)", () => {
     expect(await call('reserve', { doc: 2, gen: 1, bytes: 300 })).toMatchObject({ result: true }) // still document 2's lens's
     expect(reserved()).toEqual([100, 0, 200, 300, 300])
   })
+
+  it("a Reload that fails gives it back to the lens it would have replaced, with that lens's bytes (Z34: Raw stays)", async () => {
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 300 })).toMatchObject({ result: true })
+    reload.mockImplementationOnce(() => {
+      throw Object.assign(new Error('the memory budget is full: 4523288 bytes asked, 12 free'), { code: 'Memory' })
+    })
+    expect(await call('reload', { doc: 1, count: 1, bytes: 500 })).toMatchObject({ error: { code: 'Memory' } })
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 200 })).toMatchObject({ result: true }) // document 1's lens's again
+    reserveCache.mockReturnValueOnce(false) // refused up front: nothing changes
+    expect(await call('reload', { doc: 1, count: 1, bytes: 900 })).toMatchObject({ error: { code: 'Memory' } })
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 100 })).toMatchObject({ result: true })
+    expect(reserved()).toEqual([300, 500, 300, 200, 900, 100])
+  })
+
+  it('a Reload whose document closed meanwhile releases it', async () => {
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 300 })).toMatchObject({ result: true })
+    const read = pendingRead()
+    const reloading = dispatch({ id: 90, method: 'reload', params: { doc: 1, count: 1, bytes: 100 } }) // its first page waits
+    expect(await call('close', { doc: 1 })).toMatchObject({ result: true })
+    read.end({ items: [item()] })
+    expect(await reloading).toMatchObject({ error: { code: 'Stale' } })
+    expect(reserved()).toEqual([300, 300, 0])
+  })
 })
 
 /** A page read that runs until the test ends it, with `end` or `fail`. */
