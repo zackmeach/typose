@@ -324,7 +324,8 @@ impl Doc {
     }
 
     /// Indexes on a background thread with its own file handle, so page reads never queue behind index reads.
-    /// `cancel` stops it after its current block (plan C6), with no event after.
+    /// `cancel` stops it after its current block (plan C6). That block's progress event can still follow the cancel; it
+    /// names a closed document, which the renderer ignores.
     #[napi]
     pub fn start_index(
         &self,

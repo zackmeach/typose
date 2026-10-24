@@ -106,11 +106,11 @@ function spawnCore(win: BrowserWindow, loaded: Promise<void>): void {
     void loaded.then(() => {
       if (!win.isDestroyed()) win.webContents.send('core-gone', { session: id })
     })
-    const wait = Math.max(0, respawned + RESPAWN_EVERY - Date.now())
+    const wait = Math.max(0, respawned + RESPAWN_EVERY - performance.now()) // monotonic: a clock change can't shorten it
     if (wait > 0) log('core-stopped', { session: id, respawnInMs: wait })
     setTimeout(() => {
       if (quitting || win.isDestroyed()) return
-      respawned = Date.now()
+      respawned = performance.now()
       spawnCore(win, loaded)
     }, wait)
   })
