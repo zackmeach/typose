@@ -20,11 +20,13 @@
     "fixtures": "cargo run --release --manifest-path core/Cargo.toml -p fixtures-gen --"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
     "@playwright/test": "1.64.1",
     "@types/node": "24.19.2",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.1.2",
+    "axe-core": "4.14.0",
     "electron": "44.9.2",
     "electron-builder": "26.15.3",
     "electron-vite": "6.0.0",

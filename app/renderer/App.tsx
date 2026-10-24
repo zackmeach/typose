@@ -1,10 +1,14 @@
 import { type RefObject, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Button } from 'react-aria-components'
-import type { Limits, Opened } from '../shared/protocol'
+import type { Command, Limits, Opened } from '../shared/protocol'
 import { type Action, type Card, fileName, view } from './card'
 import { type CoreClient, CoreCallError } from './core'
 import { ROW_HEIGHT, RawLens, viewportCap } from './lenses/raw'
+import { AppMenu, LINUX } from './menu'
 import { inputMark, markNow, markPainted } from './perf'
+
+/** macOS has its native menu bar and traffic lights in place of the glyph and ☰ (brief §3.1). */
+const MAC = navigator.platform.startsWith('Mac')
 
 /** Z37's scan marks (plan A's veto, `afc58f9`), on the renderer's User Timing timeline: the gate reads them. */
 const MARKS = ['typose:open-start', 'typose:first-screen', 'typose:line-scan', 'typose:index-done']
@@ -40,6 +44,8 @@ export function App({ core }: { core: CoreClient }) {
   const live = useRef<{ doc: number; gen: number } | null>(null)
   /** The Raw lens on screen, if any: where Reopen goes back to after a core death (plan C7). */
   const lens = useRef<RawLens | null>(null)
+  /** A file chosen before the core first came up: it's opened then, ahead of the command line's. */
+  const waiting = useRef<string | null>(null)
   /** Plan C1: the next lens's viewport-only cache cap, reserved with the open's floor: the shown lens's height, else the
    *  window's, which bounds the card's. */
   const floorBytes = (l: Limits) => lens.current?.floorBytes() ?? viewportCap(l, window.innerHeight)
@@ -78,33 +84,33 @@ export function App({ core }: { core: CoreClient }) {
           : c
       )
     })
-    // Ctrl+R and F5 are Reload (spec §3.1, brief §7.2), not the page reload Electron's default menu binds to
-    // Ctrl+R. Ctrl+Shift+R isn't taken over here: the menu is PR 7's.
+    // Ctrl+R and F5 are Reload (spec §3.1, brief §7.2). Electron's default menu, whose Ctrl+R and Ctrl+Shift+R
+    // reloaded the page, is gone (main).
     const onKey = (e: KeyboardEvent) => {
       const modified = e.ctrlKey || e.metaKey || e.shiftKey || e.altKey
+      // Brief §7.2: Ctrl+Q quits on Linux, as ☰'s Quit does.
+      if (LINUX && e.key.toLowerCase() === 'q' && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey) return run('exit')
       const ctrlR = e.key.toLowerCase() === 'r' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey
       if (!ctrlR && (e.key !== 'F5' || modified)) return
       e.preventDefault()
       void reload()
     }
     window.addEventListener('keydown', onKey)
-    // Spec §8.1: a file named later (a second launch, macOS's open-file) replaces the card's. While the core is
-    // stopped, it's the file Reopen opens.
-    const offOpenPath = window.typose.onOpenPath((path) => {
-      if (latest.current.card.kind === 'gone') setCard((c) => (c.kind === 'gone' ? { ...c, path, line: undefined } : c))
-      else void open(path)
-    })
+    const offOpenPath = window.typose.onOpenPath(openNamed)
+    const offCommand = window.typose.onCommand(run) // macOS's native menu
     void core.connect().then(
       async (hello) => {
         setLimits(hello.limits)
         latest.current.limits = hello.limits // `open` below runs before React re-renders
-        const initial = await window.typose.launchPath()
+        const launched = await window.typose.launchPath()
+        const initial = waiting.current ?? launched
         if (initial) void open(initial)
         else setCard({ kind: 'empty' })
       },
       async () => {
-        // The first core died before its handshake: keep the file named on the command line, for Reopen.
-        const initial = (await window.typose.launchPath()) ?? undefined
+        // The first core died before its handshake: keep the file named, for Reopen.
+        const launched = (await window.typose.launchPath()) ?? undefined
+        const initial = waiting.current ?? launched
         setCard((c) => (c.kind === 'gone' ? { ...c, path: c.path ?? initial } : { kind: 'gone', path: initial, ready: false }))
       }
     )
@@ -113,6 +119,7 @@ export function App({ core }: { core: CoreClient }) {
       offReady()
       offProgress()
       offOpenPath()
+      offCommand()
       window.removeEventListener('keydown', onKey)
     }
   }, [core])
@@ -120,7 +127,7 @@ export function App({ core }: { core: CoreClient }) {
   /** Opens `path`; Reopen passes the line to go back to. */
   async function open(path: string, atLine?: number): Promise<void> {
     const l = latest.current.limits
-    if (!l) return
+    if (!l) return void (waiting.current = path) // the core isn't up yet: opened once it is
     const mine = ++attempt.current
     live.current = null
     for (const m of MARKS) performance.clearMarks(m)
@@ -168,7 +175,23 @@ export function App({ core }: { core: CoreClient }) {
 
   async function pick(): Promise<void> {
     const chosen = await window.typose.openDialog()
-    if (chosen) void open(chosen)
+    if (chosen) openNamed(chosen)
+  }
+
+  /**
+   * A file named after the first (spec §8.1: a second launch, macOS's open-file) or chosen in the Open dialog: it
+   * replaces the card's. While the core is stopped, it's the file Reopen opens.
+   */
+  function openNamed(path: string): void {
+    if (latest.current.card.kind === 'gone') setCard((c) => (c.kind === 'gone' ? { ...c, path, line: undefined } : c))
+    else void open(path)
+  }
+
+  /** The menu's commands: ☰'s, and macOS's native menu's (spec §9). */
+  function run(command: Command): void {
+    if (command === 'open') void pick()
+    else if (command === 'reload') void reload()
+    else if (command === 'exit') window.close() // the last window's close quits (main's window-all-closed)
   }
 
   /** Close leaves the empty card; an open still on its way is closed when it arrives. */
@@ -190,10 +213,15 @@ export function App({ core }: { core: CoreClient }) {
 
   return (
     <>
-      <header className="titlebar">
-        <span className="glyph" aria-hidden="true">
-          ▣
-        </span>
+      <header className={MAC ? 'titlebar mac' : 'titlebar'}>
+        {MAC ? null : (
+          <span className="titlebar-start">
+            <span className="glyph" aria-hidden="true">
+              ▣
+            </span>
+            <AppMenu run={run} />
+          </span>
+        )}
         {/* Element Timing: shellVisible is when this text reaches the screen (plan C8). */}
         <span className="title" {...{ elementtiming: 'titlebar' }}>
           {title}
@@ -213,7 +241,13 @@ export function App({ core }: { core: CoreClient }) {
         {shown.banner ? (
           <div className="banner" role="status" title={frozen}>
             {`${shown.banner.text} · `}
-            <Button className="banner-button" onPress={() => void reload()}>
+            <Button
+              className="banner-button"
+              onPress={() => {
+                lens.current?.list.element.focus() // so Reload's new lens takes it, as from Ctrl+R in Raw
+                void reload()
+              }}
+            >
               {shown.banner.action}
             </Button>
           </div>
@@ -287,6 +321,8 @@ function RawHost({ core, lens, atLine, opened, name, lines, indexed, limits, fro
   const host = useRef<HTMLDivElement>(null)
   const onFrozenNow = useRef(onFrozen)
   onFrozenNow.current = onFrozen
+  /** Whether the lens Reload just replaced had the focus, which the new one then takes (plan PR 7's focus gate). */
+  const hadFocus = useRef(false)
   const doc = opened.doc
   // The document closes when the card stops showing it, not when Reload replaces its generation.
   useEffect(
@@ -300,7 +336,11 @@ function RawHost({ core, lens, atLine, opened, name, lines, indexed, limits, fro
     // Reload keeps the reading position; a new lens starts where it's told to.
     const raw = new RawLens(host.current!, core, opened, name, limits, { onFrozen: (why) => onFrozenNow.current(why), atLine: lens.current?.topLine() ?? atLine })
     lens.current = raw
-    return () => raw.dispose()
+    if (hadFocus.current) raw.list.element.focus()
+    return () => {
+      hadFocus.current = raw.list.element.contains(document.activeElement)
+      raw.dispose()
+    }
   }, [core, opened, name, limits, lens, atLine])
   useEffect(() => lens.current?.setLineCount(lines), [lines])
   useEffect(() => {

@@ -3,7 +3,7 @@ import { expect } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
 import { chmodSync, closeSync, openSync, rmSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
-import { FIXTURES, finish, fixture, launch, test, visibleRows, waitIndexed, waitOpen } from './app'
+import { FIXTURES, finish, fixture, launch, osFocus, test, visibleRows, waitIndexed, waitOpen } from './app'
 
 test('an empty file and a whitespace-only one show "Empty file"', async () => {
   for (const [name, bytes] of [
@@ -67,8 +67,10 @@ test('a same-size write freezes the document with nothing new shown; Ctrl+R relo
   await waitOpen(win)
   expect(await waitIndexed(win)).toBe(60_000)
   await win.evaluate(() => Object.assign(window, { pageLifetime: 'the page that opened the file' }))
-  // Electron's default menu binds Ctrl+R to reloading the page. Its accelerators are live where its menu bar is,
-  // which the hidden title bar leaves out on Windows: show it, so this fails wherever Ctrl+R could reach it.
+  // Electron's default menu bound Ctrl+R to reloading the page, live even with its bar hidden; PR 7 removed it. In
+  // case a menu comes back, the window has the OS's focus, which a menu's accelerators need, and its bar is shown, so
+  // this fails wherever Ctrl+R could reach one.
+  await osFocus(l)
   await l.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setMenuBarVisibility(true))
   // A key as the OS delivers it. Playwright's keyboard goes through CDP, which never reaches the menu.
   const press = (keyCode: string, modifiers: ('control' | 'meta')[]) =>
@@ -80,7 +82,7 @@ test('a same-size write freezes the document with nothing new shown; Ctrl+R relo
       },
       { keyCode, modifiers }
     )
-  // Ctrl+R, or Cmd+R on macOS, where the default menu binds Cmd+R.
+  // Ctrl+R, or Cmd+R on macOS.
   const reloadKey = () => press('R', [process.platform === 'darwin' ? 'meta' : 'control'])
   await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '1')
 
