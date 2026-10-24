@@ -114,3 +114,29 @@ test('mid-index on 10 GiB: what the dead session sent, held until after Reopen, 
   expect(l.pageErrors).toEqual([])
   await finish(l)
 })
+
+test('a second death during a Reopen keeps its line: once 60 s have passed, the offered Reopen goes back to it', async () => {
+  test.setTimeout(3 * 60_000)
+  // Every chunk read waits 1.5 s, so a Reopen's open (its first chunk) is surely pending when the core dies again.
+  const l = await launch({ hooks: true, env: { TYPOSE_TEST_READ_DELAY: '1500' }, file: fixture('core-death-reopen.txt', lines(5000)) })
+  const { win } = l
+  await waitOpen(win)
+  expect(await waitIndexed(win)).toBe(5000)
+  await win.locator('.vl-scroller').evaluate((el) => (el.scrollTop = 40_000)) // line 2,001 at the top
+  await expect.poll(async () => (await top(win))?.text).toBe('line 2000')
+  const before = await top(win)
+
+  await diedWithin1s(l, killCore(l))
+  await win.locator('.card-message .open-button').click() // Reopen, at line 2,001
+  await expect(win.locator('.card-status')).toHaveText('Opening…') // its open waits on its first chunk read
+  await diedWithin1s(l, killCore(l)) // the second death, within 60 s: the stopped state
+  await expect(win.locator('.card-message .open-button')).toHaveCount(0)
+  // Proposal 2 (plan §7): once 60 s have passed since the last respawn, main respawns the core and Reopen is offered.
+  await expect(win.locator('.card-message .open-button')).toHaveText(['Reopen'], { timeout: 70_000 })
+  expect(lifecycle(l.userData).filter((r) => r.event === 'utility-spawn').map((r) => r.session)).toEqual([1, 2, 3])
+  await win.locator('.card-message .open-button').click()
+  await waitOpen(win)
+  await expect.poll(() => top(win), { timeout: 15_000 }).toEqual(before)
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})

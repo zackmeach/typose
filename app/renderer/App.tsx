@@ -51,9 +51,10 @@ export function App({ core }: { core: CoreClient }) {
 
   useEffect(() => {
     // Plan C7: the card says the core stopped, and offers Reopen at the same line once a new core is up.
+    // Without a lens on screen (a Reopen still opening, say), the line is the one the card was going back to.
     const offGone = core.onGone(() => {
-      const line = lens.current?.topLine()
-      setCard((c) => ({ kind: 'gone', path: 'path' in c ? c.path : undefined, line, ready: false }))
+      const top = lens.current?.topLine()
+      setCard((c) => ({ kind: 'gone', path: 'path' in c ? c.path : undefined, line: top ?? ('atLine' in c ? c.atLine : 'line' in c ? c.line : undefined), ready: false }))
     })
     const offReady = core.onReady((hello) => {
       latest.current.limits = hello.limits
@@ -90,7 +91,11 @@ export function App({ core }: { core: CoreClient }) {
         if (initial) void open(initial)
         else setCard({ kind: 'empty' })
       },
-      () => setCard({ kind: 'gone', ready: false })
+      async () => {
+        // The first core died before its handshake: keep the file named on the command line, for Reopen.
+        const initial = (await window.typose.launchPath()) ?? undefined
+        setCard((c) => (c.kind === 'gone' ? { ...c, path: c.path ?? initial } : { kind: 'gone', path: initial, ready: false }))
+      }
     )
     return () => {
       offGone()
@@ -110,7 +115,7 @@ export function App({ core }: { core: CoreClient }) {
     performance.mark('typose:open-start')
     markNow('openRequested')
     inputMark('open', performance.now()) // an open-then-scroll interval starts here (plan C8)
-    setCard({ kind: 'opening', path, slow: false })
+    setCard({ kind: 'opening', path, slow: false, atLine })
     // Brief §7.9's slow open: "Opening…" only once 300 ms pass without a first screen.
     const slow = setTimeout(() => setCard((c) => (c.kind === 'opening' && attempt.current === mine ? { ...c, slow: true } : c)), 300)
     try {

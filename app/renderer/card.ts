@@ -4,8 +4,8 @@ import type { ErrorCode, Opened } from '../shared/protocol'
 export type Card =
   | { kind: 'connecting' }
   | { kind: 'empty' }
-  /** `slow`: no first screen after 300 ms (brief §7.9's slow open). */
-  | { kind: 'opening'; path: string; slow: boolean }
+  /** `slow`: no first screen after 300 ms (brief §7.9's slow open). `atLine`: where a Reopen will put the view. */
+  | { kind: 'opening'; path: string; slow: boolean; atLine?: number }
   /** `frozen`: why the document stopped reading (spec §3.1); nothing new shows until Reload. `atLine`: where
    *  Reopen puts the view (plan C7). */
   | { kind: 'open'; path: string; opened: Opened; lines: number; bytes: number; indexed: boolean; frozen?: string; atLine?: number }
