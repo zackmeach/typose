@@ -53,11 +53,62 @@ export const rowsFor = (l: Bounds, reserved: number): number => Math.max(0, Math
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
 const breaks = new WeakMap<PageItem, number[]>()
 
-/** The grapheme boundaries in (`from`, `to`] of `text`, read from `from`: `from` itself isn't one. */
-function boundaries(text: string, from: number, to: number): number[] {
+/**
+ * The grapheme boundaries in (`from`, `to`] of `text`, read from `from`: `from` itself isn't one. `extra` units past
+ * `to` are in the slice (and one more, when that would end on a high surrogate) so the grapheme containing `to` is
+ * whole; only boundaries ≤ `to` are returned. A grapheme of at most a row that contains `to` ends within `to + WRAP`.
+ */
+function boundaries(text: string, from: number, to: number, extra = 0): number[] {
+  let end = Math.min(text.length, to + 1 + extra)
+  if (end < text.length && text.charCodeAt(end - 1) >= 0xd800 && text.charCodeAt(end - 1) <= 0xdbff) end++
   const out: number[] = []
-  for (const { index } of graphemes.segment(text.slice(from, to + 1))) if (index > 0 && from + index <= to) out.push(from + index)
+  for (const { index } of graphemes.segment(text.slice(from, end))) if (index > 0 && from + index <= to) out.push(from + index)
   return out
+}
+
+/** The unit at `at` may belong to the grapheme before it, so a scan that ends on it can report a false boundary. */
+function mayContinue(text: string, at: number): boolean {
+  const u = text.charCodeAt(at)
+  if (u >= 0xd800 && u <= 0xdfff) return true // a surrogate: the code point isn't whole yet
+  if (u === 0x200d || u === 0x200c) return true
+  if (u >= 0xfe00 && u <= 0xfe0f) return true
+  if (u >= 0x0300 && u <= 0x036f) return true
+  if (u >= 0x1ab0 && u <= 0x1aff) return true
+  if (u >= 0x1dc0 && u <= 0x1dff) return true
+  if (u >= 0x20d0 && u <= 0x20ff) return true
+  if (u >= 0xfe20 && u <= 0xfe2f) return true
+  return false
+}
+
+/** Where the grapheme that starts at `from` ends. One segment, so a cluster longer than a row is read once. */
+function graphemeEnd(text: string, from: number): number {
+  const next = graphemes.segment(text.slice(from))[Symbol.iterator]().next()
+  return from + (next.done ? 0 : next.value.segment.length)
+}
+
+/** The break for the row at `start`, from a scan that reads `extra` units past the limit. */
+function choose(text: string, start: number, limit: number, extra: number): { at: number; cutLong: boolean } {
+  const windowFrom = Math.max(start, limit - 96)
+  let near = boundaries(text, windowFrom, limit, extra).filter((b) => b > start)
+  // No boundary in the slice: the cluster is longer than the lookback, so read it from the row's start.
+  const sawWindow = near.length > 0 && windowFrom > start
+  if (!sawWindow) near = boundaries(text, start, limit, extra)
+  const spaced = near.filter((b) => b >= limit - 64 && text[b - 1] === ' ')
+  let at = spaced.at(-1) ?? near.at(-1) ?? limit
+  // A slice that starts inside a ZWJ sequence invents a boundary, so the rescan above never runs. If the chosen
+  // break isn't one of the scan from the row start, use that scan's last boundary. The 96-unit slice stays the fast
+  // path when it holds no ZWJ — a run of regional indicators past the 32-unit context can mispair (plan §7, carried),
+  // and a scan from the row start would pair them differently.
+  let cutLong = near.length === 0
+  if (sawWindow && text.slice(windowFrom, limit + 1).includes('\u200D')) {
+    const full = boundaries(text, start, limit, extra)
+    if (!full.includes(at)) {
+      const last = full.at(-1)
+      at = last ?? limit
+      cutLong = last === undefined
+    }
+  }
+  return { at, cutLong }
 }
 
 /**
@@ -65,33 +116,34 @@ function boundaries(text: string, from: number, to: number): number[] {
  * else falls at the last grapheme boundary before it, so a cluster never splits (a Devanagari conjunct, an emoji
  * sequence, a letter and its marks). Boundaries are read with 32 units of context before the 64; a cluster longer than
  * that is looked for from the row's start, and only one longer than a row is cut, at the limit and never inside a
- * surrogate pair. Blink lays each row out whole, with its own bidi. Returns the rows' starts, then the text's length.
+ * surrogate pair. A cut of such a cluster keeps cutting there until the cluster's real end: a scan that starts on the
+ * leftover joiner would take that joiner as its own grapheme. Blink lays each row out whole, with its own bidi.
+ * Returns the rows' starts, then the text's length.
  */
 export function rowBreaks(text: string): number[] {
   const out = [0]
+  // While `start` is inside a cluster that was cut for being longer than a row, the next cuts are the surrogate-safe
+  // limit. `forcedUntil` is that cluster's end, measured once from the row where the cut began.
+  let forcedUntil = 0
   for (let start = 0; text.length - start > WRAP; ) {
     const limit = start + WRAP
-    const windowFrom = Math.max(start, limit - 96)
-    let near = boundaries(text, windowFrom, limit).filter((b) => b > start)
-    // No boundary in the slice: the cluster is longer than the lookback, so read it from the row's start.
-    const sawWindow = near.length > 0 && windowFrom > start
-    if (!sawWindow) near = boundaries(text, start, limit)
-    const spaced = near.filter((b) => b >= limit - 64 && text[b - 1] === ' ')
-    let at = spaced.at(-1) ?? near.at(-1) ?? limit
-    // A slice that starts inside a ZWJ sequence invents a boundary, so the rescan above never runs. If the chosen
-    // break isn't one of the scan from the row start, use that scan's last boundary. The 96-unit slice stays the fast
-    // path when it holds no ZWJ — a run of regional indicators past the 32-unit context can mispair (plan §7, carried),
-    // and a scan from the row start would pair them differently.
-    let cutLong = near.length === 0
-    if (sawWindow && text.slice(windowFrom, limit + 1).includes('\u200D')) {
-      const full = boundaries(text, start, limit)
-      if (!full.includes(at)) {
-        const last = full.at(-1)
-        at = last ?? limit
-        cutLong = last === undefined
-      }
+    if (start < forcedUntil) {
+      let at = Math.min(limit, forcedUntil)
+      if (at < forcedUntil && /[\uDC00-\uDFFF]/.test(text[at] ?? '')) at--
+      out.push(at)
+      start = at
+      continue
     }
-    if (cutLong && /[\uDC00-\uDFFF]/.test(text[at])) at-- // one cluster longer than a row
+    let { at, cutLong } = choose(text, start, limit, 0)
+    // The short slice ends on the limit, so a code point that starts there is only its first unit and the segmenter
+    // reports a false boundary at the limit. Read the window and the row-start scan again with a row of lookahead.
+    // A unit that starts its own grapheme (an ASCII row's limit) stays on the short scan.
+    if (at === limit && mayContinue(text, at)) ({ at, cutLong } = choose(text, start, limit, WRAP))
+    if (cutLong) {
+      const end = graphemeEnd(text, start)
+      if (end > at) forcedUntil = end
+      if (/[\uDC00-\uDFFF]/.test(text[at] ?? '')) at-- // one cluster longer than a row
+    }
     out.push(at)
     start = at
   }

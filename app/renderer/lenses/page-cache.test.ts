@@ -76,6 +76,90 @@ describe('rowBreaks (Z66)', () => {
     expect(r.join('')).toBe(astral)
   })
 
+  it('does not cut a grapheme whose next code point starts on the row limit', () => {
+    // The scan used to end on the limit, so a surrogate pair starting there was only a high surrogate.
+    const samples: [string, string][] = [
+      ['skin', `${'a'.repeat(2046)}👨🏻`],
+      ['zwj', `${'a'.repeat(2045)}👨‍👩`],
+      ['flag', `${'a'.repeat(2046)}🇦🇧`],
+      ['tag', `${'a'.repeat(2046)}🏴\u{E0067}\u{E0062}\u{E007F}`]
+    ]
+    const bad: string[] = []
+    for (const [name, text] of samples) {
+      const b = rowBreaks(text)
+      const ok = clusters(text)
+      const lens = rows(text).map((x) => x.length)
+      if (Math.max(...lens) > WRAP || rows(text).join('') !== text) bad.push(`${name} rows ${lens.join(',')}`)
+      for (const at of b.slice(1, -1)) {
+        if (!ok.has(at)) bad.push(`${name} breaks ${b.join(',')} at ${at}`)
+        if (at < text.length && text.charCodeAt(at) >= 0xdc00 && text.charCodeAt(at) <= 0xdfff) bad.push(`${name} splits a surrogate at ${at}`)
+      }
+    }
+    expect(bad).toEqual([])
+  })
+
+  it('keeps one grapheme whole wherever it sits across the limit', () => {
+    // Seeded, so the set of clusters is fixed. Every offset 2030..2050, a few hundred strings.
+    let seed = 0x5eed
+    const next = () => {
+      seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff
+      return seed
+    }
+    const zwj = (men: number) => `${'\u{1F468}\u200D'.repeat(men)}\u{1F469}`
+    const men = new Set([1, 2, 6, 16, 33, 40, 66, 132])
+    while (men.size < 12) men.add(1 + (next() % 132)) // lengths 5..398, inside 2..400
+    const graphemes = [
+      '👨🏻',
+      '🇦🇧',
+      '🏴\u{E0067}\u{E0062}\u{E007F}',
+      ...[...men].map(zwj),
+      `e${'́'.repeat(1)}`,
+      `e${'́'.repeat(10)}`,
+      `e${'́'.repeat(40)}`,
+      `e${'́'.repeat(399)}`
+    ]
+    const bad: string[] = []
+    let seen = 0
+    for (const g of graphemes) {
+      for (let offset = 2030; offset <= 2050; offset++) {
+        seen++
+        const text = `${'a'.repeat(offset)}${g}`
+        const b = rowBreaks(text)
+        const parts = [...segmenter.segment(text)]
+        const ok = new Set(parts.map((s) => s.index))
+        const lens = b.slice(0, -1).map((at, i) => b[i + 1] - at)
+        if (lens.some((n) => n > WRAP) || rows(text).join('') !== text) {
+          bad.push(`offset ${offset} len ${g.length} rows ${lens.join(',')}`)
+          continue
+        }
+        for (let i = 1; i < b.length; i++) {
+          const at = b[i]
+          if (at < text.length && text.charCodeAt(at) >= 0xdc00 && text.charCodeAt(at) <= 0xdfff) bad.push(`offset ${offset} splits a surrogate at ${at}`)
+        }
+        for (const at of b.slice(1, -1)) {
+          if (ok.has(at)) continue
+          const owner = parts.find((s) => s.index < at && s.index + s.segment.length > at)
+          if (owner && owner.segment.length > WRAP) continue
+          bad.push(`offset ${offset} len ${g.length} breaks ${b.join(',')} at ${at}`)
+        }
+      }
+    }
+    expect(seen).toBeGreaterThan(300)
+    expect(bad.slice(0, 8)).toEqual([])
+  })
+
+  it('keeps cutting a cluster longer than a row at the surrogate-safe limit', () => {
+    const text = `${'\u{1F468}\u200D'.repeat(2000)}\u{1F469}`
+    expect(text.length).toBe(6002)
+    const b = rowBreaks(text)
+    const lens = rows(text).map((x) => x.length)
+    expect(lens.filter((n) => n === 1), `breaks ${b.join(',')} lengths ${lens.join(',')}`).toEqual([])
+    for (const n of lens.slice(0, -1)) expect(n, `lengths ${lens.join(',')}`).toBeGreaterThanOrEqual(2047)
+    expect(Math.max(...lens)).toBeLessThanOrEqual(WRAP)
+    for (const at of b.slice(1, -1)) expect(text.charCodeAt(at) < 0xdc00 || text.charCodeAt(at) > 0xdfff).toBe(true)
+    expect(rows(text).join('')).toBe(text)
+  })
+
   it('remembers an item’s breaks', () => {
     const item = cjk(0)
     expect(rowsOf(item)).toBe(rowsOf(item))

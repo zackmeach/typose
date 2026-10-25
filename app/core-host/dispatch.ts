@@ -227,8 +227,9 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       return read(req, id, (cancel) => doc.render(gen, cancel))
     },
     // A failed reload (the file is gone, say) leaves the document at its old generation, and gives the renderer cache's
-    // reservation back to the document's lens (Z34's "keeps Raw"). A reload that another Reload, or close, overtakes
-    // while its first page is read is Stale, and starts nothing: the newer one indexes.
+    // reservation back to the lens it was last handed to (`settled`), whichever document that lens is showing. A reload
+    // that another Reload, or close, overtakes while its first page is read is Stale, and starts nothing: the newer one
+    // indexes.
     reload: async (p, req): Promise<Opened> => {
       const [id, count, bytes] = [int(p, 'doc'), int(p, 'count'), int(p, 'bytes')]
       const doc = getDoc(id)
