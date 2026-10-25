@@ -98,6 +98,7 @@ Spec §4.6 makes the choice: "**Parser:** `pulldown-cmark` in the core", and "Re
 - **It mounts every block** and lets Chromium skip offscreen work: `.md-block { content-visibility: auto; contain-intrinsic-size: auto <estimate> }`.
   - Skipped content stays in the accessibility tree, the tab order and native find.
   - PR 2 tests this rather than assuming it.
+  - **Measured (fix round 1).** On this Chromium, `auto` does not leave skipped boxes in the accessibility tree: with nothing scrolled, 37 of 120 links were in the tree (heading blocks had been forced visible, and all 13 headings were present). Dropping `auto` entirely, so every block is visible: the 853 KB plan `docs/superpowers/plans/2026-10-20-typose-phase0-spike-c.md` reached `data-ready` in 526 ms, longest main-thread task during the append 140 ms, scroll max frame gap 89 ms. A generated 8 MiB file (8,385,260 bytes; prose, lists, tables, code) reached `data-ready` in 8,856 ms, longest task 480 ms, scroll max frame gap 192 ms. 480 ms is past 200 ms, so `auto` stays. What shipped: `auto` normally, and every block `visible` while the accessibility mode is on (`html[data-a11y=on]`, the mode PR 7 already delivers). A heading block stays `visible` either way, so heading navigation does not depend on the mode (this Chromium's Linux build does not emit accessibility-support). Z72's native `content-visibility` is that normal path; the mode is the exception, and a forged mode only lays more out. The same files with the fallback: 853 KB, 271 ms to ready, no long task observed, scroll gap 19 ms; 8 MiB, 5,902 ms, longest task 193 ms, scroll gap 286 ms.
 - **It's charged to the ledger:**
   - Before appending, the lens reserves `RENDERED_PER_UNIT × text units + 2 × HTML bytes` through the existing `reserve` call, with the same one-lens holder as Raw.
   - If the reservation is refused, Rendered is disabled with the memory reason, and Raw stays.
@@ -116,7 +117,7 @@ Spec §4.6 makes the choice: "**Parser:** `pulldown-cmark` in the core", and "Re
 - Reload goes through the existing path, then calls `render(gen)`.
 
 **Carried notes:**
-- PR 7's "the page can forge the accessibility mode": the slice's Rendered never reads the mode, so the forgery stays harmless. The note carries to the first lens that reads it.
+- PR 7's "the page can forge the accessibility mode": Rendered reads it only to lay every block out while the mode is on (the accessibility-tree measurement above). A forged mode costs that layout, never safety.
 - Z66 (Raw wraps at 2,048 units, PR 6b): independent of this slice. The lens switch uses Raw's `atLine` and `topLine`, which PR 6b must keep working.
 
 ### 2.3 Sanitizer and CSP (🔒 brief §4.6, spec §7)
