@@ -112,11 +112,10 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     settled = lens === null ? null : { lens, bytes: held }
     if (lens === null) hold(0)
   }
-  /** A failed Reload of document `id`, holding the reservation as `key`, gives it back to the last lens it was handed
-   *  to, if that's this document's; else to nobody. Never more than it holds, so this can't be refused. */
-  const giveBack = (key: string, id: number): void => {
+  /** A failed Reload, holding the reservation as `key`, gives it back to the last lens it was handed to, which is still
+   *  mounted, whatever document it shows. Never more than it holds, so this can't be refused. */
+  const giveBack = (key: string): void => {
     if (holder !== key) return // a newer one has taken it
-    settled = settled?.lens.startsWith(`${id}:`) ? settled : null
     holder = settled?.lens ?? null
     if ((settled?.bytes ?? 0) !== held) hold(settled?.bytes ?? 0)
   }
@@ -228,8 +227,9 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       return read(req, id, (cancel) => doc.render(gen, cancel))
     },
     // A failed reload (the file is gone, say) leaves the document at its old generation, and gives the renderer cache's
-    // reservation back to the document's lens (Z34's "keeps Raw"). A reload that another Reload, or close, overtakes
-    // while its first page is read is Stale, and starts nothing: the newer one indexes.
+    // reservation back to the lens it was last handed to (`settled`), whichever document that lens is showing. A reload
+    // that another Reload, or close, overtakes while its first page is read is Stale, and starts nothing: the newer one
+    // indexes.
     reload: async (p, req): Promise<Opened> => {
       const [id, count, bytes] = [int(p, 'doc'), int(p, 'count'), int(p, 'bytes')]
       const doc = getDoc(id)
@@ -242,7 +242,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         settle(pending, `${id}:${gen}`)
         return { ...begin(id, doc, firstPage), reserved: held }
       } catch (e) {
-        if (docs.get(id) === doc) giveBack(pending, id)
+        if (docs.get(id) === doc) giveBack(pending)
         else settle(pending, null) // closed meanwhile: its lens is gone
         throw e
       }

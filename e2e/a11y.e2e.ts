@@ -11,9 +11,10 @@ const MAC = process.platform === 'darwin'
 /** Electron's accessibility-support API and event are macOS's and Windows' (Z28 gates accessibility there). */
 const MODE = process.platform !== 'linux'
 const EXIT = process.platform === 'linux' ? 'Quit' : 'Exit' // brief §3.2
-/** Lines with no digit in them, so a digit in Raw's accessible text could only be the gutter's. Line 3 is wide. */
+/** Lines with no digit in them, so a digit in Raw's accessible text could only be the gutter's. Line 3 is wide, in
+ *  one row: Z66 wraps a row at 2,048 units, and End goes to the widest row's end. */
 const letters = (n: number): string => (n < 26 ? '' : letters(Math.floor(n / 26) - 1)) + String.fromCharCode(97 + (n % 26))
-const LINES = Array.from({ length: 5000 }, (_, i) => (i === 2 ? `wide ${'x'.repeat(3000)} end` : `line ${letters(i)} text`))
+const LINES = Array.from({ length: 5000 }, (_, i) => (i === 2 ? `wide ${'x'.repeat(2000)} end` : `line ${letters(i)} text`))
 const RAW = 'a11y.txt, Raw'
 
 async function opened(): Promise<Launched> {

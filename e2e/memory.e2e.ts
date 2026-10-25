@@ -5,8 +5,8 @@ import { type Page, expect } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
 import { rmSync, statSync, truncateSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { MOUNTED_PER_UNIT } from '../app/renderer/lenses/page-cache'
-import type { Opened, Page as CorePage } from '../app/shared/protocol'
+import { GARBAGE_PER_UNIT, WRAP, capFor, rowCost, rowsFor } from '../app/renderer/lenses/page-cache'
+import type { Limits, Opened, Page as CorePage } from '../app/shared/protocol'
 import { FIXTURES, type Launched, type TestHooks, debugStats, finish, fixture, launch, sparseFixture, test, visibleRows, waitIndexed, waitOpen } from './app'
 import { mib, processMemory, summed } from './memory'
 
@@ -14,9 +14,7 @@ type CacheStats = { charged: number; cap: number; reserved: number }
 type Hooked = { typoseTest: TestHooks & { client: { cache: (() => CacheStats) | null } } }
 const cacheStats = (win: Page) => win.evaluate(() => (window as unknown as Hooked).typoseTest.client.cache?.() ?? null)
 
-/** The most a mounted row costs (plan C1's formula, with C2's bounds): a whole 64 KiB piece and its layout. */
-const ROW = 2 * 65_536 + 393_224 + MOUNTED_PER_UNIT * 65_536
-/** 400 lines of 70,000 ASCII bytes: each row shows a first piece of 65,536 units, the most a row holds. */
+/** 400 lines of 70,000 ASCII bytes: each line's first piece is 65,536 units, over 32 rows of 2,048 (Z66). */
 const ascii64k = () => fixture('ascii-64k.txt', Array.from({ length: 400 }, () => 'a'.repeat(70_000)).join('\n') + '\n')
 
 /** Sets the window's size; returns its content size and the screen's work area, which may hold it smaller. */
@@ -30,64 +28,134 @@ const resize = (l: Launched, width: number, height: number) =>
     [width, height] as const
   )
 
-const BOUND = "raise the renderer's private bytes by ≤ its cache's reservation + 32 MiB"
-const GATES: { title: string; height: number; units: number; file: () => string; judged: boolean }[] = [
-  // 1,300 lines of 65,535 bytes: 21,845 three-byte characters each, so every line is one whole piece.
+const cp = (c: number) => String.fromCodePoint(c)
+/**
+ * Z66's gate's scripts (PR 6b): seeded words, a line of them about 60,000 bytes, within one piece (C2). A unit a byte
+ * for ASCII; 3 bytes a unit for CJK and Devanagari, 2 for Arabic, 4 bytes per 2 units for emoji. Devanagari's runs
+ * with accessibility on, so its rows' AX tree is laid out too.
+ */
+const SCRIPTS: { script: string; units: number; space: boolean; ax?: boolean; word: (r: (n: number) => number) => string }[] = [
+  { script: 'ASCII', units: 60_000, space: true, word: (r) => Array.from({ length: 2 + r(9) }, () => 'abcdefghijklmnopqrstuvwxyz0123456789{}":,'[r(41)]).join('') },
+  { script: 'CJK', units: 20_000, space: false, word: (r) => Array.from({ length: 1 + r(6) }, () => cp(0x4e00 + r(0x51a5))).join('') },
+  { script: 'emoji', units: 30_000, space: true, word: (r) => Array.from({ length: 1 + r(3) }, () => cp(0x1f300 + r(0x150)) + (r(4) === 0 ? cp(0x1f3fb + r(5)) : '')).join('') },
+  { script: 'Arabic', units: 30_000, space: true, word: (r) => Array.from({ length: 2 + r(7) }, () => cp(0x0628 + r(0x23))).join('') },
   {
-    title: `10 viewports of 64 KiB CJK lines in a 2160 px window ${BOUND}`,
-    height: 2160,
-    units: 21_845,
-    file: () => fixture('cjk-64k.txt', Array.from({ length: 1300 }, () => '語'.repeat(21_845)).join('\n') + '\n'),
-    judged: true
-  },
-  // A unit a byte, so a row holds 65,536 units: the most C2 allows. A small window keeps CI's layout time down. Logged,
-  // not judged: its peak without a GC is mostly garbage not yet collected, and varies about 2× between runs (CI rose
-  // 113.8 MiB on Windows and 194.8 MiB on Linux; local runs, 311–533 MiB). PR 6b asserts it, with a method that holds.
-  { title: "10 viewports of 64 KiB ASCII rows in a 400 px window: the renderer's private bytes, logged for PR 6b", height: 400, units: 65_536, file: ascii64k, judged: false }
+    script: 'Devanagari',
+    units: 20_000,
+    space: true,
+    ax: true,
+    word: (r) => Array.from({ length: 1 + r(4) }, () => cp(0x0915 + r(0x25)) + (r(3) === 0 ? `्${cp(0x0915 + r(0x25))}` : '') + (r(2) ? cp(0x093e + r(0xf)) : '')).join('')
+  }
 ]
 
-for (const g of GATES) test(g.title, () => rendererGate(g))
+/** 40 lines of a script's words, the same each run. */
+function scriptFile(s: (typeof SCRIPTS)[number]): string {
+  let seed = 1
+  const r = (n: number) => (seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff) % n
+  return Array.from({ length: 40 }, () => {
+    let line = ''
+    while (line.length < s.units) line += s.word(r) + (s.space ? ' ' : '')
+    return line
+  }).join('\n') + '\n'
+}
 
-async function rendererGate(g: (typeof GATES)[number]): Promise<void> {
+for (const s of SCRIPTS)
+  test(`${s.script}${s.ax ? ', with accessibility on' : ''}: Raw's rows, once collected, raise the renderer's private bytes by no more than the reservation holds for them, and a Reload leaves no more garbage than it reserves (Z66)`, () =>
+    layoutGate(s))
+
+/**
+ * Z66's deterministic gate (PR 6b): the rise in the renderer's private bytes from the empty card, after a forced GC, is
+ * within the reservation's formula at the rows mounted, less their garbage part (the fixed allowance, the two items
+ * partly mounted, the elastic part and each mounted row's charge), after the open, after 10 viewports down and after a
+ * Reload. The Reload's handover, read without a GC, leaves at most the garbage part.
+ */
+async function layoutGate(s: (typeof SCRIPTS)[number]): Promise<void> {
   test.setTimeout(5 * 60_000)
-  const path = g.file()
-  const l = await launch({ hooks: true, file: path })
+  const path = fixture(`z66-${s.script}.txt`, scriptFile(s))
+  const l = await launch({ hooks: true })
   try {
-    const { win } = l
-    // The tallest the rig allows, recorded: the OS may hold a window to its screen.
-    const size = await resize(l, 1280, g.height)
-    await waitOpen(win)
-    await waitIndexed(win)
-    const host = await win.evaluate(() => document.querySelector('.raw-host')!.clientHeight)
-    console.log(`window content ${size.content.join('×')} px (screen work area ${size.screen.width}×${size.screen.height}); Raw ${host} px tall`)
-    // The cap for a viewport and one more each way (plan C1), once the lens has reserved it for this height.
-    const rows = 3 * Math.ceil(host / 20) + 1
-    const cap = rows * ROW + (16 << 20)
-    await expect.poll(async () => (await cacheStats(win))?.reserved, { timeout: 10_000 }).toBe(cap)
-    expect((await debugStats(win)).ledger.rendererCache).toBe(cap) // the core holds it in the ledger
+    const { app, win } = l
+    await expect(win.locator('.open-button')).toHaveText('Open file…') // the empty card: no lens yet
+    if (s.ax) await app.evaluate(({ app }) => app.setAccessibilitySupportEnabled(true))
+    const size = await resize(l, 1280, 480) // the smallest window brief §9 allows
+    const hello = await core<{ limits: Limits }>(win, 'hello', { protocol: 1 })
+    if (!('ok' in hello)) throw new Error(`hello: ${hello.code}`)
+    const L = hello.ok.limits
     const cdp = await win.context().newCDPSession(win)
-    await cdp.send('HeapProfiler.collectGarbage')
-    const renderer = async () => (await processMemory(l.app)).find((p) => p.type === 'Tab')!
-    const before = await renderer()
-    let peak = before.private ?? 0
+    const renderer = async () => (await processMemory(app)).find((p) => p.type === 'Tab')!.private
+    const collected = async () => {
+      for (let i = 0; i < 3; i++) await cdp.send('HeapProfiler.collectGarbage')
+      await win.waitForTimeout(300)
+      return (await renderer())!
+    }
+    // Electron reports no private bytes on macOS (memory.ts). The charge and the ledger are still judged; only the
+    // private-byte asserts are not, and the annotation says so — a return here used to pass with nothing judged.
+    let base: number | undefined
+    if ((await renderer()) === undefined)
+      test.info().annotations.push({
+        type: 'skip',
+        description: 'private bytes are not reported by Electron on this OS; the private-byte asserts are not judged'
+      })
+    else base = await collected()
+    // As a second launch would open it (spec §8.1): no dialog.
+    await app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), path)
+    /** Raw at `gen` holds its reservation for its height, as the core does, and every mounted row has its text. */
+    const settled = async (gen: string) => {
+      await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', gen, { timeout: 30_000 })
+      const host = await win.evaluate(() => document.querySelector('.raw-host')!.clientHeight)
+      const reserved = capFor(L, 3 * Math.ceil(host / 20) + 1)
+      await expect.poll(async () => (await cacheStats(win))?.reserved, { timeout: 30_000 }).toBe(reserved)
+      expect((await debugStats(win)).ledger.rendererCache).toBe(reserved)
+      await expect.poll(() => win.evaluate(() => {
+        const rows = [...document.querySelectorAll('.vl-row')]
+        return rows.length > 0 && rows.every((r) => r.querySelector('.text'))
+      }), { timeout: 60_000 }).toBe(true)
+      const c = (await cacheStats(win))!
+      expect(c.charged, JSON.stringify(c)).toBeLessThanOrEqual(c.cap)
+      return reserved
+    }
+    const units = () => win.evaluate(() => [...document.querySelectorAll('.vl-row .text')].map((t) => t.textContent!.length))
+    const garbagePart = (reserved: number) => rowsFor(L, reserved) * WRAP * GARBAGE_PER_UNIT
+    /** After a GC, the rise is within the reservation's formula at the rows mounted, less their garbage part. */
+    const check = async (step: string, reserved: number) => {
+      const u = await units()
+      expect(Math.max(...u)).toBeLessThanOrEqual(WRAP)
+      if (base === undefined) return
+      const rise = (await collected()) - base
+      const bound = capFor(L, u.length) - u.length * WRAP * GARBAGE_PER_UNIT
+      console.log(
+        `${s.script} ${step}: rise ${mib(rise)} after GC, within ${mib(bound)} for ${u.length} rows mounted (${u.reduce((a, b) => a + b, 0)} units, ` +
+          `the longest ${Math.max(...u)}); reserved ${mib(reserved)} for ${rowsFor(L, reserved)} rows`
+      )
+      expect(rise, step).toBeLessThanOrEqual(bound)
+      return rise
+    }
+    let reserved = await settled('1')
+    console.log(`window content ${size.content.join('×')} px; Raw ${await win.evaluate(() => document.querySelector('.raw-host')!.clientHeight)} px`)
+    await check('open', reserved)
+    const top = () => win.evaluate(() => document.querySelector('.vl-scroller')!.scrollTop)
     await win.locator('.vl-scroller').focus()
+    let scrolled = 0 // the most the rise reaches on the way down, without a GC: logged
     for (let i = 0; i < 10; i++) {
+      const was = await top()
       await win.keyboard.press('PageDown')
-      // Each 64 KiB row is a long run of text to lay out: a viewport of them takes seconds to fill here.
-      await expect.poll(async () => (await visibleRows(win)).filter((r) => r.text.length !== g.units).length, { timeout: 60_000 }).toBe(0)
-      const s = (await cacheStats(win))!
-      expect(s.charged, JSON.stringify(s)).toBeLessThanOrEqual(s.cap)
-      peak = Math.max(peak, (await renderer()).private ?? 0)
+      // The CJK fixture draws on all 20,901 ideographs, and every other PageDown holds the renderer about 4–7 s here;
+      // drawn from 500 or 3,000 of them, at most 33 ms (plan §7, PR 6b).
+      await expect.poll(top, { timeout: 60_000 }).toBeGreaterThan(was)
+      reserved = await settled('1')
+      if (base !== undefined) scrolled = Math.max(scrolled, (await renderer())! - base)
     }
-    const s = (await cacheStats(win))!
-    console.log(`renderer private bytes ${mib(before.private)} before, peak ${mib(peak)}; cache charged ${mib(s.charged)} of its cap ${mib(s.cap)}, reserved ${mib(s.reserved)}`)
-    if (before.private === undefined) {
-      console.log('private bytes: not reported by Electron on this OS; nothing judged') // macOS: never replaced by RSS
-    } else if (!g.judged) {
-      console.log(`a rise of ${mib(peak - before.private)} against ${mib(s.reserved + (32 << 20))}: logged for PR 6b, not judged`)
-    } else {
-      expect(peak - before.private).toBeLessThanOrEqual(s.reserved + (32 << 20))
-    }
+    const down = await check('10 viewports down', reserved)
+    if (base !== undefined) console.log(`${s.script} scrolling: rise ${mib(scrolled)} at most before a GC, ${mib(scrolled - down!)} over what stays`)
+    // The Reload's handover: the next lens mounted, the last one's rows left for a GC.
+    await win.keyboard.press('F5')
+    reserved = await settled('2')
+    if (base !== undefined) {
+      const peak = (await renderer())! - base
+      const after = await check('Reload', reserved)
+      console.log(`${s.script} Reload: rise ${mib(peak)} before a GC, ${mib(after)} after: garbage ${mib(peak - after!)}, within ${mib(garbagePart(reserved))} reserved for it`)
+      expect(peak - after!).toBeLessThanOrEqual(garbagePart(reserved))
+    } else await check('Reload', reserved)
     expect(l.pageErrors).toEqual([])
   } finally {
     await finish(l)
@@ -99,17 +167,17 @@ async function rendererGate(g: (typeof GATES)[number]): Promise<void> {
  * Waits for Raw to hold the viewport-only reservation for its height and show the viewport's rows, then checks it
  * mounts the viewport and no overscan, and its cache is charged within the reservation, which the core holds.
  */
-async function viewportOnly(win: Page, step: string): Promise<void> {
+async function viewportOnly(win: Page, L: Limits, step: string): Promise<void> {
   const view = () =>
     win.evaluate(() => ({
       host: document.querySelector('.raw-host')!.clientHeight,
       viewport: document.querySelector('.vl-scroller')!.clientHeight,
       mounted: document.querySelectorAll('.vl-row').length
     }))
-  await expect.poll(async () => (await cacheStats(win))?.reserved === (Math.ceil((await view()).host / 20) + 1) * ROW, { timeout: 30_000 }).toBe(true)
+  await expect.poll(async () => (await cacheStats(win))?.reserved === capFor(L, Math.ceil((await view()).host / 20) + 1, false), { timeout: 30_000 }).toBe(true)
   const shown = async () => {
     const rows = await visibleRows(win)
-    return rows.length >= Math.floor((await view()).viewport / 20) && rows.every((r) => r.text.length === 65_536)
+    return rows.length >= Math.floor((await view()).viewport / 20) && rows.every((r) => r.text.length === WRAP)
   }
   await expect.poll(shown, { timeout: 60_000 }).toBe(true)
   const { host, viewport, mounted } = await view()
@@ -134,33 +202,34 @@ test('under a budget that holds only the viewport, Raw mounts only the viewport,
     const probe = await launch({ hooks: true, file: path })
     await waitOpen(probe.win)
     await waitIndexed(probe.win)
-    const hello = await core<{ limits: { openTemp: number } }>(probe.win, 'hello', { protocol: 1 })
+    const hello = await core<{ limits: Limits }>(probe.win, 'hello', { protocol: 1 })
     if (!('ok' in hello)) throw new Error(`hello: ${hello.code}`)
     const { ledger, charges } = await debugStats(probe.win)
     const inner = await probe.win.evaluate(() => window.innerHeight)
     await finish(probe)
-    const floor = (Math.ceil(inner / 20) + 1) * ROW // the open's viewport-only cap, at the window's height
-    const budget = ledger.pool + charges[1].total + hello.ok.limits.openTemp + floor + statSync(path).size + ROW
+    const L = hello.ok.limits
+    const floor = capFor(L, Math.ceil(inner / 20) + 1, false) // the open's viewport-only cap, at the window's height
+    const budget = ledger.pool + charges[1].total + L.openTemp + floor + statSync(path).size + rowCost(L)
     console.log(`budget ${mib(budget)}: pool ${mib(ledger.pool)}, document ${mib(charges[1].total)}, view ${mib(floor)} (${inner} px of window)`)
     const l = await launch({ hooks: true, file: path, env: { TYPOSE_TEST_BUDGET: String(budget) } })
     const { win } = l
     await waitOpen(win)
-    await viewportOnly(win, 'open')
+    await viewportOnly(win, L, 'open')
     await win.locator('.vl-scroller').focus()
     await win.keyboard.press('F5')
     await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '2')
-    await viewportOnly(win, 'Reload')
+    await viewportOnly(win, L, 'Reload')
     console.log(`window ${(await resize(l, 1280, 600)).content.join('×')} px`)
-    await viewportOnly(win, 'resized down')
+    await viewportOnly(win, L, 'resized down')
     console.log(`window ${(await resize(l, 1280, 800)).content.join('×')} px`)
-    await viewportOnly(win, 'resized up')
+    await viewportOnly(win, L, 'resized up')
     // Room again: a resize that keeps the row count reserves the overscan and the elastic part, and mounts them.
     await debugStats(win, { limit: 8 * GIB })
     await resize(l, 1200, 800)
     // Raw's height read with the reservation, not once after the resize: on macOS the window settles after setSize
     // returns (main-macos run 40097653559 read 509 px, then the lens reserved for a host of 581-600 px).
     const raw = () => win.evaluate(() => document.querySelector('.raw-host')!.clientHeight)
-    const full = (host: number) => (3 * Math.ceil(host / 20) + 1) * ROW + (16 << 20)
+    const full = (host: number) => capFor(L, 3 * Math.ceil(host / 20) + 1)
     await expect.poll(async () => (await cacheStats(win))?.reserved === full(await raw()), { timeout: 30_000 }).toBe(true)
     const host = await raw()
     await expect.poll(() => win.evaluate(() => document.querySelectorAll('.vl-row').length)).toBeGreaterThan(Math.ceil(host / 20) + 1)

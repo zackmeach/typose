@@ -1087,6 +1087,43 @@ The review's other owner questions are settled in the spec: Z57 (merge authority
   - A used profile read 18 and 63 ms lower in two batches (paired medians, n = 10 and 15; lower in 9 of 10 and 14 of 15), mostly in the title bar's presentation after `show`.
   - Z67 settles what's measured: shell visible is measured with an existing profile. `e2e/packaged.ts` still makes a new one for every launch, so the cold batch needs an existing profile before it runs (carried to M1's close).
 
+**PR 6b's amendments (C1's renderer reservation and its gate; Z66 is Zack's, not an amendment; no other Z-decision, 🔒 requirement or gate change; the measurements are in PR 6b's description):**
+- **Z66: a row shows at most 2,048 UTF-16 units (`WRAP`), and a longer piece goes on in the next rows.** Each row but a piece's last ends in brief §5.1's ↪ continuation marker, which assistive tech skips, as it does the gutter. This deviates from brief §5.1's "no wrapping by default" for lines of 2,049–10,000 units (Z66). §6's wrapping (View → Wrap lines, measured heights) stays M4's.
+  - A break follows a space within 64 units of the limit, else falls at the last grapheme boundary before it (`Intl.Segmenter`), so no cluster splits: a Devanagari conjunct, an emoji sequence, a letter and its marks. Boundaries are read with 32 units of context before those 64. A cluster longer than that is looked for from the row's start, and only a cluster longer than a row is cut, at the limit, never inside a surrogate pair.
+  - Each row is laid out on its own, with its own bidi. A cut between two Arabic letters, where the 64 units before the limit hold no space, breaks their joining there.
+  - Rows map to a line, a piece and a row of that piece. A line with more than one row keeps its pieces' row counts; those lines are kept in order with the rows before each, and a row is found by bisection. When a piece's rows arrive, the view keeps its place.
+  - *Why:* D, which laid out a window of each long row with spacers, was no-go at the design checkpoint, and Zack chose this instead (Z66).
+- **The reservation is per row, at a row's most. It replaces PR 6's `MOUNTED_PER_UNIT` (above).** With C2's bounds:
+  - a row costs 2 × 2,048 + 8 + ⌈(`MAP_MAX` − 8) × 3 × 2,048 / 65,536⌉ + 2,048 × (`LAYOUT_PER_UNIT` + `GARBAGE_PER_UNIT`) = 2,662,408 bytes: its text, its share of its item's map (`map_max`'s 6 bytes a source byte, at most 3 source bytes a unit), its layout and its garbage;
+  - a view of n rows reserves `FIXED` + 2 × (2 × 65,536 + `MAP_MAX`) + n × the row + the elastic 16 MiB. The second term is the two items partly mounted at the window's ends. The viewport-only cap leaves out the elastic part;
+  - the cache keeps within the reservation less `FIXED` and the garbage part: the rows the reservation covers × 2,048 × `GARBAGE_PER_UNIT`. A mounted row is charged `LAYOUT_PER_UNIT` for each unit it shows, and its item is never evicted.
+- **`LAYOUT_PER_UNIT` = 320 bytes:** a row's layout after a GC, per unit laid out. Measured in PR 6b's probe, in a 480 px window, as the slope between rows laying out 512 and 4,096 units: ASCII 20, CJK 137, Arabic 148, emoji 247 and Devanagari 262. PR 6's review measured at most 143 for Tibetan, Zalgo, harakat and Thai. 320 leaves a fifth over the worst.
+- **`GARBAGE_PER_UNIT` = 960 bytes:** what a row's layout leaves until a GC, per unit mounted. Measured in Z66's gate: at most 800 scrolling 10 viewports (five runs; Devanagari, with accessibility on; Arabic 777), and 575 in a Reload's handover (six runs; emoji). 960 leaves a fifth over the worst. It's reserved, never charged.
+- **`FIXED` = 24 MiB, reserved with the view:** font and glyph caches, which don't grow with rows. PR 6's review measured +20.7 to +22.8 MiB.
+- **The cost:** 195.9 MiB for 389 px of Raw (the 480 px window), 317.8 MiB in the default 1280 × 800 window (PR 6: 615.5 MiB), and 835.7 MiB for 2,069 px of Raw (PR 6: 1.70 GiB). The viewport-only caps are 78.3, 118.9 and 291.6 MiB.
+- **Z66's gate replaces C1's CJK e2e and its log-only ASCII variant** (`memory.e2e.ts`, one test per script):
+  - **Fixture:** 40 lines of seeded words in each of ASCII, CJK, emoji, Arabic and Devanagari, each line one piece of about 60,000 bytes. The window is 1280 × 480, brief §9's least height, and Devanagari runs with accessibility on.
+  - **Live check:** the rise in the renderer's private bytes from the empty card is read after a forced GC, after the open, after 10 viewports down and after a Reload. It must be within the reservation's formula at the rows mounted, less their garbage part. The formula at the rows mounted is the bound, not the reservation, whose elastic part covers rows that aren't mounted.
+  - **Handover check:** a Reload's handover, read without a GC, leaves at most the garbage part. At each step, the cache is charged within its cap.
+  - **Scrolling:** the peak without a GC is logged, not judged. It depends on when V8 and Blink collect, and the garbage part is sized to cover it.
+  - **Negative control:** rows of 65,536 units in `rowBreaks` alone, with the reservation unchanged, fail every script. At the open, the rise against its 66.2 MiB bound was 68.0 MiB for ASCII, 237.2 for emoji, 169.8 for Arabic and 130.2 for Devanagari, and the cache was charged up to 737 MiB against a 46.3 MiB cap. CJK's rows didn't fill within 60 s.
+- **The CJK gate's Windows CI failure was slow layout, not a stalled pump.** Locally, under 6× CPU throttling, every viewport of 64 KiB CJK rows filled, in 156–203 s, past the gate's 60 s wait.
+  - The rows still empty were the last ones the pump reached. It fills the mounted range from its first missing row, the overscan above the viewport included, and the gate pressed PageDown before the first viewport had filled.
+  - Not changed: under Z66 a row lays out at most 2,048 units, not 21,845.
+- **Tests that read a whole piece read the cache's items, through the test-hooks build's `client.items`.** C2's "no mounted item's text exceeds 64 KiB" checks the cache item, not the DOM. `long-line.e2e.ts` reads each piece's rows on its way down the line. PR 7's a11y fixture's wide line is 2,009 units, so it stays one row and End still reaches its end.
+- **A failed Reload gives the reservation back to the last lens it was handed to, whatever its document.** That lens is still mounted: close clears it when its document closes. This replaces "if that's the reloaded document's; else to nobody" (PR 6, above). `close.e2e.ts` checks the first of two overlapping Reloads ends Stale or Frozen.
+
+**Found in PR 6b, carried:**
+- **A line's row counts are kept for every line with more than one row that's been seen,** not evicted with its items. They grow with the long lines read, until the lens closes.
+- **`rowBreaks`'s 32 units of context can mispair a run of regional indicators longer than that** (a flag's two halves), at a break.
+- **The page pump fills the overscan above the viewport before the rows on screen.** Under slow layout, the viewport is the last part to fill.
+- **End goes to the widest mounted row's end.** A wrapped line ends on its last row, which may be below the viewport.
+- **Text drawing on many distinct CJK ideographs holds the renderer for seconds.** Z66's gate's CJK fixture draws on all 20,901 CJK Unified Ideographs.
+  - There, 23 of 25 of the 1st, 3rd, 5th, 7th and 9th PageDowns (five runs) held the renderer 3.7–7.3 s before the scroll took. The others took at most 54 ms.
+  - Drawn from 500 or 3,000 ideographs, the same text took at most 33 ms a PageDown, and emoji's at most 161 ms. The other scripts weren't timed.
+  - It's not a memory miss: the rise stayed within its bound. The cause isn't known; the number of distinct ideographs is the measured factor. Carried to the frame gates (PR 10+).
+  - The gate's PageDown wait is 60 s for it, as its fill wait is. With 5 s, one full run of 75 failed.
+
 **Implementer proposals Zack may veto (one place):**
 1. **Memory-refused open state** (C1), shown in the card: "Can't open `<file>` · Typose's memory budget is full. Close a file, then Retry." Brief §7.9 has no such state yet.
 2. **After a second core death within 60 s,** the core is respawned once 60 s have passed, and Reopen is offered then (C7; amended in PR 5, above).

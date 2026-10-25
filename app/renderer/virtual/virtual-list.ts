@@ -87,8 +87,9 @@ export class VirtualList {
     this.measure(this.rows.values())
   }
 
-  scrollToRow(i: number): void {
-    this.apply(this.state.moveTo(i * this.rowHeight))
+  /** Scrolls row `i` to the top, `offset` px into it. */
+  scrollToRow(i: number, offset = 0): void {
+    this.apply(this.state.moveTo(i * this.rowHeight + offset))
   }
 
   /**
