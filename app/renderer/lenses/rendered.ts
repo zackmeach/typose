@@ -66,6 +66,7 @@ export class RenderedLens {
     // Every link click, including one a key fires. `href="#"` would otherwise jump. Capture, so it runs first.
     this.scroller.addEventListener('click', this.onLink, true)
     this.scroller.addEventListener('auxclick', this.onLink, true)
+    this.scroller.addEventListener('dragstart', this.onLink, true)
     for (const type of ['wheel', 'keydown', 'pointerdown'] as const)
       this.scroller.addEventListener(type, () => {
         this.moved = true
@@ -146,6 +147,7 @@ export class RenderedLens {
     for (const f of this.flight) f.abort.abort()
     this.scroller.removeEventListener('click', this.onLink, true)
     this.scroller.removeEventListener('auxclick', this.onLink, true)
+    this.scroller.removeEventListener('dragstart', this.onLink, true)
     if (__TEST_HOOKS__) testHooks.rendered = null
   }
 

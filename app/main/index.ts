@@ -31,6 +31,11 @@ let titlebarPainted: () => void = () => {}
 // No proxy resolution at all: with Windows' "Automatically detect settings" on, Chromium otherwise runs WPAD
 // (a DNS lookup for "wpad") at startup in every network context, though Typose requests nothing (spec §7.3).
 app.commandLine.appendSwitch('no-proxy-server')
+// A renderer's `<link rel=dns-prefetch>` (and preconnect) never reaches webRequest or CSP, and preconnect is not in
+// the NetLog at all (spec §7.3). Blink's setting turns both off for every renderer, before any window exists. The
+// test-hooks build can withhold it so a launch can show the lookup; the release build constant-folds that away.
+const speculative = __TEST_HOOKS__ && process.env.TYPOSE_TEST_ALLOW_SPECULATIVE === '1'
+if (!speculative) app.commandLine.appendSwitch('blink-settings', 'dnsPrefetchingEnabled=false')
 
 // macOS: no window restoration. Typose restores no window through AppKit, yet after a crash AppKit asks at the next
 // launch whether to reopen its windows, in a modal that holds the launch short of ready until someone answers it: on

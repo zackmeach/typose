@@ -696,8 +696,10 @@ pub mod test_hooks {
     pub fn doc_charges(doc: &Doc) -> std::result::Result<Charges, Error<Code>> {
         let raw = doc.raw()?;
         let c = raw.charges();
+        // The held Markdown build's reservation. Raw's itemization does not include it; the sum does.
+        let rendered = doc.built.lock().unwrap().as_ref().map(|r| r.charged()).unwrap_or(0);
         let [hashes, checkpoints, cache, metadata, total] =
-            [c.hashes, c.checkpoints, c.cache, c.metadata, c.total()].map(|n| n as f64);
+            [c.hashes, c.checkpoints, c.cache, c.metadata, c.total() + rendered].map(|n| n as f64);
         Ok(Charges { hashes, checkpoints, cache, metadata, total, lines_stopped: raw.lines_stopped() })
     }
 

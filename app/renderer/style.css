@@ -344,9 +344,10 @@ body {
   content-visibility: auto;
   contain-intrinsic-size: auto 24px;
 }
-/* Chromium's content-visibility: auto leaves skipped boxes out of the accessibility tree (measured: 28 of 2,000
-   headings). A block that holds a heading stays in the tree, so heading navigation works without scrolling (brief §9,
-   plan §2.2). Other blocks still skip their paint. */
+/* content-visibility: auto leaves skipped boxes out of the accessibility tree (measured: 37 of 120 links, nothing
+   scrolled). While Chromium's accessibility mode is on, every block stays visible. A heading block stays visible
+   either way, so heading navigation does not wait for that mode. */
+html[data-a11y='on'] .md-block,
 .md-block:has(h1, h2, h3, h4, h5, h6) {
   content-visibility: visible;
 }

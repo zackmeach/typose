@@ -69,6 +69,8 @@ export function App({ core }: { core: CoreClient }) {
   const place = useRef<number | undefined>(undefined)
   /** Whether that lens had the focus, so the next one takes it (plan PR 7). */
   const hadFocus = useRef(false)
+  /** Reload recorded that the lens had focus, before show() unmounted the scroller. */
+  const restoreFocus = useRef(false)
   /** One reservation for Rendered at a time. */
   const holding = useRef(false)
   /** A file chosen before the core first came up: it's opened then, ahead of the command line's. */
@@ -121,6 +123,8 @@ export function App({ core }: { core: CoreClient }) {
       const ctrlR = e.key.toLowerCase() === 'r' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey
       if (!ctrlR && (e.key !== 'F5' || modified)) return
       e.preventDefault()
+      // show() unmounts the scroller before the lens's cleanup can see document.activeElement. Record it now.
+      if (lens.current?.element.contains(document.activeElement)) restoreFocus.current = true
       void reload()
     }
     window.addEventListener('keydown', onKey)
@@ -170,6 +174,10 @@ export function App({ core }: { core: CoreClient }) {
         const moved = lens.current?.readerMoved() ?? false
         const go = picked.current === 'rendered' || (picked.current !== 'raw' && !moved)
         if (!go) {
+          if (restoreFocus.current) {
+            lens.current?.focus()
+            restoreFocus.current = false
+          }
           setCard((c) => (c.kind === 'open' && c.opened === opened ? { ...c, build, rendering: false } : c))
           return
         }
@@ -178,8 +186,16 @@ export function App({ core }: { core: CoreClient }) {
         // They chose Raw while the reservation was in flight: give it back and stay.
         if (picked.current === 'raw') {
           lens.current?.resumeReservation()
+          if (restoreFocus.current) {
+            lens.current?.focus()
+            restoreFocus.current = false
+          }
           setCard((c) => (c.kind === 'open' && c.opened === opened ? { ...c, build, rendering: false, lens: 'raw' } : c))
           return
+        }
+        if (held === 'memory' && restoreFocus.current) {
+          lens.current?.focus()
+          restoreFocus.current = false
         }
         setCard((c) =>
           c.kind === 'open' && c.opened === opened
@@ -191,6 +207,10 @@ export function App({ core }: { core: CoreClient }) {
       } catch (e) {
         if (!alive) return
         const off = e instanceof CoreCallError && e.code === 'Refused' ? 'ceiling' : e instanceof CoreCallError && e.code === 'Memory' ? 'memory' : undefined
+        if (off && restoreFocus.current) {
+          lens.current?.focus()
+          restoreFocus.current = false
+        }
         setCard((c) => (c.kind === 'open' && c.opened === opened ? { ...c, rendering: false, renderedOff: off ?? c.renderedOff, lens: 'raw' } : c))
         if (!off && !(e instanceof CoreCallError && (e.code === 'Cancelled' || e.code === 'Stale' || e.code === 'CoreGone' || e.code === 'Frozen')))
           console.error('render failed', e)
@@ -276,6 +296,7 @@ export function App({ core }: { core: CoreClient }) {
 
   /** Ctrl+R: the next generation of the open document, or another try at a file that failed to open. */
   async function reload(): Promise<void> {
+    if (!restoreFocus.current && lens.current?.element.contains(document.activeElement)) restoreFocus.current = true
     const { card: c, limits: l } = latest.current
     if (c.kind === 'failed') return open(c.path)
     if (c.kind !== 'open' || !l || reloading.current) return
@@ -369,7 +390,7 @@ export function App({ core }: { core: CoreClient }) {
       <Button
         className="banner-button"
         onPress={() => {
-          lens.current?.focus() // so Reload's new lens takes it, as from Ctrl+R in Raw
+          restoreFocus.current = true // the click focuses the button; show() would then drop the scroller's focus
           void reload()
         }}
       >
@@ -400,6 +421,7 @@ export function App({ core }: { core: CoreClient }) {
         jumpTo={jumpTo}
         place={place}
         hadFocus={hadFocus}
+        restoreFocus={restoreFocus}
         atLine={card.atLine}
         opened={card.opened}
         name={fileName(card.path)}
@@ -418,6 +440,7 @@ export function App({ core }: { core: CoreClient }) {
         jumpTo={jumpTo}
         place={place}
         hadFocus={hadFocus}
+        restoreFocus={restoreFocus}
         atLine={card.atLine}
         opened={card.opened}
         name={fileName(card.path)}
@@ -530,6 +553,8 @@ interface LensHostProps {
   place: RefObject<number | undefined>
   /** Whether that lens had the focus. */
   hadFocus: RefObject<boolean>
+  /** Reload recorded focus before the scroller unmounted. Cleared once the lens that stays has taken it. */
+  restoreFocus: RefObject<boolean>
   /** The line to open at (Reopen, plan C7). */
   atLine: number | undefined
   opened: Opened
@@ -545,7 +570,7 @@ interface LensHostProps {
 }
 
 /** Mounts Raw or Rendered into the card body. The reading position is the previous lens's top line. */
-function LensHost({ core, lens, jumpTo, place, hadFocus, atLine, opened, name, lines, indexed, limits, frozen, mode, build, onFrozen, onShowRaw }: LensHostProps) {
+function LensHost({ core, lens, jumpTo, place, hadFocus, restoreFocus, atLine, opened, name, lines, indexed, limits, frozen, mode, build, onFrozen, onShowRaw }: LensHostProps) {
   const host = useRef<HTMLDivElement>(null)
   const onFrozenNow = useRef(onFrozen)
   onFrozenNow.current = onFrozen
@@ -561,7 +586,10 @@ function LensHost({ core, lens, jumpTo, place, hadFocus, atLine, opened, name, l
         ? new RenderedLens(host.current!, core, opened, build, limits, { onFrozen: onFrozenHere, atLine: at, onShowRaw: (line) => onShowRawNow.current(line) })
         : new RawLens(host.current!, core, opened, name, limits, { onFrozen: onFrozenHere, atLine: at })
     lens.current = view
-    if (hadFocus.current) view.focus()
+    // A Markdown reload mounts Raw first, then Rendered. Focusing Raw would consume the flag before Rendered exists.
+    const interim = restoreFocus.current && mode === 'raw' && opened.format === 'markdown' && !opened.blank
+    if (!interim && (hadFocus.current || restoreFocus.current)) view.focus()
+    if (restoreFocus.current && !interim) restoreFocus.current = false
     return () => {
       hadFocus.current = view.element.contains(document.activeElement)
       place.current = jumpTo.current ?? view.topLine()
@@ -569,7 +597,7 @@ function LensHost({ core, lens, jumpTo, place, hadFocus, atLine, opened, name, l
       if (lens.current === view) lens.current = null
       view.dispose(false) // the next lens holds the reservation; close() releases it with the document
     }
-  }, [core, opened, name, limits, lens, atLine, mode, build, jumpTo, place, hadFocus])
+  }, [core, opened, name, limits, lens, atLine, mode, build, jumpTo, place, hadFocus, restoreFocus])
   useEffect(() => lens.current?.setLineCount(lines), [lines])
   useEffect(() => {
     if (indexed) lens.current?.indexDone()

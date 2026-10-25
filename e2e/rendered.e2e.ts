@@ -1,5 +1,5 @@
 // Plan (Rendered Markdown slice) PR 2: the Rendered lens, the switch, file states, accessibility and the
-// sanitizer's DOM. Links stay inert. The NetLog control shows a planted `<link rel=preconnect>` would be caught.
+// sanitizer's DOM. Links stay inert. Speculative DNS is off; the control withholds that and shows the NetLog catch it.
 import AxeBuilder from '@axe-core/playwright'
 import { type Page, expect } from '@playwright/test'
 import { spawnSync } from 'node:child_process'
@@ -104,10 +104,9 @@ test('a Markdown file opens in Rendered, and Raw keeps the top line within one b
   await expect(win.locator('main a')).toHaveAttribute('title', 'https://example.invalid/a')
   await expect(win.getByRole('tablist', { name: 'Lens' })).toBeVisible()
   await expect(win.getByRole('tab', { name: 'Rendered' })).toHaveAttribute('aria-selected', 'true')
-  // Offscreen blocks stay mounted and skip their paint (plan §2.2).
+  // Offscreen blocks stay mounted and skip their paint, except a heading's (plan §2.2).
   const visibility = await win.evaluate(() => {
     const blocks = [...document.querySelectorAll<HTMLElement>('.md-block')]
-    // Headings stay in the accessibility tree, so they don't skip paint. Another block below the fold does.
     const below = blocks.find((b) => b.getBoundingClientRect().top > innerHeight && !b.querySelector('h1, h2, h3, h4, h5, h6'))
     return { count: blocks.length, below: below ? getComputedStyle(below).contentVisibility : '' }
   })
@@ -212,11 +211,13 @@ test('a low memory budget refuses Rendered, and Raw stays', async () => {
   const inner = await probe.win.evaluate(() => window.innerHeight)
   const { ledger, charges } = await debugStats(probe.win)
   await finish(probe)
-  // What `open` reserves before a lens exists: Raw's viewport cap at the window's height. The slack is far under a
-  // render's temporary (the sanitizer), so the build is refused and Raw stays.
+  // `total` includes the held Markdown build. This launch's open holds only Raw's floor, so the budget is sized from
+  // that: the slack stays under a render's temporary, Rendered is refused, and Raw stays.
+  const floor = charges[1].hashes + charges[1].checkpoints + charges[1].cache + charges[1].metadata
+  expect(charges[1].total).toBeGreaterThan(floor)
   const view = (Math.ceil(inner / 20) + 1) * rowCost(hello.limits)
-  const budget = ledger.pool + charges[1].total + hello.limits.openTemp + view + (1 << 20)
-  console.log(`rendered budget ${budget} (pool ${ledger.pool}, document ${charges[1].total}, view ${view}, window ${inner}px)`)
+  const budget = ledger.pool + floor + hello.limits.openTemp + view + (1 << 20)
+  console.log(`rendered budget ${budget} (pool ${ledger.pool}, floor ${floor}, build ${charges[1].total - floor}, view ${view}, window ${inner}px)`)
   const l = await launch({ hooks: true, file, env: { TYPOSE_TEST_BUDGET: String(budget) } })
   const { win } = l
   await waitOpen(win)
@@ -246,9 +247,9 @@ test('axe finds nothing in Rendered, at 200% zoom too, and every heading of a lo
   const deep = await launch({ file: fixture('headings.md', headings) })
   await waitRendered(deep.win)
   expect(await deep.win.locator('h1').count()).toBe(2000)
-  // No scroll. Accessibility support is what makes Chromium build the tree a reader would walk (Z39's automated read).
+  // No scroll. Accessibility support forces every block visible, which is what puts them in the tree (plan §2.2).
   if (process.platform !== 'linux') await deep.app.evaluate(({ app }) => app.setAccessibilitySupportEnabled(true))
-  // No scroll: content-visibility must leave every heading in the tree (plan §2.2, Z72).
+  if (process.platform !== 'linux') await expect(deep.win.locator('html')).toHaveAttribute('data-a11y', 'on')
   const cdp = await deep.win.context().newCDPSession(deep.win)
   const { nodes } = (await cdp.send('Accessibility.getFullAXTree')) as { nodes: { ignored: boolean; role?: { value: string }; name?: { value: string } }[] }
   await cdp.detach()
@@ -295,14 +296,19 @@ test("Spike C's corpus and the planted cases make no request, and a planted link
   })
   const clicks = await win.evaluate(() => {
     const links = [...document.querySelectorAll<HTMLAnchorElement>('.md-column a')]
+    let drags = 0
     for (const a of links) {
       a.scrollIntoView({ block: 'nearest' })
       a.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse' }))
       a.click()
+      const drag = new DragEvent('dragstart', { bubbles: true, cancelable: true })
+      a.dispatchEvent(drag)
+      if (drag.defaultPrevented) drags++
     }
-    return links.length
+    return { clicks: links.length, drags }
   })
-  expect(clicks).toBeGreaterThan(0)
+  expect(clicks.clicks).toBeGreaterThan(0)
+  expect(clicks.drags).toBe(clicks.clicks)
   const problems = await win.evaluate((forbidden) => {
     const bad: string[] = []
     const tags = new Set(forbidden)
@@ -325,33 +331,107 @@ test("Spike C's corpus and the planted cases make no request, and a planted link
   expect(l.pageErrors).toEqual([])
   await finish(l)
   expect(assertNetLog(log)).toContain('PASS')
+})
 
-  // The control: a link the sanitizer would have removed, inserted live, is DNS the NetLog reports.
-  const controlLog = test.info().outputPath('rendered-control-netlog.json')
-  const control = await launch({ netlog: controlLog })
-  await expect(control.win.locator('.open-button')).toBeVisible()
-  // The page CSP blocks a preconnect before it reaches the network stack. Bypass it for this control only, so a link
-  // that got past the sanitizer is something checkNetLog can fail on.
-  // A link in the page is cancelled by the network guard before Chromium logs it. The same `<link rel=preconnect>`
-  // inserted after CSP bypass still leaves the NetLog clean (measured). An unguarded session does reach DNS, which is
-  // what shows the gate can fail.
-  await control.win.evaluate(() => {
+test('Ctrl+R keeps keyboard focus on the Rendered scroller', async () => {
+  const l = await launch({ file: fixture('focus.md', SAMPLE) })
+  const { win } = l
+  await waitRendered(win)
+  const scroller = win.locator('.md-scroller')
+  await scroller.focus()
+  await expect(scroller).toBeFocused()
+  await win.keyboard.press('Control+r')
+  await expect(win.locator('[data-lens="rendered"]')).toHaveAttribute('data-gen', '2')
+  await waitRendered(win)
+  const focused = await win.evaluate(() => document.activeElement?.className ?? '')
+  console.log(`focus after Ctrl+R: ${focused}`)
+  await expect(win.locator('.md-scroller')).toBeFocused()
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+test('with accessibility on, every link and heading is in the tree without scrolling', async () => {
+  const n = 120
+  const parts = ['# Top heading']
+  for (let i = 0; i < n; i++) {
+    if (i % 10 === 0) parts.push('', `## Section ${i}`, '')
+    parts.push(`Paragraph ${i} with a [link ${i}](https://example.invalid/${i}).`, '')
+  }
+  const l = await launch({ file: fixture('ax-links.md', parts.join('\n')) })
+  await waitRendered(l.win)
+  expect(await l.win.locator('main a').count()).toBe(n)
+  if (process.platform !== 'linux') await l.app.evaluate(({ app }) => app.setAccessibilitySupportEnabled(true))
+  if (process.platform !== 'linux') await expect(l.win.locator('html')).toHaveAttribute('data-a11y', 'on')
+  const cdp = await l.win.context().newCDPSession(l.win)
+  const { nodes } = (await cdp.send('Accessibility.getFullAXTree')) as { nodes: { ignored: boolean; role?: { value: string }; name?: { value: string } }[] }
+  await cdp.detach()
+  const links = nodes.filter((node) => node.role?.value === 'link' && !node.ignored)
+  const headings = nodes.filter((node) => node.role?.value === 'heading' && !node.ignored)
+  const linkNames = new Set(links.map((node) => node.name?.value))
+  const headingNames = new Set(headings.map((node) => node.name?.value))
+  const missingLinks = Array.from({ length: n }, (_, i) => i).filter((i) => !linkNames.has(`link ${i}`))
+  const missingHeadings = ['Top heading', ...Array.from({ length: n / 10 }, (_, k) => `Section ${k * 10}`)].filter((name) => !headingNames.has(name))
+  console.log(`ax links ${links.length}/${n} headings ${headings.length}; missing links ${missingLinks.length} headings ${missingHeadings.length}`)
+  expect(missingLinks, `links in the tree ${links.length}/${n}`).toEqual([])
+  expect(missingHeadings, `headings in the tree ${headings.length}`).toEqual([])
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+/** How many NetLog events name `host`. A hit is the speculative lookup the guard never sees. */
+function netlogHits(log: string, host: string): number {
+  return readFileSync(log, 'utf8').split(host).length - 1
+}
+
+test('an inserted dns-prefetch is not in the NetLog when speculative networking is off', async () => {
+  const log = test.info().outputPath('speculative-off-netlog.json')
+  const l = await launch({ netlog: log })
+  const host = `dns${Date.now().toString(36)}.invalid`
+  const pre = `pre${Date.now().toString(36)}.invalid`
+  await expect(l.win.locator('.open-button')).toBeVisible()
+  await l.win.evaluate(
+    ({ host, pre }) => {
+      for (const [rel, name] of [
+        ['dns-prefetch', host],
+        ['preconnect', pre]
+      ] as const) {
+        const link = document.createElement('link')
+        link.rel = rel
+        link.href = `https://${name}/`
+        document.head.append(link)
+      }
+    },
+    { host, pre }
+  )
+  await l.win.waitForTimeout(3000)
+  await finish(l)
+  const dnsHits = netlogHits(log, host)
+  const preHits = netlogHits(log, pre)
+  console.log(`speculative off dnsHits=${dnsHits} preHits=${preHits} host=${host}`)
+  expect(dnsHits, host).toBe(0)
+  expect(preHits, pre).toBe(0)
+  expect(assertNetLog(log)).toContain('PASS')
+})
+
+test('with the speculative switch withheld, an inserted dns-prefetch is in the NetLog', async () => {
+  // The leak this rules out. An unguarded net.request is a real HTTP request on a session the guard does not cover,
+  // which is a different class, so it is not the control. Preconnect from the renderer is not in this NetLog at all.
+  const log = test.info().outputPath('speculative-on-netlog.json')
+  const host = `dns${Date.now().toString(36)}.invalid`
+  const l = await launch({ hooks: true, netlog: log, env: { TYPOSE_TEST_ALLOW_SPECULATIVE: '1' } })
+  await expect(l.win.locator('.open-button')).toBeVisible()
+  await l.win.evaluate((host) => {
     const link = document.createElement('link')
-    link.rel = 'preconnect'
-    link.href = 'https://example.com/'
+    link.rel = 'dns-prefetch'
+    link.href = `https://${host}/`
     document.head.append(link)
-  })
-  await control.app.evaluate(({ net, session }) => {
-    const s = session.fromPartition('typose-pr2-control')
-    const req = net.request({ url: 'https://example.com/', session: s })
-    req.on('error', () => {})
-    req.on('response', () => {})
-    req.end()
-  })
-  await control.win.waitForTimeout(3000)
-  await finish(control)
-  // checkNetLog, as CI runs it: a live preconnect is DNS, so this gate can fail.
-  const run = spawnSync(process.execPath, [join(__dirname, 'netlog-assert.mjs'), controlLog], { encoding: 'utf8' })
+  }, host)
+  await l.win.waitForTimeout(3000)
+  await finish(l)
+  const hits = netlogHits(log, host)
+  console.log(`speculative withheld dnsHits=${hits} host=${host}`)
+  expect(hits, host).toBeGreaterThan(0)
+  const run = spawnSync(process.execPath, [join(__dirname, 'netlog-assert.mjs'), log], { encoding: 'utf8' })
   expect(run.status, run.stdout + run.stderr).not.toBe(0)
-  expect(run.stdout).toMatch(/dns /)
+  expect(run.stdout).toMatch(new RegExp(`dns .*${host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
 })
