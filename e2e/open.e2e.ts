@@ -1,5 +1,5 @@
 import { expect } from '@playwright/test'
-import { finish, fixture, launch, test, visibleRows, waitIndexed, waitOpen } from './app'
+import { cachedItems, finish, fixture, launch, test, visibleRows, waitIndexed, waitOpen } from './app'
 
 test('a file named on the command line opens into Raw, indexes and reaches its last line', async () => {
   const lines = Array.from({ length: 5000 }, (_, i) => `{"type":"tool","msg":"row ${i}"}`)
@@ -38,7 +38,7 @@ for (const [name, label, bytes] of ENCODINGS) {
 }
 
 test('horizontal scrolling brings a wide line past the viewport into view', async () => {
-  const wide = `${'wide '.repeat(600)}MARK`
+  const wide = `${'wide '.repeat(400)}MARK` // one row: Z66 wraps at 2,048 units, and End goes to the widest row's end
   const l = await launch({ file: fixture('wide.txt', `short\n${wide}\n`) })
   const { win } = l
   await waitOpen(win)
@@ -76,14 +76,28 @@ test('horizontal scrolling brings a wide line past the viewport into view', asyn
 })
 
 test('no mounted item holds more than 64 KiB of text, and a long line ends at a character', async () => {
-  // 70,000 bytes of 3-byte characters: the first piece is cut at a character within 65,536 bytes (C2, C3).
-  const l = await launch({ file: fixture('long-cjk.txt', `${'語'.repeat(23_334)}\nafter\n`) })
+  // 70,000 bytes of 3-byte characters: the first piece is cut at a character within 65,536 bytes (C2, C3). Z66 shows
+  // it over rows of at most 2,048 units, so the pieces are read from the cache, not the rows.
+  const l = await launch({ hooks: true, file: fixture('long-cjk.txt', `${'語'.repeat(23_334)}\nafter\n`) })
   const { win } = l
   await waitOpen(win)
-  await expect.poll(async () => (await visibleRows(win))[1]).toEqual({ line: 2, text: 'after' })
-  const items = await win.evaluate(() => [...document.querySelectorAll('.vl-row .text')].map((t) => t.textContent!.length))
-  expect(Math.max(...items)).toBeLessThanOrEqual(65_536)
-  expect((await visibleRows(win))[0].text).toBe('語'.repeat(21_845)) // 65,535 bytes: no U+FFFD from a split character
-  expect(await win.locator('.vl-row .more').count()).toBe(1)
+  await expect.poll(async () => (await visibleRows(win)).find((r) => r.line === 2)).toEqual({ line: 2, text: 'after' })
+  const items = await cachedItems(win)
+  expect(Math.max(...items.map((i) => i.text.length))).toBeLessThanOrEqual(65_536)
+  expect(items.find((i) => i.key === 0)?.text).toBe('語'.repeat(21_845)) // 65,535 bytes: no U+FFFD from a split character
+  const rows = await win.locator('.vl-row[data-line="0"] .text').allTextContents()
+  expect(rows.map((t) => t.length)).toEqual([...Array(10).fill(2048), 21_845 - 10 * 2048])
+  expect(rows.join('')).toBe('語'.repeat(21_845))
+  // Each row but the piece's last ends in ↪, which assistive tech skips.
+  await expect(win.locator('.vl-row[data-line="0"] .more[aria-hidden="true"]')).toHaveText(Array(10).fill('↪'))
+  await expect(win.getByRole('button', { name: 'Show more of line 1' })).toHaveCount(1) // on the piece's last row
+  // The marker is painted on the row, and a selection across that row doesn't take it.
+  const selected = await win.evaluate(() => {
+    const row = document.querySelector('.vl-row[data-line="0"]')!
+    window.getSelection()!.selectAllChildren(row)
+    return window.getSelection()!.toString()
+  })
+  expect(selected).toContain('語')
+  expect(selected).not.toContain('↪')
   await finish(l)
 })

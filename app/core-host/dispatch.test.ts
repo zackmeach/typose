@@ -310,6 +310,16 @@ describe("the renderer cache's reservation (plan C1)", () => {
     expect(reserved()).toEqual([300, 500, 300, 200, 900, 100])
   })
 
+  it('a failed Reload of a document not on screen gives it back to the lens that is', async () => {
+    expect(await call('open', { path: 'b.txt', count: 1, bytes: 300 })).toMatchObject({ result: { doc: 2, reserved: 300 } })
+    reload.mockImplementationOnce(() => {
+      throw Object.assign(new Error('the memory budget is full: 4523288 bytes asked, 12 free'), { code: 'Memory' })
+    })
+    expect(await call('reload', { doc: 1, count: 1, bytes: 100 })).toMatchObject({ error: { code: 'Memory' } })
+    expect(await call('reserve', { doc: 2, gen: 1, bytes: 200 })).toMatchObject({ result: true }) // document 2's lens's still
+    expect(reserved()).toEqual([300, 300, 200])
+  })
+
   /** Two Reloads of `id` whose first pages wait: the first ends Stale, then the second fails (`Frozen`, say). */
   async function overlapping(id: number): Promise<void> {
     const d = doc as unknown as { generation: number }

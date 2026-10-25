@@ -44,7 +44,9 @@ export const testHooks = {
   /** The mounted Rendered lens: what it reserved, and how much of the build is appended. */
   rendered: null as
     | (() => { units: number; htmlBytes: number; reserved: number; blocks: number; appended: number })
-    | null
+    | null,
+  /** The mounted Raw lens's cached items, by key: a whole piece's text, which Z66 shows over rows of 2,048 units. */
+  items: null as (() => { key: number | string; text: string }[]) | null
 }
 
 /**

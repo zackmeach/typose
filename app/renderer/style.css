@@ -194,6 +194,7 @@ body {
 }
 .vl-row .more {
   color: var(--text2);
+  user-select: none;
 }
 .vl-row button.more {
   font: inherit;

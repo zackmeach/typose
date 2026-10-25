@@ -227,9 +227,15 @@ export interface TestHooks {
     dropped: ('event' | 'response')[]
     /** The mounted Rendered lens, when one is. */
     rendered: (() => { units: number; htmlBytes: number; reserved: number; blocks: number; appended: number }) | null
+    /** The mounted Raw lens's cached items, when one is. */
+    items: (() => { key: number | string; text: string }[]) | null
   }
   app: { close?: () => void }
 }
+
+/** The mounted Raw lens's cached items, on the test-hooks build: whole pieces, which Z66 shows over rows (PR 6b). */
+export const cachedItems = (win: Page): Promise<{ key: number | string; text: string }[]> =>
+  win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.client.items?.() ?? [])
 
 /** The core host's debug stats, on the test-hooks build (plan C5, C6). */
 export const debugStats = (win: Page, params: { gc?: boolean; resetHigh?: boolean; limit?: number } = {}): Promise<DebugStats> =>
