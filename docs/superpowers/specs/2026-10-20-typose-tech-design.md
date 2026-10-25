@@ -79,6 +79,9 @@ The packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`) holds
 | Z68 | **The first formatted lens is rendered Markdown,** built end to end before M2. (2026-10-24; §13.2) |
 | Z69 | **Merge on the full local Windows gate** until GitHub Actions minutes reset. Included minutes were exhausted ~18:00Z 2026-10-24; the spending limit stays $0 [Z61], so hosted CI pauses rather than billing. (2026-10-24) |
 | Z70 | **The default menu's keys go with it** (M1 plan §7 proposal 6, accepted): on Windows and Linux, Undo, Redo, Cut, Copy, Paste, Select All, Reload, Force Reload, developer tools, page zoom (Actual Size, Zoom In, Zoom Out), Full Screen, Minimize and Close; on Linux, Quit (Ctrl+Q) too; on macOS, the View menu's Reload, Force Reload, developer tools, page zoom and Full Screen keys, with the app, Edit and Window menus and File's Close Window unchanged. Zoom, full screen, Minimize and Close on Windows and Linux, and zoom and full screen on macOS, return in M2; Force Reload and developer tools are gone for good. (2026-10-24; M1 plan §7) |
+| Z71 | **Rendered's size ceiling is 8MiB of source** in the first Markdown slice. Above it, the file opens in Raw with Rendered disabled and the reason in its tooltip. (2026-10-24; §4.6; the slice's plan, §4) |
+| Z72 | **Rendered uses native `content-visibility` over all of its blocks** in the first Markdown slice, within Z71's ceiling, instead of the virtualizer: a temporary departure from Z26. (2026-10-24; §5.3; the slice's plan, §2.2) |
+| Z73 | **A relative link to a supported file replaces the card's file** ("open it in the window"). There's no Back until M2. (2026-10-24; §5.4; the slice's plan, §2.4) |
 
 ---
 
