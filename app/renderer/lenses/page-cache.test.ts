@@ -144,8 +144,99 @@ describe('rowBreaks (Z66)', () => {
         }
       }
     }
+    // Virama chains, seeded lengths in 2..400, at every offset 1900..2050.
+    let virSeed = 0xc0de
+    const virNext = () => {
+      virSeed = (Math.imul(virSeed, 1103515245) + 12345) & 0x7fffffff
+      return virSeed
+    }
+    const linkers: [number, number][] = [
+      [0x0915, 0x094d],
+      [0x0995, 0x09cd],
+      [0x0a95, 0x0acd],
+      [0x0b15, 0x0b4d],
+      [0x0c15, 0x0c4d],
+      [0x0d15, 0x0d4d],
+      [0x1000, 0x1039],
+      [0x1780, 0x17d2]
+    ]
+    const virLengths = new Set([2, 99, 399])
+    while (virLengths.size < 6) {
+      const n = 1 + (virNext() % 199) // (consonant, virama) × n + consonant → 3..399
+      virLengths.add(2 * n + 1)
+    }
+    const virChain = (ka: number, vir: number, units: number) => {
+      if (units === 2) return String.fromCodePoint(ka, vir)
+      const pairs = (units - 1) / 2
+      return `${String.fromCodePoint(ka, vir).repeat(pairs)}${String.fromCodePoint(ka)}`
+    }
+    for (const [ka, vir] of linkers) {
+      for (const units of virLengths) {
+        const g = virChain(ka, vir, units)
+        for (let offset = 1900; offset <= 2050; offset++) {
+          seen++
+          const text = `${'a'.repeat(offset)}${g}`
+          const b = rowBreaks(text)
+          const parts = [...segmenter.segment(text)]
+          const ok = new Set(parts.map((s) => s.index))
+          const lens = b.slice(0, -1).map((at, i) => b[i + 1] - at)
+          if (lens.some((n) => n > WRAP) || rows(text).join('') !== text) {
+            bad.push(`vir offset ${offset} len ${g.length} rows ${lens.join(',')}`)
+            continue
+          }
+          for (const at of b.slice(1, -1)) {
+            if (ok.has(at)) continue
+            const owner = parts.find((s) => s.index < at && s.index + s.segment.length > at)
+            if (owner && owner.segment.length > WRAP) continue
+            bad.push(`vir offset ${offset} len ${g.length} breaks ${b.join(',')} at ${at}`)
+          }
+        }
+      }
+    }
     expect(seen).toBeGreaterThan(300)
     expect(bad.slice(0, 8)).toEqual([])
+  })
+
+  it('does not cut a virama conjunct that straddles the row', () => {
+    const chain = (ka: number, vir: number) => `${String.fromCodePoint(ka, vir).repeat(49)}${String.fromCodePoint(ka)}`
+    const samples: [string, string][] = [
+      ['deva', `${'a'.repeat(1951)}${chain(0x0915, 0x094d)}`],
+      ['beng', `${'a'.repeat(1951)}${chain(0x0995, 0x09cd)}`],
+      ['gujr', `${'a'.repeat(1951)}${chain(0x0a95, 0x0acd)}`],
+      ['orya', `${'a'.repeat(1951)}${chain(0x0b15, 0x0b4d)}`],
+      ['telu', `${'a'.repeat(1951)}${chain(0x0c15, 0x0c4d)}`],
+      ['mlym', `${'a'.repeat(1951)}${chain(0x0d15, 0x0d4d)}`],
+      ['mymr', `${'a'.repeat(1951)}${chain(0x1000, 0x1039)}`],
+      ['khmr', `${'a'.repeat(1951)}${chain(0x1780, 0x17d2)}`]
+    ]
+    const bad: string[] = []
+    for (const [name, text] of samples) {
+      const parts = [...segmenter.segment(text)]
+      const cluster = parts.find((s) => s.index === 1951)
+      if (!cluster || cluster.segment.length !== 99) bad.push(`${name} is not one 99-unit grapheme`)
+      const b = rowBreaks(text)
+      const ok = new Set(parts.map((s) => s.index))
+      for (const at of b.slice(1, -1)) if (!ok.has(at)) bad.push(`${name} breaks ${b.join(',')} at ${at}`)
+      if (Math.max(...rows(text).map((x) => x.length)) > WRAP) bad.push(`${name} row over ${WRAP}`)
+    }
+    expect(bad).toEqual([])
+  })
+
+  it('cuts a virama chain longer than a row on the 2,048 grid', () => {
+    const text = `a${'\u0915\u094D'.repeat(1200)}\u0915`
+    expect(text.length).toBe(2402)
+    const parts = [...segmenter.segment(text)]
+    expect(parts.map((s) => s.segment.length)).toEqual([1, 2401])
+    const b = rowBreaks(text)
+    const inside = b.filter((at) => at > 1 && at < text.length)
+    const off = inside.filter((at) => {
+      const rel = at - 1
+      return rel % 2048 !== 0 && rel % 2048 !== 2047
+    })
+    expect(off, `breaks ${b.join(',')}`).toEqual([])
+    expect(inside.length, `breaks ${b.join(',')}`).toBeGreaterThan(0)
+    expect(Math.max(...rows(text).map((x) => x.length))).toBeLessThanOrEqual(WRAP)
+    expect(rows(text).join('')).toBe(text)
   })
 
   it('keeps cutting a cluster longer than a row at the surrogate-safe limit', () => {

@@ -80,10 +80,49 @@ function mayContinue(text: string, at: number): boolean {
   return false
 }
 
-/** Where the grapheme that starts at `from` ends. One segment, so a cluster longer than a row is read once. */
+const mark = /\p{M}/u
+
+/** A mark or joiner at `i`. A virama is a mark, and so is the unit before the consonant that continues the conjunct. */
+function continuesAt(text: string, i: number): boolean {
+  if (i < 0 || i >= text.length) return false
+  const u = text.charCodeAt(i)
+  if (u < 0x80) return false
+  if (u === 0x200d || u === 0x200c) return true
+  const start = u >= 0xdc00 && u <= 0xdfff && i > 0 ? i - 1 : i
+  const cp = text.codePointAt(start)
+  return cp !== undefined && mark.test(String.fromCodePoint(cp))
+}
+
+/**
+ * Where the grapheme that starts at `from` ends. The window doubles while the first segment fills it, so finding the
+ * end does not copy the rest of the line.
+ */
 function graphemeEnd(text: string, from: number): number {
-  const next = graphemes.segment(text.slice(from))[Symbol.iterator]().next()
-  return from + (next.done ? 0 : next.value.segment.length)
+  const rest = text.length - from
+  let span = Math.min(rest, 256)
+  for (;;) {
+    let end = Math.min(text.length, from + span)
+    if (end < text.length && text.charCodeAt(end - 1) >= 0xd800 && text.charCodeAt(end - 1) <= 0xdbff) end++
+    const slice = text.slice(from, end)
+    const next = graphemes.segment(slice)[Symbol.iterator]().next()
+    if (next.done) return from
+    if (next.value.segment.length < slice.length || end >= text.length) return from + next.value.segment.length
+    const grown = Math.min(rest, span * 2)
+    if (grown === span) return from + next.value.segment.length
+    span = grown
+  }
+}
+
+/**
+ * The 96-unit window may have opened inside a grapheme. A mark (a virama, a vowel sign) at its start, or the unit
+ * just before, is the class that glues; regional indicators are not marks and are left to the window. A 32-unit probe
+ * is trusted only when it itself starts outside the cluster — a chain longer than that still confirms from the row.
+ */
+function openedInside(text: string, start: number, windowFrom: number): boolean {
+  if (!continuesAt(text, windowFrom) && !continuesAt(text, windowFrom - 1)) return false
+  const probeFrom = Math.max(start, windowFrom - 32)
+  if (probeFrom > start && (continuesAt(text, probeFrom) || continuesAt(text, probeFrom - 1))) return true
+  return !boundaries(text, probeFrom, Math.min(text.length, windowFrom + 32)).includes(windowFrom)
 }
 
 /** The break for the row at `start`, from a scan that reads `extra` units past the limit. */
@@ -95,12 +134,13 @@ function choose(text: string, start: number, limit: number, extra: number): { at
   if (!sawWindow) near = boundaries(text, start, limit, extra)
   const spaced = near.filter((b) => b >= limit - 64 && text[b - 1] === ' ')
   let at = spaced.at(-1) ?? near.at(-1) ?? limit
-  // A slice that starts inside a ZWJ sequence invents a boundary, so the rescan above never runs. If the chosen
-  // break isn't one of the scan from the row start, use that scan's last boundary. The 96-unit slice stays the fast
-  // path when it holds no ZWJ — a run of regional indicators past the 32-unit context can mispair (plan §7, carried),
-  // and a scan from the row start would pair them differently.
+  // A slice that starts inside a cluster invents a boundary, so "no boundary, rescan" never runs. Confirm from the
+  // row start when the window holds a ZWJ, or when it opens on a mark or the unit after one (a virama chain). A run of
+  // regional indicators is neither, and stays on the 96-unit slice: past the 32-unit context it can mispair (plan §7,
+  // carried), and a scan from the row start would pair it differently.
   let cutLong = near.length === 0
-  if (sawWindow && text.slice(windowFrom, limit + 1).includes('\u200D')) {
+  const confirm = text.slice(windowFrom, limit + 1).includes('\u200D') || openedInside(text, start, windowFrom)
+  if (sawWindow && confirm) {
     const full = boundaries(text, start, limit, extra)
     if (!full.includes(at)) {
       const last = full.at(-1)
