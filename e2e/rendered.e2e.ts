@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { RENDERED_OFF } from '../app/renderer/card'
 import { rowCost } from '../app/renderer/lenses/page-cache'
 import type { Limits } from '../app/shared/protocol'
-import { type TestHooks, assertNetLog, debugStats, finish, fixture, launch, test, visibleRows, waitOpen } from './app'
+import { type TestHooks, assertNetLog, debugStats, finish, fixture, launch, test, visibleRows, waitIndexed, waitOpen } from './app'
 
 const SAMPLE = [
   '# Heading one',
@@ -173,6 +173,35 @@ test('Ctrl+R keeps the reader on the same block', async () => {
   const after = await topBlock(win)
   expect(after.line).toBeLessThanOrEqual(before.end)
   expect(after.end).toBeGreaterThanOrEqual(before.line)
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+test('a second file opens at its start, not at the line the previous file was scrolled to', async () => {
+  // The lens host keeps one reading position for the switch and Reload. A later file must not inherit it.
+  // `open-path` is what a second launch delivers (main). No Open dialog, and no real pointer or key.
+  const body = (name: string) => Array.from({ length: 400 }, (_, i) => `${name} line ${i + 1}`).join('\n') + '\n'
+  const l = await launch({ file: fixture('place-a.txt', body('A')) })
+  const { win } = l
+  await waitOpen(win)
+  await waitIndexed(win)
+  await win.locator('.vl-scroller').evaluate((el) => {
+    el.scrollTop = 200 * 20 // line 201; Raw's row is 20px
+  })
+  await expect.poll(async () => (await visibleRows(win))[0]).toEqual({ line: 201, text: 'A line 201' })
+  const second = fixture('place-b.txt', body('B'))
+  await l.app.evaluate(({ BrowserWindow }, path) => {
+    BrowserWindow.getAllWindows()[0].webContents.send('open-path', path)
+  }, second)
+  await expect(win.locator('.card-name')).toHaveText('place-b.txt')
+  await waitOpen(win)
+  await waitIndexed(win)
+  // The index has to know line 201 before a restored position can scroll there. Read the top after that.
+  await expect.poll(() => win.locator('.vl-scroller').evaluate((el) => el.scrollHeight)).toBeGreaterThan(200 * 20)
+  const after = (await visibleRows(win))[0]
+  console.log(`file A top line 201; file B top line ${after?.line} (${after?.text})`)
+  expect(after?.line).toBe(1)
+  expect(after?.text).toBe('B line 1')
   expect(l.pageErrors).toEqual([])
   await finish(l)
 })

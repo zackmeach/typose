@@ -65,8 +65,8 @@ export function App({ core }: { core: CoreClient }) {
   const picked = useRef<'raw' | 'rendered' | null>(null)
   /** A note's "Show in Raw" jump, read when the lens unmounts. */
   const jumpTo = useRef<number | undefined>(undefined)
-  /** The line the lens that just unmounted was at. It lives here: the switch mounts a new host. */
-  const place = useRef<number | undefined>(undefined)
+  /** The line the lens that just unmounted was at, with that document's id. The switch mounts a new host; another file must not inherit the line. */
+  const place = useRef<{ doc: number; line: number } | undefined>(undefined)
   /** Whether that lens had the focus, so the next one takes it (plan PR 7). */
   const hadFocus = useRef(false)
   /** Reload recorded that the lens had focus, before show() unmounted the scroller. */
@@ -549,8 +549,8 @@ interface LensHostProps {
   lens: RefObject<ShownLens | null>
   /** A line to open at, set just before a switch (a note's "Show in Raw"). */
   jumpTo: RefObject<number | undefined>
-  /** The previous lens's top line, shared across the switch's two hosts. */
-  place: RefObject<number | undefined>
+  /** The previous lens's top line and its document. A switch or Reload of that document reuses the line. */
+  place: RefObject<{ doc: number; line: number } | undefined>
   /** Whether that lens had the focus. */
   hadFocus: RefObject<boolean>
   /** Reload recorded focus before the scroller unmounted. Cleared once the lens that stays has taken it. */
@@ -569,7 +569,7 @@ interface LensHostProps {
   onShowRaw(line: number): void
 }
 
-/** Mounts Raw or Rendered into the card body. The reading position is the previous lens's top line. */
+/** Mounts Raw or Rendered into the card body. A switch or Reload of this document keeps the previous lens's top line. */
 function LensHost({ core, lens, jumpTo, place, hadFocus, restoreFocus, atLine, opened, name, lines, indexed, limits, frozen, mode, build, onFrozen, onShowRaw }: LensHostProps) {
   const host = useRef<HTMLDivElement>(null)
   const onFrozenNow = useRef(onFrozen)
@@ -577,8 +577,11 @@ function LensHost({ core, lens, jumpTo, place, hadFocus, restoreFocus, atLine, o
   const onShowRawNow = useRef(onShowRaw)
   onShowRawNow.current = onShowRaw
   useEffect(() => {
-    const at = place.current ?? jumpTo.current ?? atLine
-    place.current = undefined
+    // `place` outlives the document. Use it only for the document that saved it, so a second file opens at `atLine`
+    // (or the top). Clear it only after that check: Reload is the same document, and its line has to survive.
+    const saved = place.current?.doc === opened.doc ? place.current.line : undefined
+    const at = saved ?? jumpTo.current ?? atLine
+    if (saved !== undefined) place.current = undefined
     jumpTo.current = undefined
     const onFrozenHere = (why: string) => onFrozenNow.current(why)
     const view: ShownLens =
@@ -592,7 +595,8 @@ function LensHost({ core, lens, jumpTo, place, hadFocus, restoreFocus, atLine, o
     if (restoreFocus.current && !interim) restoreFocus.current = false
     return () => {
       hadFocus.current = view.element.contains(document.activeElement)
-      place.current = jumpTo.current ?? view.topLine()
+      // A note's Show in Raw wins over the line on screen for the lens this cleanup mounts next.
+      place.current = { doc: opened.doc, line: jumpTo.current ?? view.topLine() }
       jumpTo.current = undefined
       if (lens.current === view) lens.current = null
       view.dispose(false) // the next lens holds the reservation; close() releases it with the document
