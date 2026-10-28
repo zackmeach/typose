@@ -4,6 +4,7 @@ import type { Command, Limits, MdBuild, Opened } from '../shared/protocol'
 import { type Action, type Card, fileName, view } from './card'
 import { type CoreClient, CoreCallError } from './core'
 import { RenderedLens, renderedCharge } from './lenses/rendered'
+import { LensBudget, type ReloadReservation } from './lenses/lens-budget'
 import { ROW_HEIGHT, RawLens, viewportCap } from './lenses/raw'
 import { AppMenu, LINUX } from './menu'
 import { inputMark, markNow, markPainted } from './perf'
@@ -43,6 +44,13 @@ interface ShownLens {
   dispose(release?: boolean): void
 }
 
+interface RetainedRendered {
+  session: number
+  doc: number
+  gen: number
+  view: RenderedLens
+}
+
 /**
  * The M1 chrome (brief §3.1): the title bar region and one card. React renders the frame; a lens is a
  * framework-free controller mounted into the card body (spec §5.1, Z26). Markdown's switch is React Aria's
@@ -51,6 +59,8 @@ interface ShownLens {
 export function App({ core }: { core: CoreClient }) {
   const [card, setCard] = useState<Card>({ kind: 'connecting' })
   const [limits, setLimits] = useState<Limits | null>(null)
+  const [session, setSession] = useState(0)
+  const currentSession = useRef(0)
   const latest = useRef({ card, limits })
   latest.current = { card, limits }
   /** The open or reload in progress; a newer one, or Close, abandons it. */
@@ -65,14 +75,18 @@ export function App({ core }: { core: CoreClient }) {
   const picked = useRef<'raw' | 'rendered' | null>(null)
   /** A note's "Show in Raw" jump, read when the lens unmounts. */
   const jumpTo = useRef<number | undefined>(undefined)
-  /** The line the lens that just unmounted was at, with that document's id. The switch mounts a new host; another file must not inherit the line. */
-  const place = useRef<{ doc: number; line: number } | undefined>(undefined)
+  /** The previous lens's line, scoped to its core session and document: ids repeat after a core restart. */
+  const place = useRef<{ session: number; doc: number; line: number } | undefined>(undefined)
   /** Whether that lens had the focus, so the next one takes it (plan PR 7). */
   const hadFocus = useRef(false)
   /** Reload recorded that the lens had focus, before show() unmounted the scroller. */
   const restoreFocus = useRef(false)
-  /** One reservation for Rendered at a time. */
-  const holding = useRef(false)
+  /** One reservation for Rendered per open; an old response must not block a replacement document. */
+  const holding = useRef<Opened | null>(null)
+  const budget = useRef<LensBudget | null>(null)
+  /** Single-tree high water. Each next view pays two empirical allowances for disposed trees awaiting GC. */
+  const retiredRendered = useRef(0)
+  const rendered = useRef<RetainedRendered | null>(null)
   /** A file chosen before the core first came up: it's opened then, ahead of the command line's. */
   const waiting = useRef<string | null>(null)
   /** Plan C1: the next lens's viewport-only cache cap, reserved with the open's floor: the shown lens's height, else the
@@ -82,6 +96,21 @@ export function App({ core }: { core: CoreClient }) {
   const title = path ? `${fileName(path)} — Typose` : 'Typose'
   const shown = view(card)
   const openedNow = card.kind === 'open' ? card.opened : null
+
+  const budgetFor = (opened: Opened): LensBudget | null => {
+    const owner = budget.current
+    return owner?.session === currentSession.current && owner.doc === opened.doc && owner.current(opened.gen) ? owner : null
+  }
+  const discardRendered = () => {
+    rendered.current?.view.dispose()
+    rendered.current = null
+  }
+  const retireBudget = () => {
+    const owner = budget.current
+    if (!owner) return
+    retiredRendered.current = Math.max(retiredRendered.current, owner.snapshot().rendered, owner.retiredTreeMax)
+    owner.invalidate()
+  }
 
   useEffect(() => {
     document.title = title
@@ -95,9 +124,13 @@ export function App({ core }: { core: CoreClient }) {
     // Without a lens on screen (a Reopen still opening, say), the line is the one the card was going back to.
     const offGone = core.onGone(() => {
       const top = lens.current?.topLine()
+      retireBudget()
+      discardRendered()
       setCard((c) => ({ kind: 'gone', path: 'path' in c ? c.path : undefined, line: top ?? ('atLine' in c ? c.atLine : 'line' in c ? c.line : undefined), ready: false }))
     })
     const offReady = core.onReady((hello) => {
+      currentSession.current = hello.session
+      setSession(hello.session)
       latest.current.limits = hello.limits
       setLimits(hello.limits)
       setCard((c) => (c.kind === 'gone' ? { ...c, ready: true } : c))
@@ -228,17 +261,17 @@ export function App({ core }: { core: CoreClient }) {
    * keeps Raw. `stale` when this document was replaced while the call was out.
    */
   async function holdRendered(opened: Opened, build: MdBuild): Promise<'ok' | 'memory' | 'stale'> {
-    if (holding.current) return 'stale'
-    holding.current = true
+    if (holding.current === opened) return 'stale'
+    holding.current = opened
     const before = lens.current
     before?.yieldReservation()
     let ok = false
     try {
-      ok = await core.call('reserve', { doc: opened.doc, gen: opened.gen, bytes: renderedCharge(build.units, build.htmlBytes) })
+      ok = await (budgetFor(opened)?.reserveRendered(opened.gen, renderedCharge(build)) ?? Promise.resolve(false))
     } catch {
       ok = false
     } finally {
-      holding.current = false
+      if (holding.current === opened) holding.current = null
     }
     const now = latest.current.card
     if (now.kind !== 'open' || now.opened !== opened) return 'stale'
@@ -274,7 +307,11 @@ export function App({ core }: { core: CoreClient }) {
   async function open(path: string, atLine?: number): Promise<void> {
     const l = latest.current.limits
     if (!l) return void (waiting.current = path) // the core isn't up yet: opened once it is
+    const rawBytes = floorBytes(l)
     const mine = ++attempt.current
+    retireBudget()
+    const retired = retiredRendered.current
+    discardRendered()
     live.current = null
     for (const m of MARKS) performance.clearMarks(m)
     performance.mark('typose:open-start')
@@ -284,9 +321,9 @@ export function App({ core }: { core: CoreClient }) {
     // Brief §7.9's slow open: "Opening…" only once 300 ms pass without a first screen.
     const slow = setTimeout(() => setCard((c) => (c.kind === 'opening' && attempt.current === mine ? { ...c, slow: true } : c)), 300)
     try {
-      const opened = await core.call('open', { path, count: firstCount(l), bytes: floorBytes(l) })
+      const opened = await core.call('open', { path, count: firstCount(l), bytes: rawBytes + 2 * retired })
       if (attempt.current !== mine) return void core.call('close', { doc: opened.doc }).catch(() => {}) // closed meanwhile
-      show(path, opened, atLine)
+      show(path, opened, atLine, rawBytes, undefined, retired)
     } catch (e) {
       if (attempt.current === mine && !(e instanceof CoreCallError && e.code === 'CoreGone')) setCard(failed(path, e)) // onGone shows that
     } finally {
@@ -303,19 +340,36 @@ export function App({ core }: { core: CoreClient }) {
     const mine = ++attempt.current
     reloading.current = true
     try {
-      const opened = await core.call('reload', { doc: c.opened.doc, count: firstCount(l), bytes: floorBytes(l) })
-      if (attempt.current === mine) show(c.path, opened, lens.current?.topLine() ?? c.atLine)
+      const rawBytes = floorBytes(l)
+      const plan = budgetFor(c.opened)?.reloadReservation(rawBytes)
+      const opened = await core.call('reload', { doc: c.opened.doc, count: firstCount(l), bytes: plan?.bytes ?? rawBytes })
+      if (attempt.current === mine) show(c.path, opened, lens.current?.topLine() ?? c.atLine, rawBytes, plan)
     } catch (e) {
       if (attempt.current !== mine || (e instanceof CoreCallError && e.code === 'CoreGone')) return // onGone shows that
       // Plan C1: the ledger refused it. The lens stays at its generation, under a banner offering Retry (Z34's "keeps Raw").
       if (e instanceof CoreCallError && e.code === 'Memory') setCard((d) => (d.kind === 'open' && d.opened === c.opened ? { ...d, refused: true } : d))
-      else setCard(failed(c.path, e)) // the file is gone, say: the card says so, and Raw unmounting closes the document
+      else {
+        retireBudget()
+        discardRendered()
+        setCard(failed(c.path, e)) // the file is gone; the failed card closes the document and retains no tree
+      }
     } finally {
       reloading.current = false
     }
   }
 
-  function show(path: string, opened: Opened, atLine?: number): void {
+  function show(path: string, opened: Opened, atLine: number | undefined, rawBytes: number, plan?: ReloadReservation, retired = 0): void {
+    discardRendered()
+    if (opened.format === 'markdown' || retired > 0 || plan) {
+      const previous = budget.current
+      if (!previous || previous.session !== currentSession.current || previous.doc !== opened.doc || !plan || !previous.adopt(opened.gen, opened.reserved, plan)) {
+        previous?.invalidate()
+        budget.current = new LensBudget(core, currentSession.current, opened.doc, opened.gen, rawBytes, opened.reserved, Math.max(retired, plan?.retiredTreeMax ?? 0))
+      }
+    } else {
+      budget.current?.invalidate()
+      budget.current = null
+    }
     live.current = { doc: opened.doc, gen: opened.gen }
     // Raw's first page is already in the reply (Z37). Markdown switches to Rendered once `render` fits.
     setCard({ kind: 'open', path, opened, lines: opened.lines, bytes: 0, indexed: opened.indexed, atLine, lens: 'raw' })
@@ -345,6 +399,8 @@ export function App({ core }: { core: CoreClient }) {
   /** Close leaves the empty card; an open still on its way is closed when it arrives. */
   function close(): void {
     attempt.current++
+    retireBudget()
+    discardRendered()
     live.current = null
     setCard({ kind: 'empty' })
   }
@@ -417,6 +473,9 @@ export function App({ core }: { core: CoreClient }) {
     card.kind === 'open' && limits && 'raw' in shown.body ? (
       <LensHost
         core={core}
+        session={session}
+        budget={budgetFor(card.opened)}
+        retained={rendered}
         lens={lens}
         jumpTo={jumpTo}
         place={place}
@@ -436,6 +495,9 @@ export function App({ core }: { core: CoreClient }) {
     ) : card.kind === 'open' && limits && 'rendered' in shown.body && card.build ? (
       <LensHost
         core={core}
+        session={session}
+        budget={budgetFor(card.opened)}
+        retained={rendered}
         lens={lens}
         jumpTo={jumpTo}
         place={place}
@@ -545,12 +607,16 @@ function DocLifetime({ doc, core, lens, children }: { doc: number; core: CoreCli
 
 interface LensHostProps {
   core: CoreClient
+  /** The immutable session of this host's document, captured by its cleanup. */
+  session: number
+  budget: LensBudget | null
+  retained: RefObject<RetainedRendered | null>
   /** The lens on screen, for App: null while none is. */
   lens: RefObject<ShownLens | null>
   /** A line to open at, set just before a switch (a note's "Show in Raw"). */
   jumpTo: RefObject<number | undefined>
-  /** The previous lens's top line and its document. A switch or Reload of that document reuses the line. */
-  place: RefObject<{ doc: number; line: number } | undefined>
+  /** A switch or Reload reuses this document's line only within the same core session. */
+  place: RefObject<{ session: number; doc: number; line: number } | undefined>
   /** Whether that lens had the focus. */
   hadFocus: RefObject<boolean>
   /** Reload recorded focus before the scroller unmounted. Cleared once the lens that stays has taken it. */
@@ -570,7 +636,7 @@ interface LensHostProps {
 }
 
 /** Mounts Raw or Rendered into the card body. A switch or Reload of this document keeps the previous lens's top line. */
-function LensHost({ core, lens, jumpTo, place, hadFocus, restoreFocus, atLine, opened, name, lines, indexed, limits, frozen, mode, build, onFrozen, onShowRaw }: LensHostProps) {
+function LensHost({ core, session, budget, retained, lens, jumpTo, place, hadFocus, restoreFocus, atLine, opened, name, lines, indexed, limits, frozen, mode, build, onFrozen, onShowRaw }: LensHostProps) {
   const host = useRef<HTMLDivElement>(null)
   const onFrozenNow = useRef(onFrozen)
   onFrozenNow.current = onFrozen
@@ -579,15 +645,26 @@ function LensHost({ core, lens, jumpTo, place, hadFocus, restoreFocus, atLine, o
   useEffect(() => {
     // `place` outlives the document. Use it only for the document that saved it, so a second file opens at `atLine`
     // (or the top). Clear it only after that check: Reload is the same document, and its line has to survive.
-    const saved = place.current?.doc === opened.doc ? place.current.line : undefined
+    const saved = place.current?.session === session && place.current.doc === opened.doc ? place.current.line : undefined
     const at = saved ?? jumpTo.current ?? atLine
     if (saved !== undefined) place.current = undefined
     jumpTo.current = undefined
     const onFrozenHere = (why: string) => onFrozenNow.current(why)
-    const view: ShownLens =
-      mode === 'rendered' && build
-        ? new RenderedLens(host.current!, core, opened, build, limits, { onFrozen: onFrozenHere, atLine: at, onShowRaw: (line) => onShowRawNow.current(line) })
-        : new RawLens(host.current!, core, opened, name, limits, { onFrozen: onFrozenHere, atLine: at })
+    let view: ShownLens
+    if (mode === 'rendered' && build) {
+      const kept = retained.current
+      if (kept?.session === session && kept.doc === opened.doc && kept.gen === opened.gen) {
+        view = kept.view
+        kept.view.resume(host.current!, at)
+      } else {
+        kept?.view.dispose()
+        const made = new RenderedLens(host.current!, core, opened, build, limits, {
+          onFrozen: onFrozenHere, atLine: at, onShowRaw: (line) => onShowRawNow.current(line), budget: budget ?? undefined
+        })
+        retained.current = { session, doc: opened.doc, gen: opened.gen, view: made }
+        view = made
+      }
+    } else view = new RawLens(host.current!, core, opened, name, limits, { onFrozen: onFrozenHere, atLine: at, budget: budget ?? undefined })
     lens.current = view
     // A Markdown reload mounts Raw first, then Rendered. Focusing Raw would consume the flag before Rendered exists.
     const interim = restoreFocus.current && mode === 'raw' && opened.format === 'markdown' && !opened.blank
@@ -596,12 +673,13 @@ function LensHost({ core, lens, jumpTo, place, hadFocus, restoreFocus, atLine, o
     return () => {
       hadFocus.current = view.element.contains(document.activeElement)
       // A note's Show in Raw wins over the line on screen for the lens this cleanup mounts next.
-      place.current = { doc: opened.doc, line: jumpTo.current ?? view.topLine() }
+      place.current = { session, doc: opened.doc, line: jumpTo.current ?? view.topLine() }
       jumpTo.current = undefined
       if (lens.current === view) lens.current = null
-      view.dispose(false) // the next lens holds the reservation; close() releases it with the document
+      if (view instanceof RenderedLens && budget?.current(opened.gen) && retained.current?.view === view) view.pause()
+      else view.dispose(false)
     }
-  }, [core, opened, name, limits, lens, atLine, mode, build, jumpTo, place, hadFocus, restoreFocus])
+  }, [core, session, budget, retained, opened, name, limits, lens, atLine, mode, build, jumpTo, place, hadFocus, restoreFocus])
   useEffect(() => lens.current?.setLineCount(lines), [lines])
   useEffect(() => {
     if (indexed) lens.current?.indexDone()

@@ -41,9 +41,9 @@ export const testHooks = {
   dropped: [] as ('event' | 'response')[],
   /** Plan C1: the mounted Raw lens's page cache: its charged bytes, its cap, and what the core holds reserved. */
   cache: null as (() => { charged: number; cap: number; reserved: number }) | null,
-  /** The mounted Rendered lens: what it reserved, and how much of the build is appended. */
+  /** The current or retained Rendered tree, its own share, and the shared reservation's confirmed parts. */
   rendered: null as
-    | (() => { units: number; htmlBytes: number; reserved: number; blocks: number; appended: number })
+    | (() => { units: number; htmlBytes: number; nodes: number; noteUnits: number; reserved: number; rawReserved: number; retiredReserved: number; totalReserved: number; blocks: number; appended: number })
     | null,
   /** The mounted Raw lens's cached items, by key: a whole piece's text, which Z66 shows over rows of 2,048 units. */
   items: null as (() => { key: number | string; text: string }[]) | null

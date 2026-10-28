@@ -6,6 +6,9 @@ export const charge = (item: PageItem): number => 2 * item.text.length + item.ma
 /** Z66: a row shows at most this many UTF-16 units; a longer piece goes on in the next row. */
 export const WRAP = 2048
 
+/** Brief §6.1's mono line: 13px at 1.55, rounded to whole pixels so row math stays exact. */
+export const ROW_HEIGHT = 20
+
 /**
  * What a mounted row's layout costs per UTF-16 unit it shows, once garbage is collected: the DOM's copy of its text, its
  * layout and paint. Measured as the slope between rows laying out 512 and 4,096 units (plan §7, PR 6b): 20 bytes for
@@ -46,6 +49,9 @@ const fixedCost = (l: Bounds): number => FIXED + 2 * itemMax(l)
 
 /** The reservation for a mounted window of `rows` rows (plan C1), with the elastic part or without. */
 export const capFor = (l: Bounds, rows: number, elastic = true): number => fixedCost(l) + rows * rowCost(l) + (elastic ? ELASTIC : 0)
+
+/** The viewport-only cap, reserved with the open's floor before a lens mounts. */
+export const viewportCap = (l: Bounds, height: number): number => capFor(l, Math.ceil(height / ROW_HEIGHT) + 1, false)
 
 /** The rows a reservation covers, at a row's most. */
 export const rowsFor = (l: Bounds, reserved: number): number => Math.max(0, Math.floor((reserved - fixedCost(l)) / rowCost(l)))

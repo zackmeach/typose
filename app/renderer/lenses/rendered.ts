@@ -2,6 +2,7 @@ import type { Limits, MdBuild, MdItem, Opened } from '../../shared/protocol'
 import { type CoreClient, CoreCallError, testHooks } from '../core'
 import { renderedCharge } from './rendered-charge'
 import { viewportCap } from './raw'
+import type { LensBudget } from './lens-budget'
 
 export { RENDERED_PER_UNIT, renderedCharge } from './rendered-charge'
 
@@ -12,6 +13,7 @@ export interface RenderedOptions {
   onFrozen(why: string): void
   /** The note under an oversized block: show its source in Raw at this line. */
   onShowRaw(line: number): void
+  budget?: LensBudget
 }
 
 interface Flight {
@@ -33,6 +35,7 @@ export class RenderedLens {
   private readonly blocks: number
   private scheduled = false
   private stopped = false
+  private paused = false
   /** Set once the reader scrolls, or presses a key, or points: a late page doesn't move them. */
   private moved = false
   private atLine: number | undefined
@@ -51,7 +54,7 @@ export class RenderedLens {
     private readonly options: RenderedOptions
   ) {
     this.blocks = build.blocks
-    this.reserved = renderedCharge(build.units, build.htmlBytes)
+    this.reserved = renderedCharge(build)
     this.atLine = options.atLine
     this.shown = options.atLine ?? 0
     this.scroller = document.createElement('div')
@@ -79,7 +82,12 @@ export class RenderedLens {
       testHooks.rendered = () => ({
         units: build.units,
         htmlBytes: build.htmlBytes,
+        nodes: build.nodes,
+        noteUnits: build.noteUnits,
         reserved: this.reserved,
+        rawReserved: this.options.budget?.snapshot().raw ?? 0,
+        retiredReserved: this.options.budget?.snapshot().retired ?? 0,
+        totalReserved: this.options.budget?.snapshot().total ?? this.reserved,
         blocks: this.blocks,
         appended: this.column.childElementCount
       })
@@ -141,13 +149,36 @@ export class RenderedLens {
     /* nothing was yielded */
   }
 
+  /** Keep this generation's DOM, but stop paging and alignment while Raw is on screen. */
+  pause(): void {
+    this.remember()
+    this.paused = true
+    this.placeGen++
+    for (const f of this.flight) f.abort.abort()
+    this.scroller.remove()
+  }
+
+  /** A lens switch reuses the same tree and aligns it to Raw's source line. */
+  resume(host: HTMLElement, atLine?: number): void {
+    host.append(this.scroller)
+    this.paused = false
+    this.moved = false
+    this.atLine = atLine
+    delete this.scroller.dataset.ready
+    this.settle()
+    this.schedule()
+  }
+
   /** `release` is Raw's. Closing the document releases the reservation; a lens switch must not zero it first. */
   dispose(_release = true): void {
     this.stopped = true
+    this.placeGen++
     for (const f of this.flight) f.abort.abort()
     this.scroller.removeEventListener('click', this.onLink, true)
     this.scroller.removeEventListener('auxclick', this.onLink, true)
     this.scroller.removeEventListener('dragstart', this.onLink, true)
+    this.scroller.remove()
+    this.column.replaceChildren()
     if (__TEST_HOOKS__) testHooks.rendered = null
   }
 
@@ -169,7 +200,7 @@ export class RenderedLens {
   }
 
   private pump(): void {
-    if (this.stopped || this.flight.length >= 2) return
+    if (this.stopped || this.paused || this.flight.length >= 2) return
     // The next page begins where this one stops, and the 256 KiB cap chooses that, so a second request would guess it.
     if (this.flight.length >= 1) return
     if (this.cursor >= this.blocks) return this.settle()
@@ -234,7 +265,7 @@ export class RenderedLens {
     const gen = ++this.placeGen
     const align = (left: number) => {
       if (gen !== this.placeGen) return
-      if (this.stopped || this.moved) return this.finishPlace()
+      if (this.stopped || this.paused || this.moved) return this.finishPlace()
       if (block && this.scroller.getClientRects().length > 0) {
         const delta = block.getBoundingClientRect().top - this.scroller.getBoundingClientRect().top
         if (Math.abs(delta) >= 2 && left > 0) {

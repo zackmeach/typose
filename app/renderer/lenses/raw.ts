@@ -2,14 +2,10 @@ import type { Limits, Opened, PageItem, Token } from '../../shared/protocol'
 import { type CoreClient, CoreCallError, testHooks } from '../core'
 import { inputMark, markPainted, setPaintProbe } from '../perf'
 import { VirtualList } from '../virtual/virtual-list'
-import { type Key, type Mounted, PageCache, capFor, rowsFor, rowsOf } from './page-cache'
+import { type Key, type Mounted, PageCache, ROW_HEIGHT, capFor, rowsFor, rowsOf, viewportCap } from './page-cache'
+import type { LensBudget } from './lens-budget'
 
-/** Brief §6.1's mono line: 13px at 1.55, rounded to whole pixels so row math stays exact. */
-export const ROW_HEIGHT = 20
-
-/** Plan C1: the cache's cap for a viewport `height` px tall and no overscan, the least a lens mounts with: part of the
- *  open's floor. */
-export const viewportCap = (l: Limits, height: number): number => capFor(l, Math.ceil(height / ROW_HEIGHT) + 1, false)
+export { ROW_HEIGHT, viewportCap }
 
 /**
  * A line with more than one row. Z66: a piece's text shows over rows of at most 2,048 units, `rows[k]` of them for its
@@ -42,6 +38,8 @@ export interface RawOptions {
   onFrozen(why: string): void
   /** The line to start at (Reload keeps the reading position). */
   atLine?: number
+  /** Markdown keeps Raw's confirmed share beside its retained Rendered tree. */
+  budget?: LensBudget
 }
 
 const mb = new Intl.NumberFormat('en', { maximumFractionDigits: 1 })
@@ -100,7 +98,7 @@ export class RawLens {
     private readonly options: RawOptions
   ) {
     // Plan C1: the open reserved at least the viewport's cap; only the rows a reservation covers are ever mounted.
-    this.reserved = opened.reserved
+    this.reserved = options.budget?.rawReserved ?? opened.reserved
     this.cache = new PageCache(limits)
     this.cache.setCap(this.reserved)
     this.cache.add(opened.firstPage.items)
@@ -227,7 +225,8 @@ export class RawLens {
     // Plan C1: the cache is gone. A sizing still under way sends nothing more (`reserveFor`). If an open or Reload has
     // taken the reservation for the next lens, the core ignores this.
     const { doc, gen } = this.opened
-    void this.core.call('reserve', { doc, gen, bytes: 0 }).catch(() => {})
+    if (this.options.budget) void this.options.budget.reserveRaw(gen, 0)
+    else void this.core.call('reserve', { doc, gen, bytes: 0 }).catch(() => {})
   }
 
   private rowCount(): number {
@@ -363,14 +362,19 @@ export class RawLens {
     const caps = [capFor(this.limits, rows), capFor(this.limits, rows, false), viewportCap(this.limits, this.host.clientHeight), this.reserved]
     for (const cap of caps) {
       const held = cap <= this.reserved
-      const granted = held || (await this.core.call('reserve', { doc, gen, bytes: cap }).catch(() => false))
+      const granted = held || (this.options.budget
+        ? await this.options.budget.reserveRaw(gen, cap)
+        : await this.core.call('reserve', { doc, gen, bytes: cap }).catch(() => false))
       if (n !== this.sizings || this.stopped || this.yielded) return // disposed, or Rendered took the reservation
       if (!granted) continue
       const shrunk = held && cap < this.reserved
       this.reserved = cap
       this.cache.setCap(cap)
       this.list.setMaxRows(this.coveredRows()) // mounts or unmounts rows now, not at the next scroll
-      if (shrunk) void this.core.call('reserve', { doc, gen, bytes: cap }).catch(() => {}) // what it paid for has gone
+      // Shrink locally before releasing the allowance: even a delayed reserve response must not leave mounted
+      // rows or cache entries claiming the old cap after the core has lowered its reservation.
+      if (held && this.options.budget) await this.options.budget.reserveRaw(gen, cap)
+      else if (shrunk) void this.core.call('reserve', { doc, gen, bytes: cap }).catch(() => {})
       break
     }
     this.reservedOnce = true

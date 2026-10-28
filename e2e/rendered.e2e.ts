@@ -3,12 +3,16 @@
 import AxeBuilder from '@axe-core/playwright'
 import { type Page, expect } from '@playwright/test'
 import { spawnSync } from 'node:child_process'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { RENDERED_OFF } from '../app/renderer/card'
-import { rowCost } from '../app/renderer/lenses/page-cache'
+import { viewportCap } from '../app/renderer/lenses/page-cache'
 import type { Limits } from '../app/shared/protocol'
-import { type TestHooks, assertNetLog, debugStats, finish, fixture, launch, test, visibleRows, waitIndexed, waitOpen } from './app'
+import { type TestHooks, assertNetLog, debugStats, finish, fixture, launch, lifecycle, test, visibleRows, waitIndexed, waitOpen } from './app'
+
+type ReserveProbe = { held: boolean; bRendered: boolean; release?: () => void }
+type ShrinkProbe = { held: boolean; bytes?: number; release?: () => void }
+type ReserveWindow = Window & { renderReserveProbe?: ReserveProbe; shrinkReserveProbe?: ShrinkProbe }
 
 const SAMPLE = [
   '# Heading one',
@@ -206,6 +210,81 @@ test('a second file opens at its start, not at the line the previous file was sc
   await finish(l)
 })
 
+test('a different file after a core restart starts at its first line despite reused document ids', async () => {
+  const body = (name: string) => Array.from({ length: 400 }, (_, i) => `${name} line ${i + 1}`).join('\n') + '\n'
+  const l = await launch({ hooks: true, file: fixture('session-place-a.txt', body('A')) })
+  const { win } = l
+  await waitOpen(win)
+  await waitIndexed(win)
+  await win.locator('.vl-scroller').evaluate((el) => { el.scrollTop = 200 * 20 })
+  await expect.poll(async () => (await visibleRows(win))[0]).toEqual({ line: 201, text: 'A line 201' })
+  const spawned = lifecycle(l.userData).filter((r) => r.event === 'utility-spawn').at(-1)!
+  process.kill(spawned.utilityPid as number)
+  await expect(win.locator('.card-message p')).toHaveText("Typose's core stopped")
+  await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), fixture('session-place-b.txt', body('B')))
+  await expect(win.locator('.card-name')).toHaveText('session-place-b.txt')
+  await expect(win.locator('.card-message .open-button')).toHaveText(['Reopen'])
+  await win.locator('.card-message .open-button').click()
+  await waitOpen(win)
+  await waitIndexed(win)
+  await expect.poll(() => win.locator('.vl-scroller').evaluate((el) => el.scrollHeight)).toBeGreaterThan(200 * 20)
+  await expect.poll(async () => (await visibleRows(win))[0]).toEqual({ line: 1, text: 'B line 1' })
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+test('a delayed old Rendered reservation response does not block a replacement file', async () => {
+  const a = fixture('pending-reserve-a.md', '# A\n\nParagraph A.\n\n'.repeat(12))
+  const b = fixture('pending-reserve-b.md', '# B\n\nParagraph B.\n\n'.repeat(12))
+  const l = await launch({ hooks: true })
+  const { win } = l
+  await expect(win.locator('.open-button')).toBeVisible()
+  await win.evaluate(({ a, b }) => {
+    const core = (window as unknown as {
+      typoseTest: { core: { call(method: string, params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> } }
+    }).typoseTest.core
+    const state: ReserveProbe = { held: false, bRendered: false }
+    ;(window as unknown as ReserveWindow).renderReserveProbe = state
+    const call = core.call.bind(core)
+    let aDoc = 0
+    let bDoc = 0
+    let aRendered = false
+    let delayed = false
+    core.call = async (method, params, signal) => {
+      // Hold the answer, after the core has acted. Only a request issued after A's render answer is eligible, so an
+      // earlier Raw sizing request can't be mistaken for Rendered's reservation, whatever its charge formula is.
+      const delay = method === 'reserve' && params.doc === aDoc && aRendered && !delayed
+      if (delay) delayed = true
+      const result = await call(method, params, signal)
+      if (method === 'open') {
+        if (params.path === a) aDoc = (result as { doc: number }).doc
+        if (params.path === b) bDoc = (result as { doc: number }).doc
+      }
+      if (method === 'render') {
+        if (params.doc === aDoc) aRendered = true
+        if (params.doc === bDoc) state.bRendered = true
+      }
+      if (delay) {
+        state.held = true
+        await new Promise<void>((done) => { state.release = done })
+      }
+      return result
+    }
+  }, { a, b })
+  await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), a)
+  await expect.poll(() => win.evaluate(() => (window as unknown as ReserveWindow).renderReserveProbe?.held)).toBe(true)
+  await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), b)
+  await expect(win.locator('.card-name')).toHaveText('pending-reserve-b.md')
+  await expect.poll(() => win.evaluate(() => (window as unknown as ReserveWindow).renderReserveProbe?.bRendered)).toBe(true)
+  await win.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))))
+  await win.evaluate(() => (window as unknown as ReserveWindow).renderReserveProbe?.release?.())
+  await waitRendered(win)
+  await expect(win.getByRole('tab', { name: 'Rendered', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await expect(win.locator('main h1').first()).toHaveText('B')
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
 test('a write Raw finds raises the banner, and Rendered keeps what it showed', async () => {
   const lines = ['# Original heading', '', ...Array.from({ length: 400 }, (_, i) => `line ${i} stays`)]
   const file = fixture('freeze.md', lines.join('\n') + '\n')
@@ -244,7 +323,7 @@ test('a low memory budget refuses Rendered, and Raw stays', async () => {
   // that: the slack stays under a render's temporary, Rendered is refused, and Raw stays.
   const floor = charges[1].hashes + charges[1].checkpoints + charges[1].cache + charges[1].metadata
   expect(charges[1].total).toBeGreaterThan(floor)
-  const view = (Math.ceil(inner / 20) + 1) * rowCost(hello.limits)
+  const view = viewportCap(hello.limits, inner)
   const budget = ledger.pool + floor + hello.limits.openTemp + view + (1 << 20)
   console.log(`rendered budget ${budget} (pool ${ledger.pool}, floor ${floor}, build ${charges[1].total - floor}, view ${view}, window ${inner}px)`)
   const l = await launch({ hooks: true, file, env: { TYPOSE_TEST_BUDGET: String(budget) } })
@@ -255,6 +334,148 @@ test('a low memory budget refuses Rendered, and Raw stays', async () => {
   await expect(rendered.getByTitle(RENDERED_OFF.memory)).toBeVisible()
   await expect(win.locator('.md-scroller')).toHaveCount(0)
   await expect(win.locator('.vl-row .text').first()).toBeAttached()
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+test('switching back to Raw under a tight budget retains its confirmed allowance and the Rendered tree', async () => {
+  const l = await launch({ hooks: true, file: fixture('tight-switch.md', '# Small\n\nA short paragraph.\n\n'.repeat(8)) })
+  const { win } = l
+  await waitRendered(win)
+  await expect.poll(async () => (await debugStats(win)).jobs).toBe(0)
+  await win.locator('.md-scroller').evaluate((el) => { (el as HTMLElement).dataset.reused = 'same tree' })
+  const before = await debugStats(win)
+  await debugStats(win, { limit: before.ledger.used })
+  for (let i = 0; i < 3; i++) {
+    await win.getByRole('tab', { name: 'Raw', exact: true }).click()
+    await waitOpen(win)
+    await win.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))))
+    const cache = await win.evaluate(() => (window as unknown as { typoseTest: { client: { cache: () => { charged: number; cap: number; reserved: number } } } }).typoseTest.client.cache())
+    const { ledger } = await debugStats(win)
+    expect(cache.charged).toBeLessThanOrEqual(cache.cap)
+    expect(cache.cap).toBeLessThanOrEqual(cache.reserved)
+    expect(cache.reserved).toBeLessThanOrEqual(ledger.rendererCache)
+    await win.getByRole('tab', { name: 'Rendered', exact: true }).click()
+    await waitRendered(win)
+    await expect(win.locator('.md-scroller')).toHaveAttribute('data-reused', 'same tree')
+  }
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+test('Raw shrinks its local cache before a delayed shared-reservation response returns', async () => {
+  const l = await launch({ hooks: true, file: fixture('shrink-switch.md', '# Shrink\n\nA paragraph.\n\n'.repeat(80)) })
+  const { win } = l
+  await waitRendered(win)
+  await win.getByRole('tab', { name: 'Raw', exact: true }).click()
+  await waitOpen(win)
+  await win.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))))
+  const before = await debugStats(win)
+  await win.evaluate((total) => {
+    const core = (window as unknown as {
+      typoseTest: { core: { call(method: string, params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> } }
+    }).typoseTest.core
+    const state: ShrinkProbe = { held: false }
+    ;(window as unknown as ReserveWindow).shrinkReserveProbe = state
+    const call = core.call.bind(core)
+    core.call = async (method, params, signal) => {
+      const reply = await call(method, params, signal)
+      if (method === 'reserve' && typeof params.bytes === 'number' && params.bytes < total && !state.held) {
+        state.held = true
+        state.bytes = params.bytes
+        await new Promise<void>((done) => { state.release = done })
+      }
+      return reply
+    }
+  }, before.ledger.rendererCache)
+  await l.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(1000, 480))
+  await expect.poll(() => win.evaluate(() => (window as unknown as ReserveWindow).shrinkReserveProbe?.held)).toBe(true)
+  const during = await win.evaluate(() => {
+    const client = (window as unknown as { typoseTest: TestHooks & { client: { cache: () => { charged: number; cap: number; reserved: number } } } }).typoseTest.client
+    return { cache: client.cache(), rendered: client.rendered!() }
+  })
+  const actual = await debugStats(win)
+  expect(actual.ledger.rendererCache).toBeLessThan(before.ledger.rendererCache)
+  expect(during.cache.charged).toBeLessThanOrEqual(during.cache.cap)
+  expect(actual.ledger.rendererCache).toBeGreaterThanOrEqual(during.cache.reserved + during.rendered.reserved + during.rendered.retiredReserved)
+  await win.evaluate(() => (window as unknown as ReserveWindow).shrinkReserveProbe?.release?.())
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+test('all-note Markdown reserves the mounted fallback controls and their text', async () => {
+  const l = await launch({ hooks: true, file: fixture('all-notes.md', `${'>'.repeat(65)} x\n\n`.repeat(300)) })
+  const { win } = l
+  await waitRendered(win)
+  const built = await win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.client.rendered!())
+  const notes = await win.locator('.md-note').evaluateAll((els) => ({ count: els.length, units: els.reduce((n, el) => n + (el.textContent?.length ?? 0), 0) }))
+  expect(notes.count).toBe(built.blocks)
+  expect(notes.count).toBeGreaterThan(0)
+  expect(built.nodes).toBeGreaterThan(0)
+  expect(built.noteUnits).toBeGreaterThanOrEqual(notes.units)
+  expect(built.reserved).toBeGreaterThan(0)
+  expect((await debugStats(win)).ledger.rendererCache).toBeGreaterThanOrEqual(built.reserved + built.rawReserved)
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+test('retired Rendered allowance survives Close, refused open and core restart without accumulating totals', async () => {
+  const file = fixture('retired-retry.md', '# Retained allowance\n\nA paragraph.\n\n'.repeat(40))
+  const text = fixture('retired-restart.txt', 'A fresh plain text view.\n')
+  const l = await launch({ hooks: true, file })
+  const { win } = l
+  await waitRendered(win)
+  const original = await win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.client.rendered!())
+  const first = await debugStats(win)
+  await win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.app.close!())
+  await expect.poll(async () => {
+    const { ledger } = await debugStats(win)
+    return ledger.used - ledger.pool
+  }).toBe(0)
+  await debugStats(win, { limit: first.ledger.pool + 1 })
+  await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), file)
+  await expect(win.locator('.card-message p')).toContainText("Typose's memory budget is full")
+  await expect.poll(async () => {
+    const { ledger } = await debugStats(win)
+    return ledger.used - ledger.pool
+  }).toBe(0)
+  await debugStats(win, { limit: first.ledger.limit })
+  await win.getByRole('button', { name: 'Retry', exact: true }).click()
+  await waitRendered(win)
+  const reopened = await win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.client.rendered!())
+  expect(reopened.retiredReserved).toBe(2 * original.reserved)
+  expect(reopened.totalReserved).toBe(reopened.rawReserved + reopened.reserved + 2 * original.reserved)
+  const spawned = lifecycle(l.userData).filter((r) => r.event === 'utility-spawn').at(-1)!
+  process.kill(spawned.utilityPid as number)
+  await expect(win.locator('.card-message p')).toHaveText("Typose's core stopped")
+  await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), text)
+  await expect(win.locator('.card-name')).toHaveText('retired-restart.txt')
+  await expect(win.locator('.card-message .open-button')).toHaveText(['Reopen'])
+  await win.locator('.card-message .open-button').click()
+  await waitOpen(win)
+  await waitIndexed(win)
+  await expect.poll(async () => {
+    const raw = await win.evaluate(() => (window as unknown as { typoseTest: { client: { cache: () => { reserved: number } } } }).typoseTest.client.cache())
+    return (await debugStats(win)).ledger.rendererCache - raw.reserved
+  }).toBe(2 * original.reserved)
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+test('terminal Reload failure disposes the retained Rendered tree and releases the document', async () => {
+  const file = fixture('reload-deleted.md', '# Deleted before Reload\n\nA paragraph.\n')
+  const l = await launch({ hooks: true, file })
+  const { win } = l
+  await waitRendered(win)
+  rmSync(file)
+  await win.locator('.md-scroller').focus()
+  await win.keyboard.press('Control+R')
+  await expect(win.locator('.card-message p')).toContainText('File not found')
+  expect(await win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.client.rendered)).toBeNull()
+  await expect.poll(async () => {
+    const { ledger } = await debugStats(win)
+    return ledger.used - ledger.pool
+  }).toBe(0)
   expect(l.pageErrors).toEqual([])
   await finish(l)
 })

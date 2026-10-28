@@ -11,7 +11,7 @@ import { HOSTILE, isValid } from './numbers'
 const item = () => ({ gen: 1, line: 0, offset: 0, text: 'x', more: true, next: { gen: 1, line: 0, offset: 1 } })
 const page = vi.fn(async (_gen: number, _start: number, _count: number, _cancel: Cancel) => ({ items: [item()] }) as unknown as Page)
 const piece = vi.fn(async (_gen: number, _line: number, _offset: number, _cancel: Cancel) => ({ items: [item()] }) as unknown as Page)
-const render = vi.fn(async (_gen: number, _cancel: Cancel) => ({ blocks: 1, units: 1, htmlBytes: 8 }))
+const render = vi.fn(async (_gen: number, _cancel: Cancel) => ({ blocks: 1, units: 1, htmlBytes: 8, nodes: 3, noteUnits: 0 }))
 const mdPage = vi.fn(async (_gen: number, _start: number, _count: number, _cancel: Cancel) => ({ items: [] }))
 const reload = vi.fn()
 const close = vi.fn()
@@ -200,7 +200,7 @@ describe('rendered Markdown (plan: Rendered Markdown slice §2.1)', () => {
   })
 
   it('render builds the generation asked, and a rendered page reads blocks of it', async () => {
-    expect(await call('render', { doc: 1, gen: 1 })).toMatchObject({ result: { blocks: 1, units: 1, htmlBytes: 8 } })
+    expect(await call('render', { doc: 1, gen: 1 })).toMatchObject({ result: { blocks: 1, units: 1, htmlBytes: 8, nodes: 3, noteUnits: 0 } })
     expect(render).toHaveBeenCalledWith(1, expect.anything())
     expect(await call('page', { doc: 1, lens: 'rendered', gen: 1, start: 2, count: 3 })).toMatchObject({ result: { items: [] } })
     expect(mdPage).toHaveBeenCalledWith(1, 2, 3, expect.anything())
