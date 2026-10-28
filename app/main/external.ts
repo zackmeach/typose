@@ -17,6 +17,7 @@ interface Caller {
 }
 
 const MAX_URL = 32 << 10
+// oxlint-disable-next-line no-control-regex -- URL control characters must be refused before invoking the OS.
 const controls = /[\x00-\x1f\x7f-\x9f]/u
 const fits = (url: string) => url.length <= MAX_URL && Buffer.byteLength(url, 'utf8') <= MAX_URL
 

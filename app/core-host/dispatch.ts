@@ -224,6 +224,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     },
     resolve: (p): LinkTarget => {
       const [id, gen] = [int(p, 'doc'), int(p, 'gen')]
+      // oxlint-disable-next-line no-control-regex -- Refuse raw control characters at the link IPC boundary.
       if (typeof p.href !== 'string' || p.href.length > 32 << 10 || Buffer.byteLength(p.href, 'utf8') > 32 << 10 || /[\u0000-\u001f\u007f-\u009f]/.test(p.href))
         throw new Refusal('InvalidParams', 'href must be a string of at most 32 KiB, without control characters', 'href')
       const doc = getDoc(id)
@@ -235,6 +236,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
           fragment = decodeURIComponent(p.href.slice(1))
           encodeURIComponent(fragment) // rejects an unpaired UTF-16 surrogate, including an unescaped one
         } catch { return { kind: 'inert' } }
+        // oxlint-disable-next-line no-control-regex -- Percent-decoded control characters are refused too.
         if (/[\u0000-\u001f\u007f-\u009f]/.test(fragment)) return { kind: 'inert' }
         const line = doc.headingLine(gen, fragment)
         return line == null ? { kind: 'inert' } : { kind: 'heading', line }
