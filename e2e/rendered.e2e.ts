@@ -582,7 +582,8 @@ test('axe finds nothing in Rendered, at 200% zoom too, and every heading of a lo
   await cdp.detach()
   const axHeadings = nodes.filter((n) => n.role?.value === 'heading' && !n.ignored)
   const names = new Set(axHeadings.map((n) => n.name?.value))
-  expect(names.size).toBe(2000)
+  expect(names.has('headings.md')).toBe(true) // the visible file title is a heading in the reader chrome
+  expect(names.size).toBe(2001)
   for (let i = 0; i < 2000; i++) expect(names.has(`Heading ${i}`), `heading ${i}`).toBe(true)
   expect(deep.pageErrors).toEqual([])
   await finish(deep)

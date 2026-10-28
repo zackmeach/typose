@@ -10,6 +10,26 @@ const open = (l: Awaited<ReturnType<typeof launch>>, path: string) => l.app.eval
 const rendered = (win: Page) => expect(win.locator('.md-scroller')).toHaveAttribute('data-ready', '1')
 const tab = (win: Page, name: string) => win.getByRole('tab', { name, exact: true })
 
+test('a refused workspace precharge preserves the empty card and retries once there is room', async () => {
+  const file = fixture('tabs-workspace-refused.txt', 'Retry works\n')
+  const l = await launch({ hooks: true })
+  const { win } = l
+  await expect(win.locator('.open-button')).toBeVisible()
+  const { ledger } = await debugStats(win)
+  await debugStats(win, { limit: ledger.pool + 1 })
+  await open(l, file)
+  await expect(win.locator('.banner')).toHaveText("Can't open another tab: Typose's memory budget is full")
+  await expect(win.locator('.file-tab')).toHaveCount(0)
+  expect(await debugStats(win)).toMatchObject({ docs: 0, handles: 0, jobs: 0, ledger: { used: ledger.pool, rendererCache: 0 } })
+  await debugStats(win, { limit: ledger.limit })
+  await open(l, file)
+  await waitOpen(win)
+  await expect(win.locator('.banner')).toHaveCount(0)
+  await closeTabs(win)
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
 test('startup arguments open permanent tabs in order; a duplicate focuses its existing tab', async () => {
   const files = ['a', 'b', 'c'].map((name) => fixture('tabs-startup-' + name + '.txt', name + '\n'))
   const l = await launch({ hooks: true, file: [...files, files[0]] })

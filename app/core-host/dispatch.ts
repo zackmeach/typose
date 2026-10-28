@@ -172,12 +172,14 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   }
   /** Request `id`'s read of document `doc`, a page or a Markdown build, which `cancel` can stop while it runs (plan C5). */
   const read = async <T>(id: number, doc: number, start: (cancel: Cancel) => Promise<T>, retainOnLeave = false): Promise<T> => {
+    const source = getDoc(doc)
+    const gen = source.generation
     const entry: { doc: number; cancel: Cancel; retainOnLeave: boolean; cancelledAt?: number } = { doc, cancel: addon.cancelFlag(), retainOnLeave }
     reads.set(id, entry)
     try {
       return await start(entry.cancel)
     } catch (e) {
-      if (codeOf(e) === 'Frozen') cancelReads(doc) // a freeze ends the document's other reads too (plan C6)
+      if (codeOf(e) === 'Frozen' && docs.get(doc) === source && source.generation === gen) cancelReads(doc)
       if (__TEST_HOOKS__ && codeOf(e) === 'Cancelled' && entry.cancelledAt !== undefined) {
         cancels.cancelled++
         cancels.cancelMs = Math.max(cancels.cancelMs, performance.now() - entry.cancelledAt)
@@ -204,7 +206,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     try {
       doc.startIndex(cancel, (e: IndexProgress) => {
         // An index error froze the document (plan C6). An older generation's ends with Reload's freeze, not this one's.
-        if (e.error !== undefined && jobs.get(id) === cancel) cancelReads(id)
+        if (e.error !== undefined && jobs.get(id) === cancel && docs.get(id) === doc && doc.generation === gen) cancelReads(id)
         const event: ProgressEvent = { event: 'progress', session, doc: id, gen, lines: e.lines, bytes: e.bytes, done: e.done }
         if (e.error !== undefined) event.error = e.error
         emit(event)

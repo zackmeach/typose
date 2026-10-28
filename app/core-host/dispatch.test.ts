@@ -865,6 +865,45 @@ describe('retained tab activation', () => {
     })
   })
 
+  describe('generation-scoped freeze cancellation', () => {
+    it('keeps the winning Reload read when the superseded first page reports Frozen', async () => {
+      const { b } = await tabs()
+      const previous = holdPage(b)
+      const current = holdCancellablePage(b)
+      const first = dispatch({ id: 101, method: 'reload', params: { doc: 2, count: 1, bytes: 300 } })
+      const second = dispatch({ id: 102, method: 'reload', params: { doc: 2, count: 1, bytes: 500 } })
+      const currentFlag = flags.at(-1)!
+      expect(b.data.generation).toBe(3)
+      previous.fail(Object.assign(new Error('frozen: reloaded'), { code: 'Frozen' }))
+      expect(await first).toMatchObject({ error: { code: 'Frozen' } })
+      current.end()
+      expect(await second).toMatchObject({ result: { doc: 2, gen: 3 } })
+      expect(currentFlag.cancel).not.toHaveBeenCalled()
+      expect(b.index).toHaveBeenCalledOnce()
+      expect(b.close).not.toHaveBeenCalled()
+      expect(await call('reserve', { doc: 2, gen: 3, bytes: 250 })).toMatchObject({ result: true })
+      expect(await call('reserve', { doc: 2, gen: 2, bytes: 250 })).toMatchObject({ result: false })
+    })
+
+    it('ignores an old index freeze while the next generation first page is still pending', async () => {
+      const { b } = await tabs()
+      expect(await call('reload', { doc: 2, count: 1, bytes: 300 })).toMatchObject({ result: { gen: 2 } })
+      const onProgress = b.index.mock.calls.at(-1)![1]
+      b.index.mockClear()
+      const current = holdCancellablePage(b)
+      const reloading = dispatch({ id: 103, method: 'reload', params: { doc: 2, count: 1, bytes: 500 } })
+      const currentFlag = flags.at(-1)!
+      expect(b.data.generation).toBe(3)
+      onProgress({ lines: 3, bytes: 0, done: false, elapsedMs: 0, error: 'frozen: reloaded' })
+      current.end()
+      expect(await reloading).toMatchObject({ result: { doc: 2, gen: 3 } })
+      expect(currentFlag.cancel).not.toHaveBeenCalled()
+      expect(b.index).toHaveBeenCalledOnce()
+      expect(b.close).not.toHaveBeenCalled()
+      expect(await call('reserve', { doc: 2, gen: 3, bytes: 250 })).toMatchObject({ result: true })
+    })
+  })
+
   describe('pending view disposal', () => {
     it('refuses an activation whose target was disposed even if its cancelled first page returns successfully', async () => {
       const { a, b, aJob, bJob } = await tabs()

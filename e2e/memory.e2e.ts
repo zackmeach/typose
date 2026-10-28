@@ -506,23 +506,27 @@ for (const size of ['1 GiB', '10 GiB'] as const) {
 
 /**
  * Plan C1: an open the ledger can't hold is refused with `Memory`, and the card says so (plan §7 proposal 1, PR 4's
- * card). The budget override holds the pool and 1 MiB more, so neither a 10 GiB document's floor (≈ 4.31 MiB) nor its
+ * card). After paying the persistent tab UI, the override holds the pool and 1 MiB more, so neither a 10 GiB document's floor (≈ 4.31 MiB) nor its
  * view's fits; or 40 MiB more, so the document's would, and only the view's floor, the viewport-only cache cap, doesn't.
  */
 for (const over of [1, 40])
-  test(`an open with the pool and ${over} MiB as its budget shows the memory-refused card, and the ledger doesn't change`, () => refusedOpen(over))
+  test(`an open with workspace paid and ${over} MiB above the pool refuses the native floor and retains only the UI share`, () => refusedOpen(over))
 
 async function refusedOpen(over: number): Promise<void> {
-  const probe = await launch({ hooks: true })
-  await expect(probe.win.locator('.open-button')).toHaveText('Open file…')
+  const path = fixture('memory-refused.txt', HEAD)
+  const probe = await launch({ hooks: true, file: path })
+  await waitOpen(probe.win)
   const pool = (await debugStats(probe.win)).ledger.pool
+  const workspace = await workspaceHeld(probe.win)
   await finish(probe)
-  const path = sparseFixture('memory-refused.txt', 10 * GIB, HEAD)
+  sparseFixture('memory-refused.txt', 10 * GIB, HEAD)
   try {
-    const l = await launch({ hooks: true, file: path, env: { TYPOSE_TEST_BUDGET: String(pool + over * (1 << 20)) } })
+    const l = await launch({ hooks: true, file: path, env: { TYPOSE_TEST_BUDGET: String(pool + workspace + over * (1 << 20)) } })
     await expect(l.win.locator('.card-state p')).toHaveText("Can't open memory-refused.txt · Typose's memory budget is full. Close a file, then Retry.")
     await expect(l.win.locator('.card-state .open-button')).toHaveText(['Retry', 'Close'])
-    expect(await debugStats(l.win)).toMatchObject({ docs: 0, handles: 0, jobs: 0, ledger: { used: pool, rendererCache: 0 } })
+    expect(await debugStats(l.win)).toMatchObject({ docs: 0, handles: 0, jobs: 0, ledger: { used: pool + workspace, rendererCache: workspace } })
+    await l.win.getByRole('button', { name: 'Close', exact: true }).click()
+    await expect.poll(async () => { const { ledger } = await debugStats(l.win); return ledger.used - ledger.pool }).toBe(0)
     expect(l.pageErrors).toEqual([])
     await finish(l)
   } finally {

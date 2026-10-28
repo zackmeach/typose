@@ -787,7 +787,7 @@ export function App({ core }: { core: CoreClient }) {
 
   const header = (
     <div className="card-header">
-      <span className="card-name">{path ? fileName(path) : 'No file open'}</span>
+      <span className="card-name" role="heading" aria-level={1}>{path ? fileName(path) : 'No file open'}</span>
       <span className="card-status">{shown.status}</span>
       {shown.lenses ? (
         <TabList aria-label="Lens" className="lens-switch">

@@ -2,7 +2,7 @@
 
 One window keeps permanent file tabs and displays one selected card. Opening an identical manual path focuses its existing tab. Startup and second-instance batches preserve file order. Duplicate filenames show their parent folder; an overflow chooser lists every open path.
 
-Selection retains each tab's source line and explicit Raw/Rendered choice. The selected lens alone owns DOM, cached page payloads and image Blobs. Inactive tabs retain scalar metadata, their native document/index and any local filesystem capability. They do not retain a renderer first page or its view reservation. Selection reads the retained native document; it does not reopen a display path or restart indexing.
+Selection retains each tab's source line and explicit Raw/Rendered choice. The selected lens alone owns DOM, cached page payloads and image Blobs. Inactive tabs retain scalar metadata, their native document/index and any local filesystem capability. Once pending handoffs settle, they retain no renderer first page or view reservation. Selection reads the retained native document; it does not reopen a display path or restart indexing.
 
 The active tab has a close control and Close tab menu command. Arrow keys, Home and End select within the file row; Enter/Space activates its focused tab and Delete closes it. Ctrl+W closes the selected tab; Ctrl+Tab/Ctrl+Shift+Tab and the platform's specified alternatives select adjacent tabs. Closing the last tab leaves the empty card. Mac accelerators require separate Mac qualification.
 
