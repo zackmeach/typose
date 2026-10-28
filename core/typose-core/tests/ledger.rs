@@ -22,6 +22,7 @@ use typose_core::doc::{DocError, STRUCT_BYTES};
 use typose_core::md::MAX_SOURCE;
 use typose_core::pages::MAX_ITEMS;
 use typose_core::raw::Raw;
+use typose_core::store::CHUNK;
 
 struct Counting;
 
@@ -46,15 +47,6 @@ static ALLOCATOR: Counting = Counting;
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let p = unsafe { System.alloc(layout) };
-        if !p.is_null() {
-            LIVE.fetch_add(layout.size() as u64, SeqCst);
-            check(layout.size());
-        }
-        p
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let p = unsafe { System.alloc_zeroed(layout) };
         if !p.is_null() {
             LIVE.fetch_add(layout.size() as u64, SeqCst);
             check(layout.size());
@@ -396,7 +388,7 @@ fn main() {
         .collect();
     let lone: Vec<u8> =
         [0xD800u16, 0x0041, 0xDC00].into_iter().cycle().take(40_000).flat_map(u16::to_le_bytes).collect();
-    let shapes = [
+    let mut shapes = vec![
         Shape { name: "all-newline", path: at("newlines.txt"), fill_cache: true },
         Shape { name: "all-CJK", path: at("cjk.txt"), fill_cache: true },
         Shape { name: "all-malformed", path: at("malformed.txt"), fill_cache: true },
@@ -419,6 +411,29 @@ fn main() {
     write(&shapes[4].path, &[&utf16, &lone], 1);
     write(&shapes[5].path, &[astral.as_bytes()], 60);
     one_gib_line(&shapes[6].path);
+    // Whole-file blank checks decode only files at or below CHUNK. Exercise their allocations at that boundary,
+    // including UTF-16's three UTF-8 bytes per unit and malformed input's replacement characters.
+    for (name, file, le, unit, len) in [
+        ("short LE whitespace", "short-le-space.txt", true, 0x3000u16, CHUNK),
+        ("short BE whitespace", "short-be-space.txt", false, 0x3000, CHUNK),
+        ("short LE dense BMP", "short-le-bmp.txt", true, 0x0800, CHUNK),
+        ("short BE dense BMP", "short-be-bmp.txt", false, 0x0800, CHUNK),
+        ("short LE surrogate", "short-le-surrogate.txt", true, 0xD800, CHUNK),
+        ("short BE surrogate", "short-be-surrogate.txt", false, 0xD800, CHUNK),
+        ("odd LE whitespace", "odd-le-space.txt", true, 0x3000, CHUNK - 1),
+        ("odd BE whitespace", "odd-be-space.txt", false, 0x3000, CHUNK - 1),
+    ] {
+        let encode = if le { u16::to_le_bytes } else { u16::to_be_bytes };
+        let bom = if le { [0xFF, 0xFE] } else { [0xFE, 0xFF] };
+        let bytes: Vec<u8> =
+            bom.into_iter().chain(std::iter::repeat_n(unit, CHUNK / 2).flat_map(encode)).take(len).collect();
+        let path = at(file);
+        fs::write(&path, bytes).unwrap();
+        shapes.push(Shape { name, path, fill_cache: false });
+    }
+    let path = at("short-malformed-utf8.txt");
+    write(&path, &[b"\xEF\xBB\xBF", &vec![0xFF; CHUNK - 5], b"\xE3\x80"], 1);
+    shapes.push(Shape { name: "short malformed UTF-8", path, fill_cache: false });
     // Plan (Rendered Markdown slice) §3: Markdown at the ceiling, padded tables, the densest parse (a node a byte, `md.rs`),
     // and UTF-16 and windows-1252 text.
     let mixed = mixed_markdown(MAX_SOURCE as usize);

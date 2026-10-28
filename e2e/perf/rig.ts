@@ -5,6 +5,9 @@ import { appendFileSync, mkdirSync } from 'node:fs'
 import { cpus, hostname } from 'node:os'
 import { join, resolve } from 'node:path'
 import { stripVTControlCharacters } from 'node:util'
+import { percentile } from './frames.mjs'
+
+export { percentile }
 
 /** Outside test-results/, which every Playwright run empties: cold samples accumulate across restarts. */
 export const RESULTS = resolve(__dirname, '../../.evidence/m1/perf')
@@ -30,12 +33,6 @@ export async function idleLoad(ms = 5000): Promise<number> {
   const from = cpuTimes()
   await new Promise((ok) => setTimeout(ok, ms))
   return cpuLoad(from)
-}
-
-/** Nearest-rank percentile, as plan A's runner judged (p95 of n = 30 is the 29th value). */
-export function percentile(values: number[], p: number): number {
-  const sorted = [...values].sort((a, b) => a - b)
-  return sorted[Math.min(sorted.length, Math.max(1, Math.ceil((p / 100) * sorted.length))) - 1]
 }
 
 export function summary(samples: number[]) {

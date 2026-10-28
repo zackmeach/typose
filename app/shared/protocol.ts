@@ -146,12 +146,6 @@ export type Method = keyof Methods
 /** What a call resolves to: a page's shape follows its lens. */
 export type Result<M extends Method, P> = M extends 'page' ? (P extends { lens: 'rendered' } ? MdPage : Page) : Methods[M]['result']
 
-export interface Request<M extends Method = Method> {
-  id: number
-  method: M
-  params: Methods[M]['params']
-}
-
 /** `id` is null when the request's own id was invalid. */
 export type Response =
   | { id: number | null; session: number; result: unknown }
