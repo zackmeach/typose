@@ -1,11 +1,28 @@
 // Plan C9's four controlled failures, each told apart by the lifecycle log and the exit status alone.
 import { expect } from '@playwright/test'
-import { existsSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { dumps, finish, fixture, launch, lifecycle, test, waitOpen } from './app'
 
 const events = (userData: string) => lifecycle(userData).map((r) => r.event)
 const file = () => fixture('lifecycle.txt', Array.from({ length: 2000 }, (_, i) => `line ${i}`).join('\n'))
+
+test('dump discovery traverses directories, skips directory entries and does not follow directory links', () => {
+  const profile = test.info().outputPath('dump-profile')
+  expect(dumps(profile)).toEqual([])
+  const crashpad = join(profile, 'Crashpad')
+  const nested = join(crashpad, 'pending', 'nested')
+  const directory = join(crashpad, 'directory.dmp')
+  mkdirSync(nested, { recursive: true })
+  mkdirSync(directory)
+  const outside = test.info().outputPath('outside-profile')
+  mkdirSync(outside)
+  writeFileSync(join(outside, 'outside.dmp'), '')
+  symlinkSync(outside, join(crashpad, 'linked'), process.platform === 'win32' ? 'junction' : 'dir')
+  const files = [join(crashpad, 'root.dmp'), join(nested, 'nested.dmp'), join(directory, 'inside.dmp')]
+  for (const path of [...files, join(nested, 'not-a-dump.txt'), join(crashpad, 'upper.DMP')]) writeFileSync(path, '')
+  expect(dumps(profile).sort()).toEqual(files.sort())
+})
 
 test('a window close is a clean quit sequence, exit 0', async () => {
   const l = await launch({ file: file() })

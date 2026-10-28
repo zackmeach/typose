@@ -146,6 +146,18 @@ export async function osFocus(l: Launched): Promise<void> {
     .toBe(true)
 }
 
+/** A key as the OS delivers it, through the page and then a menu's accelerators. Playwright's keyboard goes through
+ *  CDP, which never reaches the accelerators. */
+export const pressAsOS = (l: Launched, keyCode: string, modifiers: ('control' | 'meta' | 'shift')[]) =>
+  l.app.evaluate(
+    ({ BrowserWindow }, { keyCode, modifiers }) => {
+      const contents = BrowserWindow.getAllWindows()[0].webContents
+      for (const type of ['keyDown', 'char', 'keyUp'] as const)
+        if (type !== 'char' || keyCode.length === 1) contents.sendInputEvent({ type, keyCode: type === 'char' ? keyCode.toLowerCase() : keyCode, modifiers })
+    },
+    { keyCode, modifiers }
+  )
+
 /**
  * Open file… without the OS dialog, which must never open on the desktop the tests run on: main's handler is replaced
  * by one that answers `path` and counts its calls (`globalThis.dialogCalls`), and the dialog itself rejects.

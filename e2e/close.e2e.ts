@@ -21,19 +21,22 @@ async function midIndex() {
   return l
 }
 
+/** Runs entirely in the page: close, then time how long the core takes to release everything. */
+const closeAndWait = async () => {
+  const { core, app } = (window as unknown as { typoseTest: TestHooks }).typoseTest
+  const t0 = performance.now()
+  app.close!()
+  for (;;) {
+    const s = (await core.call('debugStats', {})) as { jobs: number; tasks: number; handles: number; docs: number }
+    if (s.jobs + s.tasks + s.handles + s.docs === 0) return performance.now() - t0
+    if (performance.now() - t0 > 5000) throw new Error(`still held after 5 s: ${JSON.stringify(s)}`)
+  }
+}
+
 test('close mid-index on 10 GiB: the job stops within 50 ms, and 0 jobs, 0 tasks and 0 handles remain', async () => {
   const l = await midIndex()
   // From App's own close (the card leaves Raw, which closes the document) until the core holds nothing.
-  const stoppedMs = await l.win.evaluate(async () => {
-    const { core, app } = (window as unknown as { typoseTest: TestHooks }).typoseTest
-    const t0 = performance.now()
-    app.close!()
-    for (;;) {
-      const s = (await core.call('debugStats', {})) as { jobs: number; tasks: number; handles: number; docs: number }
-      if (s.jobs + s.tasks + s.handles + s.docs === 0) return performance.now() - t0
-      if (performance.now() - t0 > 5000) throw new Error(`still held after 5 s: ${JSON.stringify(s)}`)
-    }
-  })
+  const stoppedMs = await l.win.evaluate(closeAndWait)
   console.log(`close mid-index: everything released ${stoppedMs.toFixed(1)} ms after close`)
   expect(stoppedMs).toBeLessThan(50)
   expect(await debugStats(l.win)).toMatchObject({ jobs: 0, tasks: 0, handles: 0, docs: 0 })
@@ -89,16 +92,7 @@ test('a double Reload mid-index on 10 GiB keeps one index job, and close then le
     await l.win.waitForTimeout(50)
   }
   expect((await debugStats(l.win)).jobs).toBe(1) // still mid-index: close stops it
-  const releasedMs = await l.win.evaluate(async () => {
-    const { core, app } = (window as unknown as { typoseTest: TestHooks }).typoseTest
-    const t0 = performance.now()
-    app.close!()
-    for (;;) {
-      const s = (await core.call('debugStats', {})) as { jobs: number; tasks: number; handles: number; docs: number }
-      if (s.jobs + s.tasks + s.handles + s.docs === 0) return performance.now() - t0
-      if (performance.now() - t0 > 5000) throw new Error(`still held after 5 s: ${JSON.stringify(s)}`)
-    }
-  })
+  const releasedMs = await l.win.evaluate(closeAndWait)
   console.log(`double Reload, then close: everything released ${releasedMs.toFixed(1)} ms after close`)
   expect(releasedMs).toBeLessThan(50)
   expect(l.pageErrors).toEqual([])

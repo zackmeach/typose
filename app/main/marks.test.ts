@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { HOSTILE } from '../core-host/numbers'
 import { STARTUP_MARKS } from '../shared/protocol'
-import { delayHook, isMark, marksHook } from './marks'
+import { envWhole, isMark, marksHook } from './marks'
 
 describe("mark's time is a safe integer in [0, 2^53 − 1]; its name is a known mark", () => {
   // 2^32, 2^32 + 1 and 1e12 are in this range; every other hostile value isn't.
@@ -16,12 +16,18 @@ describe("mark's time is a safe integer in [0, 2^53 − 1]; its name is a known 
   for (const name of STARTUP_MARKS) it(`takes ${name}`, () => expect(isMark(name, 1)).toBe(true))
 })
 
-describe('the test-hooks delays are whole ms in [0, 10000]', () => {
-  for (const value of ['NaN', 'Infinity', '-1', '0.5', '1e3', '10001', '', ' 1', '0x10', '4294967296'])
-    it(`refuses "${value}"`, () => expect(() => delayHook('TYPOSE_TEST_DELAY_SHOW', value)).toThrow(/TYPOSE_TEST_DELAY_SHOW/))
-  it('unset is no delay', () => expect(delayHook('TYPOSE_TEST_DELAY_SHOW', undefined)).toBe(0))
-  for (const value of ['0', '300', '10000']) it(`takes "${value}"`, () => expect(delayHook('X', value)).toBe(Number(value)))
-})
+for (const kind of ['bytes', 'ms'] as const)
+  describe(`the test-hooks ${kind} are whole numbers within their bounds`, () => {
+    const name = kind === 'bytes' ? 'TYPOSE_TEST_BUDGET' : 'TYPOSE_TEST_DELAY_SHOW'
+    const range = kind === 'bytes' ? 'bytes in [1, 2^53 − 1]' : 'ms in [0, 10000]'
+    const outside = kind === 'bytes' ? ['0', '9007199254740992'] : ['10001', '4294967296']
+    for (const value of ['NaN', 'Infinity', '-1', '+1', '0.5', '1e3', '', ' 1', '1 ', '1\n', '0x10', ...outside])
+      it(`refuses ${JSON.stringify(value)} with the exact error`, () =>
+        expect(() => envWhole(name, value, kind)).toThrow(new Error(`${name} must be a whole number of ${range}`)))
+    it('unset leaves the override off', () => expect(envWhole(name, undefined, kind)).toBe(0))
+    for (const value of ['1', '300', '0001', ...(kind === 'bytes' ? ['9007199254740991'] : ['0', '000', '10000'])])
+      it(`takes "${value}"`, () => expect(envWhole(name, value, kind)).toBe(Number(value)))
+  })
 
 describe('TYPOSE_MARKS', () => {
   let dir: string
