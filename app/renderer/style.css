@@ -404,3 +404,12 @@ html[data-a11y='on'] .md-block,
 .md-column .tp-img {
   color: var(--text2);
 }
+.md-column .tp-img[data-loaded] {
+  display: inline-block;
+  max-width: 100%;
+}
+.md-column .tp-img > img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}

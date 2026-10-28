@@ -28,7 +28,7 @@ static AMMONIA: LazyLock<ammonia::Builder<'static>> = LazyLock::new(|| {
     // No `href` at all: `sanitize` writes every link's `href` itself, so none from the file can survive.
     let attrs: [(&str, &[&str]); 5] = [
         ("a", &["data-href"]),
-        ("img", &["src", "alt"]),
+        ("img", &["data-src", "alt"]),
         // pulldown-cmark's attributes sit only on its own tags, so raw HTML can't smuggle them onto RAW_TAGS.
         ("ol", &["start"]),
         ("input", &["type", "checked", "disabled"]),
@@ -200,17 +200,51 @@ pub fn target(url: &str) -> Target {
 /// What an image target may become: as `target`, except that `mailto:` is never an image target (Z43).
 pub fn image_target(url: &str) -> Target {
     let s: String = url.trim_matches(|c: char| c <= ' ').chars().filter(|c| !matches!(c, '\t' | '\n' | '\r')).collect();
+    let bytes = s.as_bytes();
+    if s.get(..8).is_some_and(|prefix| prefix.eq_ignore_ascii_case("file:///"))
+        && bytes.get(8).is_some_and(u8::is_ascii_alphabetic)
+        && bytes.get(9) == Some(&b':')
+        && bytes.get(10) == Some(&b'/')
+    {
+        return Target::Live; // inert metadata only; the native capability validates the actual route
+    }
     match target(url) {
         Target::Live if s.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("mailto:")) => Target::Inert,
         t => t,
     }
 }
 
+/// Move image destinations into inert data before ammonia's URL filtering. The final pass always replaces the
+/// image element, so preserving a file URI here never gives the browser a live file/network source.
+fn inert_images(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let (mut at, mut copied) = (0, 0);
+    while let Some(next) = memchr::memchr(b'<', &html.as_bytes()[at..]) {
+        let start = at + next;
+        at = start + 1;
+        if let Some((end, name, attrs)) = tag_parts(html.as_bytes(), start) {
+            if name == "img" {
+                for attr in attrs.into_iter().filter(|r| html[r.clone()].eq_ignore_ascii_case("src")) {
+                    out.push_str(&html[copied..attr.start]);
+                    out.push_str("data-src");
+                    copied = attr.end;
+                }
+            }
+            at = end;
+        } else if tag_at_eof(html.as_bytes(), start) {
+            break; // do not rescan a long unterminated tag for every later literal '<'
+        }
+    }
+    out.push_str(&html[copied..]);
+    out
+}
+
 /// Every block's last step: ammonia, then `<img>` → placeholder, and every link rewritten with `href="#"`: its target
 /// judged once (`target`), kept as inert `data-href` or dropped. Every link keeps an `href`, so it keeps its role and
 /// keyboard focus (brief §9). Running it again changes nothing.
 pub fn sanitize(html: &str) -> String {
-    let clean = AMMONIA.clean(html).to_string();
+    let inert = inert_images(html);
+    let clean = AMMONIA.clean(&inert).to_string();
     // ponytail: a string rewrite of ammonia's serialization, where `<` only ever opens a tag and attribute values
     // are double-quoted with `"`, `<` and `>` escaped. A DOM rewrite would need ammonia's unstable rcdom API.
     let mut out = String::with_capacity(clean.len());
@@ -230,7 +264,7 @@ pub fn sanitize(html: &str) -> String {
         };
         if tag.starts_with("<img") {
             out.push_str("<span class=\"tp-img\"");
-            let src = value("src").filter(|v| image_target(&decode(v)) == Target::Live);
+            let src = value("data-src").filter(|v| image_target(&decode(v)) == Target::Live);
             for (attr, v) in [("data-src", src), ("data-alt", value("alt"))] {
                 if let Some(v) = v {
                     out.push_str(&format!(" {attr}=\"{v}\""));
@@ -310,6 +344,27 @@ mod tests {
             )
         );
         assert_eq!(sanitize(&got), got, "idempotent");
+    }
+
+    #[test]
+    fn image_destinations_stay_inert_including_file_and_network_forms() {
+        for (src, kept) in [
+            ("next.png", true),
+            ("file:///C:/a%20b.png", true),
+            ("file://host/share/a.png", false),
+            ("smb://host/a.png", false),
+            ("//host/a.png", false),
+        ] {
+            let html = sanitize(&format!("<img src=\"{src}\" alt=\"a&lt;b\" onerror=\"x\">"));
+            assert!(html.starts_with("<span class=\"tp-img\""), "{html}");
+            assert_eq!(html.contains(&format!("data-src=\"{src}\"")), kept, "{html}");
+            assert!(!html.contains("<img") && !html.contains(" src=") && !html.contains("onerror"), "{html}");
+            assert_eq!(sanitize(&html), html);
+        }
+        let hostile = "<img src=\"<img ".repeat(20_000);
+        let start = std::time::Instant::now();
+        let _ = sanitize(&hostile);
+        assert!(start.elapsed().as_secs() < 2);
     }
 
     #[test]

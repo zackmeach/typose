@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use typose_core::budget::{self, Work};
 use typose_core::doc::{DocError, STRUCT_BYTES};
+use typose_core::images::{self, ImageError};
 use typose_core::md::MAX_SOURCE;
 use typose_core::pages::MAX_ITEMS;
 use typose_core::raw::Raw;
@@ -40,6 +41,13 @@ static MARGIN: AtomicU64 = AtomicU64::new(u64::MAX);
 static MARGIN_AT: AtomicUsize = AtomicUsize::new(0);
 /// Where the test is: a shape's index × 4 + its step (open, fill, index, pages).
 static STEP: AtomicUsize = AtomicUsize::new(0);
+/// Image jobs run after the document workers stop. Their own baselines exclude already allocated fixtures and their
+/// reservations, so neither can conceal an uncharged codec allocation. Negative controls withdraw only image charges
+/// from this test's comparison; production reservation behavior is never changed.
+static RESERVED_BASELINE: AtomicU64 = AtomicU64::new(0);
+static WITHDRAW_IMAGE_CHARGES: AtomicBool = AtomicBool::new(false);
+static CANCEL_IMAGE_OUTPUT: AtomicBool = AtomicBool::new(false);
+static IMAGE_CANCEL: AtomicBool = AtomicBool::new(false);
 
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
@@ -74,8 +82,18 @@ fn check(size: usize) {
         return;
     }
     CHECKS.fetch_add(1, SeqCst);
+    // Deterministically cancel after the real canonical Vec allocation, with decoder pixels/work still alive.
+    // This hook lives only in this allocator test binary and cannot alter the production addon.
+    if CANCEL_IMAGE_OUTPUT.load(SeqCst) && size == images::MAX_CANONICAL {
+        IMAGE_CANCEL.store(true, SeqCst);
+    }
     for _ in 0..1000 {
         let (reserved, version) = budget::in_use();
+        let reserved = if WITHDRAW_IMAGE_CHARGES.load(SeqCst) {
+            0
+        } else {
+            reserved.saturating_sub(RESERVED_BASELINE.load(SeqCst))
+        };
         let live = LIVE.load(SeqCst).saturating_sub(BASELINE.load(SeqCst));
         if budget::version() != version {
             continue;
@@ -375,6 +393,249 @@ fn shape(i: usize, s: &Shape) {
     assert!(leaked.unsigned_abs() < 64 << 10, "{}: {leaked} bytes still live after close", s.name);
 }
 
+#[derive(Clone, Copy)]
+enum ImageExpected {
+    Ready,
+    Refused,
+    Memory,
+    Cancelled,
+}
+
+#[derive(Clone, Copy)]
+enum ImageControl {
+    Positive,
+    MissingCharges,
+    MissingResource,
+    CancelOutput,
+}
+
+/// No fixture allocation or printing occurs while armed. Each job must return its exact ledger/heap baseline after
+/// success, cancellation or refusal. A successful return may retain only its fixed canonical capacity.
+fn image_case(name: &str, source: &Vec<u8>, expected: ImageExpected, control: ImageControl, room: Option<u64>) {
+    let initial = budget::totals();
+    let source_charge = budget::Reservation::new(source.capacity() as u64).unwrap();
+    let before = budget::totals().used;
+    if let Some(room) = room {
+        budget::set_limit(before + room).unwrap();
+    }
+    BASELINE.store(LIVE.load(SeqCst), SeqCst);
+    RESERVED_BASELINE.store(budget::in_use().0, SeqCst);
+    CHECKS.store(0, SeqCst);
+    SKIPPED.store(0, SeqCst);
+    OVER.store(0, SeqCst);
+    for slot in &WORST {
+        slot.store(0, SeqCst);
+    }
+    IMAGE_CANCEL.store(false, SeqCst);
+    CANCEL_IMAGE_OUTPUT.store(matches!(control, ImageControl::CancelOutput), SeqCst);
+    WITHDRAW_IMAGE_CHARGES.store(matches!(control, ImageControl::MissingCharges), SeqCst);
+    ARMED.store(true, SeqCst);
+    let result = images::decode(source, &IMAGE_CANCEL);
+    let expected_result = matches!(
+        (&result, expected),
+        (Ok(_), ImageExpected::Ready)
+            | (Err(ImageError::Refused(_)), ImageExpected::Refused)
+            | (Err(ImageError::Memory(_)), ImageExpected::Memory)
+            | (Err(ImageError::Cancelled), ImageExpected::Cancelled)
+    );
+    let canonical_only = match &result {
+        Ok(image) => {
+            image.charged() == images::MAX_CANONICAL as u64
+                && budget::totals().used - before == image.charged()
+                && LIVE.load(SeqCst) - BASELINE.load(SeqCst) == image.charged()
+                && image.bytes().len() <= images::MAX_CANONICAL
+        }
+        Err(_) => true,
+    };
+    if matches!(control, ImageControl::MissingResource) {
+        WITHDRAW_IMAGE_CHARGES.store(true, SeqCst);
+        check(0); // the completed resource's charge is withdrawn while its actual Vec remains live
+    }
+    drop(result);
+    ARMED.store(false, SeqCst);
+    CANCEL_IMAGE_OUTPUT.store(false, SeqCst);
+    WITHDRAW_IMAGE_CHARGES.store(false, SeqCst);
+    RESERVED_BASELINE.store(0, SeqCst);
+    let (checks, skipped, over) = (CHECKS.load(SeqCst), SKIPPED.load(SeqCst), OVER.load(SeqCst));
+    let leaked = LIVE.load(SeqCst) as i64 - BASELINE.load(SeqCst) as i64;
+    budget::set_limit(initial.limit).unwrap();
+    assert!(expected_result, "{name}: unexpected image result");
+    assert!(canonical_only, "{name}: native work or pixels escaped with the canonical resource");
+    assert_eq!(budget::totals().used, before, "{name}: image reservations survived completion/drop");
+    assert_eq!(leaked, 0, "{name}: image heap survived completion/drop");
+    assert!(checks > 0, "{name}: no actual image allocations were observed");
+    assert_eq!(skipped, 0, "{name}: serialized image checks must not skip allocations");
+    match control {
+        ImageControl::MissingCharges | ImageControl::MissingResource => {
+            assert!(over > 0, "{name}: withdrawing image reservations did not trip the allocator check");
+        }
+        _ => {
+            let [live, reserved, size] = WORST.each_ref().map(|w| w.load(SeqCst));
+            assert_eq!(over, 0, "{name}: {live} live > {reserved} reserved at allocation {size}");
+        }
+    }
+    drop(source_charge);
+    assert_eq!(budget::totals().used, initial.used, "{name}: source charge survived");
+    println!(
+        "{name:>30}: {checks} checked, {over} violations (negative controls require violations), heap/ledger restored"
+    );
+}
+
+fn image_palette() -> Vec<u8> {
+    (0..=255_u8).flat_map(|v| [v, v.wrapping_mul(3), 255 - v]).collect()
+}
+
+fn ledger_png() -> Vec<u8> {
+    let mut source = Vec::new();
+    let palette = image_palette();
+    let transparency: Vec<u8> = (0..=255).collect();
+    let mut state = 0x6d2b_79f5_u32;
+    let indices: Vec<u8> = (0..(1024 * 256))
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            if state & 7 == 0 { state as u8 } else { (state & 7) as u8 }
+        })
+        .collect();
+    {
+        let mut encoder = png::Encoder::new(&mut source, 1024, 256);
+        encoder.set_color(png::ColorType::Indexed);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_palette(palette.as_slice());
+        encoder.set_trns(transparency.as_slice());
+        // Fixture creation is unarmed. Dynamic DEFLATE exercises the production decoder's secondary Huffman tables;
+        // production canonical encoding still explicitly selects FdeflateUltraFast.
+        encoder.set_deflate_compression(png::DeflateCompression::Level(6));
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&indices).unwrap();
+        writer.finish().unwrap();
+    }
+    source
+}
+
+fn ledger_gif() -> Vec<u8> {
+    let mut source = Vec::new();
+    let palette = image_palette();
+    let mut state = 0x1b87_3593_u32;
+    let indices: Vec<u8> = (0..4096 * 32)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect();
+    {
+        let mut encoder = gif::Encoder::new(&mut source, 4096, 32, &palette).unwrap();
+        let frame =
+            gif::Frame { width: 4096, height: 32, buffer: std::borrow::Cow::Borrowed(&indices), ..Default::default() };
+        encoder.write_frame(&frame).unwrap();
+    }
+    source
+}
+
+fn ledger_jpeg(width: u16, height: u16, sampling: u8) -> Vec<u8> {
+    // A complete baseline YCbCr scan, zero DC and EOB for each block. Two one-bit Huffman codes per block.
+    let mut source = vec![0xff, 0xd8, 0xff, 0xdb, 0, 0x43, 0];
+    source.extend_from_slice(&[1; 64]);
+    source.extend_from_slice(&[0xff, 0xc0, 0, 17, 8]);
+    source.extend_from_slice(&height.to_be_bytes());
+    source.extend_from_slice(&width.to_be_bytes());
+    source.extend_from_slice(&[3, 1, sampling, 0, 2, 0x11, 0, 3, 0x11, 0]);
+    for class in [0, 0x10] {
+        source.extend_from_slice(&[0xff, 0xc4, 0, 20, class, 1]);
+        source.extend_from_slice(&[0; 15]);
+        source.push(0);
+    }
+    source.extend_from_slice(&[0xff, 0xda, 0, 12, 3, 1, 0, 2, 0, 3, 0, 0, 63, 0]);
+    let (h, v) = (usize::from(sampling >> 4), usize::from(sampling & 15));
+    let bits = usize::from(width).div_ceil(8 * h) * usize::from(height).div_ceil(8 * v) * (h * v + 2) * 2;
+    source.resize(source.len() + bits / 8, 0);
+    if bits % 8 != 0 {
+        source.push((1_u8 << (8 - bits % 8)) - 1);
+    }
+    source.extend_from_slice(&[0xff, 0xd9]);
+    source
+}
+
+fn corrupt_png_adler(source: &[u8]) -> Vec<u8> {
+    let mut source = source.to_vec();
+    let mut at = 8;
+    let mut idat = None;
+    while at < source.len() {
+        let len = u32::from_be_bytes(source[at..at + 4].try_into().unwrap()) as usize;
+        if &source[at + 4..at + 8] == b"IDAT" {
+            idat = Some((at, len));
+        }
+        at += 12 + len;
+    }
+    let (at, len) = idat.unwrap();
+    source[at + 8 + len - 1] ^= 1;
+    let mut crc = u32::MAX;
+    for byte in &source[at + 4..at + 8 + len] {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & (0_u32.wrapping_sub(crc & 1)));
+        }
+    }
+    source[at + 8 + len..at + 12 + len].copy_from_slice(&(!crc).to_be_bytes());
+    source
+}
+
+fn image_checks() {
+    // Built before each job's baseline. The complete active public production path is exercised for every format.
+    let png = ledger_png();
+    let gif = ledger_gif();
+    let jpeg_h = ledger_jpeg(65_535, 1, 0x21);
+    let jpeg_hv = ledger_jpeg(257, 257, 0x22);
+    let webp = vec![
+        0x52, 0x49, 0x46, 0x46, 0x3c, 0, 0, 0, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x20, 0x30, 0, 0, 0, 0xd0, 1,
+        0, 0x9d, 1, 0x2a, 2, 0, 2, 0, 2, 0, 0x34, 0x25, 0xa0, 2, 0x74, 0xba, 1, 0xf8, 0, 3, 0xb0, 0, 0xfe, 0xf0, 0xc4,
+        0x0b, 0xff, 0x20, 0xb9, 0x61, 0x75, 0xc8, 0xd7, 0xff, 0x20, 0x3f, 0xe4, 7, 0xfc, 0x80, 0xff, 0xf8, 0xf2, 0, 0,
+        0,
+    ];
+    for (name, source) in [
+        ("PNG indexed dynamic", &png),
+        ("GIF dictionary growth", &gif),
+        ("JPEG H wide rows", &jpeg_h),
+        ("JPEG HV partial MCU", &jpeg_hv),
+    ] {
+        image_case(name, source, ImageExpected::Ready, ImageControl::Positive, None);
+    }
+    for (name, source) in
+        [("negative PNG charges", &png), ("negative GIF charges", &gif), ("negative JPEG charges", &jpeg_hv)]
+    {
+        image_case(name, source, ImageExpected::Ready, ImageControl::MissingCharges, None);
+    }
+    image_case("negative canonical resource", &png, ImageExpected::Ready, ImageControl::MissingResource, None);
+    image_case("cancel at canonical allocation", &png, ImageExpected::Cancelled, ImageControl::CancelOutput, None);
+    image_case("canonical budget refused", &png, ImageExpected::Memory, ImageControl::Positive, Some(4 << 20));
+    let bad_png = corrupt_png_adler(&png);
+    image_case("PNG decoder error cleanup", &bad_png, ImageExpected::Refused, ImageControl::Positive, None);
+    let bad_gif = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\xff\x01\x00\x3b".to_vec();
+    image_case("GIF decoder error cleanup", &bad_gif, ImageExpected::Refused, ImageControl::Positive, None);
+    let sos = jpeg_hv.windows(2).position(|bytes| bytes == [0xff, 0xda]).unwrap();
+    let entropy = sos + 2 + usize::from(u16::from_be_bytes([jpeg_hv[sos + 2], jpeg_hv[sos + 3]]));
+    let mut short_jpeg = jpeg_hv[..entropy + 1].to_vec();
+    short_jpeg.extend_from_slice(&[0xff, 0xd9]);
+    image_case("JPEG decoder error cleanup", &short_jpeg, ImageExpected::Refused, ImageControl::Positive, None);
+    // A known-valid WebP reaches only the explicit format refusal, with no codec/resource allocation or charge.
+    let before = budget::totals().used;
+    BASELINE.store(LIVE.load(SeqCst), SeqCst);
+    RESERVED_BASELINE.store(budget::in_use().0, SeqCst);
+    CHECKS.store(0, SeqCst);
+    ARMED.store(true, SeqCst);
+    let refused = images::decode(&webp, &AtomicBool::new(false));
+    ARMED.store(false, SeqCst);
+    RESERVED_BASELINE.store(0, SeqCst);
+    assert!(matches!(refused, Err(ImageError::Refused("WebP images are not supported yet"))));
+    assert_eq!(CHECKS.load(SeqCst), 0, "WebP refusal allocated codec/resource memory");
+    assert_eq!(budget::totals().used, before, "WebP refusal changed reservations");
+    assert_eq!(LIVE.load(SeqCst), BASELINE.load(SeqCst), "WebP refusal retained heap memory");
+    println!("WebP explicit refusal: zero codec/resource allocations or charges");
+}
+
 fn main() {
     assert!(size_of::<Raw>() as u64 + 16 <= STRUCT_BYTES, "a Raw ({} bytes) outgrew its metadata", size_of::<Raw>());
     let dir = std::env::temp_dir().join(format!("typose-ledger-{}", std::process::id()));
@@ -546,5 +807,6 @@ fn main() {
          allocation of {size}"
     );
     assert!(checks > 10_000 && skipped * 100 < checks, "too few checks ran: the test proves nothing");
+    image_checks();
     println!("ok");
 }

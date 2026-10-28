@@ -7,12 +7,18 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-# Spike C's reviewed pins (plan: Rendered Markdown slice §2.3). pulldown-cmark's `html` writes each block.
+# Parser/sanitizer pins (Rendered Markdown slice §2.3) and image codec pins (images.rs allocation inventory).
 ammonia = "=4.2.4"
 encoding_rs = "=0.8.42"
+fdeflate = "=0.3.7"
+gif = { version = "=0.14.2", default-features = false, features = ["std"] }
 memchr = "=2.8.3"
+png = "=0.18.1"
 pulldown-cmark = { version = "=0.13.4", default-features = false, features = ["html"] }
+weezl = "=0.1.10"
 xxhash-rust = { version = "=0.8.19", features = ["xxh3"] }
+zune-core = { version = "=0.5.3", default-features = false, features = ["std"] }
+zune-jpeg = { version = "=0.5.15", default-features = false, features = ["std"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

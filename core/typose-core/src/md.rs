@@ -189,6 +189,19 @@ impl Rendered {
                 + 1;
         } else {
             self.nodes += 1 + html_nodes(&item.html); // the block wrapper and the final serialized fragment
+            for tag in item
+                .html
+                .split('<')
+                .filter_map(|s| s.strip_prefix("span "))
+                .filter_map(|s| s.split_once('>').map(|(attrs, _)| attrs))
+            {
+                if tag.contains("class=\"tp-img\"") {
+                    // The renderer adds a fallback text node, later replaced by one img. Attribute units bound
+                    // decoded alt text; 256 more units pay the clipped refusal reason (lenses/images.ts).
+                    self.nodes += 1;
+                    self.note_units += tag.encode_utf16().count() as u64 + 256;
+                }
+            }
         }
         self.items.push(item);
         Ok(())
@@ -988,6 +1001,16 @@ mod tests {
                 assert_eq!((r.units(), r.html_bytes(), r.nodes()), (0, 0, 3));
             }
         }
+    }
+
+    #[test]
+    fn image_summary_pays_for_generated_alt_reason_and_replacement_image_node() {
+        let r = render("![界 & text](next.png)\n");
+        let html = r.items()[0].html.as_ref();
+        assert_eq!(r.nodes(), 2 + html_nodes(html)); // wrapper plus the generated fallback/loaded image node
+        assert!(r.note_units() >= "界 & text · ".encode_utf16().count() as u64 + 256);
+        let literal = render("class=\"tp-img\"\n");
+        assert_eq!(literal.note_units(), 0);
     }
 
     /// Plan §3: no item over 64 Ki units of text, and no page over 256 KiB of HTML; the first item always fits.

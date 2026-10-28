@@ -10,6 +10,8 @@ pub mod doc;
 pub mod encoding;
 #[cfg(feature = "test-hooks")]
 pub mod hooks;
+pub mod image_resource;
+pub mod images;
 pub mod index;
 pub mod limits;
 pub mod local;

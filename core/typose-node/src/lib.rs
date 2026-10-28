@@ -12,6 +12,7 @@ use typose_core::budget::{self, NoSlot, Reservation, Slot, Work};
 use typose_core::doc::DocError;
 #[cfg(feature = "test-hooks")]
 use typose_core::hooks;
+use typose_core::image_resource::{self, Pending, Resources};
 use typose_core::limits::{self, RANGES};
 use typose_core::md::{self, Rendered};
 use typose_core::pages::{self, LinePiece};
@@ -431,10 +432,108 @@ impl Task for MdRead {
     }
 }
 
+const IMAGE_TASK_BYTES: u64 = (3 * pages::MAX_PATH_BYTES + 4096) as u64;
+
+#[napi(object)]
+pub struct ImagePrepared {
+    pub id: f64,
+    pub width: u32,
+    pub height: u32,
+    pub encoded_bytes: u32,
+    pub pixel_bytes: u32,
+}
+
+/// Field order is deliberate: generation state drops before its last Raw Arc, charge drops last.
+pub struct PrepareImage {
+    pending: Pending,
+    raw: Arc<Raw>,
+    target: String,
+    generation: u32,
+    cancel: Arc<AtomicBool>,
+    #[cfg(feature = "test-hooks")]
+    _task: hooks::Live,
+    _charge: Reservation,
+}
+
+impl Task for PrepareImage {
+    type Output = std::result::Result<typose_core::images::CanonicalImage, DocError>;
+    type JsValue = ImagePrepared;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        Ok(image_resource::prepare(self.raw.document(), self.generation, &self.target, &self.cancel))
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> Result<ImagePrepared> {
+        let output = output.and_then(|image| {
+            if self.cancel.load(Ordering::Relaxed) {
+                return Err(DocError::Cancelled);
+            }
+            image_resource::check_source(self.raw.document(), self.generation)?;
+            self.pending.publish(image)
+        });
+        match output {
+            Ok(metadata) => Ok(ImagePrepared {
+                id: metadata.id as f64,
+                width: metadata.width,
+                height: metadata.height,
+                encoded_bytes: metadata.encoded_bytes,
+                pixel_bytes: metadata.pixel_bytes,
+            }),
+            Err(error) => Err(Error::from(JsError::from(doc_error(error)).into_unknown(env))),
+        }
+    }
+}
+
+pub struct ImageChunk {
+    state: Arc<Resources>, // drop before Raw, including on cancellation/close
+    raw: Arc<Raw>,
+    generation: u32,
+    id: u64,
+    offset: usize,
+    cancel: Arc<AtomicBool>,
+    slot: Option<Slot>,
+    #[cfg(feature = "test-hooks")]
+    _task: hooks::Live,
+    _charge: Reservation,
+}
+
+impl Task for ImageChunk {
+    type Output = std::result::Result<Vec<u8>, DocError>;
+    type JsValue = Uint8Array;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        Ok(cancellable(&self.cancel, || {
+            self.slot = Some(budget::slot(Work::Page, &store::cancelled).map_err(|error| match error {
+                NoSlot::Cancelled => DocError::Cancelled,
+                NoSlot::Budget(error) => DocError::Memory(error),
+            })?);
+            image_resource::check_source(self.raw.document(), self.generation)?;
+            let bytes = self.state.chunk(self.id, self.offset)?;
+            image_resource::check_source(self.raw.document(), self.generation)?;
+            Ok(bytes)
+        }))
+    }
+
+    fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Uint8Array> {
+        let output = output.and_then(|bytes| {
+            if self.cancel.load(Ordering::Relaxed) || !self.state.contains(self.id) {
+                return Err(DocError::Cancelled);
+            }
+            image_resource::check_source(self.raw.document(), self.generation)?;
+            Ok(bytes)
+        });
+        match output {
+            Ok(bytes) => Ok(Uint8Array::new(bytes)), // Work::Page slot survives through this NAPI conversion
+            Err(error) => Err(Error::from(JsError::from(doc_error(error)).into_unknown(env))),
+        }
+    }
+}
+
 /// An open document in Raw. Offsets and sizes are exact numbers: `Raw::open` refuses files over 2^53 − 1 bytes.
 /// `close` drops it at once; until then it lives as long as the JS object does.
 #[napi]
 pub struct Doc {
+    images: Option<Arc<Resources>>,
     raw: Option<Arc<Raw>>,
     /// The current generation's Markdown build. Reload and close start a new one, and the old drops with its last task.
     built: Built,
@@ -450,7 +549,7 @@ impl Doc {
             return Err(Error::new(Code::InvalidParams, why));
         }
         let raw = Raw::open(std::path::Path::new(&path)).map_err(doc_error)?;
-        Ok(Doc { raw: Some(Arc::new(raw)), built: Built::default() })
+        Ok(Doc { images: None, raw: Some(Arc::new(raw)), built: Built::default() })
     }
 
     fn raw(&self) -> std::result::Result<&Arc<Raw>, Error<Code>> {
@@ -514,6 +613,91 @@ impl Doc {
         Ok((raw, generation))
     }
 
+    // The host has parsed src exactly once. Native still validates the decoded target through image_route.
+    #[napi(ts_return_type = "Promise<ImagePrepared>")]
+    pub fn prepare_image(
+        &mut self,
+        generation: f64,
+        target: String,
+        cancel: &Cancel,
+    ) -> std::result::Result<AsyncTask<PrepareImage>, Error<Code>> {
+        let (raw, generation) = {
+            let (raw, generation) = self.local_source(generation)?;
+            (Arc::clone(raw), generation)
+        };
+        // Validate before the task is queued; resource route checks remain on its worker too.
+        if target.is_empty() || target.len() > 32 << 10 || target.chars().any(char::is_control) {
+            return Err(Error::new(
+                Code::InvalidParams,
+                "image target must be a decoded path of at most 32 KiB without controls",
+            ));
+        }
+        let charge = Reservation::new(IMAGE_TASK_BYTES).map_err(|error| doc_error(DocError::Memory(error)))?;
+        if self.images.is_none() {
+            self.images = Some(Resources::new(generation).map_err(doc_error)?);
+        }
+        let state = self.images.as_ref().unwrap();
+        let pending = state.reserve(Arc::clone(&cancel.flag)).map_err(doc_error)?;
+        Ok(AsyncTask::new(PrepareImage {
+            pending,
+            raw,
+            target,
+            generation,
+            cancel: Arc::clone(&cancel.flag),
+            #[cfg(feature = "test-hooks")]
+            _task: hooks::Live::new(&hooks::TASKS),
+            _charge: charge,
+        }))
+    }
+
+    #[napi(ts_return_type = "Promise<Uint8Array>")]
+    pub fn image_chunk(
+        &self,
+        generation: f64,
+        id: f64,
+        offset: f64,
+        cancel: &Cancel,
+    ) -> std::result::Result<AsyncTask<ImageChunk>, Error<Code>> {
+        let id = int("id", id)?; // u64/MAX_SAFE throughout; never a u32 cast
+        let offset = int("offset", offset)?;
+        if offset > typose_core::images::MAX_CANONICAL as u64 || !offset.is_multiple_of(image_resource::CHUNK as u64) {
+            return Err(Error::new(Code::InvalidParams, "image offset must be aligned to 256 KiB within 8 MiB"));
+        }
+        let (raw, generation) = self.local_source(generation)?;
+        let state = self
+            .images
+            .as_ref()
+            .filter(|state| state.generation() == generation && state.contains(id))
+            .ok_or_else(|| Error::new(Code::Refused, "the image resource was released"))?;
+        let charge = Reservation::new(4096).map_err(|error| doc_error(DocError::Memory(error)))?;
+        Ok(AsyncTask::new(ImageChunk {
+            state: Arc::clone(state),
+            raw: Arc::clone(raw),
+            generation,
+            id,
+            offset: offset as usize,
+            cancel: Arc::clone(&cancel.flag),
+            slot: None,
+            #[cfg(feature = "test-hooks")]
+            _task: hooks::Live::new(&hooks::TASKS),
+            _charge: charge,
+        }))
+    }
+
+    #[napi]
+    pub fn release_image(&self, generation: f64, id: f64) -> std::result::Result<bool, Error<Code>> {
+        let generation = int("gen", generation)? as u32;
+        let id = int("id", id)?;
+        Ok(self.images.as_ref().filter(|state| state.generation() == generation).is_some_and(|state| state.release(id)))
+    }
+
+    // Non-exported method inside impl Doc. Called before replacing/dropping raw.
+    fn clear_images(&mut self) {
+        if let Some(state) = self.images.take() {
+            state.close();
+        }
+    }
+
     /// Normalizes a decoded route and checks the source identity, without opening the target.
     #[napi]
     pub fn local_path(&self, generation: f64, target: String) -> std::result::Result<String, Error<Code>> {
@@ -528,7 +712,7 @@ impl Doc {
     pub fn open_local(&self, generation: f64, target: String) -> std::result::Result<Doc, Error<Code>> {
         let (raw, generation) = self.local_source(generation)?;
         let next = raw.open_local(generation, &target).map_err(doc_error)?;
-        Ok(Doc { raw: Some(Arc::new(next)), built: Built::default() })
+        Ok(Doc { images: None, raw: Some(Arc::new(next)), built: Built::default() })
     }
 
     /// Ctrl+R (spec §3.1): the same path at the next generation, which `startIndex` then indexes. Every page and
@@ -536,6 +720,7 @@ impl Doc {
     #[napi]
     pub fn reload(&mut self) -> std::result::Result<(), Error<Code>> {
         let next = self.raw()?.reload().map_err(doc_error)?;
+        self.clear_images();
         self.raw = Some(Arc::new(next));
         self.built = Built::default();
         Ok(())
@@ -545,6 +730,7 @@ impl Doc {
     /// stopped, which the core host cancels first. Every later call is `NoDocument`.
     #[napi]
     pub fn close(&mut self) {
+        self.clear_images();
         self.raw = None;
         self.built = Built::default();
     }
@@ -765,8 +951,9 @@ pub mod test_hooks {
         let c = raw.charges();
         // The held Markdown build's reservation. Raw's itemization does not include it; the sum does.
         let rendered = doc.built.lock().unwrap().as_ref().map(|r| r.charged()).unwrap_or(0);
+        let images = doc.images.as_ref().map(|resources| resources.charged()).unwrap_or(0);
         let [hashes, checkpoints, cache, metadata, total] =
-            [c.hashes, c.checkpoints, c.cache, c.metadata, c.total() + rendered].map(|n| n as f64);
+            [c.hashes, c.checkpoints, c.cache, c.metadata, c.total() + rendered + images].map(|n| n as f64);
         Ok(Charges { hashes, checkpoints, cache, metadata, total, lines_stopped: raw.lines_stopped() })
     }
 
@@ -786,5 +973,11 @@ pub mod test_hooks {
     #[napi]
     pub fn set_read_delay(ms: f64) -> std::result::Result<(), Error<Code>> {
         hooks::set_read_delay(ms).map_err(|why| Error::new(Code::InvalidParams, why))
+    }
+}
+
+impl Drop for Doc {
+    fn drop(&mut self) {
+        self.clear_images();
     }
 }

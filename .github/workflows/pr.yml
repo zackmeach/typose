@@ -67,7 +67,7 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25 # the e2e step's 12 after a cold ~5-minute setup, with room left for the evidence upload
+    timeout-minutes: 25 # Windows e2e allows 15 minutes after setup, with room for the evidence upload
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: rust
@@ -105,6 +105,10 @@ jobs:
         if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
         run: cargo test --locked
         working-directory: core
+      - name: Vendored JPEG strictness regressions
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
+        run: cargo test --locked -p zune-jpeg --lib
+        working-directory: core
       - name: npm run check
         if: ${{ !cancelled() && steps.napi.outcome == 'success' }}
         run: npm run check
@@ -129,7 +133,7 @@ jobs:
           xvfb-run -a npm run e2e
       - name: e2e and the NetLog assertion (Windows)
         if: ${{ !cancelled() && steps.package.outcome == 'success' && steps.electron.outcome == 'success' && runner.os == 'Windows' }}
-        timeout-minutes: 12 # past the longest test's own limit (10 min, large and long-line; the config's is 5)
+        timeout-minutes: 15 # the full Windows suite took 12.5 minutes at 82de093
         run: npm run e2e
       # Failure evidence (plan C9): kept 5 days, for the orchestrator to copy into .evidence/m1/ci/ before it expires.
       - name: Collect the failure evidence (bounded)

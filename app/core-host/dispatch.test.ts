@@ -16,6 +16,9 @@ const mdPage = vi.fn(async (_gen: number, _start: number, _count: number, _cance
 const headingLine = vi.fn((_gen: number, _fragment: string): number | null => null)
 const localPath = vi.fn((_gen: number, _target: string) => 'C:\\docs\\linked.md')
 const openLocal = vi.fn((_gen: number, _target: string): Doc => localDoc)
+const prepareImage = vi.fn(async (_gen: number, _target: string, _cancel: Cancel) => ({ id: 1, width: 1, height: 1, encodedBytes: 72, pixelBytes: 4 }))
+const imageChunk = vi.fn(async (_gen: number, _id: number, _offset: number, _cancel: Cancel) => new Uint8Array([137, 80, 78, 71]))
+const releaseImage = vi.fn((_gen: number, _id: number) => true)
 const reload = vi.fn()
 const close = vi.fn()
 const startIndex = vi.fn((_cancel: Cancel, _onProgress: (p: IndexProgress) => void) => {})
@@ -34,6 +37,9 @@ const doc = {
   headingLine,
   localPath,
   openLocal,
+  prepareImage,
+  imageChunk,
+  releaseImage,
   reload,
   close,
   startIndex
@@ -65,9 +71,25 @@ beforeEach(async () => {
 })
 
 const token = { session: 7, doc: 1, gen: 1, line: 0, offset: 1 }
+const imageRef = { session: 7, doc: 1, gen: 1, id: 1 }
 
 // Each method's numeric fields, with valid values for the others. `continuation.x` is a token's field.
 const TABLE: [method: string, field: string, base: Record<string, unknown>][] = [
+  ['prepareImage', 'doc', { gen: 1, src: 'one.png' }],
+  ['prepareImage', 'gen', { doc: 1, src: 'one.png' }],
+  ['imageChunk', 'doc', { gen: 1, ref: imageRef, offset: 0 }],
+  ['imageChunk', 'gen', { doc: 1, ref: imageRef, offset: 0 }],
+  ['imageChunk', 'offset', { doc: 1, gen: 1, ref: imageRef }],
+  ['imageChunk', 'ref.session', { doc: 1, gen: 1, ref: imageRef, offset: 0 }],
+  ['imageChunk', 'ref.doc', { doc: 1, gen: 1, ref: imageRef, offset: 0 }],
+  ['imageChunk', 'ref.gen', { doc: 1, gen: 1, ref: imageRef, offset: 0 }],
+  ['imageChunk', 'ref.id', { doc: 1, gen: 1, ref: imageRef, offset: 0 }],
+  ['releaseImage', 'doc', { gen: 1, ref: imageRef }],
+  ['releaseImage', 'gen', { doc: 1, ref: imageRef }],
+  ['releaseImage', 'ref.session', { doc: 1, gen: 1, ref: imageRef }],
+  ['releaseImage', 'ref.doc', { doc: 1, gen: 1, ref: imageRef }],
+  ['releaseImage', 'ref.gen', { doc: 1, gen: 1, ref: imageRef }],
+  ['releaseImage', 'ref.id', { doc: 1, gen: 1, ref: imageRef }],
   ['hello', 'protocol', {}],
   ['open', 'count', { path: 'b.txt', bytes: 0 }],
   ['open', 'bytes', { path: 'b.txt', count: 1 }],
@@ -114,7 +136,7 @@ function withValue(base: Record<string, unknown>, field: string, value: unknown)
 
 describe('every numeric parameter takes only integers in its range', () => {
   for (const [method, field, base] of TABLE) {
-    const { min, max } = range(field.replace('continuation.', ''))
+    const { min, max } = range(field.replace(/^(continuation|ref)\./, ''))
     for (const value of [...HOSTILE, min, max, max + 1]) {
       it(`${method}${base.lens === 'rendered' ? ' (rendered)' : ''}.${field} = ${String(value)}`, async () => {
         const response = await call(method, withValue(base, field, value))
@@ -124,7 +146,7 @@ describe('every numeric parameter takes only integers in its range', () => {
           return
         }
         expect(response).toMatchObject({ id: nextId - 1, session: 7, error: { code: 'InvalidParams', field } })
-        for (const spy of [openDoc, page, piece, render, mdPage, headingLine, localPath, openLocal, reload, close, startIndex, reserveCache]) expect(spy).not.toHaveBeenCalled()
+        for (const spy of [openDoc, page, piece, render, mdPage, headingLine, localPath, openLocal, prepareImage, imageChunk, releaseImage, reload, close, startIndex, reserveCache]) expect(spy).not.toHaveBeenCalled()
         // No state change: document 1 is still open, and the next open is document 2.
         expect(await call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 })).toHaveProperty('result')
         expect(await call('open', { path: 'c.txt', count: 1, bytes: 0 })).toMatchObject({ result: { doc: 2 } })
@@ -320,6 +342,106 @@ describe('thin Markdown link resolution', () => {
     await call('close', { doc: 1 })
     expect(await call('resolve', { doc: 1, gen: 1, href: '#title' })).toMatchObject({ error: { code: 'NoDocument' } })
     expect(headingLine).not.toHaveBeenCalled()
+  })
+})
+
+describe('local image resources', () => {
+  it('parses raw src once, stamps a path-free reference and uses binary fixed chunks', async () => {
+    expect(await call('prepareImage', { doc: 1, gen: 1, src: 'a%252fb.png' })).toMatchObject({
+      result: { ref: imageRef, width: 1, height: 1, encodedBytes: 72, pixelBytes: 4 }
+    })
+    expect(prepareImage).toHaveBeenCalledWith(1, 'a%2fb.png', expect.anything())
+    const reply = await call('imageChunk', { doc: 1, gen: 1, ref: imageRef, offset: 0 })
+    expect(reply).toMatchObject({ result: new Uint8Array([137, 80, 78, 71]) })
+    expect(imageChunk).toHaveBeenCalledWith(1, 1, 0, expect.anything())
+    expect(openDoc).not.toHaveBeenCalled()
+    expect(localPath).not.toHaveBeenCalled()
+    expect(reserveCache).not.toHaveBeenCalled() // renderer pays for its image assembly before requesting chunks
+  })
+
+  it('refuses raw controls, oversized src and remote/ambiguous paths before addon or I/O', async () => {
+    for (const src of [null, 0, {}, [], 'a' + String.fromCharCode(0) + '.png', 'é'.repeat(16_385)])
+      expect(await call('prepareImage', { doc: 1, gen: 1, src })).toMatchObject({ error: { code: 'InvalidParams', field: 'src' } })
+    for (const src of ['https://example.com/a.png', 'data:image/png,x', '//host/a.png', '%5c%5chost/a.png', 'file://host/a.png', 'a.png%3astream', 'a.png?query'])
+      expect(await call('prepareImage', { doc: 1, gen: 1, src })).toMatchObject({ error: { code: 'Refused' } })
+    expect(prepareImage).not.toHaveBeenCalled()
+    expect(localPath).not.toHaveBeenCalled()
+  })
+
+  it('binds references to this session, document and generation before native calls', async () => {
+    for (const method of ['imageChunk', 'releaseImage']) {
+      for (const [ref, code] of [
+        [{ ...imageRef, session: 6 }, 'Stale'], [{ ...imageRef, doc: 2 }, 'InvalidParams'], [{ ...imageRef, gen: 2 }, 'Stale']
+      ] as const)
+        expect(await call(method, { doc: 1, gen: 1, ref, offset: 0 })).toMatchObject({ error: { code } })
+      for (const ref of [null, 3, [], {}])
+        expect(await call(method, { doc: 1, gen: 1, ref, offset: 0 })).toMatchObject({ error: { code: 'InvalidParams' } })
+    }
+    expect(imageChunk).not.toHaveBeenCalled()
+    expect(releaseImage).not.toHaveBeenCalled()
+  })
+
+  it('refuses unaligned or oversized chunks and a caller count', async () => {
+    for (const offset of [1, 262_145, 8_650_752])
+      expect(await call('imageChunk', { doc: 1, gen: 1, ref: imageRef, offset })).toMatchObject({ error: { code: 'InvalidParams', field: 'offset' } })
+    expect(await call('imageChunk', { doc: 1, gen: 1, ref: imageRef, offset: 0, count: 1 })).toMatchObject({ error: { code: 'InvalidParams', field: 'count' } })
+    expect(imageChunk).not.toHaveBeenCalled()
+  })
+
+  it('does not send an oversized native chunk over the port', async () => {
+    imageChunk.mockResolvedValueOnce(new Uint8Array((256 << 10) + 1))
+    expect(await call('imageChunk', { doc: 1, gen: 1, ref: imageRef, offset: 0 })).toMatchObject({ error: { code: 'Internal' } })
+  })
+
+  it('forwards MAX_SAFE resource ids without a u32 truncation and releases harmlessly after close', async () => {
+    const ref = { ...imageRef, id: Number.MAX_SAFE_INTEGER }
+    expect(await call('releaseImage', { doc: 1, gen: 1, ref })).toMatchObject({ result: true })
+    expect(releaseImage).toHaveBeenCalledWith(1, Number.MAX_SAFE_INTEGER)
+    releaseImage.mockReturnValueOnce(false)
+    expect(await call('releaseImage', { doc: 1, gen: 1, ref })).toMatchObject({ result: false })
+    await call('close', { doc: 1 })
+    expect(await call('releaseImage', { doc: 1, gen: 1, ref })).toMatchObject({ result: false })
+  })
+
+  it('uses the existing cancellable read path and refuses a result after its source closes', async () => {
+    let finish = (_image: { id: number; width: number; height: number; encodedBytes: number; pixelBytes: number }) => {}
+    prepareImage.mockImplementationOnce(() => new Promise((ok) => { finish = ok }))
+    const preparing = dispatch({ id: 60, method: 'prepareImage', params: { doc: 1, gen: 1, src: 'one.png' } })
+    const flag = flags.at(-1)!
+    expect(await call('cancel', { id: 60 })).toMatchObject({ result: true })
+    expect(flag.cancel).toHaveBeenCalledOnce()
+    await call('close', { doc: 1 })
+    finish({ id: 1, width: 1, height: 1, encodedBytes: 72, pixelBytes: 4 })
+    expect(await preparing).toMatchObject({ error: { code: 'Stale' } })
+    expect(releaseImage).toHaveBeenCalledWith(1, 1)
+  })
+
+  it('releases a stale prepare result with its original generation after Reload', async () => {
+    let finish = (_image: { id: number; width: number; height: number; encodedBytes: number; pixelBytes: number }) => {}
+    prepareImage.mockImplementationOnce(() => new Promise((ok) => { finish = ok }))
+    const preparing = dispatch({ id: 61, method: 'prepareImage', params: { doc: 1, gen: 1, src: 'one.png' } })
+    const mutable = doc as unknown as { generation: number }
+    reload.mockImplementationOnce(() => { mutable.generation = 2 })
+    try {
+      expect(await call('reload', { doc: 1, count: 1, bytes: 0 })).toMatchObject({ result: { gen: 2 } })
+      finish({ id: 1, width: 1, height: 1, encodedBytes: 72, pixelBytes: 4 })
+      expect(await preparing).toMatchObject({ error: { code: 'Stale' } })
+      expect(releaseImage).toHaveBeenCalledWith(1, 1)
+      expect(releaseImage).not.toHaveBeenCalledWith(2, 1)
+    } finally { mutable.generation = 1 }
+  })
+
+  it('does not publish a chunk answered after Reload', async () => {
+    let finish = (_bytes: Uint8Array<ArrayBuffer>) => {}
+    imageChunk.mockImplementationOnce(() => new Promise((ok) => { finish = ok }))
+    const reading = dispatch({ id: 62, method: 'imageChunk', params: { doc: 1, gen: 1, ref: imageRef, offset: 0 } })
+    const mutable = doc as unknown as { generation: number }
+    reload.mockImplementationOnce(() => { mutable.generation = 2 })
+    try {
+      expect(await call('reload', { doc: 1, count: 1, bytes: 0 })).toMatchObject({ result: { gen: 2 } })
+      finish(new Uint8Array([137, 80, 78, 71]))
+      expect(await reading).toMatchObject({ error: { code: 'Stale' } })
+    } finally { mutable.generation = 1 }
   })
 })
 

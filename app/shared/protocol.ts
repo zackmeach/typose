@@ -81,6 +81,12 @@ export interface Opened {
 }
 
 export interface Methods {
+  /** Decode a local image from this generation's held Markdown. Ref carries no path or URL. */
+  prepareImage: { params: { doc: number; gen: number; src: string }; result: PreparedImage }
+  /** A fixed aligned chunk of canonical PNG bytes, at most 256 KiB. No count. */
+  imageChunk: { params: { doc: number; gen: number; ref: ImageRef; offset: number }; result: Uint8Array }
+  /** Release native encoded bytes after assembly or abandonment. Repeated release is harmless. */
+  releaseImage: { params: { doc: number; gen: number; ref: ImageRef }; result: boolean }
   hello: { params: { protocol: number }; result: Hello }
   /** `bytes`: the lens's viewport-only cache cap, reserved with the document's floor (plan C1); refused, `Memory`. */
   open: { params: { path: string; count: number; bytes: number }; result: Opened }
@@ -208,3 +214,14 @@ export const STARTUP_MARKS = [
   'rawUsable'
 ] as const
 export type StartupMark = (typeof STARTUP_MARKS)[number]
+
+
+/** Opaque resource identity, echoed without modification. */
+export interface ImageRef { session: number; doc: number; gen: number; id: number }
+export interface PreparedImage {
+  ref: ImageRef
+  width: number
+  height: number
+  encodedBytes: number
+  pixelBytes: number
+}

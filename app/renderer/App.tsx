@@ -270,7 +270,7 @@ export function App({ core }: { core: CoreClient }) {
     before?.yieldReservation()
     let ok = false
     try {
-      ok = await (budgetFor(opened)?.reserveRendered(opened.gen, renderedCharge(build)) ?? Promise.resolve(false))
+      ok = await (budgetFor(opened)?.ensureRendered(opened.gen, renderedCharge(build)) ?? Promise.resolve(false))
     } catch {
       ok = false
     } finally {
@@ -342,7 +342,8 @@ export function App({ core }: { core: CoreClient }) {
     const sourceSession = currentSession.current
     const rawBytes = floorBytes(l)
     const owner = budgetFor(source)
-    const retired = Math.max(retiredRendered.current, owner?.snapshot().rendered ?? 0, owner?.retiredTreeMax ?? 0)
+    const plan = owner?.reloadReservation(rawBytes)
+    const retired = Math.max(retiredRendered.current, plan?.retiredTreeMax ?? 0)
     try {
       const opened = await core.call('openLocal', { doc: source.doc, gen: source.gen, target, count: firstCount(l), bytes: rawBytes + 2 * retired })
       if (attempt.current !== mine || currentSession.current !== sourceSession || latest.current.card.kind !== 'open' || latest.current.card.opened !== source) {
@@ -358,6 +359,8 @@ export function App({ core }: { core: CoreClient }) {
       if (attempt.current === mine && e instanceof CoreCallError && e.code === 'Frozen')
         setCard((d) => d.kind === 'open' && d.opened === source ? { ...d, frozen: d.frozen ?? e.message } : d)
       return false // no replacement: the source and its reservation remain usable
+    } finally {
+      if (plan) owner?.cancelTransition(plan)
     }
   }
 
@@ -369,9 +372,10 @@ export function App({ core }: { core: CoreClient }) {
     if (c.kind !== 'open' || !l || reloading.current) return
     const mine = ++attempt.current
     reloading.current = true
+    const rawBytes = floorBytes(l)
+    const owner = budgetFor(c.opened)
+    const plan = owner?.reloadReservation(rawBytes)
     try {
-      const rawBytes = floorBytes(l)
-      const plan = budgetFor(c.opened)?.reloadReservation(rawBytes)
       const opened = await core.call('reload', { doc: c.opened.doc, count: firstCount(l), bytes: plan?.bytes ?? rawBytes })
       if (attempt.current === mine) show(c.path, opened, lens.current?.topLine() ?? c.atLine, rawBytes, plan)
     } catch (e) {
@@ -384,6 +388,7 @@ export function App({ core }: { core: CoreClient }) {
         setCard({ ...failed(c.path, e), localOnly: c.opened.localOnly }) // a lost local route requires explicit selection
       }
     } finally {
+      if (plan) owner?.cancelTransition(plan)
       reloading.current = false
     }
   }
