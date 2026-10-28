@@ -36,9 +36,9 @@ export type Card =
       /** Rendered can't show. The tooltip is `RENDERED_OFF`. */
       renderedOff?: RenderedOff
     }
-  | { kind: 'failed'; path: string; code: ErrorCode; message: string }
+  | { kind: 'failed'; path: string; code: ErrorCode; message: string; localOnly?: true }
   /** Plan C7: the core died. `line` is where its view was; `ready` once a new core is up to Reopen it in. */
-  | { kind: 'gone'; path?: string; line?: number; ready: boolean }
+  | { kind: 'gone'; path?: string; line?: number; ready: boolean; localOnly?: true }
 
 export type Action = 'Open file…' | 'Locate…' | 'Retry' | 'Close' | 'Reopen'
 
@@ -96,6 +96,8 @@ export function view(card: Card): CardView {
       }
     }
     case 'failed':
+      // A lost local capability cannot be recreated by treating its display path as a manual open.
+      if (card.localOnly) return say(`Can't open ${card.path} · ${card.message}`, 'Locate…', 'Close')
       switch (card.code) {
         case 'Binary':
           return say('Binary file · not shown') // the hand-off (brief §4.6) is M4
@@ -112,6 +114,7 @@ export function view(card: Card): CardView {
       // Plan C7: the cached text died with the core. Until a new core is up (60 s after a second death), the stopped
       // state offers nothing.
       if (!card.ready) return say("Typose's core stopped")
+      if (card.localOnly) return say("Typose's core stopped · Open the file again to continue", 'Open file…')
       return say("Typose's core stopped", card.path ? 'Reopen' : 'Open file…')
   }
 }

@@ -328,4 +328,16 @@ After PR #20, deliver same-document heading/footnote jumps and HTTP/HTTPS/mailto
 
 Local-file links and local images remain inert in this PR. Their approved follow-up needs a local-only policy preserved through open, identity checks, Reload and Reopen: the original preflight followed by a final UNC check can contact a retargeted share too early. Manual CLI/dialog-open policy remains unchanged. This split delivers working links without folding that filesystem capability into the first link PR.
 
+## 8. Local-file follow-up policy · 2026-10-28
+
+After #23, local-file links precede local images, then M2, as Zack confirmed. The first local backend targets Windows. Other platforms refuse these derived opens until an equivalent backend is implemented and qualified; the existing reader and manual open policy remain available.
+
+A manual Markdown open captures a directory capability before Markdown is interpreted. It pins a drive-root handle, proves that handle belongs to a local disk, walks the source one component at a time without following reparses, and compares the opened source identity. Failure to establish that proof disables local navigation for that source. No image or link can bootstrap a capability by opening its destination's drive name.
+
+Relative targets, parent components and same-drive `file:///C:/…` targets normalize lexically under the captured root. Network/device syntax, alternate streams, ambiguous components, other drives and all reparses are refused. The first supported document targets are `.md`, `.markdown` and `.txt`. A refused or missing link keeps the current document open. The capability and route travel with derived documents: later change checks and Reload walk from the same held root, without falling back to ordinary path opens.
+
+A core crash loses these handles. A derived document therefore offers explicit file selection instead of automatic Reopen from its display path. A failed terminal Reload likewise offers Locate and Close. An explicitly selected file uses the existing manual-open policy. This is a deliberate availability limit, not a relaxation of the local-only rule.
+
+Local images are the following slice. The old final-UNC check and a header-only `width × height × 4` estimate are insufficient evidence for all image variants. Unsupported decodes must retain alt text and a refusal reason under Z43; image delivery and decoding require their own bounded path and verification.
+
 Footnote references use a reserved `typose-footnote:` fragment namespace so their labels cannot collide with heading slugs. ASCII label case variants share numbering and a destination; broader Unicode case folding remains an existing limitation. M2 and the remaining qualification debt are unchanged.

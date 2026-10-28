@@ -1,5 +1,7 @@
 import { type Page, expect } from '@playwright/test'
-import { type TestHooks, assertNetLog, finish, fixture, launch, stubExternal, test } from './app'
+import { mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { FIXTURES, type TestHooks, assertNetLog, debugStats, finish, fixture, launch, lifecycle, stubExternal, stubOpenDialog, test, waitOpen } from './app'
 
 const ready = (win: Page) => expect(win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 30_000 })
 
@@ -19,7 +21,7 @@ const waitHeld = (win: Page) => expect.poll(() => win.evaluate(() => typeof (win
 const release = (win: Page) => win.evaluate(() => (window as unknown as { releaseLink: () => void }).releaseLink())
 const frames = (win: Page) => win.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))))
 
-test('external links hand off once, while unsafe and local destinations stay inert and the app makes no network request', async () => {
+test('external links hand off once, while unsafe and missing targets keep the reader in place without network requests', async () => {
   const log = test.info().outputPath('links-netlog.json')
   const l = await launch({ file: fixture('links.md', [
     '# Links', '',
@@ -132,6 +134,135 @@ test('the release preload refuses invalid external destinations before any OS ha
   })
   expect(results).toEqual([false, false, false, false, false, false, false])
   expect(await calls()).toEqual([])
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+test('local Markdown and text links replace the card, inherit the route, and Reload through it', async () => {
+  test.skip(process.platform !== 'win32', 'local capability backend is currently Windows-only')
+  fixture('local-next.md', '# Next document\n\n[Text](local-text.txt)\n')
+  const text = fixture('local-text.txt', 'First local text\n')
+  const l = await launch({ file: fixture('local-start.md', '# Start\n\n[Next](local-next.md)\n') })
+  const { win } = l
+  await ready(win)
+  await win.getByRole('link', { name: 'Next', exact: true }).click()
+  await expect(win.locator('.card-name')).toHaveText('local-next.md')
+  await ready(win)
+  await expect(win.getByRole('heading', { name: 'Next document' })).toBeVisible()
+  await win.getByRole('link', { name: 'Text', exact: true }).click()
+  await expect(win.locator('.card-name')).toHaveText('local-text.txt')
+  await waitOpen(win)
+  await expect(win.locator('.vl-row .text').first()).toHaveText('First local text')
+  writeFileSync(text, 'Second local text\n')
+  await win.keyboard.press('Control+r')
+  await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '2')
+  await expect(win.locator('.vl-row .text').first()).toHaveText('Second local text')
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+test('a local target cannot regain manual path privileges after a core restart', async () => {
+  test.skip(process.platform !== 'win32', 'local capability backend is currently Windows-only')
+  const target = fixture('local-restart-next.md', '# Local restart target\n')
+  const l = await launch({ hooks: true, file: fixture('local-restart-start.md', '# Start\n\n[Next](local-restart-next.md)\n') })
+  const { win } = l
+  await ready(win)
+  await win.getByRole('link', { name: 'Next', exact: true }).click()
+  await expect(win.locator('.card-name')).toHaveText('local-restart-next.md')
+  await ready(win)
+  const spawned = lifecycle(l.userData).filter((r) => r.event === 'utility-spawn').at(-1)!
+  process.kill(spawned.utilityPid as number)
+  await expect(win.locator('.card-message p')).toContainText("Typose's core stopped")
+  await expect(win.locator('.card-message .open-button')).toHaveText(['Open file…'])
+  await expect(win.getByRole('button', { name: 'Reopen', exact: true })).toHaveCount(0)
+  await stubOpenDialog(l.app, target)
+  await win.locator('.card-message .open-button').click()
+  await ready(win)
+  await expect(win.getByRole('heading', { name: 'Local restart target' })).toBeVisible()
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+test('a source change after local resolution keeps the current view and raises its Reload banner', async () => {
+  test.skip(process.platform !== 'win32', 'local capability backend is currently Windows-only')
+  fixture('local-race-target.md', '# Target\n')
+  const source = fixture('local-race-source.md', '# Original source\n\n[Next](local-race-target.md)\n')
+  const l = await launch({ hooks: true, file: source })
+  const { win } = l
+  await ready(win)
+  await expect.poll(async () => (await debugStats(win)).jobs).toBe(0)
+  await holdResolve(win)
+  await win.getByRole('link', { name: 'Next', exact: true }).click()
+  await waitHeld(win)
+  writeFileSync(source, '# Changed source\n')
+  await release(win)
+  await expect(win.locator('.banner')).toHaveText('Changed on disk · Reload (Ctrl+R)')
+  await expect(win.getByRole('heading', { name: 'Original source', exact: true })).toBeVisible()
+  await expect(win.locator('.card-name')).toHaveText('local-race-source.md')
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+test('retargeting a local ancestor to a junction refuses Reload without reopening the display path', async () => {
+  test.skip(process.platform !== 'win32', 'local capability backend is currently Windows-only')
+  const root = join(FIXTURES, 'local-retarget')
+  const moved = join(FIXTURES, 'local-retarget-held')
+  const other = join(FIXTURES, 'local-retarget-other')
+  for (const dir of [root, moved, other]) expect(dirname(dir)).toBe(FIXTURES)
+  for (const dir of [root, moved, other]) rmSync(dir, { recursive: true, force: true })
+  mkdirSync(root, { recursive: true })
+  mkdirSync(other)
+  writeFileSync(join(root, 'next.md'), '# Original local file\n')
+  writeFileSync(join(other, 'next.md'), '# Wrong target\n')
+  const l = await launch({ file: fixture('local-retarget-start.md', '# Start\n\n[Next](local-retarget/next.md)\n') })
+  try {
+    const { win } = l
+    await ready(win)
+    await win.getByRole('link', { name: 'Next', exact: true }).click()
+    await ready(win)
+    await expect(win.getByRole('heading', { name: 'Original local file' })).toBeVisible()
+    const held = join(FIXTURES, 'local-retarget-held.md')
+    expect(dirname(held)).toBe(FIXTURES)
+    renameSync(join(root, 'next.md'), held)
+    renameSync(root, moved)
+    renameSync(held, join(moved, 'next.md'))
+    symlinkSync(other, root, 'junction')
+    await win.keyboard.press('Control+r')
+    await expect(win.locator('.card-message p')).toContainText("Can't open")
+    await expect(win.locator('.card-message .open-button')).toHaveText(['Locate…', 'Close'])
+    await expect(win.locator('.card')).not.toContainText('Wrong target')
+    expect(l.pageErrors).toEqual([])
+  } finally {
+    await finish(l)
+    for (const dir of [root, moved, other]) rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a replacement abandons an already opened local target and closes its document', async () => {
+  test.skip(process.platform !== 'win32', 'local capability backend is currently Windows-only')
+  fixture('local-delayed-target.md', '# Delayed target\n')
+  const l = await launch({ hooks: true, file: fixture('local-delayed-start.md', '# Start\n\n[Next](local-delayed-target.md)\n') })
+  const { win } = l
+  await ready(win)
+  await win.evaluate(() => {
+    const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core
+    const call = core.call.bind(core)
+    core.call = async (method, params) => {
+      const reply = await call(method, params)
+      if (method === 'openLocal') await new Promise<void>((done) => { (window as unknown as { releaseLink: () => void }).releaseLink = done })
+      return reply
+    }
+  })
+  await win.getByRole('link', { name: 'Next', exact: true }).click()
+  await waitHeld(win)
+  const replacement = fixture('local-delayed-replacement.md', '# Replacement\n')
+  await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), replacement)
+  await expect(win.locator('.card-name')).toHaveText('local-delayed-replacement.md')
+  await ready(win)
+  await release(win)
+  await frames(win)
+  await expect.poll(async () => (await debugStats(win)).docs).toBe(1)
+  await expect(win.getByRole('heading', { name: 'Replacement', exact: true })).toBeVisible()
   expect(l.pageErrors).toEqual([])
   await finish(l)
 })

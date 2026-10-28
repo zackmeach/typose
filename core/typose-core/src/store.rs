@@ -487,13 +487,27 @@ impl ByteStore {
     /// reservation is an `io::Error` holding the `OverBudget`, and nothing stays charged.
     pub fn open_with(path: &Path, cache_chunks: usize) -> io::Result<ByteStore> {
         let file = open_regular(path)?;
-        let len = file.metadata()?.len();
+        Self::from_file(file, cache_chunks)
+    }
+
+    /// A file already opened through a verified local route. This constructor never revisits its display path.
+    pub(crate) fn from_file(file: File, cache_chunks: usize) -> io::Result<ByteStore> {
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(io::Error::other(NotRegular));
+        }
+        let len = metadata.len();
         let chunks = len.div_ceil(CHUNK as u64);
         let hashes = ChunkHashes::new(chunks).map_err(io::Error::other)?;
         let cache = Cache::new(cache_chunks.min(chunks as usize).max(1), len).map_err(io::Error::other)?;
         #[cfg(feature = "test-hooks")]
         crate::hooks::HANDLES.fetch_add(1, Ordering::Relaxed); // until `drop` below
         Ok(ByteStore { file, len, hashes, cache: Mutex::new(cache) })
+    }
+
+    /// The actual source handle, borrowed only while its local origin is captured during explicit open.
+    pub(crate) fn file(&self) -> &File {
+        &self.file
     }
 
     /// What this store has charged: (its hash tables, its cache).

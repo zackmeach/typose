@@ -75,6 +75,9 @@ export interface Opened {
   firstPage: Page
   /** Plan C1: what the ledger holds for this lens's page cache, at least the `bytes` the open asked for. */
   reserved: number
+  /** Derived local navigation keeps its inherited capability for Reload and later links. */
+  localOnly?: true
+  path?: string
 }
 
 export interface Methods {
@@ -93,8 +96,10 @@ export interface Methods {
   /** Plan (Rendered Markdown slice) §2.1: builds generation `gen` as Markdown blocks, up to 8 MiB of source, for rendered
    *  pages. `Refused` over 8 MiB, `Memory` when the budget can't hold it. Cancellable. */
   render: { params: { doc: number; gen: number }; result: MdBuild }
-  /** This generation's held Markdown links: heading/footnote fragments or http/https/mailto. Other targets stay inert. */
+  /** This generation's held Markdown links: fragments, external URLs, or capability-checked local paths. */
   resolve: { params: { doc: number; gen: number; href: string }; result: LinkTarget }
+  /** Open a decoded local target through the source document's inherited capability. Failure keeps its lens. */
+  openLocal: { params: { doc: number; gen: number; target: string; count: number; bytes: number }; result: Opened }
   /** Ctrl+R (spec §3.1): the document's next generation, opened again, with its first page. `bytes` as for `open`. */
   reload: { params: { doc: number; count: number; bytes: number }; result: Opened }
   /** Plan C6: cancels the document's index and page reads, and releases it. */
@@ -109,7 +114,7 @@ export interface Methods {
   debugStats: { params: { gc?: boolean; resetHigh?: boolean; limit?: number }; result: DebugStats }
 }
 
-export type LinkTarget = { kind: 'heading'; line: number } | { kind: 'external'; url: string } | { kind: 'inert' }
+export type LinkTarget = { kind: 'heading'; line: number } | { kind: 'external'; url: string } | { kind: 'local'; target: string; path: string } | { kind: 'inert' }
 
 /** The test-hooks build's debug stats (plan C5, C6): the core's live jobs, tasks and file handles, the longest a chunk
  *  read's delay actually waited since the delay was set (`delayMs`), the documents the core host holds, and how its

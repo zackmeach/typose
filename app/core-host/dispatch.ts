@@ -17,6 +17,7 @@ import {
   type Response
 } from '../shared/protocol'
 import { isValid } from './numbers'
+import { boundedLink, decodedLocalTarget, localTarget } from './local-target'
 
 declare const __TEST_HOOKS__: boolean
 
@@ -146,22 +147,30 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       reads.delete(id)
     }
   }
-  /** Starts indexing a document's current generation, and describes it with its first page. */
-  const begin = (id: number, doc: Doc, firstPage: CorePage): Omit<Opened, 'reserved'> => {
-    const gen = doc.generation
+  type LocalInfo = { localOnly: true; path: string } | undefined
+  const localInfo = (doc: Doc): LocalInfo => doc.localOnly ? { localOnly: true, path: doc.path } : undefined
+  /** Read fallible metadata before starting a job; a failed start leaves no job registered. */
+  const begin = (id: number, doc: Doc, firstPage: CorePage, local?: LocalInfo): Omit<Opened, 'reserved'> => {
+    const { generation: gen, size, encoding, lines, indexed, blank } = doc
+    const format = doc.format as Opened['format'] // the core's two values
+    const opened = { doc: id, gen, format, size, encoding, lines, indexed, blank, firstPage: stampPage(id, firstPage), ...local }
     const cancel = addon.cancelFlag()
     jobs.get(id)?.cancel() // the previous generation's job, if it still runs (plan C6)
     jobs.set(id, cancel)
-    doc.startIndex(cancel, (e: IndexProgress) => {
-      // An index error froze the document (plan C6). An older generation's ends with Reload's freeze, not this one's.
-      if (e.error !== undefined && jobs.get(id) === cancel) cancelReads(id)
-      const event: ProgressEvent = { event: 'progress', session, doc: id, gen, lines: e.lines, bytes: e.bytes, done: e.done }
-      if (e.error !== undefined) event.error = e.error
-      emit(event)
-    })
-    const { size, encoding, lines, indexed, blank } = doc
-    const format = doc.format as Opened['format'] // the core's two values
-    return { doc: id, gen, format, size, encoding, lines, indexed, blank, firstPage: stampPage(id, firstPage) }
+    try {
+      doc.startIndex(cancel, (e: IndexProgress) => {
+        // An index error froze the document (plan C6). An older generation's ends with Reload's freeze, not this one's.
+        if (e.error !== undefined && jobs.get(id) === cancel) cancelReads(id)
+        const event: ProgressEvent = { event: 'progress', session, doc: id, gen, lines: e.lines, bytes: e.bytes, done: e.done }
+        if (e.error !== undefined) event.error = e.error
+        emit(event)
+      })
+    } catch (e) {
+      cancel.cancel()
+      if (jobs.get(id) === cancel) jobs.delete(id)
+      throw e
+    }
+    return opened
   }
 
   // Each handler checks all of its parameters before it calls the addon or changes state. `id` is the request's.
@@ -184,9 +193,10 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       }
       // The first page reads from byte 0, so it doesn't wait for the index (Z37). It's read before the document is
       // registered, and a failure closes it, so nothing is left behind.
-      let firstPage: CorePage
+      let opened: Omit<Opened, 'reserved'>
       try {
-        firstPage = await doc.page(doc.generation, 0, count, addon.cancelFlag())
+        const firstPage = await doc.page(doc.generation, 0, count, addon.cancelFlag())
+        opened = begin(nextDoc, doc, firstPage)
       } catch (e) {
         doc.close()
         settle(pending, null)
@@ -194,8 +204,38 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       }
       const id = nextDoc++
       docs.set(id, doc)
-      settle(pending, `${id}:${doc.generation}`)
-      return { ...begin(id, doc, firstPage), reserved: held }
+      settle(pending, `${id}:${opened.gen}`)
+      return { ...opened, reserved: held }
+    },
+    openLocal: async (p, req): Promise<Opened> => {
+      const [id, gen, count, bytes] = [int(p, 'doc'), int(p, 'gen'), int(p, 'count'), int(p, 'bytes')]
+      if (typeof p.target !== 'string' || !decodedLocalTarget(p.target))
+        throw new Refusal('InvalidParams', 'target must be a safe decoded local path of at most 32 KiB', 'target')
+      const source = getDoc(id)
+      if (source.generation !== gen) throw new Refusal('Stale', `generation ${gen} was replaced`)
+      const pending = take(req, bytes)
+      let doc: Doc | undefined
+      let opened: Omit<Opened, 'reserved'>
+      try {
+        doc = source.openLocal(gen, p.target)
+        const local = localInfo(doc)
+        const firstPage = await doc.page(doc.generation, 0, count, addon.cancelFlag())
+        if (docs.get(id) !== source || source.generation !== gen)
+          throw new Refusal('Stale', `generation ${gen} was replaced while the local file opened`)
+        opened = begin(nextDoc, doc, firstPage, local)
+      } catch (e) {
+        doc?.close()
+        giveBack(pending) // the source lens remains mounted when navigation fails
+        if (codeOf(e) === 'Frozen') {
+          if (doc) throw new Refusal('Refused', 'local target changed while opening')
+          cancelReads(id) // only the source can be Frozen before its openLocal call returns
+        }
+        throw e
+      }
+      const next = nextDoc++
+      docs.set(next, doc)
+      settle(pending, `${next}:${opened.gen}`)
+      return { ...opened, reserved: held }
     },
     page: (p, req): Promise<Page | MdPage> => {
       const id = int(p, 'doc')
@@ -224,8 +264,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     },
     resolve: (p): LinkTarget => {
       const [id, gen] = [int(p, 'doc'), int(p, 'gen')]
-      // oxlint-disable-next-line no-control-regex -- Refuse raw control characters at the link IPC boundary.
-      if (typeof p.href !== 'string' || p.href.length > 32 << 10 || Buffer.byteLength(p.href, 'utf8') > 32 << 10 || /[\u0000-\u001f\u007f-\u009f]/.test(p.href))
+      if (!boundedLink(p.href))
         throw new Refusal('InvalidParams', 'href must be a string of at most 32 KiB, without control characters', 'href')
       const doc = getDoc(id)
       if (doc.generation !== gen) throw new Refusal('Stale', `generation ${gen} was replaced`)
@@ -240,6 +279,14 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         if (/[\u0000-\u001f\u007f-\u009f]/.test(fragment)) return { kind: 'inert' }
         const line = doc.headingLine(gen, fragment)
         return line == null ? { kind: 'inert' } : { kind: 'heading', line }
+      }
+      const target = localTarget(p.href)
+      if (target !== null) {
+        try { return { kind: 'local', target, path: doc.localPath(gen, target) } }
+        catch (e) {
+          if (codeOf(e) === 'Frozen') cancelReads(id)
+          throw e
+        }
       }
       try {
         const url = new URL(p.href)
@@ -256,12 +303,14 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const doc = getDoc(id)
       const pending = take(req, bytes)
       try {
+        const local = localInfo(doc) // a Memory refusal must precede Reload's generation change
         doc.reload()
         const gen = doc.generation
         const firstPage = await doc.page(gen, 0, count, addon.cancelFlag())
         if (docs.get(id) !== doc || doc.generation !== gen) throw new Refusal('Stale', `generation ${gen} was replaced while it opened`)
+        const opened = begin(id, doc, firstPage, local)
         settle(pending, `${id}:${gen}`)
-        return { ...begin(id, doc, firstPage), reserved: held }
+        return { ...opened, reserved: held }
       } catch (e) {
         if (docs.get(id) === doc) giveBack(pending)
         else settle(pending, null) // closed meanwhile: its lens is gone

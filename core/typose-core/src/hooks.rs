@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-/// Open byte stores, so open file handles: one per open document generation (plan C6).
+/// Open byte stores and persistent local capability roots (plan C6).
 pub static HANDLES: AtomicUsize = AtomicUsize::new(0);
 /// Index jobs whose thread hasn't ended.
 pub static JOBS: AtomicUsize = AtomicUsize::new(0);

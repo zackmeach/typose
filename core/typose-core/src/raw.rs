@@ -37,6 +37,11 @@ impl Raw {
     fn open_with(path: &Path, cache_chunks: usize, generation: u32) -> Result<Raw, DocError> {
         let _temp = Reservation::new(OPEN_TEMP).map_err(DocError::Memory)?; // declared first, released last
         let doc = Document::open_with(path, cache_chunks, generation)?;
+        Self::from_document(doc)
+    }
+
+    /// The caller reserves `OPEN_TEMP` before either kind of document construction and this initial sniff.
+    fn from_document(doc: Document) -> Result<Raw, DocError> {
         let index = LineIndex::new(doc.len(), &IndexConfig::default(), WINDOWS_1252).map_err(DocError::Memory)?;
         let head = doc.verified(doc.generation(), |store| store.read(0, CHUNK as u64))?;
         let encoding = match sniff(&head, doc.len() <= CHUNK as u64, WINDOWS_1252) {
@@ -61,8 +66,18 @@ impl Raw {
     /// freezes, so its index stops at its next block and its pages and tokens are refused. If the open fails
     /// (the file is gone, say), this generation stays as it was.
     pub fn reload(&self) -> Result<Raw, DocError> {
-        let next = Self::open_with(self.doc.path(), CACHE_CHUNKS, self.doc.generation() + 1)?;
+        let _temp = Reservation::new(OPEN_TEMP).map_err(DocError::Memory)?;
+        let next = Self::from_document(self.doc.reopened()?)?;
         let _ = self.doc.freeze("reloaded".into());
+        Ok(next)
+    }
+
+    /// A local target is opened and sniffed through the inherited capability, with source checks on both sides.
+    pub fn open_local(&self, generation: u32, target: &str) -> Result<Raw, DocError> {
+        let _temp = Reservation::new(OPEN_TEMP).map_err(DocError::Memory)?;
+        let target = self.doc.open_local(generation, target)?;
+        let next = Self::from_document(target).map_err(crate::doc::local_target_error)?;
+        self.doc.check_local_source(generation)?;
         Ok(next)
     }
 

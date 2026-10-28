@@ -12,6 +12,7 @@ pub mod encoding;
 pub mod hooks;
 pub mod index;
 pub mod limits;
+pub mod local;
 pub mod md;
 pub mod pages;
 pub mod raw;
