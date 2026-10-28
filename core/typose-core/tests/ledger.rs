@@ -53,15 +53,6 @@ unsafe impl GlobalAlloc for Counting {
         p
     }
 
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let p = unsafe { System.alloc_zeroed(layout) };
-        if !p.is_null() {
-            LIVE.fetch_add(layout.size() as u64, SeqCst);
-            check(layout.size());
-        }
-        p
-    }
-
     unsafe fn dealloc(&self, p: *mut u8, layout: Layout) {
         unsafe { System.dealloc(p, layout) };
         LIVE.fetch_sub(layout.size() as u64, SeqCst);
