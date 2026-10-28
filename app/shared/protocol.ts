@@ -73,7 +73,7 @@ export interface Opened {
   /** Brief §7.9's empty file: 0 bytes, or only whitespace. */
   blank: boolean
   firstPage: Page
-  /** Plan C1: what the ledger holds for this lens's page cache, at least the `bytes` the open asked for. */
+  /** Plan C1: what the ledger holds for this lens's page cache. A disposed background Reload returns zero. */
   reserved: number
   /** Derived local navigation keeps its inherited capability for Reload and later links. */
   localOnly?: true
@@ -90,6 +90,10 @@ export interface Methods {
   hello: { params: { protocol: number }; result: Hello }
   /** `bytes`: the lens's viewport-only cache cap, reserved with the document's floor (plan C1); refused, `Memory`. */
   open: { params: { path: string; count: number; bytes: number }; result: Opened }
+  /** First screen of a retained document, without reopening or restarting its index. One renderer lens is active. */
+  activate: { params: { doc: number; gen: number; count: number; bytes: number }; result: Opened }
+  /** Dispose a current view or Reload's exact old settled view, retaining the document/index. Pending activation cannot hand it back. */
+  deactivate: { params: { doc: number; gen: number }; result: boolean }
   /** A window of lines of generation `gen`, or the one piece a continuation token names (plan C3). Rendered: a window of
    *  blocks of the generation's Markdown build (`render`). Cancellable. */
   page: {
@@ -116,6 +120,8 @@ export interface Methods {
    *  `bytes`. False when the ledger refuses the growth, which leaves the reservation as it was, and for a lens an open
    *  or Reload has replaced. */
   reserve: { params: { doc: number; gen: number; bytes: number }; result: boolean }
+  /** Persistent tab UI and scalar metadata, separate from the active lens, in the same native reservation. */
+  reserveWorkspace: { params: { bytes: number }; result: boolean }
   /** The test-hooks build only (plan m8): what's alive in the core host. Elsewhere it's `UnknownMethod`. */
   debugStats: { params: { gc?: boolean; resetHigh?: boolean; limit?: number }; result: DebugStats }
 }
@@ -184,6 +190,8 @@ export type MainMessage = { type: 'core-port'; session: number } | { type: 'core
 export interface TyposeApi {
   /** The file named on the command line, if any: the newest named before the page asked (spec §8.1). */
   launchPath(): Promise<string | null>
+  /** Every file named at startup, consumed as one batch for serial tab creation. */
+  launchPaths(): Promise<string[]>
   /** Called with each file named after that: by a second launch, or macOS's open-file. Returns the unsubscribe. */
   onOpenPath(cb: (path: string) => void): () => void
   /** The OS Open dialog; null when cancelled. */
@@ -200,7 +208,7 @@ export interface TyposeApi {
 }
 
 /** The menu's commands (brief §3.2's M1 subset): ☰ on Windows and Linux, the native menu on macOS. */
-export type Command = 'open' | 'reload' | 'exit'
+export type Command = 'open' | 'reload' | 'close-tab' | 'exit'
 
 /** The renderer's startup marks (plan C8, §5). */
 export const STARTUP_MARKS = [

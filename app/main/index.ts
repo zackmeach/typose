@@ -6,7 +6,7 @@ import { extname, join, sep } from 'node:path'
 import coreHostPath from '../core-host/index?modulePath'
 import type { Command } from '../shared/protocol'
 import { openExternal } from './external'
-import { handoff, launchPath } from './launch'
+import { handoff, launchPaths } from './launch'
 import { startLifecycle } from './lifecycle'
 import { envWhole, isMark, marksHook } from './marks'
 
@@ -64,10 +64,10 @@ const MIME: Record<string, string> = {
 const CSP =
   "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
-/** The newest file named: by this launch, a second one, or macOS's open-file. M1's one card shows it. */
-let newest = launchPath(process.argv, process.cwd(), !!process.defaultApp)
-/** Until the page asks for its first file, a newer one replaces it; after, main sends each to the page. */
-let deliver = (path: string) => void (newest = path)
+/** Files queued before the page asks for them; subsequent opens are delivered individually. */
+let pendingPaths = launchPaths(process.argv, process.cwd(), !!process.defaultApp)
+let newest = pendingPaths.at(-1) ?? null
+let deliver = (path: string) => { newest = path; pendingPaths.push(path) }
 // macOS names files through open-file, not argv: before ready for the file a launch opens, and after.
 app.on('open-file', (event, path) => {
   event.preventDefault()
@@ -191,7 +191,7 @@ function createWindow(): BrowserWindow {
 }
 
 /**
- * macOS's native menu (spec §9): ☰'s commands, which the page runs as ☰'s do, with Close Window (Cmd+W, brief §7.2),
+ * macOS's native menu (spec §9): ☰'s commands, with Cmd+W closing a tab (or the empty window, brief §7.2),
  * and the app, Edit and Window menus of every Mac app (Edit's Copy and Select All are how Cmd+C and Cmd+A reach the
  * page). The page keeps Cmd+R (PR 4), so Reload has no accelerator here.
  */
@@ -199,7 +199,12 @@ function macMenu(win: BrowserWindow): Menu {
   const run = (command: Command) => () => win.isDestroyed() || win.webContents.send('command', command)
   return Menu.buildFromTemplate([
     { role: 'appMenu' },
-    { label: 'File', submenu: [{ label: 'Open File…', click: run('open') }, { label: 'Reload', click: run('reload') }, { role: 'close' }] },
+    { label: 'File', submenu: [
+      { label: 'Open File…', click: run('open') },
+      { label: 'Reload', click: run('reload') },
+      { label: 'Close Tab', accelerator: 'Cmd+W', click: run('close-tab') },
+      { role: 'close', accelerator: 'Shift+Cmd+W' }
+    ] },
     { role: 'editMenu' },
     { role: 'windowMenu' }
   ])
@@ -257,16 +262,25 @@ void app.whenReady().then(() => {
   app.on('second-instance', (_event, _argv, _cwd, data) => {
     if (quitting || win.isDestroyed()) return // a hand-off during a quit opens nothing and shows no window
     const sent = handoff(data)
-    const path = sent && launchPath(sent.argv, sent.cwd, !!process.defaultApp)
-    if (path) deliver(path)
+    if (sent) for (const path of launchPaths(sent.argv, sent.cwd, !!process.defaultApp)) deliver(path)
     if (win.isMinimized()) win.restore()
     if (win.isVisible()) win.focus() // focus() would show a window that isn't shown yet, ahead of plan C8's show
   })
-  handle(win, 'launch-path', () => {
+  const liveDelivery = () => {
     deliver = (path) => {
       newest = path
       if (!win.isDestroyed()) win.webContents.send('open-path', path)
     }
+  }
+  handle(win, 'launch-paths', () => {
+    liveDelivery()
+    const paths = pendingPaths
+    pendingPaths = []
+    return paths
+  })
+  handle(win, 'launch-path', () => {
+    liveDelivery()
+    pendingPaths = []
     return newest
   })
   handle(win, 'open-dialog', async () => {

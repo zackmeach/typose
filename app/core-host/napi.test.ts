@@ -79,6 +79,23 @@ it('Doc.open refuses a path that is empty, holds a NUL or is longer than the cor
   for (const bad of ['', 'a\0b', 'x'.repeat(3 * 32_767 + 1)]) expect(() => Doc.open(bad)).toThrow(expect.objectContaining({ code: 'InvalidParams' }))
 })
 
+it('inactive cache policy checks live document and generation without reopening a path', async () => {
+  const source = join(dir, 'cache-policy.txt')
+  writeFileSync(source, 'one\n')
+  const doc = Doc.open(source)
+  doc.setCacheActive(1, false)
+  expect((await doc.page(1, 0, 1, new Cancel())).items[0]).toMatchObject({ text: 'one' })
+  rmSync(source)
+  doc.setCacheActive(1, true)
+  expect(() => doc.setCacheActive(2, false)).toThrow(expect.objectContaining({ code: 'Stale' }))
+  for (const value of HOSTILE) {
+    if (isValid(value, range('gen').min, range('gen').max)) continue
+    expect(() => doc.setCacheActive(value as number, false)).toThrow()
+  }
+  doc.close()
+  expect(() => doc.setCacheActive(1, false)).toThrow(expect.objectContaining({ code: 'NoDocument' }))
+})
+
 it('plan C1: setBudget and reserveCache refuse every number that is not an integer in range', () => {
   for (const [name, call, field] of [
     ['setBudget', setBudget, 'totalmem'],

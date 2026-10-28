@@ -50,6 +50,8 @@ struct Cache {
     max: usize,
     /// The file's length: the cache never holds more than that.
     len: u64,
+    /// Inactive documents keep their floor but cannot grow, including inserts from reads already in flight.
+    active: bool,
     charge: Reservation,
 }
 
@@ -451,11 +453,25 @@ impl Cache {
     fn new(max: usize, len: u64) -> Result<Cache, OverBudget> {
         let slots = FLOOR_CHUNKS.min(max);
         let charge = Reservation::new(Self::bytes(slots, max, len))?;
-        Ok(Cache { chunks: VecDeque::with_capacity(max), slots, max, len, charge })
+        Ok(Cache { chunks: VecDeque::with_capacity(max), slots, max, len, active: true, charge })
     }
 
     fn get(&self, idx: u64) -> Option<&[u8]> {
         self.chunks.iter().find(|(i, _)| *i == idx).map(|(_, data)| data.as_slice())
+    }
+
+    fn set_active(&mut self, active: bool) {
+        self.active = active;
+        if active {
+            return; // reactivation enables future growth without allocating now
+        }
+        let floor = FLOOR_CHUNKS.min(self.max);
+        while self.chunks.len() > floor {
+            drop(self.chunks.pop_front()); // free each Vec before returning the reservation that paid for it
+        }
+        self.slots = floor;
+        let keep = Self::bytes(floor, self.max, self.len); // max still pays for the retained queue allocation
+        self.charge.shrink(self.charge.bytes() - keep);
     }
 
     /// Takes a chunk a reader has just read and verified. Past its floor the cache grows only while the ledger takes
@@ -466,7 +482,7 @@ impl Cache {
         }
         if self.chunks.len() >= self.slots {
             let more = Self::bytes(self.slots + 1, self.max, self.len) - Self::bytes(self.slots, self.max, self.len);
-            if self.slots < self.max && self.charge.grow(more).is_ok() {
+            if self.active && self.slots < self.max && self.charge.grow(more).is_ok() {
                 self.slots += 1;
             } else {
                 // At its most, or at the ledger's limit: the cache evicts, and keeps what it has (plan §7, PR 6).
@@ -513,6 +529,12 @@ impl ByteStore {
     /// What this store has charged: (its hash tables, its cache).
     pub fn charges(&self) -> (u64, u64) {
         (self.hashes.charged(), self.cache.lock().unwrap().charge.bytes())
+    }
+
+    /// Inactive tabs retain the paid floor and queue metadata. The same lock guards trimming and insertion, so a
+    /// read that finishes after deactivation cannot reclaim elastic slots. No source handle or hash state changes.
+    pub fn set_cache_active(&self, active: bool) {
+        self.cache.lock().unwrap().set_active(active);
     }
 
     pub fn len(&self) -> u64 {
@@ -683,5 +705,80 @@ mod tests {
         let store = ByteStore::open(&path).unwrap();
         store.read(0, 1).unwrap();
         std::fs::remove_file(&path).expect("Typose must never lock a file (brief §7.9)");
+    }
+
+    #[test]
+    fn inactive_cache_releases_growth_preserves_queue_and_can_reactivate() {
+        let mut cache = Cache::new(8, (12 * CHUNK) as u64).unwrap();
+        for idx in 0..8 {
+            cache.insert(idx, vec![idx as u8; CHUNK]);
+        }
+        let (capacity, max) = (cache.chunks.capacity(), cache.max);
+        cache.set_active(false);
+        let floor = Cache::bytes(FLOOR_CHUNKS, max, cache.len);
+        assert_eq!((cache.slots, cache.chunks.len(), cache.charge.bytes()), (FLOOR_CHUNKS, FLOOR_CHUNKS, floor));
+        assert_eq!((cache.max, cache.chunks.capacity()), (max, capacity));
+        assert!(cache.get(0).is_none());
+        assert_eq!(cache.get(7).unwrap()[0], 7);
+        cache.insert(8, vec![8; CHUNK]);
+        cache.insert(8, vec![8; CHUNK]); // duplicate late replies neither grow nor evict another chunk
+        assert_eq!((cache.slots, cache.chunks.len(), cache.charge.bytes()), (FLOOR_CHUNKS, FLOOR_CHUNKS, floor));
+        assert!(cache.get(5).is_some());
+        cache.set_active(false);
+        assert_eq!(cache.charge.bytes(), floor);
+        cache.set_active(true);
+        assert_eq!((cache.slots, cache.chunks.len(), cache.charge.bytes()), (FLOOR_CHUNKS, FLOOR_CHUNKS, floor));
+        cache.insert(9, vec![9; CHUNK]);
+        assert_eq!((cache.slots, cache.chunks.len(), cache.charge.bytes()), (5, 5, floor + CHUNK as u64));
+    }
+
+    #[test]
+    fn inactive_cache_keeps_empty_small_and_partial_file_floors_paid() {
+        for (max, len) in [(1, 0), (1, 17), (2, CHUNK as u64 + 17), (5, (4 * CHUNK) as u64 + 17)] {
+            let mut cache = Cache::new(max, len).unwrap();
+            for idx in 0..len.div_ceil(CHUNK as u64) {
+                let size = len.saturating_sub(idx * CHUNK as u64).min(CHUNK as u64) as usize;
+                cache.insert(idx, vec![0; size]);
+            }
+            let capacity = cache.chunks.capacity();
+            cache.set_active(false);
+            let floor = FLOOR_CHUNKS.min(max);
+            assert_eq!(cache.slots, floor);
+            assert!(cache.chunks.len() <= floor);
+            assert_eq!(cache.charge.bytes(), Cache::bytes(floor, max, len));
+            assert_eq!(cache.chunks.capacity(), capacity);
+            assert_eq!(cache.max, max);
+            let data: usize = cache.chunks.iter().map(|(_, bytes)| bytes.capacity()).sum();
+            assert!(data as u64 + (max * size_of::<(u64, Vec<u8>)>()) as u64 <= cache.charge.bytes());
+        }
+    }
+
+    #[test]
+    fn an_insert_prepared_before_deactivation_cannot_regrow_the_cache() {
+        use std::sync::Barrier;
+        let cache = Arc::new(Mutex::new(Cache::new(8, (12 * CHUNK) as u64).unwrap()));
+        for idx in 0..8 {
+            cache.lock().unwrap().insert(idx, vec![0; CHUNK]);
+        }
+        let prepared = Arc::new(Barrier::new(2));
+        let insert = Arc::new(Barrier::new(2));
+        let reader = {
+            let (cache, prepared, insert) = (cache.clone(), prepared.clone(), insert.clone());
+            std::thread::spawn(move || {
+                let bytes = vec![9; CHUNK]; // a cache-miss read owns this outside the cache lock
+                prepared.wait();
+                insert.wait();
+                cache.lock().unwrap().insert(9, bytes);
+            })
+        };
+        prepared.wait();
+        cache.lock().unwrap().set_active(false);
+        insert.wait();
+        reader.join().unwrap();
+        let cache = cache.lock().unwrap();
+        assert!(!cache.active);
+        assert_eq!((cache.slots, cache.chunks.len()), (FLOOR_CHUNKS, FLOOR_CHUNKS));
+        assert_eq!(cache.charge.bytes(), Cache::bytes(FLOOR_CHUNKS, cache.max, cache.len));
+        assert_eq!(cache.get(9).unwrap()[0], 9);
     }
 }

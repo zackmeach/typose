@@ -7,7 +7,7 @@ import { rmSync, statSync, truncateSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { GARBAGE_PER_UNIT, WRAP, capFor, rowCost, rowsFor } from '../app/renderer/lenses/page-cache'
 import type { Limits, Opened, Page as CorePage } from '../app/shared/protocol'
-import { FIXTURES, type Launched, type TestHooks, debugStats, finish, fixture, launch, sparseFixture, test, visibleRows, waitIndexed, waitOpen } from './app'
+import { FIXTURES, type Launched, type TestHooks, debugStats, finish, fixture, launch, sparseFixture, test, visibleRows, waitIndexed, waitOpen, workspaceHeld } from './app'
 import { mib, processMemory, summed } from './memory'
 
 type CacheStats = { charged: number; cap: number; reserved: number }
@@ -105,7 +105,7 @@ async function layoutGate(s: (typeof SCRIPTS)[number]): Promise<void> {
       const host = await win.evaluate(() => document.querySelector('.raw-host')!.clientHeight)
       const reserved = capFor(L, 3 * Math.ceil(host / 20) + 1)
       await expect.poll(async () => (await cacheStats(win))?.reserved, { timeout: 30_000 }).toBe(reserved)
-      expect((await debugStats(win)).ledger.rendererCache).toBe(reserved)
+      expect((await debugStats(win)).ledger.rendererCache).toBe(reserved + await workspaceHeld(win))
       await expect.poll(() => win.evaluate(() => {
         const rows = [...document.querySelectorAll('.vl-row')]
         return rows.length > 0 && rows.every((r) => r.querySelector('.text'))
@@ -185,7 +185,7 @@ async function viewportOnly(win: Page, L: Limits, step: string): Promise<void> {
   console.log(`${step}: Raw ${host} px (${viewport} px of rows), ${mounted} rows mounted; cache charged ${mib(s.charged)} of ${mib(s.reserved)} reserved`)
   expect(mounted, step).toBeLessThanOrEqual(Math.ceil(viewport / 20) + 1) // the viewport's rows, no overscan
   expect(s.charged, step).toBeLessThanOrEqual(s.reserved)
-  expect((await debugStats(win)).ledger.rendererCache, step).toBe(s.reserved)
+  expect((await debugStats(win)).ledger.rendererCache, step).toBe(s.reserved + await workspaceHeld(win))
 }
 
 /**
@@ -205,11 +205,12 @@ test('under a budget that holds only the viewport, Raw mounts only the viewport,
     const hello = await core<{ limits: Limits }>(probe.win, 'hello', { protocol: 1 })
     if (!('ok' in hello)) throw new Error(`hello: ${hello.code}`)
     const { ledger, charges } = await debugStats(probe.win)
+    const workspace = await workspaceHeld(probe.win)
     const inner = await probe.win.evaluate(() => window.innerHeight)
     await finish(probe)
     const L = hello.ok.limits
     const floor = capFor(L, Math.ceil(inner / 20) + 1, false) // the open's viewport-only cap, at the window's height
-    const budget = ledger.pool + charges[1].total + L.openTemp + floor + statSync(path).size + rowCost(L)
+    const budget = ledger.pool + charges[1].total + L.openTemp + floor + statSync(path).size + rowCost(L) + workspace
     console.log(`budget ${mib(budget)}: pool ${mib(ledger.pool)}, document ${mib(charges[1].total)}, view ${mib(floor)} (${inner} px of window)`)
     const l = await launch({ hooks: true, file: path, env: { TYPOSE_TEST_BUDGET: String(budget) } })
     const { win } = l
@@ -243,7 +244,7 @@ test('under a budget that holds only the viewport, Raw mounts only the viewport,
 /** The lens on screen has its reservation settled, and the core holds exactly that for it. */
 async function holdsItsReservation(win: Page): Promise<boolean> {
   const [s, { ledger }] = [await cacheStats(win), await debugStats(win)]
-  return s !== null && s.reserved > 0 && s.reserved === ledger.rendererCache
+  return s !== null && s.reserved > 0 && s.reserved + await workspaceHeld(win) === ledger.rendererCache
 }
 
 /**
@@ -272,7 +273,7 @@ test('a Reload the ledger refuses keeps Raw at its generation, with a banner, an
     expect(rows.every((r) => r.text === `line ${r.line - 1}`)).toBe(true) // still showing, gutter numbers from 1
     const s = (await cacheStats(win))!
     expect(s.charged).toBeLessThanOrEqual(s.reserved)
-    expect((await debugStats(win)).ledger.rendererCache).toBe(s.reserved) // given back to the lens that stayed
+    expect((await debugStats(win)).ledger.rendererCache).toBe(s.reserved + await workspaceHeld(win)) // given back to the lens that stayed
     await debugStats(win, { limit: ledger.limit })
     await win.locator('.banner-button').click()
     await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '2')

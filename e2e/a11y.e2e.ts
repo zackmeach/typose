@@ -88,7 +88,7 @@ test('Raw is a named region whose text leaves out the gutter, and ☰ exposes me
   if (!MAC) {
     const [trigger] = cdp.find('button', 'Menu')
     expect({ popup: cdp.prop(trigger, 'hasPopup'), expanded: cdp.prop(trigger, 'expanded') }).toEqual({ popup: 'menu', expanded: false })
-    await win.getByRole('button', { name: 'Menu' }).click()
+    await win.getByRole('button', { name: 'Menu', exact: true }).click()
     await expect(win.getByRole('menu')).toBeVisible()
     const open = await axTree(win)
     const [menu] = open.find('menu')
@@ -104,7 +104,7 @@ test('Raw is a named region whose text leaves out the gutter, and ☰ exposes me
     for (const r of shown) expect(uiaSaid).toContain(r.text)
     expect(uiaSaid).not.toMatch(/\d/)
     expect(tree.find((n) => n.name === 'Menu')).toMatchObject({ type: 'Button', expand: 'Collapsed' })
-    await win.getByRole('button', { name: 'Menu' }).click()
+    await win.getByRole('button', { name: 'Menu', exact: true }).click()
     await expect(win.getByRole('menu')).toBeVisible()
     const menu = uiaNodes(await uiaTree(app)).find((n) => n.type === 'Menu')
     expect(menu?.children?.filter((n) => n.type === 'MenuItem').map((n) => n.name)).toEqual(['Open file…', 'Reload', EXIT])
@@ -248,7 +248,7 @@ test('axe finds no violations on the chrome: empty, with Raw, with ☰ open, and
   const { app, win } = l
   report.raw = await axe(win)
   if (!MAC) {
-    await win.getByRole('button', { name: 'Menu' }).click()
+    await win.getByRole('button', { name: 'Menu', exact: true }).click()
     await expect(win.getByRole('menu')).toBeVisible()
     report.menu = await axe(win)
     await win.keyboard.press('Escape')

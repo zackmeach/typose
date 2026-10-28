@@ -36,11 +36,20 @@ export type Card =
       /** Rendered can't show. The tooltip is `RENDERED_OFF`. */
       renderedOff?: RenderedOff
     }
-  | { kind: 'failed'; path: string; code: ErrorCode; message: string; localOnly?: true }
+  | {
+      kind: 'failed'; path: string; code: ErrorCode; message: string; localOnly?: true
+      /** Inactive activation froze, but this tab still owns the native document and its Reload capability. */
+      reloadable?: true
+    }
   /** Plan C7: the core died. `line` is where its view was; `ready` once a new core is up to Reopen it in. */
   | { kind: 'gone'; path?: string; line?: number; ready: boolean; localOnly?: true }
 
-export type Action = 'Open file…' | 'Locate…' | 'Retry' | 'Close' | 'Reopen'
+export type Action = 'Open file…' | 'Locate…' | 'Retry' | 'Reload' | 'Close' | 'Reopen'
+
+/** Display needs scalar identity, never the selected controller's first page or memory lease. */
+export type DisplayCard = Exclude<Card, { kind: 'open' }> | (Omit<Extract<Card, { kind: 'open' }>, 'opened'> & {
+  opened: Omit<Opened, 'firstPage' | 'reserved'>
+})
 
 export interface CardView {
   /** The header's status text. */
@@ -61,7 +70,7 @@ const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFracti
 const lines = (n: number, format: (n: number) => string) => `${format(n)} line${n === 1 ? '' : 's'}`
 
 /** What the card shows in each state (brief §7.9, §8.2; the memory refusal is plan §7 proposal 1). */
-export function view(card: Card): CardView {
+export function view(card: DisplayCard): CardView {
   const plain = { status: '', progress: null, banner: null, lenses: null }
   const say = (message: string, ...actions: Action[]): CardView => ({ ...plain, body: { message, actions } })
   switch (card.kind) {
@@ -96,6 +105,7 @@ export function view(card: Card): CardView {
       }
     }
     case 'failed':
+      if (card.reloadable) return say(`Can't open ${card.path} · ${card.message}`, 'Reload', 'Close')
       // A lost local capability cannot be recreated by treating its display path as a manual open.
       if (card.localOnly) return say(`Can't open ${card.path} · ${card.message}`, 'Locate…', 'Close')
       switch (card.code) {

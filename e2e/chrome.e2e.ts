@@ -54,7 +54,7 @@ test('Windows: the bar is the window’s caption except ☰, the caption buttons
   expect(hits).toEqual([HT.CAPTION, HT.CAPTION, HT.CAPTION, HT.CLIENT, HT.CLIENT, HT.MINBUTTON, HT.MAXBUTTON, HT.CLOSE])
   // While ☰ is open, React Aria's underlay covers the window, and a click on it closes the menu: the bar is the page's
   // then, not a drag.
-  await win.getByRole('button', { name: 'Menu' }).click()
+  await win.getByRole('button', { name: 'Menu', exact: true }).click()
   await expect(win.getByRole('menu')).toBeVisible()
   await expect.poll(() => hitTest(app, [p.bar, p.title])).toEqual([HT.CLIENT, HT.CLIENT])
   await win.keyboard.press('Escape')
@@ -130,7 +130,7 @@ test('macOS: a minimal native menu, and Cmd+R is the page’s Reload', async () 
   // dead-key test below is Windows' and Linux's.)
   const menu = await appMenu(l)
   expect(menu?.map((m) => m.role ?? m.label)).toEqual(['appmenu', 'File', 'editmenu', 'windowmenu'])
-  expect(menu?.[1].items).toEqual(['Open File…', 'Reload', 'close'])
+  expect(menu?.[1].items).toEqual(['Open File…', 'Reload', 'Close Tab', 'close'])
   await win.evaluate(() => Object.assign(window, { pageLifetime: 'the first page' }))
   await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '1')
   await pressAsOS(l, 'R', ['meta'])
@@ -206,12 +206,12 @@ test('☰ is a menu of Open file…, Reload and Exit, each wired to its command;
   await waitOpen(win)
   await stubOpenDialog(app, second)
 
-  const trigger = win.getByRole('button', { name: 'Menu' })
+  const trigger = win.getByRole('button', { name: 'Menu', exact: true })
   const exit = process.platform === 'linux' ? 'Quit' : 'Exit' // brief §3.2
   const opened = async () => {
     await trigger.click()
     await expect(win.getByRole('menu')).toBeVisible()
-    await expect(win.getByRole('menuitem')).toHaveText(['Open file…', 'Reload', exit])
+    await expect(win.getByRole('menuitem')).toHaveText(['Open file…', 'Reload', 'Close tab', exit])
   }
   // Escape closes it and gives focus back to ☰.
   await opened()

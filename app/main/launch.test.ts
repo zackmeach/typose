@@ -1,10 +1,18 @@
 // Spec §8.1 and plan C4 for what PR 8 adds: the path a launch names, and the untrusted message a second instance sends.
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { handoff, launchPath } from './launch'
+import { handoff, launchPath, launchPaths } from './launch'
 
 const cwd = resolve('/launch-cwd')
 const exe = 'typose'
+
+describe('launchPaths', () => {
+  it('preserves all nonempty file arguments in order, including development and -- rules', () => {
+    expect(launchPaths([exe, 'a.txt', 'b.md', ''], cwd, false)).toEqual([resolve(cwd, 'a.txt'), resolve(cwd, 'b.md')])
+    expect(launchPaths(['electron', '--switch', 'app', 'a.txt', '--', '-b.md'], cwd, true)).toEqual([resolve(cwd, 'a.txt'), resolve(cwd, '-b.md')])
+    expect(launchPaths([exe, '--switch', '--'], cwd, false)).toEqual([])
+  })
+})
 
 describe('launchPath', () => {
   it('takes the last path, resolved against the cwd', () => expect(launchPath([exe, 'a.txt', 'b.txt'], cwd, false)).toBe(resolve(cwd, 'b.txt')))
