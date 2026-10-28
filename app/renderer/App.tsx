@@ -216,8 +216,9 @@ export function App({ core }: { core: CoreClient }) {
         }
         const held = await holdRendered(opened, build)
         if (!alive || held === 'stale') return
-        // They chose Raw while the reservation was in flight: give it back and stay.
-        if (picked.current === 'raw') {
+        // Raw may have moved while the reservation was in flight. Only an explicit Rendered choice overrides that.
+        if (picked.current === 'raw' || (picked.current !== 'rendered' && lens.current?.readerMoved())) {
+          void budgetFor(opened)?.reserveRendered(opened.gen, 0)
           lens.current?.resumeReservation()
           if (restoreFocus.current) {
             lens.current?.focus()
@@ -244,7 +245,8 @@ export function App({ core }: { core: CoreClient }) {
           lens.current?.focus()
           restoreFocus.current = false
         }
-        setCard((c) => (c.kind === 'open' && c.opened === opened ? { ...c, rendering: false, renderedOff: off ?? c.renderedOff, lens: 'raw' } : c))
+        const frozen = e instanceof CoreCallError && e.code === 'Frozen' ? e.message : undefined
+        setCard((c) => (c.kind === 'open' && c.opened === opened ? { ...c, rendering: false, renderedOff: off ?? c.renderedOff, frozen: c.frozen ?? frozen, lens: 'raw' } : c))
         if (!off && !(e instanceof CoreCallError && (e.code === 'Cancelled' || e.code === 'Stale' || e.code === 'CoreGone' || e.code === 'Frozen')))
           console.error('render failed', e)
       }

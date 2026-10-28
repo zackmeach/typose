@@ -12,7 +12,35 @@ import { type TestHooks, assertNetLog, debugStats, finish, fixture, launch, life
 
 type ReserveProbe = { held: boolean; bRendered: boolean; release?: () => void }
 type ShrinkProbe = { held: boolean; bytes?: number; release?: () => void }
-type ReserveWindow = Window & { renderReserveProbe?: ReserveProbe; shrinkReserveProbe?: ShrinkProbe }
+type PauseProbe = { held: boolean; release?: () => void }
+type ReserveWindow = Window & { renderReserveProbe?: ReserveProbe; shrinkReserveProbe?: ShrinkProbe; renderPause?: PauseProbe }
+
+/** Pause a real render request or its following reservation response; neither result is forged. */
+async function pauseRender(win: Page, where: 'request' | 'reserve-response'): Promise<void> {
+  await win.evaluate((where) => {
+    const core = (window as unknown as {
+      typoseTest: { core: { call(method: string, params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> } }
+    }).typoseTest.core
+    const state: PauseProbe = { held: false }
+    ;(window as unknown as ReserveWindow).renderPause = state
+    const call = core.call.bind(core)
+    let rendered = false
+    let claimed = false
+    const pause = async () => {
+      state.held = true
+      await new Promise<void>((done) => { state.release = done })
+    }
+    core.call = async (method, params, signal) => {
+      const selected = !claimed && (where === 'request' ? method === 'render' : method === 'reserve' && rendered)
+      if (selected) claimed = true
+      if (selected && where === 'request') await pause()
+      const reply = await call(method, params, signal)
+      if (method === 'render') rendered = true
+      if (selected && where === 'reserve-response') await pause()
+      return reply
+    }
+  }, where)
+}
 
 const SAMPLE = [
   '# Heading one',
@@ -281,6 +309,50 @@ test('a delayed old Rendered reservation response does not block a replacement f
   await waitRendered(win)
   await expect(win.getByRole('tab', { name: 'Rendered', exact: true })).toHaveAttribute('aria-selected', 'true')
   await expect(win.locator('main h1').first()).toHaveText('B')
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+test('reading Raw during a delayed Rendered reservation keeps Raw and releases the unmounted tree allowance', async () => {
+  const l = await launch({ hooks: true })
+  const { win } = l
+  await expect(win.locator('.open-button')).toBeVisible()
+  await pauseRender(win, 'reserve-response')
+  const file = fixture('read-during-reserve.md', Array.from({ length: 400 }, (_, i) => `Paragraph ${i}.\n\n`).join(''))
+  await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), file)
+  await expect.poll(() => win.evaluate(() => (window as unknown as ReserveWindow).renderPause?.held)).toBe(true)
+  await waitOpen(win)
+  await expect.poll(async () => (await debugStats(win)).jobs).toBe(0)
+  await win.locator('.vl-scroller').focus()
+  await win.keyboard.press('PageDown')
+  await expect.poll(() => win.locator('.vl-scroller').evaluate((el) => el.scrollTop)).toBeGreaterThan(0)
+  await win.evaluate(() => (window as unknown as ReserveWindow).renderPause!.release!())
+  await win.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))))
+  await expect(win.getByRole('tab', { name: 'Raw', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await expect(win.locator('.md-scroller')).toHaveCount(0)
+  await expect.poll(async () => {
+    const raw = await win.evaluate(() => (window as unknown as { typoseTest: { client: { cache: () => { reserved: number } } } }).typoseTest.client.cache())
+    return (await debugStats(win)).ledger.rendererCache - raw.reserved
+  }).toBe(0)
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+test('a render that detects a write after indexing freezes Raw with the Reload banner', async () => {
+  const l = await launch({ hooks: true })
+  const { win } = l
+  await expect(win.locator('.open-button')).toBeVisible()
+  await pauseRender(win, 'request')
+  const file = fixture('write-before-render.md', '# First version\n\nA paragraph.\n')
+  await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), file)
+  await expect.poll(() => win.evaluate(() => (window as unknown as ReserveWindow).renderPause?.held)).toBe(true)
+  await waitOpen(win)
+  await expect.poll(async () => (await debugStats(win)).jobs).toBe(0)
+  writeFileSync(file, '# Other version\n\nA paragraph.\n')
+  await win.evaluate(() => (window as unknown as ReserveWindow).renderPause!.release!())
+  await expect(win.locator('.banner')).toHaveText('Changed on disk · Reload (Ctrl+R)')
+  await expect(win.locator('.vl-row .text').first()).toContainText('# First version')
+  await expect(win.locator('.md-scroller')).toHaveCount(0)
   expect(l.pageErrors).toEqual([])
   await finish(l)
 })
