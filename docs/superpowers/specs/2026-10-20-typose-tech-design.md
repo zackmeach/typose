@@ -710,6 +710,9 @@ Sequence [Z38, amended by Z39 and Z53]:
   - **outputs:** the YAML worker's parse throughput (which set `yaml.treeMaxBytes` to 8MiB [Z36]) and the scanner decision.
 
 ### 13.2 Milestones (each one is a sequence of PRs; the implementation plan details M1 first)
+
+**Implementation closeout [Z65]:** record M1's remaining gaps and continue to the first formatted lens. This does not establish qualification: Z58's Mac acceptance and Z59's cold-startup requirements still apply. Pending gates remain pending; failures remain failures.
+
 | # | Milestone | Exit criterion |
 |---|---|---|
 | M1 | **Walking skeleton.** Repo, CI, security baseline (§7), core host + protocol, byte store and generations, the Raw lens on the virtualizer, title bars on Windows and macOS, single instance and CLI. | Open a 10GiB file into Raw within the §10.2 budgets, on an unsigned dev build (signing starts at M7, §15). Z34's aggregate accounting and enforcement, with a deterministic multi-document budget-exhaustion test [Z47]. Cold startup measured on the M1 app and within its targets [Z54, Z59, Z67]. No corresponding unexplained exit in the M1 baseline [Z56]. M1 stays open while Mac acceptance is pending [Z58] |
