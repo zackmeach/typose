@@ -348,6 +348,19 @@ impl Document {
     }
 
     pub(crate) fn check_local_source(&self, generation: u32) -> Result<(), DocError> {
+        self.checked_local_file(generation).map(drop)
+    }
+
+    /// A fresh index handle must retain the derived document's local-only policy too.
+    pub(crate) fn index_file(&self) -> Result<File, DocError> {
+        if self.local_only {
+            self.checked_local_file(self.generation)
+        } else {
+            self.store.reopen().map_err(|e| self.fail(StoreError::Io(e)))
+        }
+    }
+
+    fn checked_local_file(&self, generation: u32) -> Result<File, DocError> {
         if generation != self.generation {
             return Err(DocError::Stale { current: self.generation, asked: generation });
         }
@@ -363,11 +376,12 @@ impl Document {
                 if !route.same_file(&file, self.store.file())? {
                     return Ok(None);
                 }
-                Ok(Some(FileId::of_file(&file)?))
+                let id = FileId::of_file(&file)?;
+                Ok(Some((file, id)))
             })
             .map_err(local_error);
         match current {
-            Ok(Some(now)) if now == self.id => Ok(()),
+            Ok(Some((file, now))) if now == self.id => Ok(file),
             Ok(_) => Err(self.freeze("changed on disk".into())),
             Err(e @ DocError::Memory(_)) => Err(e),
             Err(e) => Err(self.freeze(format!("local source unavailable: {e}"))),
@@ -1017,6 +1031,29 @@ mod tests {
         junction(&link, r"\??\pipe\");
         assert!(matches!(source.local_path(1, "target.txt"), Err(DocError::Refused(_))));
         assert!(matches!(source.open_local(1, "target.txt"), Err(DocError::Refused(_))));
+        assert!(!server.connected());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn derived_index_open_uses_the_local_route_and_refuses_a_retargeted_ancestor() {
+        let scratch = Scratch::new("local-index-route");
+        let server = PipeServer::new("index-target.txt");
+        let sub = scratch.0.join("sub");
+        fs::create_dir(&sub).unwrap();
+        let source_path = scratch.0.join("source.md");
+        fs::write(&source_path, b"# Source").unwrap();
+        fs::write(sub.join(server.name()), b"safe").unwrap();
+        let source = crate::raw::Raw::open(&source_path).unwrap();
+        let derived = source.open_local(1, &format!("sub/{}", server.name())).unwrap();
+        let held = scratch.0.join("held-index.txt");
+        fs::rename(sub.join(server.name()), &held).unwrap();
+        let moved = scratch.0.join("moved");
+        fs::rename(&sub, &moved).unwrap();
+        fs::rename(&held, moved.join(server.name())).unwrap();
+        junction(&sub, r"\??\pipe\");
+        assert!(derived.index(|_| true).is_err(), "indexing must refuse the changed local route");
+        assert!(derived.document().frozen().is_some());
         assert!(!server.connected());
     }
 

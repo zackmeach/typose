@@ -156,10 +156,9 @@ impl Raw {
             Err(NoSlot::Budget(e)) => return Err(DocError::Memory(e).to_string()),
         };
         let store = self.doc.store();
-        let built = store.reopen().map_err(crate::store::StoreError::Io).and_then(|file| {
-            build(&file, store.len(), IndexConfig::default(), &store.hashes(), &self.index, |p| {
-                on_progress(p) && self.doc.frozen().is_none()
-            })
+        let file = self.doc.index_file().map_err(|e| e.to_string())?;
+        let built = build(&file, store.len(), IndexConfig::default(), &store.hashes(), &self.index, |p| {
+            on_progress(p) && self.doc.frozen().is_none()
         });
         if let Err(e) = built {
             return Err(self.doc.fail(e).to_string());
