@@ -3,7 +3,7 @@ import { expect } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
 import { chmodSync, closeSync, openSync, rmSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
-import { FIXTURES, finish, fixture, launch, osFocus, test, visibleRows, waitIndexed, waitOpen } from './app'
+import { FIXTURES, finish, fixture, launch, osFocus, pressAsOS, test, visibleRows, waitIndexed, waitOpen } from './app'
 
 test('an empty file and a whitespace-only one show "Empty file"', async () => {
   for (const [name, bytes] of [
@@ -72,18 +72,8 @@ test('a same-size write freezes the document with nothing new shown; Ctrl+R relo
   // this fails wherever Ctrl+R could reach one.
   await osFocus(l)
   await l.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setMenuBarVisibility(true))
-  // A key as the OS delivers it. Playwright's keyboard goes through CDP, which never reaches the menu.
-  const press = (keyCode: string, modifiers: ('control' | 'meta')[]) =>
-    l.app.evaluate(
-      ({ BrowserWindow }, { keyCode, modifiers }) => {
-        const contents = BrowserWindow.getAllWindows()[0].webContents
-        for (const type of ['keyDown', 'char', 'keyUp'] as const)
-          if (type !== 'char' || keyCode.length === 1) contents.sendInputEvent({ type, keyCode: type === 'char' ? keyCode.toLowerCase() : keyCode, modifiers })
-      },
-      { keyCode, modifiers }
-    )
   // Ctrl+R, or Cmd+R on macOS.
-  const reloadKey = () => press('R', [process.platform === 'darwin' ? 'meta' : 'control'])
+  const reloadKey = () => pressAsOS(l, 'R', [process.platform === 'darwin' ? 'meta' : 'control'])
   await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '1')
 
   // A same-size, in-place write near the end, where nothing has been read yet.
@@ -104,7 +94,7 @@ test('a same-size write freezes the document with nothing new shown; Ctrl+R relo
   await expect(win.locator('.banner')).toHaveCount(0)
   await expect.poll(async () => (await visibleRows(win)).find((r) => r.line === 59_991)?.text).toBe('CHANGED'.padEnd(63, '!'))
   // Brief §7.2 binds Reload to F5 too.
-  await press('F5', [])
+  await pressAsOS(l, 'F5', [])
   await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '3')
   expect(await win.evaluate(() => (window as unknown as { pageLifetime?: string }).pageLifetime)).toBe('the page that opened the file')
   expect(l.pageErrors).toEqual([])

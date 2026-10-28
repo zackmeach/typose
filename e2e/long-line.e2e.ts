@@ -107,21 +107,37 @@ test("1 GiB on one line: the first piece shows before the scan passes the line's
     for (const [control, m] of vetoControls(marks)) expect(scanGate(m).verdict, control).toBe('fail')
   })
 
-  await test.step("the line's first MiB loads on demand, piece by piece, then says how much more there is", async () => {
+  await test.step("the line's first MiB loads on demand, piece by piece, over rows of 2,048 units, then says how much more there is", async () => {
     const rowsOfLine = win.locator('.vl-row[data-line="0"]')
-    await expect(rowsOfLine).toHaveCount(1)
+    await expect(rowsOfLine).toHaveCount(32) // Z66: the first piece, 64 KiB of ASCII, over 32 rows of 2,048 units
     await win.getByRole('button', { name: 'Show more of line 1' }).click()
-    await expect(win.locator('.vl-row .more').filter({ hasText: /more on this line$/ })).toHaveText('+1,072.7 MB more on this line', { timeout: 30_000 })
-    await expect(rowsOfLine).toHaveCount(16)
-    const texts = await rowsOfLine.evaluateAll((rows) =>
-      rows.sort((a, b) => Number(a.dataset.piece) - Number(b.dataset.piece)).map((r) => r.querySelector('.text')?.textContent ?? '')
-    )
-    expect(Math.max(...texts.map((t) => t.length))).toBeLessThanOrEqual(65_536) // C2: no item over 64 KiB
+    // Each piece comes as its rows scroll into view: every row's text is read on the way down to the line's end.
+    const seen = new Map<string, string>()
+    const last = win.locator('.vl-row .more').filter({ hasText: /more on this line$/ })
+    await win.locator('.vl-scroller').focus()
+    for (let i = 0; i < 100 && (await last.count()) === 0; i++) {
+      await expect.poll(() => rowsOfLine.evaluateAll((rows) => rows.every((r) => r.querySelector('.text')))).toBe(true)
+      for (const [at, text] of await rowsOfLine.evaluateAll((rows) => rows.map((r) => [`${r.dataset.piece}:${r.dataset.sub}`, r.querySelector('.text')!.textContent!])))
+        seen.set(at, text)
+      await win.keyboard.press('PageDown')
+    }
+    await expect(last).toHaveText('+1,072.7 MB more on this line', { timeout: 30_000 })
+    await expect.poll(() => rowsOfLine.evaluateAll((rows) => rows.every((r) => r.querySelector('.text')))).toBe(true)
+    for (const [at, text] of await rowsOfLine.evaluateAll((rows) => rows.map((r) => [`${r.dataset.piece}:${r.dataset.sub}`, r.querySelector('.text')!.textContent!])))
+      seen.set(at, text)
+    // Each piece, whole from its rows, in order: 16 of them, each a row's most at a time.
+    const texts = Array.from({ length: 16 }, (_, piece) => {
+      const rows: string[] = []
+      for (let sub = 0; seen.has(`${piece}:${sub}`); sub++) rows.push(seen.get(`${piece}:${sub}`)!)
+      return rows
+    })
+    expect(Math.max(...texts.flat().map((t) => t.length))).toBeLessThanOrEqual(2048) // Z66
+    expect(Math.max(...texts.map((rows) => rows.join('').length))).toBeLessThanOrEqual(65_536) // C2: no piece over 64 KiB
     const shown = Buffer.alloc(1 << 20)
     const fd = openSync(ONE_LINE, 'r')
     readSync(fd, shown, 0, shown.length, 0)
     closeSync(fd)
-    expect(texts.join('')).toBe(shown.toString('utf8')) // the pieces, in order, are the line's first MiB
+    expect(texts.map((rows) => rows.join('')).join('')).toBe(shown.toString('utf8')) // the pieces, in order, are the line's first MiB
   })
   expect(l.pageErrors).toEqual([])
   await finish(l)

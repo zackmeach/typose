@@ -1,7 +1,7 @@
 // Plan PR 7's title bars and menus (brief §3.1, §3.2; spec §9): WCO on Windows, the traffic lights on macOS, ☰, and
 // Electron's default menu gone.
 import { expect } from '@playwright/test'
-import { type Launched, finish, fixture, launch, lifecycle, osFocus, stubOpenDialog, test, waitOpen } from './app'
+import { type Launched, finish, fixture, launch, lifecycle, osFocus, pressAsOS, stubOpenDialog, test, waitOpen } from './app'
 import { HT, doubleClickMessage, hitTest, reaches, realMouse } from './win32'
 
 const MAC = process.platform === 'darwin'
@@ -110,18 +110,6 @@ test('macOS: the traffic lights are centred in the 40 px bar, which has no ☰, 
   expect(title.x + title.width).toBeLessThanOrEqual((await win.evaluate(() => innerWidth)) - 80)
   await finish(l)
 })
-
-/** A key as the OS delivers it, through the page and then a menu's accelerators. Playwright's keyboard goes through
- *  CDP, which never reaches the accelerators. */
-const pressAsOS = (l: Launched, keyCode: string, modifiers: ('control' | 'meta' | 'shift')[]) =>
-  l.app.evaluate(
-    ({ BrowserWindow }, { keyCode, modifiers }) => {
-      const contents = BrowserWindow.getAllWindows()[0].webContents
-      for (const type of ['keyDown', 'char', 'keyUp'] as const)
-        if (type !== 'char' || keyCode.length === 1) contents.sendInputEvent({ type, keyCode: type === 'char' ? keyCode.toLowerCase() : keyCode, modifiers })
-    },
-    { keyCode, modifiers }
-  )
 
 /** The app menu as main left it: each menu's role or label, and its items'. */
 const appMenu = (l: Launched) =>

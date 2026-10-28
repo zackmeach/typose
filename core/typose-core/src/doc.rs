@@ -259,10 +259,7 @@ impl Document {
     /// Freezes the document (spec §3.1): nothing more is read until Reload. Also how Raw stops a superseded
     /// generation's index (`Raw::reload`) and records an index failure (plan C6).
     pub(crate) fn freeze(&self, why: String) -> DocError {
-        let mut end = why.len().min(REASON_MAX); // what the metadata's charge holds
-        while !why.is_char_boundary(end) {
-            end -= 1;
-        }
+        let end = why.floor_char_boundary(REASON_MAX); // what the metadata's charge holds
         *self.frozen.lock().unwrap() = Some(why[..end].to_owned());
         DocError::Frozen(why)
     }
@@ -278,6 +275,24 @@ mod tests {
 
     fn pattern(len: usize, seed: u8) -> Vec<u8> {
         (0..len).map(|i| ((i * 31) as u8).wrapping_add(seed)).collect()
+    }
+
+    #[test]
+    fn frozen_reason_fits_its_byte_charge_without_splitting_utf8() {
+        let doc = Document::open(&temp_file("doc-freeze-reason", b"")).unwrap();
+        for (why, kept) in [(String::new(), String::new()), ("x".repeat(REASON_MAX), "x".repeat(REASON_MAX))] {
+            assert!(matches!(doc.freeze(why.clone()), DocError::Frozen(full) if full == why));
+            assert_eq!(doc.frozen(), Some(kept));
+        }
+        for scalar in ['é', '界', '😀'] {
+            for room in 0..=scalar.len_utf8() {
+                let prefix = "x".repeat(REASON_MAX - room);
+                let why = format!("{prefix}{scalar}tail");
+                let kept = if room == scalar.len_utf8() { format!("{prefix}{scalar}") } else { prefix };
+                assert!(matches!(doc.freeze(why.clone()), DocError::Frozen(full) if full == why));
+                assert_eq!(doc.frozen(), Some(kept));
+            }
+        }
     }
 
     #[test]
@@ -747,52 +762,5 @@ mod tests {
     fn a_file_whose_offsets_javascript_cannot_hold_is_refused() {
         assert!(check_len(MAX_SAFE).is_ok());
         assert!(matches!(check_len(MAX_SAFE + 1), Err(DocError::Refused(_))));
-    }
-
-    /// Spec §3.3: keep the handle for the document's lifetime, or reopen per read? Prints the cost of each.
-    /// Run: cargo test --release -p spike-core handle_lifetime -- --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn handle_lifetime_costs() {
-        let len = 64 * CHUNK;
-        let path = temp_file("doc-handles", &pattern(len, 5));
-        let doc = Document::open(&path).unwrap();
-        let offsets: Vec<u64> = (0..2000u64).map(|i| (i * 2_654_435_761) % (len as u64 - 65_536)).collect();
-        let time = |label: &str, mut f: Box<dyn FnMut(u64)>| {
-            let mut us: Vec<f64> = offsets
-                .iter()
-                .map(|&o| {
-                    let t = std::time::Instant::now();
-                    f(o);
-                    t.elapsed().as_secs_f64() * 1e6
-                })
-                .collect();
-            us.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            println!("{label}: p50 {:.1} µs, p95 {:.1} µs", us[us.len() / 2], us[us.len() * 95 / 100]);
-        };
-        time("kept handle, store.read only", Box::new(|o| drop(doc.store().read(o, o + 65_536).unwrap())));
-        time("kept handle + identity checks (doc.read)", Box::new(|o| drop(doc.read(1, o, o + 65_536).unwrap())));
-        time(
-            "reopen per read + identity checks",
-            Box::new(|o| {
-                let _ = FileId::of(&path).unwrap();
-                let f = fs::File::open(&path).unwrap();
-                let mut buf = vec![0u8; 65_536];
-                crate::store::read_exact_at(&f, &mut buf, o).unwrap();
-                let _ = FileId::of(&path).unwrap();
-            }),
-        );
-        time(
-            "identity check alone",
-            Box::new(|_| {
-                FileId::of(&path).unwrap();
-            }),
-        );
-        time(
-            "route check alone",
-            Box::new(|_| {
-                route_refusal(&path).unwrap();
-            }),
-        );
     }
 }

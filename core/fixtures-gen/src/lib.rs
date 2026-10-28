@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 
 const TYPES: [&str; 4] = ["plan", "tool", "model", "eval"];
 
@@ -29,13 +29,7 @@ pub fn jsonl<W: Write>(w: &mut W, target_bytes: u64, line_len: usize) -> io::Res
 /// One record whose `msg` is `payload_bytes` of 'a', then a newline.
 pub fn huge_record<W: Write>(w: &mut W, payload_bytes: u64) -> io::Result<()> {
     w.write_all(b"{\"ts\":\"2026-10-20T12:00:00.000Z\",\"type\":\"blob\",\"msg\":\"")?;
-    let block = vec![b'a'; 1 << 20];
-    let mut left = payload_bytes;
-    while left > 0 {
-        let take = left.min(block.len() as u64) as usize;
-        w.write_all(&block[..take])?;
-        left -= take as u64;
-    }
+    io::copy(&mut io::repeat(b'a').take(payload_bytes), w)?;
     w.write_all(b"\"}\n")
 }
 
@@ -203,11 +197,41 @@ mod tests {
 
     #[test]
     fn huge_record_has_the_requested_payload() {
-        let mut out = Vec::new();
-        huge_record(&mut out, 1000).unwrap();
-        let s = String::from_utf8(out).unwrap();
-        assert!(s.ends_with("\"}\n"));
-        assert_eq!(s.matches('a').count(), 1000);
+        let head = b"{\"ts\":\"2026-10-20T12:00:00.000Z\",\"type\":\"blob\",\"msg\":\"";
+        for payload in [0, 1, 1000, (1 << 20) - 1, 1 << 20, (1 << 20) + 1] {
+            let mut out = Vec::new();
+            huge_record(&mut out, payload).unwrap();
+            assert!(out.starts_with(head));
+            assert_eq!(&out[head.len()..head.len() + payload as usize], vec![b'a'; payload as usize]);
+            assert_eq!(&out[head.len() + payload as usize..], b"\"}\n");
+        }
+    }
+
+    #[test]
+    fn huge_record_propagates_partial_write_failures_in_each_part() {
+        struct FailsAfter(usize);
+        impl Write for FailsAfter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.0 == 0 {
+                    return Err(io::Error::other("write refused"));
+                }
+                let written = bytes.len().min(self.0);
+                self.0 -= written;
+                Ok(written)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut complete = Vec::new();
+        huge_record(&mut complete, 1000).unwrap();
+        let head = complete.len() - 1000 - b"\"}\n".len();
+        for limit in [0, head - 1, head, head + 999, head + 1000, complete.len() - 1] {
+            let error = huge_record(&mut FailsAfter(limit), 1000).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::Other);
+            assert_eq!(error.to_string(), "write refused");
+        }
     }
 
     #[test]

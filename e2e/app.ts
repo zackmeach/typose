@@ -146,6 +146,18 @@ export async function osFocus(l: Launched): Promise<void> {
     .toBe(true)
 }
 
+/** A key as the OS delivers it, through the page and then a menu's accelerators. Playwright's keyboard goes through
+ *  CDP, which never reaches the accelerators. */
+export const pressAsOS = (l: Launched, keyCode: string, modifiers: ('control' | 'meta' | 'shift')[]) =>
+  l.app.evaluate(
+    ({ BrowserWindow }, { keyCode, modifiers }) => {
+      const contents = BrowserWindow.getAllWindows()[0].webContents
+      for (const type of ['keyDown', 'char', 'keyUp'] as const)
+        if (type !== 'char' || keyCode.length === 1) contents.sendInputEvent({ type, keyCode: type === 'char' ? keyCode.toLowerCase() : keyCode, modifiers })
+    },
+    { keyCode, modifiers }
+  )
+
 /**
  * Open file… without the OS dialog, which must never open on the desktop the tests run on: main's handler is replaced
  * by one that answers `path` and counts its calls (`globalThis.dialogCalls`), and the dialog itself rejects.
@@ -225,9 +237,14 @@ export interface TestHooks {
     aborts: number
     gone: { at: number; rejected: number } | null
     dropped: ('event' | 'response')[]
+    items: (() => { key: number | string; text: string }[]) | null
   }
   app: { close?: () => void }
 }
+
+/** The mounted Raw lens's cached items, on the test-hooks build: whole pieces, which Z66 shows over rows (PR 6b). */
+export const cachedItems = (win: Page): Promise<{ key: number | string; text: string }[]> =>
+  win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.client.items?.() ?? [])
 
 /** The core host's debug stats, on the test-hooks build (plan C5, C6). */
 export const debugStats = (win: Page, params: { gc?: boolean; resetHigh?: boolean; limit?: number } = {}): Promise<DebugStats> =>

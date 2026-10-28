@@ -24,15 +24,9 @@ pub const RANGES: [(&str, u64, u64); 11] = [
     ("totalmem", 1, MAX_SAFE),
 ];
 
-/// `field`'s inclusive range. Panics on a field missing from `RANGES`, which is a bug, not input.
-pub fn range(field: &str) -> (u64, u64) {
-    let (_, min, max) = RANGES.iter().find(|r| r.0 == field).unwrap_or_else(|| panic!("no range for {field}"));
-    (*min, *max)
-}
-
 /// `x` as an integer, if it's a finite whole number within `field`'s range. The error names the field.
 pub fn int(field: &str, x: f64) -> Result<u64, String> {
-    let (min, max) = range(field);
+    let &(_, min, max) = RANGES.iter().find(|r| r.0 == field).unwrap_or_else(|| panic!("no range for {field}"));
     // Both bounds are at most 2^53 − 1, so they're exact as f64 and the cast below is exact too.
     if x.is_finite() && x.fract() == 0.0 && x >= min as f64 && x <= max as f64 {
         Ok(x as u64)
