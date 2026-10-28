@@ -34,6 +34,8 @@ pub const MAX_DEPTH: usize = 64;
 pub const HTML_MAX: usize = PAGE_BYTES;
 /// The build checks its cancel flag this often, in parser events (plan §2.1).
 const CANCEL_EVERY: usize = 1024;
+/// A colon cannot occur in the generated heading slugs, so footnote targets never collide with them.
+const FOOTNOTE_PREFIX: &str = "typose-footnote:";
 
 /// CommonMark with GFM's tables, footnotes, strikethrough and task lists. Off until M4: GitHub alerts, math and wikilinks
 /// (`[!NOTE]`, `$x$` and `[[w]]` stay literal text), and pulldown-cmark's metadata blocks, which it accepts at any block
@@ -117,6 +119,21 @@ impl Rendered {
 
     pub fn items(&self) -> &[Item] {
         &self.items
+    }
+
+    /// A decoded same-document fragment, resolved against the held build without reading the file again.
+    pub fn heading_line(&self, fragment: &str) -> Option<u32> {
+        if fragment.is_empty() {
+            return Some(0);
+        }
+        if let Some(label) = fragment.strip_prefix(FOOTNOTE_PREFIX) {
+            return self
+                .items
+                .iter()
+                .find(|item| item.footnote.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(label)))
+                .map(|item| item.line);
+        }
+        self.items.iter().find(|item| item.slug.as_deref() == Some(fragment)).map(|item| item.line)
     }
 
     /// The UTF-16 units of the sanitized HTML's text. Generated note labels are counted separately.
@@ -382,12 +399,15 @@ struct Build<'c> {
 
 impl Build<'_> {
     fn number(&mut self, label: &str) -> Result<u32, OverBudget> {
-        if let Some(&n) = self.numbers.get(label) {
+        // pulldown preserves event-label casing. Match ASCII variants without a second normalization dependency.
+        let _key = Reservation::new(label.len() as u64)?;
+        let label = label.to_ascii_lowercase();
+        if let Some(&n) = self.numbers.get(&label) {
             return Ok(n);
         }
         self.charge.grow(map_entry::<String, u32>() + label.len() as u64)?;
         let n = self.numbers.len() as u32 + 1;
-        self.numbers.insert(label.to_owned(), n);
+        self.numbers.insert(label, n);
         Ok(n)
     }
 
@@ -491,7 +511,8 @@ impl<'a, I: Iterator<Item = (Event<'a>, Range<usize>)>> Events<'_, '_, 'a, I> {
             }
             Event::FootnoteReference(label) => {
                 let n = self.build.number(&label).map_err(DocError::Memory)?;
-                Event::InlineHtml(format!("<sup><a data-href=\"#{}\">{n}</a></sup>", escape_attr(&label)).into())
+                let label = escape_attr(&label.replace('%', "%25"));
+                Event::InlineHtml(format!("<sup><a data-href=\"#{FOOTNOTE_PREFIX}{label}\">{n}</a></sup>").into())
             }
             Event::Start(Tag::FootnoteDefinition(label)) => {
                 let n = self.build.number(&label).map_err(DocError::Memory)?;
@@ -777,7 +798,7 @@ mod tests {
             (
                 "x[^n] y[^m]\n\n[^m]: M\n\n[^n]: N\n",
                 &[
-                    "<p>x<sup><a href=\"#\" data-href=\"#n\">1</a></sup> y<sup><a href=\"#\" data-href=\"#m\">2</a></sup></p>\n",
+                    "<p>x<sup><a href=\"#\" data-href=\"#typose-footnote:n\">1</a></sup> y<sup><a href=\"#\" data-href=\"#typose-footnote:m\">2</a></sup></p>\n",
                     "<div><sup>2</sup>\n<p>M</p>\n</div>\n",
                     "<div><sup>1</sup>\n<p>N</p>\n</div>\n",
                 ],
@@ -836,6 +857,21 @@ mod tests {
             Some("-1"),
         ];
         assert_eq!(slugs, want);
+    }
+
+    #[test]
+    fn fragments_find_unique_headings_and_distinct_ascii_case_footnotes() {
+        let r = render("# Note\n\n# Note\n\nText[^NOTE] and [^a%20b].\n\n[^note]: Body\n\n[^a%20b]: Percent\n");
+        assert_eq!(r.heading_line(""), Some(0));
+        assert_eq!(r.heading_line("note"), Some(0));
+        assert_eq!(r.heading_line("note-1"), Some(2));
+        assert_eq!(r.heading_line("typose-footnote:NOTE"), Some(6));
+        assert_eq!(r.heading_line("typose-footnote:a%20b"), Some(8));
+        assert_eq!(r.heading_line("missing"), None);
+        assert_eq!(r.heading_line("Note"), None); // heading slugs are exact, unlike footnote labels
+        assert!(r.items()[2].html.contains("data-href=\"#typose-footnote:a%2520b\""));
+        assert!(r.items()[3].html.contains("<sup>1</sup>"));
+        assert!(r.items()[4].html.contains("<sup>2</sup>"));
     }
 
     /// Plan §1: a GitHub alert, math and a wikilink stay literal text until M4.

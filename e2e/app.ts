@@ -30,6 +30,16 @@ export interface Launched {
   pageErrors: string[]
 }
 
+/** Observe intended OS handoffs without opening a real browser or mail client. The stub exists only in this test process. */
+export async function stubExternal(app: ElectronApplication): Promise<() => Promise<string[]>> {
+  await app.evaluate(({ shell }) => {
+    const state = globalThis as unknown as { externalCalls: string[] }
+    state.externalCalls = []
+    shell.openExternal = async (url) => { state.externalCalls.push(url) }
+  })
+  return () => app.evaluate(() => (globalThis as unknown as { externalCalls: string[] }).externalCalls)
+}
+
 const running = new Set<Launched>()
 /** Other launches to finish when the test ends (the packaged build's, from packaged.ts). */
 export const cleanups = new Set<() => Promise<unknown>>()

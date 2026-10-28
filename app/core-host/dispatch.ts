@@ -8,6 +8,7 @@ import {
   type DebugStats,
   type ErrorCode,
   type Hello,
+  type LinkTarget,
   type MdBuild,
   type MdPage,
   type Opened,
@@ -220,6 +221,29 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const [id, gen] = [int(p, 'doc'), int(p, 'gen')]
       const doc = getDoc(id)
       return read(req, id, (cancel) => doc.render(gen, cancel))
+    },
+    resolve: (p): LinkTarget => {
+      const [id, gen] = [int(p, 'doc'), int(p, 'gen')]
+      if (typeof p.href !== 'string' || p.href.length > 32 << 10 || Buffer.byteLength(p.href, 'utf8') > 32 << 10 || /[\u0000-\u001f\u007f-\u009f]/.test(p.href))
+        throw new Refusal('InvalidParams', 'href must be a string of at most 32 KiB, without control characters', 'href')
+      const doc = getDoc(id)
+      if (doc.generation !== gen) throw new Refusal('Stale', `generation ${gen} was replaced`)
+      if (doc.format !== 'markdown') return { kind: 'inert' }
+      if (p.href.startsWith('#')) {
+        let fragment: string
+        try {
+          fragment = decodeURIComponent(p.href.slice(1))
+          encodeURIComponent(fragment) // rejects an unpaired UTF-16 surrogate, including an unescaped one
+        } catch { return { kind: 'inert' } }
+        if (/[\u0000-\u001f\u007f-\u009f]/.test(fragment)) return { kind: 'inert' }
+        const line = doc.headingLine(gen, fragment)
+        return line == null ? { kind: 'inert' } : { kind: 'heading', line }
+      }
+      try {
+        const url = new URL(p.href)
+        if (!['http:', 'https:', 'mailto:'].includes(url.protocol) || url.href.length > 32 << 10 || Buffer.byteLength(url.href, 'utf8') > 32 << 10) return { kind: 'inert' }
+        return { kind: 'external', url: url.href }
+      } catch { return { kind: 'inert' } }
     },
     // A failed reload (the file is gone, say) leaves the document at its old generation, and gives the renderer cache's
     // reservation back to the lens it was last handed to (`settled`), whichever document that lens is showing. A reload

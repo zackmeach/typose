@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { RENDERED_OFF } from '../app/renderer/card'
 import { viewportCap } from '../app/renderer/lenses/page-cache'
 import type { Limits } from '../app/shared/protocol'
-import { type TestHooks, assertNetLog, debugStats, finish, fixture, launch, lifecycle, test, visibleRows, waitIndexed, waitOpen } from './app'
+import { type TestHooks, assertNetLog, debugStats, finish, fixture, launch, lifecycle, stubExternal, test, visibleRows, waitIndexed, waitOpen } from './app'
 
 type ReserveProbe = { held: boolean; bRendered: boolean; release?: () => void }
 type ShrinkProbe = { held: boolean; bytes?: number; release?: () => void }
@@ -612,6 +612,7 @@ test("Spike C's corpus and the planted cases make no request, and a planted link
   const log = test.info().outputPath('rendered-netlog.json')
   const l = await launch({ file: corpusFile(), netlog: log })
   const { win } = l
+  await stubExternal(l.app)
   await waitRendered(win)
   await win.locator('.md-scroller').evaluate((el) => {
     el.scrollTop = el.scrollHeight

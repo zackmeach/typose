@@ -188,6 +188,40 @@ describe('plan (Rendered Markdown slice) §2.1: render builds the blocks, and md
     expect((await doc.mdPage(1, 3, 10, new Cancel())).items).toEqual([])
   })
 
+  it('headingLine resolves held headings and reserved footnotes without reading the file', async () => {
+    const linkPath = join(dir, 'links.md')
+    writeFileSync(linkPath, '# Note\n\n# Note\n\nText[^NOTE] and [^a%20b].\n\n[^note]: Body\n\n[^a%20b]: Percent\n')
+    const doc = Doc.open(linkPath)
+    expect(() => doc.headingLine(1, 'note')).toThrow(expect.objectContaining({ code: 'InvalidParams' }))
+    await doc.render(1, new Cancel())
+    expect(doc.headingLine(1, 'note')).toBe(0)
+    expect(doc.headingLine(1, 'note-1')).toBe(2)
+    expect(doc.headingLine(1, 'typose-footnote:NOTE')).toBe(6)
+    expect(doc.headingLine(1, 'typose-footnote:a%20b')).toBe(8)
+    expect(doc.headingLine(1, 'missing')).toBeNull()
+    doc.reload()
+    expect(() => doc.headingLine(1, 'note')).toThrow(expect.objectContaining({ code: 'Stale' }))
+    expect(() => doc.headingLine(2, 'note')).toThrow(expect.objectContaining({ code: 'InvalidParams' }))
+    await doc.render(2, new Cancel())
+    rmSync(linkPath)
+    expect(doc.headingLine(2, 'note')).toBe(0) // metadata lookup, even after the path disappeared
+    doc.close()
+    expect(() => doc.headingLine(2, 'note')).toThrow(expect.objectContaining({ code: 'NoDocument' }))
+  })
+
+  it('headingLine refuses hostile generations and oversized/control-containing fragments', async () => {
+    const doc = Doc.open(mdPath)
+    await doc.render(1, new Cancel())
+    const { min, max } = range('gen')
+    for (const value of [...HOSTILE, max + 1]) {
+      if (isValid(value, min, max)) continue
+      expect(() => doc.headingLine(value as number, 'title')).toThrow()
+    }
+    for (const fragment of ['x'.repeat(32_769), 'é'.repeat(16_385), 'a\0b', 'a\nb', 'a\u0085b'])
+      expect(() => doc.headingLine(1, fragment)).toThrow(expect.objectContaining({ code: 'InvalidParams' }))
+    expect(doc.headingLine(1, 'x'.repeat(32_768))).toBeNull()
+  })
+
   it('a page before any build is InvalidParams, an old generation Stale, and over 8 MiB is Refused', async () => {
     const doc = Doc.open(mdPath)
     expect(await refused(() => doc.mdPage(1, 0, 1, new Cancel()))).toMatchObject({ code: 'InvalidParams', message: expect.stringContaining('render it first') })
