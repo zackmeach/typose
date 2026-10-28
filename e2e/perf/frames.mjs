@@ -78,7 +78,7 @@ function animationFrames(events) {
 }
 
 /** Nearest-rank percentile of `values` (ms), or undefined when there are none. */
-const percentile = (values, p) => {
+export const percentile = (values, p) => {
   const sorted = [...values].sort((a, b) => a - b)
   return sorted.length ? sorted[Math.min(sorted.length, Math.max(1, Math.ceil((p / 100) * sorted.length))) - 1] : undefined
 }

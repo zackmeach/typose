@@ -7,7 +7,7 @@ import coreHostPath from '../core-host/index?modulePath'
 import type { Command } from '../shared/protocol'
 import { handoff, launchPath } from './launch'
 import { startLifecycle } from './lifecycle'
-import { bytesHook, delayHook, isMark, marksHook } from './marks'
+import { envWhole, isMark, marksHook } from './marks'
 
 const mainStart = Date.now() // plan C8's first startup mark: read now, written once the hook is set up below
 
@@ -20,12 +20,12 @@ if (!app.requestSingleInstanceLock({ argv: process.argv, cwd: process.cwd() })) 
 const log = startLifecycle()
 // Plan C8's startup controls, compiled only into the test-hooks build: show() a set delay after both
 // ready-to-show and the title bar's paint, or delay React's mount.
-const showDelay = __TEST_HOOKS__ ? delayHook('TYPOSE_TEST_DELAY_SHOW', process.env.TYPOSE_TEST_DELAY_SHOW) : 0
-const mountDelay = __TEST_HOOKS__ ? delayHook('TYPOSE_TEST_DELAY_MOUNT', process.env.TYPOSE_TEST_DELAY_MOUNT) : 0
+const showDelay = __TEST_HOOKS__ ? envWhole('TYPOSE_TEST_DELAY_SHOW', process.env.TYPOSE_TEST_DELAY_SHOW, 'ms') : 0
+const mountDelay = __TEST_HOOKS__ ? envWhole('TYPOSE_TEST_DELAY_MOUNT', process.env.TYPOSE_TEST_DELAY_MOUNT, 'ms') : 0
 // Plan C5's per-read delay, for the test-hooks addon: every chunk the core reads from disk waits this long first.
-const readDelay = __TEST_HOOKS__ ? delayHook('TYPOSE_TEST_READ_DELAY', process.env.TYPOSE_TEST_READ_DELAY) : 0
+const readDelay = __TEST_HOOKS__ ? envWhole('TYPOSE_TEST_READ_DELAY', process.env.TYPOSE_TEST_READ_DELAY, 'ms') : 0
 // Plan C1's budget override, for the test-hooks addon: the ledger's limit in bytes, in place of a quarter of RAM.
-const budget = __TEST_HOOKS__ ? bytesHook('TYPOSE_TEST_BUDGET', process.env.TYPOSE_TEST_BUDGET) : 0
+const budget = __TEST_HOOKS__ ? envWhole('TYPOSE_TEST_BUDGET', process.env.TYPOSE_TEST_BUDGET, 'bytes') : 0
 let titlebarPainted: () => void = () => {}
 
 // No proxy resolution at all: with Windows' "Automatically detect settings" on, Chromium otherwise runs WPAD
@@ -51,10 +51,7 @@ const ALLOWED = app.isPackaged ? /^(typose|data|blob):/ : /^(typose|data|blob|de
 const MIME: Record<string, string> = {
   '.html': 'text/html',
   '.js': 'text/javascript',
-  '.css': 'text/css',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.woff2': 'font/woff2'
+  '.css': 'text/css'
 }
 // Spec §7.1, sent as a header on every app response rather than a meta tag. No inline script; inline style stays
 // allowed, as in the spike, because React Aria injects a style element.

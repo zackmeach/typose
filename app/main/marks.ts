@@ -54,19 +54,11 @@ export function marksHook(path: string | undefined, log: Log, platform: NodeJS.P
 export const isMark = (name: unknown, t: unknown): name is StartupMark =>
   STARTUP_MARKS.includes(name as StartupMark) && isValid(t, 0, Number.MAX_SAFE_INTEGER)
 
-/** The test-hooks budget override (plan C1) from the environment, in bytes: unset is 0, which leaves the ledger's
- *  limit at a quarter of physical RAM; anything but a whole number in [1, 2^53 − 1] is refused. */
-export function bytesHook(name: string, value: string | undefined): number {
+/** A test-hooks environment value: unset is 0; otherwise whole bytes in [1, 2^53 − 1] or ms in [0, 10000]. */
+export function envWhole(name: string, value: string | undefined, kind: 'bytes' | 'ms'): number {
   if (value === undefined) return 0
-  const bytes = /^\d+$/.test(value) ? Number(value) : NaN
-  if (!isValid(bytes, 1, Number.MAX_SAFE_INTEGER)) throw new Error(`${name} must be a whole number of bytes in [1, 2^53 − 1]`)
-  return bytes
-}
-
-/** A test-hooks delay (ms) from the environment: unset is 0; anything but a whole number in [0, 10000] is refused. */
-export function delayHook(name: string, value: string | undefined): number {
-  if (value === undefined) return 0
-  const ms = /^\d+$/.test(value) ? Number(value) : NaN
-  if (!isValid(ms, 0, 10_000)) throw new Error(`${name} must be a whole number of ms in [0, 10000]`)
-  return ms
+  const n = /^\d+$/.test(value) ? Number(value) : NaN
+  if (!isValid(n, kind === 'bytes' ? 1 : 0, kind === 'bytes' ? Number.MAX_SAFE_INTEGER : 10_000))
+    throw new Error(`${name} must be a whole number of ${kind === 'bytes' ? 'bytes in [1, 2^53 − 1]' : 'ms in [0, 10000]'}`)
+  return n
 }

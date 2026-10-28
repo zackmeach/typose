@@ -1,7 +1,18 @@
 // Plan C8's demanded-frame accounting on synthetic traces: each case is the smallest trace that fails if the rule breaks.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { analyzeFrames } from './frames.mjs'
+import { analyzeFrames, percentile } from './frames.mjs'
+
+test('nearest-rank percentiles preserve empty, single and unsorted inputs', () => {
+  assert.equal(percentile([], 95), undefined)
+  assert.equal(percentile([7], 95), 7)
+  const samples = [30, ...Array.from({ length: 29 }, (_, i) => 29 - i)]
+  assert.equal(percentile(samples, 50), 15)
+  assert.equal(percentile(samples, 95), 29)
+  assert.equal(percentile(samples, 0), 1)
+  assert.equal(percentile(samples, 100), 30)
+  assert.equal(samples[0], 30)
+})
 
 // Builders, in ms on one clock (the renderer's performance.now() is the trace clock here, offset 0).
 const renderer = (pid) => ({ ph: 'M', name: 'process_name', pid, args: { name: 'Renderer' } })

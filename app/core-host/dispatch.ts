@@ -1,6 +1,6 @@
 // The core host's side of protocol v1. Every request is validated before anything acts on it (plan C4):
 // numbers against the core's own range table, methods by own property only, and no addon call on a refusal.
-import type { Cancel, Doc, IndexProgress, Limits, Page as CorePage, PageItem as CorePageItem } from 'typose-node'
+import type { Cancel, Doc, IndexProgress, Limits, Page as CorePage } from 'typose-node'
 import {
   PROTOCOL,
   type Charges,
@@ -12,7 +12,6 @@ import {
   type MdPage,
   type Opened,
   type Page,
-  type PageItem,
   type ProgressEvent,
   type Response
 } from '../shared/protocol'
@@ -125,12 +124,8 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   }
   // Continuation tokens leave with this session and their document in them, and are refused for any other
   // (plan C3; C7: every token carries `{session, doc, gen}`).
-  const stamp = (doc: number, item: CorePageItem): PageItem => {
-    if (item.next) Object.assign(item.next, { session, doc })
-    return item as PageItem
-  }
   const stampPage = (doc: number, page: CorePage): Page => {
-    for (const item of page.items) stamp(doc, item)
+    for (const item of page.items) if (item.next) Object.assign(item.next, { session, doc })
     return page as Page
   }
   /** Request `id`'s read of document `doc`, a page or a Markdown build, which `cancel` can stop while it runs (plan C5). */
