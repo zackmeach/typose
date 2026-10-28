@@ -3,6 +3,7 @@ import { type CoreClient, CoreCallError, testHooks } from '../core'
 import { renderedCharge } from './rendered-charge'
 import { viewportCap } from './raw'
 import type { LensBudget } from './lens-budget'
+import { RenderedImages } from './images'
 
 export { RENDERED_PER_UNIT, renderedCharge } from './rendered-charge'
 
@@ -31,6 +32,7 @@ export class RenderedLens {
   readonly element: HTMLElement
   private readonly scroller: HTMLElement
   private readonly column: HTMLElement
+  private readonly images: RenderedImages
   private readonly flight: Flight[] = []
   /** The next block to ask for. A page ends where the 256 KiB cap stops it, so that start isn't known ahead of the answer. */
   private cursor = 0
@@ -71,6 +73,7 @@ export class RenderedLens {
     this.scroller.append(this.column)
     host.append(this.scroller)
     this.element = this.scroller
+    this.images = new RenderedImages(this.scroller, core, opened, options.budget, options.onFrozen)
     // Every link click, including one a key fires. `href="#"` would otherwise jump. Capture, so it runs first.
     this.scroller.addEventListener('click', this.onLink, true)
     this.scroller.addEventListener('auxclick', this.onLink, true)
@@ -91,7 +94,7 @@ export class RenderedLens {
         htmlBytes: build.htmlBytes,
         nodes: build.nodes,
         noteUnits: build.noteUnits,
-        reserved: this.reserved,
+        reserved: this.options.budget?.snapshot().rendered ?? this.reserved,
         rawReserved: this.options.budget?.snapshot().raw ?? 0,
         retiredReserved: this.options.budget?.snapshot().retired ?? 0,
         totalReserved: this.options.budget?.snapshot().total ?? this.reserved,
@@ -160,6 +163,7 @@ export class RenderedLens {
   pause(): void {
     this.remember()
     this.paused = true
+    this.images.pause()
     this.linkGeneration++
     this.focusJump = false
     this.placeGen++
@@ -171,6 +175,7 @@ export class RenderedLens {
   resume(host: HTMLElement, atLine?: number): void {
     host.append(this.scroller)
     this.paused = false
+    this.images.resume()
     this.moved = false
     this.atLine = atLine
     delete this.scroller.dataset.ready
@@ -181,6 +186,7 @@ export class RenderedLens {
   /** `release` is Raw's. Closing the document releases the reservation; a lens switch must not zero it first. */
   dispose(_release = true): void {
     this.stopped = true
+    this.images.dispose()
     this.placeGen++
     for (const f of this.flight) f.abort.abort()
     this.scroller.removeEventListener('click', this.onLink, true)
@@ -346,6 +352,7 @@ export class RenderedLens {
       el.append(button)
     } else {
       el.innerHTML = item.html
+      for (const image of el.querySelectorAll<HTMLElement>('.tp-img')) this.images.add(image)
       for (const a of el.querySelectorAll('a')) {
         const dest = a.getAttribute('data-href')
         if (dest) a.title = dest // the tooltip shows the target (plan §2.4); the href stays "#"

@@ -341,3 +341,7 @@ A core crash loses these handles. A derived document therefore offers explicit f
 Local images are the following slice. The old final-UNC check and a header-only `width × height × 4` estimate are insufficient evidence for all image variants. Unsupported decodes must retain alt text and a refusal reason under Z43; image delivery and decoding require their own bounded path and verification.
 
 Footnote references use a reserved `typose-footnote:` fragment namespace so their labels cannot collide with heading slugs. ASCII label case variants share numbering and a destination; broader Unicode case folding remains an existing limitation. M2 and the remaining qualification debt are unchanged.
+
+### Local-image delivery decision (2026-10-28)
+
+Zack chose PNG/GIF/JPEG for the first local-image PR, with WebP visibly refused for now. A valid noisy VP8 fixture delayed cancellation by 445 ms; its decoder and dependency are deferred rather than weakening the cancellation gate. The working slice uses the existing local capability, bounded native canonicalization and opaque chunks, with Blob URLs only. Supported profiles, bounds and the narrow vendored JPEG strictness repair are recorded in `docs/qualification/local-images.md`. M2 follows this first local-image slice; remote and inline-data images remain deferred.

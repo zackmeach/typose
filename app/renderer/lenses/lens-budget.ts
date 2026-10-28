@@ -16,6 +16,7 @@ export class LensBudget {
   private epoch = 0
   private serial = Promise.resolve()
   private rendered = 0
+  private transitioning = false
 
   constructor(
     private readonly core: ReserveCore,
@@ -51,16 +52,36 @@ export class LensBudget {
     return this.change(generation, 'rendered', bytes)
   }
 
-  /** Two empirical retired-tree allowances; keep the single-tree maximum separate so repeated Reload cannot double it. */
+  /** A retained tree keeps its image leases when the lens switch asks for its base allowance again. */
+  ensureRendered(generation: number, bytes: number): Promise<boolean> {
+    return this.change(generation, 'rendered-min', bytes)
+  }
+
+  /** Image leases grow serially, so simultaneous metadata replies cannot overwrite one another's charge. */
+  growRendered(generation: number, bytes: number): Promise<boolean> {
+    return this.change(generation, 'rendered-add', bytes)
+  }
+
+  /** Freeze grants before the handoff snapshot: a late image grant must not allocate an uncounted retired Blob. */
   reloadReservation(raw: number): ReloadReservation {
+    this.transitioning = true
+    this.epoch++
+    this.serial = Promise.resolve()
     const retiredTreeMax = Math.max(this.treeMax, this.rendered)
     return { generation: this.generation, epoch: this.epoch, raw, retiredTreeMax, bytes: raw + 2 * retiredTreeMax }
+  }
+
+  /** A refused handoff keeps the old generation usable, without reviving any pre-snapshot grants. */
+  cancelTransition(plan: ReloadReservation): void {
+    if (!this.current(plan.generation) || plan.epoch !== this.epoch) return
+    this.transitioning = false
   }
 
   /** The core's Reload already reserved `held`. Older queued work cannot update this generation's shares. */
   adopt(generation: number, held: number, plan: ReloadReservation): boolean {
     if (!this.current(plan.generation) || plan.epoch !== this.epoch || generation <= this.generation) return false
     this.epoch++
+    this.transitioning = false
     this.generation = generation
     this.raw = plan.raw
     this.rendered = 0
@@ -75,15 +96,15 @@ export class LensBudget {
     this.epoch++
   }
 
-  private change(generation: number, share: 'raw' | 'rendered', bytes: number): Promise<boolean> {
+  private change(generation: number, share: 'raw' | 'rendered' | 'rendered-min' | 'rendered-add', bytes: number): Promise<boolean> {
     const epoch = this.epoch
     const changed = this.serial.then(async () => {
-      if (!this.current(generation) || epoch !== this.epoch) return false
+      if (this.transitioning || !this.current(generation) || epoch !== this.epoch) return false
       const raw = share === 'raw' ? bytes : this.raw
-      const rendered = share === 'rendered' ? bytes : this.rendered
+      const rendered = share === 'rendered' ? bytes : share === 'rendered-min' ? Math.max(this.rendered, bytes) : share === 'rendered-add' ? this.rendered + bytes : this.rendered
       const total = raw + rendered + 2 * this.treeMax
       const granted = total === this.held || await this.core.call('reserve', { doc: this.doc, gen: generation, bytes: total }).catch(() => false)
-      if (!granted || !this.current(generation) || epoch !== this.epoch) return false
+      if (!granted || this.transitioning || !this.current(generation) || epoch !== this.epoch) return false
       this.raw = raw
       this.rendered = rendered
       this.held = total

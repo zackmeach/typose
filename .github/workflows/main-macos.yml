@@ -67,6 +67,10 @@ jobs:
         if: ${{ !cancelled() && steps.rust.outcome == 'success' && !inputs.grep }}
         run: cargo test --locked
         working-directory: core
+      - name: Vendored JPEG strictness regressions
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' && !inputs.grep }}
+        run: cargo test --locked -p zune-jpeg --lib
+        working-directory: core
       - name: npm run check
         if: ${{ !cancelled() && steps.napi.outcome == 'success' }}
         run: npm run check

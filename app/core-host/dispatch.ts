@@ -8,6 +8,8 @@ import {
   type DebugStats,
   type ErrorCode,
   type Hello,
+  type ImageRef,
+  type PreparedImage,
   type LinkTarget,
   type MdBuild,
   type MdPage,
@@ -84,6 +86,15 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     if (!doc) throw new Refusal('NoDocument', `no document ${id}`)
     return doc
   }
+  const imageRef = (p: Params, id: number, gen: number): ImageRef => {
+    if (!isRecord(p.ref)) throw new Refusal('InvalidParams', 'ref must be an image reference', 'ref')
+    const [refSession, refDoc, refGen, resource] = ['session', 'doc', 'gen', 'id'].map((field) => int(p.ref as Params, field, 'ref.' + field))
+    if (refSession !== session) throw new Refusal('Stale', 'the image reference belongs to another session')
+    if (refDoc !== id) throw new Refusal('InvalidParams', 'the image reference belongs to another document', 'ref.doc')
+    if (refGen !== gen) throw new Refusal('Stale', 'the image reference belongs to another generation')
+    return { session, doc: id, gen, id: resource }
+  }
+
   /**
    * Plan C1: the renderer cache's reservation. One renderer talks to a core host and shows one lens at a time, so it's
    * held for one lens: `doc:gen`. An open or Reload takes it at its first step for the lens it opens (`#id` while it's
@@ -256,6 +267,50 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       if (p.lens === 'rendered') return read(req, id, (cancel) => doc.mdPage(gen, start, count, cancel))
       return read(req, id, async (cancel) => stampPage(id, await doc.page(gen, start, count, cancel)))
     },
+    prepareImage: (p, req): Promise<PreparedImage> => {
+      const [id, gen] = [int(p, 'doc'), int(p, 'gen')]
+      if (!boundedLink(p.src))
+        throw new Refusal('InvalidParams', 'src must be a string of at most 32 KiB without controls', 'src')
+      const target = localTarget(p.src)
+      if (target === null) throw new Refusal('Refused', 'only supported local image paths can be opened')
+      const doc = getDoc(id)
+      if (doc.generation !== gen) throw new Refusal('Stale', 'the image source generation was replaced')
+      return read(req, id, async (cancel) => {
+        const image = await doc.prepareImage(gen, target, cancel)
+        if (docs.get(id) !== doc || doc.generation !== gen) {
+          doc.releaseImage(gen, image.id)
+          throw new Refusal('Stale', 'the image source generation was replaced while decoding')
+        }
+        return {
+          ref: { session, doc: id, gen, id: image.id }, width: image.width, height: image.height,
+          encodedBytes: image.encodedBytes, pixelBytes: image.pixelBytes,
+        }
+      })
+    },
+    imageChunk: (p, req): Promise<Uint8Array> => {
+      const [id, gen, offset] = [int(p, 'doc'), int(p, 'gen'), int(p, 'offset')]
+      const ref = imageRef(p, id, gen)
+      if (offset > 8 << 20 || offset % (256 << 10) !== 0)
+        throw new Refusal('InvalidParams', 'offset must be aligned to 256 KiB within 8 MiB', 'offset')
+      if (Object.hasOwn(p, 'count')) throw new Refusal('InvalidParams', 'image chunks do not take count', 'count')
+      const doc = getDoc(id)
+      if (doc.generation !== gen) throw new Refusal('Stale', 'the image source generation was replaced')
+      return read(req, id, async (cancel) => {
+        const bytes = await doc.imageChunk(gen, ref.id, offset, cancel)
+        if (docs.get(id) !== doc || doc.generation !== gen)
+          throw new Refusal('Stale', 'the image source generation was replaced while reading')
+        if (!(bytes instanceof Uint8Array) || bytes.byteLength > 256 << 10)
+          throw new Refusal('Internal', 'the core returned an invalid image chunk')
+        return bytes
+      })
+    },
+    releaseImage: (p): boolean => {
+      const [id, gen] = [int(p, 'doc'), int(p, 'gen')]
+      const ref = imageRef(p, id, gen)
+      const doc = docs.get(id)
+      return doc !== undefined && doc.generation === gen && doc.releaseImage(gen, ref.id)
+    },
+
     // Plan (Rendered Markdown slice) §2.1: the document's Markdown build of generation `gen`, cancelled as a read is.
     render: (p, req): Promise<MdBuild> => {
       const [id, gen] = [int(p, 'doc'), int(p, 'gen')]
