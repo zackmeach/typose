@@ -1,10 +1,11 @@
-import { BrowserWindow, Menu, MessageChannelMain, app, crashReporter, dialog, ipcMain, protocol, screen, session, systemPreferences, utilityProcess } from 'electron'
+import { BrowserWindow, Menu, MessageChannelMain, app, crashReporter, dialog, ipcMain, protocol, screen, session, shell, systemPreferences, utilityProcess } from 'electron'
 import type { IpcMainEvent, IpcMainInvokeEvent } from 'electron'
 import { once } from 'node:events'
 import { readFile } from 'node:fs/promises'
 import { extname, join, sep } from 'node:path'
 import coreHostPath from '../core-host/index?modulePath'
 import type { Command } from '../shared/protocol'
+import { openExternal } from './external'
 import { handoff, launchPath } from './launch'
 import { startLifecycle } from './lifecycle'
 import { envWhole, isMark, marksHook } from './marks'
@@ -272,6 +273,7 @@ void app.whenReady().then(() => {
     const r = await dialog.showOpenDialog(win, { properties: ['openFile'] })
     return r.canceled ? null : (r.filePaths[0] ?? null)
   })
+  ipcMain.handle('open-external', (event: IpcMainInvokeEvent, ...args: unknown[]) => openExternal(win, event, args, (url) => shell.openExternal(url)))
   void win.loadURL(`${ORIGIN}/index.html${mountDelay ? `?delayMount=${mountDelay}` : ''}`)
 })
 

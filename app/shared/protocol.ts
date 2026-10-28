@@ -93,6 +93,8 @@ export interface Methods {
   /** Plan (Rendered Markdown slice) §2.1: builds generation `gen` as Markdown blocks, up to 8 MiB of source, for rendered
    *  pages. `Refused` over 8 MiB, `Memory` when the budget can't hold it. Cancellable. */
   render: { params: { doc: number; gen: number }; result: MdBuild }
+  /** This generation's held Markdown links: heading/footnote fragments or http/https/mailto. Other targets stay inert. */
+  resolve: { params: { doc: number; gen: number; href: string }; result: LinkTarget }
   /** Ctrl+R (spec §3.1): the document's next generation, opened again, with its first page. `bytes` as for `open`. */
   reload: { params: { doc: number; count: number; bytes: number }; result: Opened }
   /** Plan C6: cancels the document's index and page reads, and releases it. */
@@ -106,6 +108,8 @@ export interface Methods {
   /** The test-hooks build only (plan m8): what's alive in the core host. Elsewhere it's `UnknownMethod`. */
   debugStats: { params: { gc?: boolean; resetHigh?: boolean; limit?: number }; result: DebugStats }
 }
+
+export type LinkTarget = { kind: 'heading'; line: number } | { kind: 'external'; url: string } | { kind: 'inert' }
 
 /** The test-hooks build's debug stats (plan C5, C6): the core's live jobs, tasks and file handles, the longest a chunk
  *  read's delay actually waited since the delay was set (`delayMs`), the documents the core host holds, and how its
@@ -165,7 +169,7 @@ export interface ProgressEvent {
 /** What the preload forwards from main to the page, with `window.postMessage` to its own origin. */
 export type MainMessage = { type: 'core-port'; session: number } | { type: 'core-gone'; session: number }
 
-/** The page's whole API into main, from the preload. Only `mark` takes arguments, which main validates (plan C4). */
+/** The page's whole API into main, from the preload. Main validates arguments and sender (C4); external links require the main frame. */
 export interface TyposeApi {
   /** The file named on the command line, if any: the newest named before the page asked (spec §8.1). */
   launchPath(): Promise<string | null>
@@ -173,6 +177,8 @@ export interface TyposeApi {
   onOpenPath(cb: (path: string) => void): () => void
   /** The OS Open dialog; null when cancelled. */
   openDialog(): Promise<string | null>
+  /** A user-activated external link. Main independently checks the app's main frame, size and allowed scheme. */
+  openExternal(url: string): Promise<boolean>
   /** A startup mark at a wall-clock time (ms); main records it only under the TYPOSE_MARKS hook (plan C8). */
   mark(name: StartupMark, t: number): void
   /** Called once, when main has shown the window; main only tells the page under the TYPOSE_MARKS hook (plan C8). */

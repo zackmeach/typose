@@ -23,7 +23,7 @@ interface Flight {
 /**
  * Rendered (brief §5.2) for one Markdown build. Every block is mounted; Chromium skips offscreen work
  * (`content-visibility`), and the blocks stay in the accessibility tree (plan §2.2, Z72). The core already sanitized
- * the HTML. This lens never parses Markdown. Links stay inert: every click is cancelled, and the tooltip is the target.
+ * the HTML. This lens never parses Markdown. Link destinations are resolved by the core; browser navigation stays off.
  */
 export class RenderedLens {
   readonly element: HTMLElement
@@ -43,6 +43,9 @@ export class RenderedLens {
   private shown: number
   /** A newer placement supersedes one still aligning. */
   private placeGen = 0
+  private interaction = 0
+  private linkGeneration = 0
+  private focusJump = false
   private readonly reserved: number
 
   constructor(
@@ -72,8 +75,10 @@ export class RenderedLens {
     this.scroller.addEventListener('dragstart', this.onLink, true)
     for (const type of ['wheel', 'keydown', 'pointerdown'] as const)
       this.scroller.addEventListener(type, () => {
+        this.interaction++
         this.moved = true
         this.atLine = undefined
+        this.focusJump = false
       }, { passive: true })
     // Remember the top line while the view is on screen. Unmount hides the panel first, and every block's box is then
     // empty, so reading geometry in dispose would report the last block.
@@ -153,6 +158,8 @@ export class RenderedLens {
   pause(): void {
     this.remember()
     this.paused = true
+    this.linkGeneration++
+    this.focusJump = false
     this.placeGen++
     for (const f of this.flight) f.abort.abort()
     this.scroller.remove()
@@ -186,7 +193,33 @@ export class RenderedLens {
     const t = e.target
     if (!(t instanceof Element)) return
     const a = t.closest('a')
-    if (a && this.scroller.contains(a)) e.preventDefault()
+    if (!a || !this.scroller.contains(a)) return
+    e.preventDefault()
+    if (e.type === 'click' && (!(e instanceof MouseEvent) || e.button === 0)) void this.follow(a)
+  }
+
+  private async follow(a: HTMLAnchorElement): Promise<void> {
+    const href = a.getAttribute('data-href')
+    if (!href || this.stopped || this.paused) return
+    const generation = this.linkGeneration
+    const interaction = this.interaction
+    try {
+      const target = await this.core.call('resolve', { doc: this.opened.doc, gen: this.opened.gen, href })
+      if (this.stopped || this.paused || generation !== this.linkGeneration) return
+      if (target.kind === 'external') {
+        if (!await window.typose.openExternal(target.url)) a.title = `Not opened: ${href}`
+      } else if (target.kind === 'heading' && interaction === this.interaction) {
+        this.atLine = target.line
+        this.moved = false
+        this.focusJump = true
+        delete this.scroller.dataset.ready
+        this.settle()
+      } else if (target.kind === 'inert') a.title = `Not opened: ${href}`
+    } catch (err) {
+      if (this.stopped || this.paused || generation !== this.linkGeneration) return
+      if (err instanceof CoreCallError && err.code === 'Frozen') this.options.onFrozen(err.message)
+      a.title = `Not opened: ${href}`
+    }
   }
 
   /** One page per frame, and at most 2 in flight (plan §2.2, C5). */
@@ -276,6 +309,14 @@ export class RenderedLens {
       }
       this.atLine = undefined
       if (block) this.shown = Number(block.dataset.line)
+      if (this.focusJump) {
+        this.focusJump = false
+        const target = block?.querySelector<HTMLElement>('h1,h2,h3,h4,h5,h6') ?? block
+        if (target) {
+          target.tabIndex = -1
+          target.focus({ preventScroll: true })
+        }
+      }
       this.finishPlace()
     }
     requestAnimationFrame(() => align(8))

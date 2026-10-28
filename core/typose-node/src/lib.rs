@@ -634,6 +634,23 @@ impl Doc {
             _task: hooks::Live::new(&hooks::TASKS),
         }))
     }
+
+    /// A decoded fragment's source line in this generation's held Markdown build. No file-system access.
+    #[napi]
+    pub fn heading_line(&self, generation: f64, fragment: String) -> std::result::Result<Option<u32>, Error<Code>> {
+        let generation = int("gen", generation)? as u32;
+        if fragment.len() > 32 << 10 || fragment.chars().any(char::is_control) {
+            return Err(Error::new(Code::InvalidParams, "fragment must be at most 32 KiB, without control characters"));
+        }
+        let current = self.raw()?.document().generation();
+        if generation != current {
+            return Err(doc_error(DocError::Stale { current, asked: generation }));
+        }
+        let built = self.built.lock().unwrap();
+        let rendered =
+            built.as_ref().ok_or_else(|| Error::new(Code::InvalidParams, "render the Markdown build first"))?;
+        Ok(rendered.heading_line(&fragment))
+    }
 }
 
 /// The test-hooks addon's own calls (plan m8), absent from the release addon.

@@ -1,6 +1,6 @@
 // Plan C4 at the core host: every numeric parameter against the hostile table, with a spy addon that must not be
 // called (and no state change) when a request is refused. And plan C5 and C6's cancels, against the same spy.
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Cancel, Doc, IndexProgress, Page } from 'typose-node'
 import { limits } from 'typose-node'
 import type { Response } from '../shared/protocol'
@@ -13,6 +13,7 @@ const page = vi.fn(async (_gen: number, _start: number, _count: number, _cancel:
 const piece = vi.fn(async (_gen: number, _line: number, _offset: number, _cancel: Cancel) => ({ items: [item()] }) as unknown as Page)
 const render = vi.fn(async (_gen: number, _cancel: Cancel) => ({ blocks: 1, units: 1, htmlBytes: 8, nodes: 3, noteUnits: 0 }))
 const mdPage = vi.fn(async (_gen: number, _start: number, _count: number, _cancel: Cancel) => ({ items: [] }))
+const headingLine = vi.fn((_gen: number, _fragment: string): number | null => null)
 const reload = vi.fn()
 const close = vi.fn()
 const startIndex = vi.fn((_cancel: Cancel, _onProgress: (p: IndexProgress) => void) => {})
@@ -28,6 +29,7 @@ const doc = {
   piece,
   render,
   mdPage,
+  headingLine,
   reload,
   close,
   startIndex
@@ -77,6 +79,8 @@ const TABLE: [method: string, field: string, base: Record<string, unknown>][] = 
   ['page', 'count', { doc: 1, lens: 'rendered', gen: 1, start: 0 }],
   ['render', 'doc', { gen: 1 }],
   ['render', 'gen', { doc: 1 }],
+  ['resolve', 'doc', { gen: 1, href: '#title' }],
+  ['resolve', 'gen', { doc: 1, href: '#title' }],
   ['reload', 'doc', { count: 1, bytes: 0 }],
   ['reload', 'count', { doc: 1, bytes: 0 }],
   ['reload', 'bytes', { doc: 1, count: 1 }],
@@ -109,7 +113,7 @@ describe('every numeric parameter takes only integers in its range', () => {
           return
         }
         expect(response).toMatchObject({ id: nextId - 1, session: 7, error: { code: 'InvalidParams', field } })
-        for (const spy of [openDoc, page, piece, render, mdPage, reload, close, startIndex, reserveCache]) expect(spy).not.toHaveBeenCalled()
+        for (const spy of [openDoc, page, piece, render, mdPage, headingLine, reload, close, startIndex, reserveCache]) expect(spy).not.toHaveBeenCalled()
         // No state change: document 1 is still open, and the next open is document 2.
         expect(await call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 })).toHaveProperty('result')
         expect(await call('open', { path: 'c.txt', count: 1, bytes: 0 })).toMatchObject({ result: { doc: 2 } })
@@ -239,6 +243,58 @@ describe('rendered Markdown (plan: Rendered Markdown slice §2.1)', () => {
     const last = flags.at(-1)!
     expect(await call('close', { doc: 1 })).toMatchObject({ result: true })
     expect(last.cancel).toHaveBeenCalledOnce()
+  })
+})
+
+describe('thin Markdown link resolution', () => {
+  const mutable = doc as unknown as { format: string; generation: number }
+  beforeEach(() => { mutable.format = 'markdown' })
+  afterEach(() => {
+    mutable.format = 'text'
+    mutable.generation = 1
+    headingLine.mockReset().mockReturnValue(null)
+  })
+
+  it('decodes fragments once and asks the held build for a source line', async () => {
+    for (const [href, fragment, line] of [['#title-1', 'title-1', 4], ['#%E8%AA%9E', '語', 8], ['#typose-footnote:NOTE', 'typose-footnote:NOTE', 12], ['#typose-footnote:a%2520b', 'typose-footnote:a%20b', 16]] as const) {
+      headingLine.mockReturnValueOnce(line)
+      expect(await call('resolve', { doc: 1, gen: 1, href })).toMatchObject({ result: { kind: 'heading', line } })
+      expect(headingLine).toHaveBeenLastCalledWith(1, fragment)
+    }
+    expect(await call('resolve', { doc: 1, gen: 1, href: '#missing' })).toMatchObject({ result: { kind: 'inert' } })
+  })
+
+  it('canonicalizes only allowed external schemes without asking the addon or filesystem', async () => {
+    for (const [href, url] of [['HTTP://EXAMPLE.COM', 'http://example.com/'], ['https://example.com/a b', 'https://example.com/a%20b'], ['mailto:me@example.com?subject=Hi', 'mailto:me@example.com?subject=Hi']])
+      expect(await call('resolve', { doc: 1, gen: 1, href })).toMatchObject({ result: { kind: 'external', url } })
+    for (const spy of [openDoc, page, piece, render, mdPage, headingLine]) expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('leaves local, network, device, other-scheme and malformed targets inert', async () => {
+    for (const href of ['', 'other.md', '../a.md', '/a.md', 'file:///C:/a.md', 'file://host/share/a.md', '//host/share/a.md', '\\\\host\\share\\a.md', '\\\\?\\C:\\a.md', 'smb://host/share/a.md', 'javascript:alert(1)', 'vbscript:x', 'data:text/plain,x', 'http://%', '#%', '#%FF', '#%00', '#%C2%85', '#\ud800'])
+      expect(await call('resolve', { doc: 1, gen: 1, href })).toMatchObject({ result: { kind: 'inert' } })
+    for (const spy of [openDoc, page, piece, render, mdPage, headingLine]) expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('validates href type, raw controls and both raw/canonical UTF-8 size bounds', async () => {
+    for (const href of [undefined, null, 7, [], {}, 'x'.repeat(32_769), 'é'.repeat(16_385), 'https://e/\0x', 'https://e/\nx', '#\u0085'])
+      expect(await call('resolve', { doc: 1, gen: 1, href })).toMatchObject({ error: { code: 'InvalidParams', field: 'href' } })
+    const exact = 'https://e/' + 'x'.repeat(32_768 - 'https://e/'.length)
+    expect(await call('resolve', { doc: 1, gen: 1, href: exact })).toMatchObject({ result: { kind: 'external', url: exact } })
+    expect(await call('resolve', { doc: 1, gen: 1, href: 'https://e/' + '語'.repeat(3000) })).toMatchObject({ result: { kind: 'external' } })
+    expect(await call('resolve', { doc: 1, gen: 1, href: 'https://e/' + '語'.repeat(4000) })).toMatchObject({ result: { kind: 'inert' } })
+    expect(headingLine).not.toHaveBeenCalled()
+  })
+
+  it('rejects stale/closed documents and does not resolve a text document', async () => {
+    mutable.generation = 2
+    expect(await call('resolve', { doc: 1, gen: 1, href: '#title' })).toMatchObject({ error: { code: 'Stale' } })
+    mutable.generation = 1
+    mutable.format = 'text'
+    expect(await call('resolve', { doc: 1, gen: 1, href: 'https://example.com' })).toMatchObject({ result: { kind: 'inert' } })
+    await call('close', { doc: 1 })
+    expect(await call('resolve', { doc: 1, gen: 1, href: '#title' })).toMatchObject({ error: { code: 'NoDocument' } })
+    expect(headingLine).not.toHaveBeenCalled()
   })
 })
 
