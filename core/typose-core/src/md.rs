@@ -91,6 +91,8 @@ pub struct Rendered {
     items: Vec<Item>,
     units: u64,
     html_bytes: u64,
+    nodes: u64,
+    note_units: u64,
     /// Pays for the items and this struct. Declared last, so it's released after them.
     charge: Reservation,
 }
@@ -103,20 +105,37 @@ const ITEM_SLOTS: u64 = 4 * size_of::<Item>() as u64;
 
 impl Rendered {
     fn new() -> Result<Rendered, OverBudget> {
-        Ok(Rendered { items: Vec::new(), units: 0, html_bytes: 0, charge: Reservation::new(RENDERED_BYTES)? })
+        Ok(Rendered {
+            items: Vec::new(),
+            units: 0,
+            html_bytes: 0,
+            nodes: 0,
+            note_units: 0,
+            charge: Reservation::new(RENDERED_BYTES)?,
+        })
     }
 
     pub fn items(&self) -> &[Item] {
         &self.items
     }
 
-    /// The UTF-16 units of text and the HTML bytes across the items: what the lens reserves for (plan §2.2).
+    /// The UTF-16 units of the sanitized HTML's text. Generated note labels are counted separately.
     pub fn units(&self) -> u64 {
         self.units
     }
 
     pub fn html_bytes(&self) -> u64 {
         self.html_bytes
+    }
+
+    /// Element and text nodes, including each block's renderer wrapper and generated note controls.
+    pub fn nodes(&self) -> u64 {
+        self.nodes
+    }
+
+    /// UTF-16 units of generated note labels, including their source-line numbers.
+    pub fn note_units(&self) -> u64 {
+        self.note_units
     }
 
     pub fn charged(&self) -> u64 {
@@ -145,6 +164,15 @@ impl Rendered {
         self.charge.grow(ITEM_SLOTS + heap as u64)?;
         self.units += units;
         self.html_bytes += item.html.len() as u64;
+        if let Some(note) = item.note {
+            self.nodes += 3; // the block wrapper, button and its text node
+            self.note_units += note.text().encode_utf16().count() as u64
+                + " · Show in Raw at line ".encode_utf16().count() as u64
+                + (u64::from(item.line) + 1).ilog10() as u64
+                + 1;
+        } else {
+            self.nodes += 1 + html_nodes(&item.html); // the block wrapper and the final serialized fragment
+        }
         self.items.push(item);
         Ok(())
     }
@@ -310,6 +338,27 @@ fn text_units(html: &str) -> u64 {
         }
     }
     units
+}
+
+/// Element and text nodes in final fixed-point sanitized HTML. As in `sanitize`'s serialization walk, literal `<`
+/// opens a tag and attribute values escape `<` and `>`. Adjacent serialized text stays one text node, entities
+/// included; a closing tag is not a second element.
+fn html_nodes(mut html: &str) -> u64 {
+    let mut nodes = 0;
+    while let Some(start) = html.find('<') {
+        if start > 0 {
+            nodes += 1;
+        }
+        html = &html[start + 1..];
+        if !html.starts_with('/') {
+            nodes += 1;
+        }
+        match html.find('>') {
+            Some(end) => html = &html[end + 1..],
+            None => return nodes + 1, // conservatively include any unterminated tail as text
+        }
+    }
+    nodes + u64::from(!html.is_empty())
 }
 
 /// A hash map's charge for one more entry of `(K, V)`, its key's heap aside: hashbrown doubles its buckets (of the
@@ -862,6 +911,47 @@ mod tests {
         assert!(nested.len() < 64 << 10);
         assert_eq!(render(&nested).items()[0].note, Some(Note::Large));
         assert_eq!(Note::Big.text(), "This block is over 64 KiB");
+    }
+
+    #[test]
+    fn final_html_nodes_include_empty_elements_and_single_entity_text_runs() {
+        for (html, nodes) in [
+            ("", 0),
+            ("a &amp; &#x1F600;", 1),
+            ("<h1></h1>\n", 2),
+            ("<p>one <em>x</em></p>\n", 5),
+            ("<p><span data-alt=\"&lt;&gt; &amp;\"></span></p>\n", 3),
+            ("<input disabled=\"\" type=\"checkbox\">\n", 2),
+            ("<table><tbody><tr><td></td></tr></tbody></table>\n", 5),
+            ("<pre><code>\n&amp;\n</code></pre>\n", 4),
+        ] {
+            assert_eq!(html_nodes(html), nodes, "{html:?}");
+        }
+        let html = clean(r#"<a data-href="a<>b">x &amp; y</a>"#).unwrap();
+        assert!(html.contains("&lt;&gt;"), "{html}");
+        assert_eq!(html_nodes(&html), 2); // one anchor, one text node; attribute entities add no nodes
+    }
+
+    #[test]
+    fn build_summary_charges_zero_text_blocks_and_the_generated_note_label() {
+        let r = render(&format!("{} x\n\n#\n\n* * *\n", ">".repeat(65)));
+        assert_eq!(r.items().len(), 3);
+        assert_eq!(r.items()[0].note, Some(Note::Deep));
+        assert_eq!(r.units(), 2); // the heading's and rule's serialized newlines; the note stays separate
+        assert_eq!(r.nodes(), 9); // note wrapper/button/text, then wrapper/heading/newline and wrapper/rule/newline
+        let label = format!("{} · Show in Raw at line 1", Note::Deep.text());
+        assert_eq!(r.note_units(), label.encode_utf16().count() as u64);
+
+        for note in [Note::Big, Note::Deep, Note::Large] {
+            for line in [0, 8, 9, 98, 99, 999, u32::MAX] {
+                let mut r = Rendered::new().unwrap();
+                r.push(Item { line, lines: 1, html: Box::default(), slug: None, footnote: None, note: Some(note) }, 0)
+                    .unwrap();
+                let label = format!("{} · Show in Raw at line {}", note.text(), u64::from(line) + 1);
+                assert_eq!(r.note_units(), label.encode_utf16().count() as u64);
+                assert_eq!((r.units(), r.html_bytes(), r.nodes()), (0, 0, 3));
+            }
+        }
     }
 
     /// Plan §3: no item over 64 Ki units of text, and no page over 256 KiB of HTML; the first item always fits.

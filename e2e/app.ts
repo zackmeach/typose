@@ -237,6 +237,9 @@ export interface TestHooks {
     aborts: number
     gone: { at: number; rejected: number } | null
     dropped: ('event' | 'response')[]
+    /** The mounted Rendered lens, when one is. */
+    rendered: (() => { units: number; htmlBytes: number; nodes: number; noteUnits: number; reserved: number; rawReserved: number; retiredReserved: number; totalReserved: number; blocks: number; appended: number }) | null
+    /** The mounted Raw lens's cached items, when one is. */
     items: (() => { key: number | string; text: string }[]) | null
   }
   app: { close?: () => void }

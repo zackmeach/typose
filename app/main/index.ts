@@ -31,6 +31,11 @@ let titlebarPainted: () => void = () => {}
 // No proxy resolution at all: with Windows' "Automatically detect settings" on, Chromium otherwise runs WPAD
 // (a DNS lookup for "wpad") at startup in every network context, though Typose requests nothing (spec §7.3).
 app.commandLine.appendSwitch('no-proxy-server')
+// A renderer's `<link rel=dns-prefetch>` bypasses webRequest and CSP (spec §7.3). Blink's setting suppresses that
+// speculative DNS before any window exists. Electron 44.9.2's Preconnect path emits a session event without opening
+// a socket; Typose installs no handler. The test-hooks build can withhold the DNS setting to prove the NetLog gate.
+const speculative = __TEST_HOOKS__ && process.env.TYPOSE_TEST_ALLOW_SPECULATIVE === '1'
+if (!speculative) app.commandLine.appendSwitch('blink-settings', 'dnsPrefetchingEnabled=false')
 
 // macOS: no window restoration. Typose restores no window through AppKit, yet after a crash AppKit asks at the next
 // launch whether to reopen its windows, in a modal that holds the launch short of ready until someone answers it: on

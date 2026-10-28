@@ -1,4 +1,12 @@
-import type { ErrorCode, Opened } from '../shared/protocol'
+import type { ErrorCode, MdBuild, Opened } from '../shared/protocol'
+
+/** Why Rendered stays off, in the switch's tooltip (plan §2.2, Z71, Z34). */
+export const RENDERED_OFF = {
+  ceiling: 'Rendered shows files of up to 8 MB',
+  memory: "Typose's memory budget is full"
+} as const
+
+export type RenderedOff = keyof typeof RENDERED_OFF
 
 /** The card's state: brief §7.9's file states, plus what M1 needs around them. */
 export type Card =
@@ -9,7 +17,25 @@ export type Card =
   /** `frozen`: why the document stopped reading (spec §3.1); nothing new shows until Reload. `refused`: the ledger
    *  refused a Reload, so the lens stays at its generation (plan C1, Z34's "keeps Raw"). `atLine`: where Reopen puts
    *  the view (plan C7). */
-  | { kind: 'open'; path: string; opened: Opened; lines: number; bytes: number; indexed: boolean; frozen?: string; refused?: true; atLine?: number }
+  | {
+      kind: 'open'
+      path: string
+      opened: Opened
+      lines: number
+      bytes: number
+      indexed: boolean
+      frozen?: string
+      refused?: true
+      atLine?: number
+      /** What's showing. Markdown opens in Raw, then Rendered once its build fits (plan §2.2). */
+      lens?: 'raw' | 'rendered'
+      /** Set once `render` has finished. Pages come from it. */
+      build?: MdBuild
+      /** Past 50 ms with the build still running, the status says "Rendering…". */
+      rendering?: boolean
+      /** Rendered can't show. The tooltip is `RENDERED_OFF`. */
+      renderedOff?: RenderedOff
+    }
   | { kind: 'failed'; path: string; code: ErrorCode; message: string }
   /** Plan C7: the core died. `line` is where its view was; `ready` once a new core is up to Reopen it in. */
   | { kind: 'gone'; path?: string; line?: number; ready: boolean }
@@ -23,8 +49,10 @@ export interface CardView {
   progress: number | 'indeterminate' | null
   /** A banner under the header, and its button's label. The button reloads, as Ctrl+R does. */
   banner: { text: string; action: string } | null
-  /** The Raw lens, or a message with its actions. */
-  body: { raw: true } | { message: string; actions: Action[] }
+  /** The Raw lens, the Rendered lens, or a message with its actions. */
+  body: { raw: true } | { rendered: true } | { message: string; actions: Action[] }
+  /** Markdown's Raw/Rendered switch. `renderedOff` is the disabled tab's tooltip. Null when the file has no switch. */
+  lenses: null | { showing: 'raw' | 'rendered'; renderedOff?: string }
 }
 
 export const fileName = (path: string): string => path.split(/[\\/]/).pop() || path
@@ -34,7 +62,7 @@ const lines = (n: number, format: (n: number) => string) => `${format(n)} line${
 
 /** What the card shows in each state (brief §7.9, §8.2; the memory refusal is plan §7 proposal 1). */
 export function view(card: Card): CardView {
-  const plain = { status: '', progress: null, banner: null }
+  const plain = { status: '', progress: null, banner: null, lenses: null }
   const say = (message: string, ...actions: Action[]): CardView => ({ ...plain, body: { message, actions } })
   switch (card.kind) {
     case 'connecting':
@@ -43,12 +71,18 @@ export function view(card: Card): CardView {
       return say('', 'Open file…')
     case 'opening':
       // Nothing for the first 300 ms, so a fast open doesn't flash; then the line, and the file can be closed.
-      return card.slow ? { status: 'Opening…', progress: 'indeterminate', banner: null, body: { message: '', actions: ['Close'] } } : say('')
+      return card.slow
+        ? { status: 'Opening…', progress: 'indeterminate', banner: null, lenses: null, body: { message: '', actions: ['Close'] } }
+        : say('')
     case 'open': {
       const { opened, frozen } = card
       const count = lines(card.lines, (n) => n.toLocaleString('en'))
       let status = `${count} · ${opened.encoding}`
       if (!card.indexed) status = frozen ? `Indexing stopped at ${count}` : `Indexing ${lines(card.lines, (n) => compact.format(n))}…`
+      // Plan §2.2: Raw shows "Rendering…" until the build is ready. A freeze already has its own status.
+      if (card.rendering && !frozen) status = 'Rendering…'
+      const showing = card.lens ?? 'raw'
+      const markdown = opened.format === 'markdown' && !opened.blank
       return {
         status,
         progress: card.indexed || frozen ? null : opened.size > 0 ? card.bytes / opened.size : 0,
@@ -57,7 +91,8 @@ export function view(card: Card): CardView {
           : frozen
             ? { text: 'Changed on disk', action: 'Reload (Ctrl+R)' }
             : null,
-        body: opened.blank ? { message: 'Empty file', actions: [] } : { raw: true }
+        body: opened.blank ? { message: 'Empty file', actions: [] } : showing === 'rendered' ? { rendered: true } : { raw: true },
+        lenses: markdown ? { showing, renderedOff: card.renderedOff ? RENDERED_OFF[card.renderedOff] : undefined } : null
       }
     }
     case 'failed':

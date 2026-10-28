@@ -2,14 +2,10 @@ import type { Limits, Opened, PageItem, Token } from '../../shared/protocol'
 import { type CoreClient, CoreCallError, testHooks } from '../core'
 import { inputMark, markPainted, setPaintProbe } from '../perf'
 import { VirtualList } from '../virtual/virtual-list'
-import { type Key, type Mounted, PageCache, capFor, rowsFor, rowsOf } from './page-cache'
+import { type Key, type Mounted, PageCache, ROW_HEIGHT, capFor, rowsFor, rowsOf, viewportCap } from './page-cache'
+import type { LensBudget } from './lens-budget'
 
-/** Brief §6.1's mono line: 13px at 1.55, rounded to whole pixels so row math stays exact. */
-export const ROW_HEIGHT = 20
-
-/** Plan C1: the cache's cap for a viewport `height` px tall and no overscan, the least a lens mounts with: part of the
- *  open's floor. */
-export const viewportCap = (l: Limits, height: number): number => capFor(l, Math.ceil(height / ROW_HEIGHT) + 1, false)
+export { ROW_HEIGHT, viewportCap }
 
 /**
  * A line with more than one row. Z66: a piece's text shows over rows of at most 2,048 units, `rows[k]` of them for its
@@ -42,6 +38,8 @@ export interface RawOptions {
   onFrozen(why: string): void
   /** The line to start at (Reload keeps the reading position). */
   atLine?: number
+  /** Markdown keeps Raw's confirmed share beside its retained Rendered tree. */
+  budget?: LensBudget
 }
 
 const mb = new Intl.NumberFormat('en', { maximumFractionDigits: 1 })
@@ -64,6 +62,12 @@ export class RawLens {
   private extraRows = 0
   private lineCount = 0
   private atLine: number | undefined
+  /** The reader scrolled, or pressed a key, or pointed: an open stays in Raw instead of switching to Rendered. */
+  private moved = false
+  /** The line last at the top while the view was on screen. Hiding the panel resets scroll before dispose. */
+  private shownLine = 0
+  /** A Rendered switch is about to take the reservation. In-flight sizing must not write over it. */
+  private yielded = false
   private wanted: { first: number; last: number } | null = null
   /** The keys of the wanted range's rows: a request for none of them is stale. */
   private wantedKeys = new Set<Key>()
@@ -94,7 +98,7 @@ export class RawLens {
     private readonly options: RawOptions
   ) {
     // Plan C1: the open reserved at least the viewport's cap; only the rows a reservation covers are ever mounted.
-    this.reserved = opened.reserved
+    this.reserved = options.budget?.rawReserved ?? opened.reserved
     this.cache = new PageCache(limits)
     this.cache.setCap(this.reserved)
     this.cache.add(opened.firstPage.items)
@@ -108,8 +112,13 @@ export class RawLens {
     Object.assign(this.list.element, { role: 'region', ariaLabel: `${label}, Raw` })
     // Reload's reading position, reached once the new index has found that line, unless the reader moves first.
     this.atLine = options.atLine
+    this.shownLine = options.atLine ?? 0
     for (const type of ['wheel', 'keydown', 'pointerdown'] as const)
-      this.list.element.addEventListener(type, () => (this.atLine = undefined), { passive: true })
+      this.list.element.addEventListener(type, () => {
+        this.atLine = undefined
+        this.moved = true
+      }, { passive: true })
+    this.list.element.addEventListener('scroll', () => this.rememberLine(), { passive: true })
     this.setLineCount(opened.lines)
     // Plan C8: every input that can move the view demands frames until its target rows paint. A click can expand a
     // long line; it's marked after the button's own handler has added the rows.
@@ -140,14 +149,54 @@ export class RawLens {
     this.lineCount = Math.max(lines, this.opened.firstPage.items.length)
     this.list.setRowCount(this.rowCount())
     if (this.atLine !== undefined && this.lineCount > this.atLine) {
-      this.list.scrollToRow(this.rowOf(this.atLine))
+      this.list.scrollToRow(this.rowOf(this.atLine)) // a source line can span several rows
+      this.shownLine = this.atLine // shownLine stays a source line
       this.atLine = undefined
     }
   }
 
-  /** The line at the top of the viewport. */
+  /** The line at the top of the viewport, or the one this lens was asked to open at until it gets there. */
   topLine(): number {
-    return this.slot(Math.floor(this.list.state.top / ROW_HEIGHT)).line
+    this.rememberLine()
+    return this.atLine !== undefined ? this.atLine : this.shownLine
+  }
+
+  /** A hidden scroller's scroll jumps to 0 before dispose. Keep the line from while it was on screen. */
+  private rememberLine(): void {
+    const el = this.list.element
+    if (el.getClientRects().length === 0 || el.closest('[hidden]')) return
+    this.shownLine = this.slot(Math.floor(this.list.state.top / ROW_HEIGHT)).line
+  }
+
+  /** The reader has moved the view (plan §2.2): don't switch to Rendered out from under them. */
+  readerMoved(): boolean {
+    return this.moved
+  }
+
+  /** The scroller, for focus. */
+  get element(): HTMLElement {
+    return this.list.element
+  }
+
+  focus(): void {
+    this.list.element.focus()
+  }
+
+  /**
+   * Stop sizing the cache. An in-flight `reserve` bails when it returns, so a Rendered reservation made after this
+   * isn't overwritten. The lens keeps showing until it unmounts.
+   */
+  yieldReservation(): void {
+    this.yielded = true
+    this.sizings++
+  }
+
+  /** The Rendered reservation was refused: size the cache again. */
+  resumeReservation(): void {
+    if (this.stopped) return
+    this.yielded = false
+    this.sizedTo = ''
+    this.sizeCache()
   }
 
   /** The index is done. A last piece fetched before the index knew where its line ends says "More on this line":
@@ -162,16 +211,22 @@ export class RawLens {
     this.frozen = true
   }
 
-  dispose(): void {
+  /**
+   * `release` drops the cache reservation. A switch to Rendered passes false: that lens already holds it, and zeroing
+   * it here would race the hold. Close releases it with the document.
+   */
+  dispose(release = true): void {
     this.stopped = true
     for (const q of this.inflight) q.abort.abort()
     setPaintProbe(null)
     this.list.dispose()
     if (__TEST_HOOKS__) testHooks.cache = testHooks.items = null
+    if (!release) return
     // Plan C1: the cache is gone. A sizing still under way sends nothing more (`reserveFor`). If an open or Reload has
     // taken the reservation for the next lens, the core ignores this.
     const { doc, gen } = this.opened
-    void this.core.call('reserve', { doc, gen, bytes: 0 }).catch(() => {})
+    if (this.options.budget) void this.options.budget.reserveRaw(gen, 0)
+    else void this.core.call('reserve', { doc, gen, bytes: 0 }).catch(() => {})
   }
 
   private rowCount(): number {
@@ -301,20 +356,25 @@ export class RawLens {
    * its reservation.
    */
   private async reserveFor(rows: number, n: number): Promise<void> {
-    if (n !== this.sizings || this.stopped) return // a later size has superseded this one
+    if (n !== this.sizings || this.stopped || this.yielded) return // a later size, or Rendered, has superseded this one
     const { doc, gen } = this.opened
     // The last, if all are refused: what the core already holds.
     const caps = [capFor(this.limits, rows), capFor(this.limits, rows, false), viewportCap(this.limits, this.host.clientHeight), this.reserved]
     for (const cap of caps) {
       const held = cap <= this.reserved
-      const granted = held || (await this.core.call('reserve', { doc, gen, bytes: cap }).catch(() => false))
-      if (this.stopped) return // disposed meanwhile: its release is already on its way
+      const granted = held || (this.options.budget
+        ? await this.options.budget.reserveRaw(gen, cap)
+        : await this.core.call('reserve', { doc, gen, bytes: cap }).catch(() => false))
+      if (n !== this.sizings || this.stopped || this.yielded) return // disposed, or Rendered took the reservation
       if (!granted) continue
       const shrunk = held && cap < this.reserved
       this.reserved = cap
       this.cache.setCap(cap)
       this.list.setMaxRows(this.coveredRows()) // mounts or unmounts rows now, not at the next scroll
-      if (shrunk) void this.core.call('reserve', { doc, gen, bytes: cap }).catch(() => {}) // what it paid for has gone
+      // Shrink locally before releasing the allowance: even a delayed reserve response must not leave mounted
+      // rows or cache entries claiming the old cap after the core has lowered its reservation.
+      if (held && this.options.budget) await this.options.budget.reserveRaw(gen, cap)
+      else if (shrunk) void this.core.call('reserve', { doc, gen, bytes: cap }).catch(() => {})
       break
     }
     this.reservedOnce = true

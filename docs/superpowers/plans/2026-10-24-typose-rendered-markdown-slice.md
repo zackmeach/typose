@@ -98,6 +98,7 @@ Spec §4.6 makes the choice: "**Parser:** `pulldown-cmark` in the core", and "Re
 - **It mounts every block** and lets Chromium skip offscreen work: `.md-block { content-visibility: auto; contain-intrinsic-size: auto <estimate> }`.
   - Skipped content stays in the accessibility tree, the tab order and native find.
   - PR 2 tests this rather than assuming it.
+  - **Measured (fix round 1).** On this Chromium, `auto` does not leave skipped boxes in the accessibility tree: with nothing scrolled, 37 of 120 links were in the tree (heading blocks had been forced visible, and all 13 headings were present). Dropping `auto` entirely, so every block is visible: the 853 KB plan `docs/superpowers/plans/2026-10-20-typose-phase0-spike-c.md` reached `data-ready` in 526 ms, longest main-thread task during the append 140 ms, scroll max frame gap 89 ms. A generated 8 MiB file (8,385,260 bytes; prose, lists, tables, code) reached `data-ready` in 8,856 ms, longest task 480 ms, scroll max frame gap 192 ms. 480 ms is past 200 ms, so `auto` stays. What shipped: `auto` normally, and every block `visible` while the accessibility mode is on (`html[data-a11y=on]`, the mode PR 7 already delivers). A heading block stays `visible` either way, so heading navigation does not depend on the mode (this Chromium's Linux build does not emit accessibility-support). Z72's native `content-visibility` is that normal path; the mode is the exception, and a forged mode only lays more out. The same files with the fallback: 853 KB, 271 ms to ready, no long task observed, scroll gap 19 ms; 8 MiB, 5,902 ms, longest task 193 ms, scroll gap 286 ms.
 - **It's charged to the ledger:**
   - Before appending, the lens reserves `RENDERED_PER_UNIT × text units + 2 × HTML bytes` through the existing `reserve` call, with the same one-lens holder as Raw.
   - If the reservation is refused, Rendered is disabled with the memory reason, and Raw stays.
@@ -116,7 +117,7 @@ Spec §4.6 makes the choice: "**Parser:** `pulldown-cmark` in the core", and "Re
 - Reload goes through the existing path, then calls `render(gen)`.
 
 **Carried notes:**
-- PR 7's "the page can forge the accessibility mode": the slice's Rendered never reads the mode, so the forgery stays harmless. The note carries to the first lens that reads it.
+- PR 7's "the page can forge the accessibility mode": Rendered reads it only to lay every block out while the mode is on (the accessibility-tree measurement above). A forged mode costs that layout, never safety.
 - Z66 (Raw wraps at 2,048 units, PR 6b): independent of this slice. The lens switch uses Raw's `atLine` and `topLine`, which PR 6b must keep working.
 
 ### 2.3 Sanitizer and CSP (🔒 brief §4.6, spec §7)
@@ -282,3 +283,41 @@ The original questions:
 1. **Document markup causes network activity.** *Mitigation:* no URL from the file in any live attribute; the spike's reviewed allowlist plus the oracle and a proptest; PR 2's DOM sweep and NetLog over the corpus, with a positive control.
 2. **Keeping the whole DOM costs too much on big files.** *Mitigation:* the ledger refuses and Raw stays; everything wraps; one page is appended per frame; the build runs off the UI thread; hostile shapes are timed at the ceiling. If it comes out bad, lower the ceiling.
 3. **A link or image path reaches a network host and sends NTLM credentials** (Z43). *Mitigation:* network forms refused before the file system is touched; a UNC route refused; PR 3's junction test. *Cost:* images beside a document on a share or mapped drive don't load in this slice.
+
+## 6. PR 2 memory amendment · 2026-10-28
+
+This amendment replaces §2.2's text-only charge and one-lens reservation model, and §3's original PR 2 memory acceptance. The earlier scroll measurements remain evidence for the text component; they measured from an already-mounted DOM and did not establish the cost of initial mounting.
+
+### Build metadata and charge
+
+`MdBuild` now returns `{blocks, units, htmlBytes, nodes, noteUnits}`. `units` keeps its existing meaning: UTF-16 text units in sanitized HTML. `noteUnits` adds the exact UTF-16 units of generated fallback labels (`note + ' · Show in Raw at line ' + (line + 1)`). `nodes` counts final sanitized element and text nodes, each block's renderer wrapper, and each fallback note's wrapper, button and text node. Empty elements and zero-HTML note items therefore carry a charge. The fixed-point sanitizer serialization escapes literal angle brackets in text and attributes, so the core counts its final serialized topology without a second HTML parser. Browser TreeWalker element/text counts and text totals matched the build summaries in the calibration samples.
+
+Before mounting a generation, reserve:
+
+```text
+6 MiB + 128 × (units + noteUnits) + 16,384 × nodes + 2 × htmlBytes
+```
+
+The 128 B/unit term remains the historical scroll allowance described in §2.2. The new node and fixed terms cover the measured opening/mounting component. This Windows measurement does not qualify Mac or Linux, or close M7's broader qualification debt.
+
+### Calibration evidence and limits
+
+The calibration warmed a Markdown card, closed it, waited for the non-pool ledger total to return to zero, and collected garbage **before taking the empty-card baseline**. It then opened the target file, sampled renderer private bytes through mounting, scrolled to the end and sampled again. The measured rise is from that pre-open baseline to the observed peak. Shapes were deep fallback notes, thematic rules, empty headings, escaped span markup, empty inline markup, tables, task lists and empty links with long targets; each used 1, 200 and 2,000 source repetitions, with accessibility mode off and on. Repetitions are not always separate build blocks: a task list, for example, is one block.
+
+There are **48 successful measurements**, including one isolated retry. The original Playwright worker exited with `0xC0000409` while assigned the 2,000-repetition escaped-span case (reported 0 ms); the exact isolated retry passed. Its cause is unknown. Original stdout is retained; a retry mistakenly overwrote its per-test artifacts, so product-crash attribution is unavailable. This was not a clean 48-case suite. Future runs use unique artifact directories. Local evidence is in `.evidence/audit/pr20-calibration.jsonl`, `.evidence/audit/pr20-calibration-analysis.json` and the `pr20-calibration-*.log` files.
+
+For each shape/mode, subtract the existing text and HTML terms from the 200→2,000-repetition private-byte delta, then divide by the node delta. The worst residual slope was **13,073.535555555556 B/node**, empty links with accessibility off. Multiplying by 1.25 and rounding up to 64 B gives **16,384 B/node**. With that coefficient, the largest remaining fixed residual across all samples was **4,241,712 B**; multiplying by 1.25 and rounding up to MiB gives **6,291,456 B (6 MiB)**. These empirical allowances do not prove arbitrary-document memory bounds.
+
+### Ownership, reuse and lifecycle gate
+
+One reservation owner tracks a document's core session and generation. Its confirmed total is **Raw + current Rendered + 2 × retired single-tree maximum**. Updates are serialized, and replies from an invalidated session or generation cannot update the current shares. Raw sizing changes its own share instead of overwriting the retained Rendered share.
+
+Raw ↔ Rendered switches reuse one Rendered DOM per generation. Hiding Rendered pauses paging and alignment while keeping that tree's charge; returning resumes the same tree. Reload updates the single-tree maximum from `max(previous single-tree maximum, previous current Rendered charge)` and pays twice that maximum beside the new Raw share, then adds the next generation's Rendered share if granted. Repeated Reload therefore keeps a bounded allowance rather than accumulating every previous total. Aggregate paid retired bytes are never fed back into the single-tree maximum. Closing, replacing, or terminally failing Reload invalidates the owner and disposes its trees; memory-refused Reload keeps the current view.
+
+The first lifecycle run failed all five cases: three exposed a replacement invoice gap, one exceeded the default five-second Reload assertion, and one exceeded the five-second native accessibility assertion. A separate diagnostic after TXT replacement found 9,783 DOM nodes and 808,357,888 renderer private bytes before GC, versus 53 nodes and 81,510,400 bytes after GC. That collection is diagnostic only, outside the judged interval. A second run with one carried allowance passed five of six cases, but Arabic TXT replacement exceeded Raw plus the single allowance plus 32 MiB by 79.7 MiB. Arabic Reloads completed after 16.3/16.5 seconds; dense native accessibility delivery also completed within the extended assertion. Two retired-tree allowances are the next empirical slack hypothesis, not proof that Chromium retains only two dead generations. The revised test requires five consecutive Reloads and, for Arabic, four alternating Arabic/CJK file replacements without GC; if this fails, the mechanism must be revisited rather than repeatedly raising the multiplier.
+
+A renderer-lifetime numeric single-tree maximum carries across file replacements, TXT, failed-open retries, Close/reopen and core restarts. Each next open pays Raw plus twice that maximum before allocating its view; Raw resizing preserves it. The previous aggregate total is never carried or accumulated. Renderer restart resets the maximum. This can conservatively refuse future opens or Rendered builds after a large prior view.
+
+The corrected lifecycle gate takes its baseline **before the tested open**, checks each stable bracketed sample against its contemporaneous summed reservation plus C1's 32 MiB tolerance, and exercises initial mount, scroll, accessibility, repeated lens switches, five Reloads, alternating scripts, large-to-small Markdown/TXT replacement and the settled view after Close/reopen. It forces no GC between these actions. Close separately checks C6's exact logical ledger baseline. Empty/failed cards are not covered by a private-byte bound; this is an empirical active-view allowance, not continuous whole-process enforcement of 25% private memory. Separate regressions check stale reservation replies, reused document IDs after restart, Raw's confirmed share, terminal Reload cleanup and bounded Reload shares. The revised targeted run passed **7 tests** (five lifecycle cases, refused-open/core-restart carry, terminal Reload cleanup); evidence is `pr20-memory-two-retired.log` and its unique results directory. Final committed-head gate and hosted-check disposition are recorded on PR #20; this targeted result does not establish Mac/Linux acceptance.
+
+The conservative node charge and simultaneous shares materially reduce Rendered availability under tight budgets. A file below the 8 MiB source ceiling can still be refused, especially with many small elements or retained Reload allowance. Refusal keeps Raw usable with the memory reason; production budget and reservation checks stay intact.

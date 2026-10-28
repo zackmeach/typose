@@ -1,0 +1,95 @@
+/** One document's share of the core's renderer reservation. Raw and retained Rendered trees coexist. */
+interface ReserveCore {
+  call(method: 'reserve', params: { doc: number; gen: number; bytes: number }): Promise<boolean>
+}
+
+export interface ReloadReservation {
+  generation: number
+  epoch: number
+  raw: number
+  retiredTreeMax: number
+  bytes: number
+}
+
+export class LensBudget {
+  private active = true
+  private epoch = 0
+  private serial = Promise.resolve()
+  private rendered = 0
+
+  constructor(
+    private readonly core: ReserveCore,
+    readonly session: number,
+    readonly doc: number,
+    private generation: number,
+    private raw: number,
+    private held: number,
+    private treeMax = 0
+  ) {}
+
+  current(generation: number): boolean {
+    return this.active && this.generation === generation
+  }
+
+  get rawReserved(): number {
+    return this.raw
+  }
+
+  get retiredTreeMax(): number {
+    return this.treeMax
+  }
+
+  snapshot() {
+    return { generation: this.generation, raw: this.raw, rendered: this.rendered, retired: 2 * this.treeMax, total: this.held }
+  }
+
+  reserveRaw(generation: number, bytes: number): Promise<boolean> {
+    return this.change(generation, 'raw', bytes)
+  }
+
+  reserveRendered(generation: number, bytes: number): Promise<boolean> {
+    return this.change(generation, 'rendered', bytes)
+  }
+
+  /** Two empirical retired-tree allowances; keep the single-tree maximum separate so repeated Reload cannot double it. */
+  reloadReservation(raw: number): ReloadReservation {
+    const retiredTreeMax = Math.max(this.treeMax, this.rendered)
+    return { generation: this.generation, epoch: this.epoch, raw, retiredTreeMax, bytes: raw + 2 * retiredTreeMax }
+  }
+
+  /** The core's Reload already reserved `held`. Older queued work cannot update this generation's shares. */
+  adopt(generation: number, held: number, plan: ReloadReservation): boolean {
+    if (!this.current(plan.generation) || plan.epoch !== this.epoch || generation <= this.generation) return false
+    this.epoch++
+    this.generation = generation
+    this.raw = plan.raw
+    this.rendered = 0
+    this.treeMax = plan.retiredTreeMax
+    this.held = held
+    this.serial = Promise.resolve()
+    return true
+  }
+
+  invalidate(): void {
+    this.active = false
+    this.epoch++
+  }
+
+  private change(generation: number, share: 'raw' | 'rendered', bytes: number): Promise<boolean> {
+    const epoch = this.epoch
+    const changed = this.serial.then(async () => {
+      if (!this.current(generation) || epoch !== this.epoch) return false
+      const raw = share === 'raw' ? bytes : this.raw
+      const rendered = share === 'rendered' ? bytes : this.rendered
+      const total = raw + rendered + 2 * this.treeMax
+      const granted = total === this.held || await this.core.call('reserve', { doc: this.doc, gen: generation, bytes: total }).catch(() => false)
+      if (!granted || !this.current(generation) || epoch !== this.epoch) return false
+      this.raw = raw
+      this.rendered = rendered
+      this.held = total
+      return true
+    })
+    this.serial = changed.then(() => {})
+    return changed
+  }
+}

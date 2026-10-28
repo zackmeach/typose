@@ -302,13 +302,15 @@ impl Task for Read {
     }
 }
 
-/// What a Markdown build made (plan: Rendered Markdown slice §2.1): its items, and the text units and HTML bytes
-/// across them, which the lens reserves for (§2.2).
+/// What a Markdown build made (plan: Rendered Markdown slice §2.1): its items, HTML text units and bytes, DOM nodes,
+/// and generated note-label units, which the lens reserves for (§2.2).
 #[napi(object)]
 pub struct MdBuild {
     pub blocks: f64,
     pub units: f64,
     pub html_bytes: f64,
+    pub nodes: f64,
+    pub note_units: f64,
 }
 
 /// One top-level block of a Markdown build: its index, its first line and how many lines it runs over (Raw's), its
@@ -360,8 +362,9 @@ impl Task for Render {
             Ok(rendered) => {
                 let size = rendered.items().len() as f64;
                 let (units, html_bytes) = (rendered.units() as f64, rendered.html_bytes() as f64);
+                let (nodes, note_units) = (rendered.nodes() as f64, rendered.note_units() as f64);
                 *self.built.lock().unwrap() = Some(rendered); // the build it replaces drops
-                Ok(MdBuild { blocks: size, units, html_bytes })
+                Ok(MdBuild { blocks: size, units, html_bytes, nodes, note_units })
             }
             Err(e) => Err(Error::from(JsError::from(doc_error(e)).into_unknown(env))),
         }
@@ -696,8 +699,10 @@ pub mod test_hooks {
     pub fn doc_charges(doc: &Doc) -> std::result::Result<Charges, Error<Code>> {
         let raw = doc.raw()?;
         let c = raw.charges();
+        // The held Markdown build's reservation. Raw's itemization does not include it; the sum does.
+        let rendered = doc.built.lock().unwrap().as_ref().map(|r| r.charged()).unwrap_or(0);
         let [hashes, checkpoints, cache, metadata, total] =
-            [c.hashes, c.checkpoints, c.cache, c.metadata, c.total()].map(|n| n as f64);
+            [c.hashes, c.checkpoints, c.cache, c.metadata, c.total() + rendered].map(|n| n as f64);
         Ok(Charges { hashes, checkpoints, cache, metadata, total, lines_stopped: raw.lines_stopped() })
     }
 
