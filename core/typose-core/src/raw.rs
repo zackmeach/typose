@@ -2,7 +2,7 @@
 use std::path::Path;
 use std::sync::RwLock;
 
-use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE, WINDOWS_1252};
+use encoding_rs::{Encoding, WINDOWS_1252};
 
 use crate::budget::{self, NoSlot, Reservation, Work};
 use crate::doc::{Charges, DocError, Document};
@@ -162,18 +162,7 @@ fn whitespace_only(head: &[u8], encoding: &'static Encoding) -> bool {
         Some((e, n)) if e == encoding => n,
         _ => 0,
     };
-    let text = &head[bom..];
-    if encoding == UTF_16LE || encoding == UTF_16BE {
-        let units = text.chunks_exact(2).map(|u| {
-            if encoding == UTF_16LE { u16::from_le_bytes([u[0], u[1]]) } else { u16::from_be_bytes([u[0], u[1]]) }
-        });
-        text.len().is_multiple_of(2) && char::decode_utf16(units).all(|c| c.is_ok_and(char::is_whitespace))
-    } else if encoding == UTF_8 {
-        std::str::from_utf8(text).is_ok_and(|s| s.chars().all(char::is_whitespace))
-    } else {
-        // A single-byte fallback: its decoded chars, by the same rule as UTF-8's (windows-1252's 0xA0 is NBSP).
-        encoding.decode_without_bom_handling(text).0.chars().all(char::is_whitespace)
-    }
+    encoding.decode_without_bom_handling(&head[bom..]).0.chars().all(char::is_whitespace)
 }
 
 #[cfg(test)]
@@ -181,6 +170,7 @@ mod tests {
     use super::*;
     use crate::doc::FileId;
     use crate::store::testutil::temp_file;
+    use encoding_rs::{UTF_8, UTF_16BE, UTF_16LE};
     use std::fs::{self, OpenOptions};
     use std::io::{self, Seek, SeekFrom, Write};
 
@@ -219,6 +209,36 @@ mod tests {
         assert!(!blank("blank-text", b"\n\n x\n"));
         assert!(!blank("blank-u16-odd", b"\xFF\xFE \0\n"));
         assert!(!blank("blank-big", &[b' '; 2 << 20])); // past the first chunk: shown as blank lines
+    }
+
+    #[test]
+    fn blank_decoding_keeps_malformed_text_and_nonmatching_boms_visible() {
+        let cases: &[(&[u8], &Encoding, bool)] = &[
+            (b"", UTF_8, true),
+            (b"\xEF\xBB\xBF", UTF_8, true),
+            ("\u{A0}\u{3000}\n".as_bytes(), UTF_8, true),
+            (b" \xFF", UTF_8, false),
+            (b"\xC0\xA0", UTF_8, false), // an overlong encoding of a space
+            (b"\xE3\x80", UTF_8, false), // a truncated ideographic space
+            (b"\xEF\xBB\xBF\xEF\xBB\xBF", UTF_8, false),
+            (b"", UTF_16LE, true),
+            (b"\xFF\xFE \0\x00\x30", UTF_16LE, true),
+            (b"\xFE\xFF\0 \x30\x00", UTF_16BE, true),
+            (b"\xFF\xFE \0\n", UTF_16LE, false),
+            (b"\xFE\xFF\0 \n", UTF_16BE, false),
+            (b"\xFF\xFE\0\xD8", UTF_16LE, false),
+            (b"\xFF\xFE\0\xDC", UTF_16LE, false),
+            (b"\xFE\xFF\xD8\0", UTF_16BE, false),
+            (b"\xFE\xFF\xDC\0", UTF_16BE, false),
+            (b"\xFE\xFF", UTF_16LE, false),
+            (b"\xFF\xFE", UTF_16BE, false),
+            (b"\xEF\xBB\xBF", WINDOWS_1252, false),
+            (b"\xA0\n\x0B", WINDOWS_1252, true),
+            (b"\xA0x", WINDOWS_1252, false),
+        ];
+        for &(bytes, encoding, blank) in cases {
+            assert_eq!(whitespace_only(bytes, encoding), blank, "{}: {bytes:?}", encoding.name());
+        }
     }
 
     fn letters(len: usize, seed: u8) -> Vec<u8> {
