@@ -484,6 +484,53 @@ impl Doc {
         Ok(if md::is_markdown(self.raw()?.document().path()) { "markdown" } else { "text" }.into())
     }
 
+    /// Local-derived documents require an explicit manual selection after a core restart loses this capability.
+    #[napi(getter)]
+    pub fn local_only(&self) -> std::result::Result<bool, Error<Code>> {
+        Ok(self.raw()?.document().local_only())
+    }
+
+    #[napi(getter)]
+    pub fn path(&self) -> std::result::Result<String, Error<Code>> {
+        let raw = self.raw()?;
+        let _temp = Reservation::new((3 * pages::MAX_PATH_BYTES) as u64).map_err(|e| doc_error(DocError::Memory(e)))?;
+        Ok(raw.document().path().to_string_lossy().into_owned())
+    }
+
+    /// The local-link source must still be live and rendered in this generation. The target is already decoded.
+    fn local_source(&self, generation: f64) -> std::result::Result<(&Arc<Raw>, u32), Error<Code>> {
+        let generation = int("gen", generation)? as u32;
+        let raw = self.raw()?;
+        let current = raw.document().generation();
+        if generation != current {
+            return Err(doc_error(DocError::Stale { current, asked: generation }));
+        }
+        if !md::is_markdown(raw.document().path()) {
+            return Err(Error::new(Code::Refused, "local links require a Markdown source"));
+        }
+        if self.built.lock().unwrap().is_none() {
+            return Err(Error::new(Code::InvalidParams, "render the Markdown build first"));
+        }
+        Ok((raw, generation))
+    }
+
+    /// Normalizes a decoded route and checks the source identity, without opening the target.
+    #[napi]
+    pub fn local_path(&self, generation: f64, target: String) -> std::result::Result<String, Error<Code>> {
+        let (raw, generation) = self.local_source(generation)?;
+        let _temp = Reservation::new((3 * pages::MAX_PATH_BYTES) as u64).map_err(|e| doc_error(DocError::Memory(e)))?;
+        let route = raw.document().local_path(generation, &target).map_err(doc_error)?;
+        Ok(route.path().to_string_lossy().into_owned())
+    }
+
+    /// Opens only a supported local document through its parent's held capability. No pathname fallback.
+    #[napi]
+    pub fn open_local(&self, generation: f64, target: String) -> std::result::Result<Doc, Error<Code>> {
+        let (raw, generation) = self.local_source(generation)?;
+        let next = raw.open_local(generation, &target).map_err(doc_error)?;
+        Ok(Doc { raw: Some(Arc::new(next)), built: Built::default() })
+    }
+
     /// Ctrl+R (spec §3.1): the same path at the next generation, which `startIndex` then indexes. Every page and
     /// token of the old generation is refused from now on (`Stale`). If the open fails, nothing changes.
     #[napi]

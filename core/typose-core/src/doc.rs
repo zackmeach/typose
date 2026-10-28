@@ -1,14 +1,16 @@
-//! Documents with generations (spec §3.1): after every read, the path's identity is checked against the one
+//! Documents with generations (spec §3.1): after every read, the path or inherited route's identity is checked against the one
 //! taken at open [Z63], and every chunk is verified against its first-read hash. Any change freezes the document.
+use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
 use crate::budget::{OverBudget, Reservation};
+use crate::local::{LocalError, LocalRoute};
 use crate::store::{ByteStore, NotRegular, StoreError, refusal, route_refusal};
 
-/// What change detection compares, taken from the path (never the open handle, spec §3.3).
+/// What change detection compares, taken from a freshly opened path or inherited local route (spec §3.3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileId {
     pub volume: u64,
@@ -20,9 +22,14 @@ pub struct FileId {
 impl FileId {
     #[cfg(windows)]
     pub fn of(path: &Path) -> io::Result<FileId> {
+        let f = crate::store::query_open(path, 0)?; // query only, with identification-level QoS
+        Self::of_file(&f)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn of_file(f: &File) -> io::Result<FileId> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle};
-        let f = crate::store::query_open(path, 0)?; // query only, with identification-level QoS
         let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
         if unsafe { GetFileInformationByHandle(f.as_raw_handle() as _, &mut info) } == 0 {
             return Err(io::Error::last_os_error());
@@ -40,6 +47,13 @@ impl FileId {
     pub fn of(path: &Path) -> io::Result<FileId> {
         use std::os::unix::fs::MetadataExt;
         let meta = std::fs::metadata(path)?;
+        Ok(FileId { volume: meta.dev(), index: meta.ino(), size: meta.len(), modified: meta.modified()? })
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn of_file(f: &File) -> io::Result<FileId> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = f.metadata()?;
         Ok(FileId { volume: meta.dev(), index: meta.ino(), size: meta.len(), modified: meta.modified()? })
     }
 }
@@ -101,6 +115,22 @@ fn io_error(e: io::Error) -> DocError {
     }
 }
 
+fn local_error(e: LocalError) -> DocError {
+    match e {
+        LocalError::Refused(why) => DocError::Refused(why.into()),
+        LocalError::Io(e) => io_error(e),
+        LocalError::Memory(e) => DocError::Memory(e),
+    }
+}
+
+/// Only a newly opened target's mutation is a navigation refusal; source freezes keep their own error code.
+pub(crate) fn local_target_error(e: DocError) -> DocError {
+    match e {
+        DocError::Frozen(why) => DocError::Refused(format!("local target changed while opening: {why}")),
+        other => other,
+    }
+}
+
 /// A freeze reason is kept to this many bytes, reserved with the document (plan C1's metadata).
 pub const REASON_MAX: usize = 256;
 /// The document's own structures, with the `Raw` around it and the `Arc` napi keeps that in (plan C1's metadata).
@@ -133,6 +163,10 @@ pub struct Document {
     generation: u32,
     cache_chunks: usize,
     frozen: Mutex<Option<String>>,
+    /// Captured only at explicit source open, then inherited by local navigation. Absence is cached refusal.
+    local: Option<LocalRoute>,
+    /// A derived document must never regain ordinary pathname access, including after Reload.
+    local_only: bool,
     /// Pays for the path, the freeze reason and the structures. Declared last, so it's released after them.
     metadata: Reservation,
 }
@@ -154,13 +188,52 @@ impl Document {
         }
         check_len(store.len())?;
         let metadata = Reservation::new(metadata_bytes(path)).map_err(DocError::Memory)?;
-        Ok(Document { path: path.to_owned(), store, id, generation, cache_chunks, frozen: Mutex::new(None), metadata })
+        let local = crate::md::is_markdown(path).then(|| LocalRoute::capture(path, store.file()).ok()).flatten();
+        Ok(Document {
+            path: path.to_owned(),
+            store,
+            id,
+            generation,
+            cache_chunks,
+            frozen: Mutex::new(None),
+            local,
+            local_only: false,
+            metadata,
+        })
+    }
+
+    fn from_local(route: LocalRoute, cache_chunks: usize, generation: u32) -> Result<Document, DocError> {
+        let file = route.open().map_err(local_error)?;
+        let id = FileId::of_file(&file).map_err(DocError::Io)?;
+        check_len(id.size)?;
+        let metadata = Reservation::new(metadata_bytes(route.path())).map_err(DocError::Memory)?;
+        let path = route.path().to_owned();
+        let store = ByteStore::from_file(file, cache_chunks).map_err(io_error)?;
+        if store.len() != id.size || FileId::of_file(store.file()).map_err(DocError::Io)? != id {
+            return Err(DocError::Frozen("changed while opening".into()));
+        }
+        Ok(Document {
+            path,
+            store,
+            id,
+            generation,
+            cache_chunks,
+            frozen: Mutex::new(None),
+            local: Some(route),
+            local_only: true,
+            metadata,
+        })
     }
 
     /// What this document's store and metadata have charged; `Raw` adds its checkpoints.
     pub fn charges(&self) -> Charges {
         let (hashes, cache) = self.store.charges();
-        Charges { hashes, checkpoints: 0, cache, metadata: self.metadata.bytes() }
+        Charges {
+            hashes,
+            checkpoints: 0,
+            cache,
+            metadata: self.metadata.bytes() + self.local.as_ref().map_or(0, LocalRoute::charged),
+        }
     }
 
     pub fn generation(&self) -> u32 {
@@ -232,13 +305,113 @@ impl Document {
         &self.path
     }
 
+    pub fn local_only(&self) -> bool {
+        self.local_only
+    }
+
+    /// Resolve a decoded local target without opening it. Only the source route is checked for mutation.
+    pub fn local_path(&self, generation: u32, target: &str) -> Result<LocalRoute, DocError> {
+        self.local_target(generation, target)
+    }
+
+    pub fn open_local(&self, generation: u32, target: &str) -> Result<Document, DocError> {
+        let route = self.local_target(generation, target)?;
+        let next = Self::from_local(route, self.cache_chunks, 1).map_err(local_target_error)?;
+        self.check_local_source(generation)?;
+        Ok(next)
+    }
+
+    fn local_target(&self, generation: u32, target: &str) -> Result<LocalRoute, DocError> {
+        if generation != self.generation {
+            return Err(DocError::Stale { current: self.generation, asked: generation });
+        }
+        if !crate::md::is_markdown(&self.path) {
+            return Err(DocError::Refused("local links require a Markdown source".into()));
+        }
+        if target.is_empty() || target.len() > 32 << 10 || target.chars().any(char::is_control) {
+            return Err(DocError::Invalid(
+                "target must be a non-empty decoded path of at most 32 KiB, without control characters".into(),
+            ));
+        }
+        let source = self.local.as_ref().ok_or_else(|| {
+            DocError::Refused("local files are unavailable for this source; select it manually again".into())
+        })?;
+        let route = source.resolve(target).map_err(local_error)?;
+        let supported = route.path().extension().and_then(|s| s.to_str()).is_some_and(|s| {
+            s.eq_ignore_ascii_case("md") || s.eq_ignore_ascii_case("markdown") || s.eq_ignore_ascii_case("txt")
+        });
+        if !supported {
+            return Err(DocError::Refused("local links support only .md, .markdown and .txt files".into()));
+        }
+        self.check_local_source(generation)?;
+        Ok(route)
+    }
+
+    pub(crate) fn check_local_source(&self, generation: u32) -> Result<(), DocError> {
+        self.checked_local_file(generation).map(drop)
+    }
+
+    /// A fresh index handle must retain the derived document's local-only policy too.
+    pub(crate) fn index_file(&self) -> Result<File, DocError> {
+        if self.local_only {
+            self.checked_local_file(self.generation)
+        } else {
+            self.store.reopen().map_err(|e| self.fail(StoreError::Io(e)))
+        }
+    }
+
+    fn checked_local_file(&self, generation: u32) -> Result<File, DocError> {
+        if generation != self.generation {
+            return Err(DocError::Stale { current: self.generation, asked: generation });
+        }
+        if let Some(why) = self.frozen() {
+            return Err(DocError::Frozen(why));
+        }
+        let route = self.local.as_ref().ok_or_else(|| {
+            DocError::Refused("local files are unavailable for this source; select it manually again".into())
+        })?;
+        let current = route
+            .open()
+            .and_then(|file| {
+                if !route.same_file(&file, self.store.file())? {
+                    return Ok(None);
+                }
+                let id = FileId::of_file(&file)?;
+                Ok(Some((file, id)))
+            })
+            .map_err(local_error);
+        match current {
+            Ok(Some((file, now))) if now == self.id => Ok(file),
+            Ok(_) => Err(self.freeze("changed on disk".into())),
+            Err(e @ DocError::Memory(_)) => Err(e),
+            Err(e) => Err(self.freeze(format!("local source unavailable: {e}"))),
+        }
+    }
+
     /// Ctrl+R: a fresh handle, identity and hash table, one generation later.
     pub fn reload(&mut self) -> Result<(), DocError> {
-        *self = Document::open_with(&self.path, self.cache_chunks, self.generation + 1)?;
+        *self = self.reopened()?;
         Ok(())
     }
 
+    pub(crate) fn reopened(&self) -> Result<Document, DocError> {
+        if self.local_only {
+            let route = self
+                .local
+                .as_ref()
+                .expect("derived documents retain their local route")
+                .try_clone()
+                .map_err(local_error)?;
+            Self::from_local(route, self.cache_chunks, self.generation + 1)
+        } else {
+            Self::open_with(&self.path, self.cache_chunks, self.generation + 1)
+        }
+    }
+
     fn check(&self) -> Result<(), DocError> {
+        if self.local_only {
+            return self.check_local_source(self.generation);
+        }
         if let Some(why) = self.frozen() {
             return Err(DocError::Frozen(why));
         }
@@ -762,5 +935,137 @@ mod tests {
     fn a_file_whose_offsets_javascript_cannot_hold_is_refused() {
         assert!(check_len(MAX_SAFE).is_ok());
         assert!(matches!(check_len(MAX_SAFE + 1), Err(DocError::Refused(_))));
+    }
+
+    #[test]
+    fn handle_identity_is_the_open_file_even_after_its_path_is_replaced() {
+        let path = temp_file("handle-id", b"old");
+        let moved = path.with_extension("old");
+        let file = crate::store::open_regular(&path).unwrap();
+        let id = FileId::of_file(&file).unwrap();
+        fs::rename(&path, &moved).unwrap();
+        fs::write(&path, b"newer").unwrap();
+        assert_eq!(FileId::of_file(&file).unwrap(), id);
+        assert_ne!(FileId::of(&path).unwrap(), id);
+        drop(file);
+        fs::remove_file(moved).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn local_documents_inherit_routes_and_reload_without_path_fallback() {
+        let scratch = Scratch::new("local-document");
+        let sub = scratch.0.join("sub");
+        fs::create_dir(&sub).unwrap();
+        let source_path = scratch.0.join("source.md");
+        fs::write(&source_path, b"# Source").unwrap();
+        fs::write(sub.join("child.md"), b"# Child").unwrap();
+        fs::write(scratch.0.join("last.txt"), b"last").unwrap();
+        let source = Document::open(&source_path).unwrap();
+        assert!(!source.local_only());
+        assert_eq!(source.local_path(1, "missing.txt").unwrap().path(), scratch.0.join("missing.txt"));
+        assert!(matches!(source.open_local(2, "sub/child.md"), Err(DocError::Stale { .. })));
+        assert!(matches!(source.open_local(1, "absent.png"), Err(DocError::Refused(_))));
+        let mut child = source.open_local(1, "sub/child.md").unwrap();
+        drop(source);
+        assert!(child.local_only());
+        assert_eq!(child.read(1, 0, 20).unwrap(), b"# Child");
+        let mut text = child.open_local(1, "../last.txt").unwrap();
+        assert!(text.local_only());
+        text.reload().unwrap();
+        assert!(text.local_only());
+        assert_eq!(text.read(2, 0, 20).unwrap(), b"last");
+
+        // An ordinary manual open follows this local junction. The inherited route must refuse it on read/Reload.
+        let moved = scratch.0.join("moved");
+        let held = scratch.0.join("held-child.md");
+        fs::rename(sub.join("child.md"), &held).unwrap();
+        fs::rename(&sub, &moved).unwrap();
+        fs::rename(&held, moved.join("child.md")).unwrap();
+        junction(&sub, &format!(r"\??\{}", moved.display()));
+        assert!(Document::open(&sub.join("child.md")).is_ok());
+        assert!(matches!(child.read(1, 0, 20), Err(DocError::Frozen(_))));
+        assert!(matches!(child.reload(), Err(DocError::Refused(_))));
+        assert_eq!(child.generation(), 1);
+        assert!(child.local_only());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn derived_identity_and_reload_refuse_a_pipe_junction_without_connecting() {
+        let scratch = Scratch::new("local-pipe-swap");
+        let server = PipeServer::new("local-target.txt");
+        let sub = scratch.0.join("sub");
+        fs::create_dir(&sub).unwrap();
+        let source_path = scratch.0.join("source.md");
+        fs::write(&source_path, b"# Source").unwrap();
+        fs::write(sub.join(server.name()), b"safe").unwrap();
+        let source = Document::open(&source_path).unwrap();
+        let target = format!("sub/{}", server.name());
+        let mut derived = source.open_local(1, &target).unwrap();
+        let held = scratch.0.join("held-target.txt");
+        fs::rename(sub.join(server.name()), &held).unwrap();
+        let moved = scratch.0.join("moved");
+        fs::rename(&sub, &moved).unwrap();
+        fs::rename(&held, moved.join(server.name())).unwrap();
+        junction(&sub, r"\??\pipe\");
+        assert!(matches!(source.open_local(1, &target), Err(DocError::Refused(_))));
+        assert!(matches!(derived.read(1, 0, 4), Err(DocError::Frozen(_))));
+        assert!(matches!(derived.reload(), Err(DocError::Refused(_))));
+        assert!(!server.connected());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_absent_cached_capability_refuses_before_rechecking_the_source_path() {
+        let scratch = Scratch::new("local-no-capability");
+        let server = PipeServer::new("local-source.md");
+        let real = scratch.0.join("real");
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join(server.name()), b"# Source").unwrap();
+        let link = scratch.0.join("alias");
+        junction(&link, &format!(r"\??\{}", real.display()));
+        let source = Document::open(&link.join(server.name())).unwrap();
+        assert!(source.local.is_none(), "a reparse route cannot become an automatic local-file capability");
+        fs::remove_dir(&link).unwrap();
+        junction(&link, r"\??\pipe\");
+        assert!(matches!(source.local_path(1, "target.txt"), Err(DocError::Refused(_))));
+        assert!(matches!(source.open_local(1, "target.txt"), Err(DocError::Refused(_))));
+        assert!(!server.connected());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn derived_index_open_uses_the_local_route_and_refuses_a_retargeted_ancestor() {
+        let scratch = Scratch::new("local-index-route");
+        let server = PipeServer::new("index-target.txt");
+        let sub = scratch.0.join("sub");
+        fs::create_dir(&sub).unwrap();
+        let source_path = scratch.0.join("source.md");
+        fs::write(&source_path, b"# Source").unwrap();
+        fs::write(sub.join(server.name()), b"safe").unwrap();
+        let source = crate::raw::Raw::open(&source_path).unwrap();
+        let derived = source.open_local(1, &format!("sub/{}", server.name())).unwrap();
+        let held = scratch.0.join("held-index.txt");
+        fs::rename(sub.join(server.name()), &held).unwrap();
+        let moved = scratch.0.join("moved");
+        fs::rename(&sub, &moved).unwrap();
+        fs::rename(&held, moved.join(server.name())).unwrap();
+        junction(&sub, r"\??\pipe\");
+        assert!(derived.index(|_| true).is_err(), "indexing must refuse the changed local route");
+        assert!(derived.document().frozen().is_some());
+        assert!(!server.connected());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unsupported_local_origin_is_cached_without_changing_manual_open() {
+        let path = temp_file("local-unsupported", b"# Source").with_extension("md");
+        fs::write(&path, b"# Source").unwrap();
+        let source = Document::open(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(matches!(source.local_path(1, "target.txt"), Err(DocError::Refused(_))));
+        assert!(matches!(source.open_local(1, "target.txt"), Err(DocError::Refused(_))));
+        assert!(!source.local_only());
     }
 }

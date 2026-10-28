@@ -78,3 +78,14 @@ it('gives Markdown its switch, and the reasons Rendered stays off', () => {
   const empty = open({ opened: opened({ format: 'markdown', blank: true, size: 0 }), lines: 0, indexed: true })
   expect(view(empty)).toMatchObject({ body: { message: 'Empty file', actions: [] }, lenses: null })
 })
+
+it('requires manual selection after a local capability is lost', () => {
+  expect(view({ kind: 'gone', path: PATH, ready: true, localOnly: true }).body).toEqual({
+    message: "Typose's core stopped · Open the file again to continue", actions: ['Open file…']
+  })
+  for (const code of ['Memory', 'PermissionDenied', 'NotFound', 'Refused'] as const) {
+    expect(view({ kind: 'failed', path: PATH, code, message: 'route unavailable', localOnly: true }).body).toEqual({
+      message: `Can't open ${PATH} · route unavailable`, actions: ['Locate…', 'Close']
+    })
+  }
+})

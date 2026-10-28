@@ -13,6 +13,8 @@ export interface RenderedOptions {
   onFrozen(why: string): void
   /** The note under an oversized block: show its source in Raw at this line. */
   onShowRaw(line: number): void
+  /** Opens through this source document's local capability; false leaves the reader in place. */
+  onOpenLocal?(target: string, path: string): Promise<boolean>
   budget?: LensBudget
 }
 
@@ -208,6 +210,8 @@ export class RenderedLens {
       if (this.stopped || this.paused || generation !== this.linkGeneration) return
       if (target.kind === 'external') {
         if (!await window.typose.openExternal(target.url)) a.title = `Not opened: ${href}`
+      } else if (target.kind === 'local') {
+        if (!await this.options.onOpenLocal?.(target.target, target.path)) a.title = `Not opened: ${href}`
       } else if (target.kind === 'heading' && interaction === this.interaction) {
         this.atLine = target.line
         this.moved = false

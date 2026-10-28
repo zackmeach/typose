@@ -1,6 +1,6 @@
 // Plan C4 at the napi layer: the addon itself refuses every hostile number, whatever the core host checked. And
 // plan C3's forged-token table, at the boundary a token crosses, and C5's cancel and C6's close.
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir, totalmem } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -158,6 +158,10 @@ it('plan C6: a closed document refuses everything with NoDocument', async () => 
     () => doc.generation,
     () => doc.lines,
     () => doc.format,
+    () => doc.path,
+    () => doc.localOnly,
+    () => doc.localPath(1, 'other.md'),
+    () => doc.openLocal(1, 'other.md'),
     () => doc.page(1, 0, 1, new Cancel()),
     () => doc.startIndex(new Cancel(), () => {}),
     () => doc.reload(),
@@ -166,6 +170,115 @@ it('plan C6: a closed document refuses everything with NoDocument', async () => 
   ]
   for (const call of calls) expect(thrown(call)).toMatchObject({ code: 'NoDocument' })
   doc.close() // twice is fine
+})
+
+describe('local-file links keep inherited native routes', () => {
+  const windows = process.platform === 'win32' ? it : it.skip
+
+  windows('normalizes without target access, opens nested Markdown/text, and retains routes after source close and Reload', async () => {
+    const folder = join(dir, 'local-chain')
+    mkdirSync(join(folder, 'nested'), { recursive: true })
+    const sourcePath = join(folder, 'source.md')
+    const childPath = join(folder, 'nested', 'child.MARKDOWN')
+    const textPath = join(folder, 'last.txt')
+    writeFileSync(sourcePath, '# Source\n')
+    writeFileSync(childPath, '# Child\n')
+    writeFileSync(textPath, 'last\n')
+    const source = Doc.open(sourcePath)
+    expect(source.localOnly).toBe(false)
+    expect(() => source.localPath(1, 'nested/child.MARKDOWN')).toThrow(expect.objectContaining({ code: 'InvalidParams' }))
+    await source.render(1, new Cancel())
+    expect(source.localPath(1, 'missing.txt')).toBe(join(folder, 'missing.txt')) // no target stat/open
+    expect(source.localPath(1, './nested/../nested/child.MARKDOWN')).toBe(childPath)
+    const child = source.openLocal(1, 'nested/child.MARKDOWN')
+    source.close()
+    try {
+      expect(child.localOnly).toBe(true)
+      expect(child.path).toBe(childPath)
+      expect((await child.page(1, 0, 1, new Cancel())).items[0].text).toBe('# Child')
+      await child.render(1, new Cancel())
+      const text = child.openLocal(1, '../last.txt')
+      try {
+        expect(text.localOnly).toBe(true)
+        expect(text.path).toBe(textPath)
+        expect(text.format).toBe('text')
+        text.reload()
+        expect(text.generation).toBe(2)
+        expect(text.localOnly).toBe(true)
+        expect((await text.page(2, 0, 1, new Cancel())).items[0].text).toBe('last')
+        expect(() => text.localPath(2, 'source.md')).toThrow(expect.objectContaining({ code: 'Refused' }))
+      } finally {
+        text.close()
+      }
+      child.reload()
+      expect(child.localOnly).toBe(true)
+      expect(() => child.openLocal(1, '../last.txt')).toThrow(expect.objectContaining({ code: 'Stale' }))
+      expect(() => child.openLocal(2, '../last.txt')).toThrow(expect.objectContaining({ code: 'InvalidParams' }))
+    } finally {
+      child.close()
+      source.close()
+    }
+  })
+
+  windows('refuses unsupported extensions before target access, freezes changed source/target, and reloads the target through its route', async () => {
+    const folder = join(dir, 'local-mutation')
+    mkdirSync(folder)
+    const sourcePath = join(folder, 'source.md')
+    const targetPath = join(folder, 'target.txt')
+    writeFileSync(sourcePath, '# Source\n')
+    writeFileSync(targetPath, 'old\n')
+    const source = Doc.open(sourcePath)
+    await source.render(1, new Cancel())
+    const target = source.openLocal(1, 'target.txt')
+    try {
+      for (const file of ['not-present.exe', 'not-present.png', 'not-present']) {
+        expect(() => source.localPath(1, file)).toThrow(expect.objectContaining({ code: 'Refused' }))
+        expect(() => source.openLocal(1, file)).toThrow(expect.objectContaining({ code: 'Refused' }))
+      }
+      renameSync(targetPath, join(folder, 'old.txt'))
+      writeFileSync(targetPath, 'new target\n')
+      expect(await refused(() => target.page(1, 0, 1, new Cancel()))).toMatchObject({ code: 'Frozen' })
+      expect(source.localPath(1, 'target.txt')).toBe(targetPath) // a target freeze leaves its source usable
+      target.reload()
+      expect(target.localOnly).toBe(true)
+      expect((await target.page(2, 0, 1, new Cancel())).items[0].text).toBe('new target')
+      writeFileSync(sourcePath, '# Changed source\n')
+      expect(() => source.localPath(1, 'target.txt')).toThrow(expect.objectContaining({ code: 'Frozen' }))
+      expect(() => source.openLocal(1, 'target.txt')).toThrow(expect.objectContaining({ code: 'Frozen' }))
+    } finally {
+      target.close()
+      source.close()
+    }
+  })
+
+  it('requires current rendered Markdown and validates generations/decoded target bounds independently', async () => {
+    const sourcePath = join(dir, 'local-params.md')
+    writeFileSync(sourcePath, '# Source\n')
+    const source = Doc.open(sourcePath)
+    const text = Doc.open(path)
+    try {
+      expect(() => text.openLocal(1, 'other.txt')).toThrow(expect.objectContaining({ code: 'Refused' }))
+      expect(() => source.openLocal(1, 'other.txt')).toThrow(expect.objectContaining({ code: 'InvalidParams' }))
+      await source.render(1, new Cancel())
+      for (const gen of [...HOSTILE, range('gen').max + 1]) {
+        if (isValid(gen, range('gen').min, range('gen').max)) continue
+        expect(() => source.localPath(gen as number, 'other.txt')).toThrow()
+        expect(() => source.openLocal(gen as number, 'other.txt')).toThrow()
+      }
+      for (const target of ['', 'a\0b.txt', 'a\nb.txt', 'a\u0085b.txt', 'x'.repeat(32_769), `${'é'.repeat(16_385)}.txt`]) {
+        expect(() => source.localPath(1, target)).toThrow(expect.objectContaining({ code: 'InvalidParams' }))
+        expect(() => source.openLocal(1, target)).toThrow(expect.objectContaining({ code: 'InvalidParams' }))
+      }
+      if (process.platform !== 'win32')
+        expect(() => source.openLocal(1, 'other.txt')).toThrow(expect.objectContaining({ code: 'Refused' }))
+      source.reload()
+      expect(() => source.localPath(1, 'other.txt')).toThrow(expect.objectContaining({ code: 'Stale' }))
+      expect(() => source.localPath(2, 'other.txt')).toThrow(expect.objectContaining({ code: 'InvalidParams' }))
+    } finally {
+      text.close()
+      source.close()
+    }
+  })
 })
 
 describe('plan (Rendered Markdown slice) §2.1: render builds the blocks, and mdPage pages them', () => {

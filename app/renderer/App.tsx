@@ -22,7 +22,7 @@ const firstCount = (l: Limits) => Math.min(l.maxItems, 3 * Math.ceil(window.inne
 /** The test-hooks build's way in for the e2e tests (plan m8): App's own close, as the empty card's would do it. */
 export const appHooks: { close?: () => void } = {}
 
-const failed = (path: string, e: unknown): Card => ({
+const failed = (path: string, e: unknown): Extract<Card, { kind: 'failed' }> => ({
   kind: 'failed',
   path,
   code: e instanceof CoreCallError ? e.code : 'Internal',
@@ -126,7 +126,8 @@ export function App({ core }: { core: CoreClient }) {
       const top = lens.current?.topLine()
       retireBudget()
       discardRendered()
-      setCard((c) => ({ kind: 'gone', path: 'path' in c ? c.path : undefined, line: top ?? ('atLine' in c ? c.atLine : 'line' in c ? c.line : undefined), ready: false }))
+      setCard((c) => ({ kind: 'gone', path: 'path' in c ? c.path : undefined, line: top ?? ('atLine' in c ? c.atLine : 'line' in c ? c.line : undefined), ready: false,
+        localOnly: c.kind === 'open' ? c.opened.localOnly : 'localOnly' in c ? c.localOnly : undefined }))
     })
     const offReady = core.onReady((hello) => {
       currentSession.current = hello.session
@@ -333,11 +334,38 @@ export function App({ core }: { core: CoreClient }) {
     }
   }
 
+  /** Keep the source alive until the capability-relative open has returned its first page. */
+  async function openLocal(source: Opened, target: string): Promise<boolean> {
+    const { card: c, limits: l } = latest.current
+    if (c.kind !== 'open' || c.opened !== source || !l || reloading.current) return false
+    const mine = ++attempt.current
+    const sourceSession = currentSession.current
+    const rawBytes = floorBytes(l)
+    const owner = budgetFor(source)
+    const retired = Math.max(retiredRendered.current, owner?.snapshot().rendered ?? 0, owner?.retiredTreeMax ?? 0)
+    try {
+      const opened = await core.call('openLocal', { doc: source.doc, gen: source.gen, target, count: firstCount(l), bytes: rawBytes + 2 * retired })
+      if (attempt.current !== mine || currentSession.current !== sourceSession || latest.current.card.kind !== 'open' || latest.current.card.opened !== source) {
+        if (currentSession.current === sourceSession) void core.call('close', { doc: opened.doc }).catch(() => {})
+        return false
+      }
+      retireBudget()
+      discardRendered()
+      restoreFocus.current = true
+      show(opened.path!, opened, undefined, rawBytes, undefined, retired)
+      return true
+    } catch (e) {
+      if (attempt.current === mine && e instanceof CoreCallError && e.code === 'Frozen')
+        setCard((d) => d.kind === 'open' && d.opened === source ? { ...d, frozen: d.frozen ?? e.message } : d)
+      return false // no replacement: the source and its reservation remain usable
+    }
+  }
+
   /** Ctrl+R: the next generation of the open document, or another try at a file that failed to open. */
   async function reload(): Promise<void> {
     if (!restoreFocus.current && lens.current?.element.contains(document.activeElement)) restoreFocus.current = true
     const { card: c, limits: l } = latest.current
-    if (c.kind === 'failed') return open(c.path)
+    if (c.kind === 'failed') return c.localOnly ? pick() : open(c.path)
     if (c.kind !== 'open' || !l || reloading.current) return
     const mine = ++attempt.current
     reloading.current = true
@@ -353,7 +381,7 @@ export function App({ core }: { core: CoreClient }) {
       else {
         retireBudget()
         discardRendered()
-        setCard(failed(c.path, e)) // the file is gone; the failed card closes the document and retains no tree
+        setCard({ ...failed(c.path, e), localOnly: c.opened.localOnly }) // a lost local route requires explicit selection
       }
     } finally {
       reloading.current = false
@@ -379,7 +407,10 @@ export function App({ core }: { core: CoreClient }) {
 
   async function pick(): Promise<void> {
     const chosen = await window.typose.openDialog()
-    if (chosen) openNamed(chosen)
+    if (!chosen) return
+    const c = latest.current.card
+    if (c.kind === 'gone' && c.localOnly && c.ready) void open(chosen)
+    else openNamed(chosen)
   }
 
   /**
@@ -387,7 +418,7 @@ export function App({ core }: { core: CoreClient }) {
    * replaces the card's. While the core is stopped, it's the file Reopen opens.
    */
   function openNamed(path: string): void {
-    if (latest.current.card.kind === 'gone') setCard((c) => (c.kind === 'gone' ? { ...c, path, line: undefined } : c))
+    if (latest.current.card.kind === 'gone') setCard((c) => (c.kind === 'gone' ? { ...c, path, line: undefined, localOnly: undefined } : c))
     else void open(path)
   }
 
@@ -411,9 +442,9 @@ export function App({ core }: { core: CoreClient }) {
   const actions: Record<Action, () => void> = {
     'Open file…': () => void pick(),
     'Locate…': () => void pick(),
-    Retry: () => path && void open(path),
+    Retry: () => card.kind === 'failed' && card.localOnly ? void pick() : path && void open(path),
     Close: close,
-    Reopen: () => card.kind === 'gone' && card.path && void open(card.path, card.line)
+    Reopen: () => card.kind === 'gone' && !card.localOnly && card.path && void open(card.path, card.line)
   }
   const frozen = card.kind === 'open' ? card.frozen : undefined
 
@@ -493,6 +524,7 @@ export function App({ core }: { core: CoreClient }) {
         mode="raw"
         onFrozen={(why) => setCard((c) => (c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c))}
         onShowRaw={() => {}}
+        onOpenLocal={(target) => openLocal(card.opened, target)}
       />
     ) : card.kind === 'open' && limits && 'rendered' in shown.body && card.build ? (
       <LensHost
@@ -520,6 +552,7 @@ export function App({ core }: { core: CoreClient }) {
           picked.current = 'raw'
           setCard((c) => (c.kind === 'open' && c.opened === card.opened ? { ...c, lens: 'raw' } : c))
         }}
+        onOpenLocal={(target) => openLocal(card.opened, target)}
       />
     ) : (
       message
@@ -635,15 +668,18 @@ interface LensHostProps {
   build?: MdBuild
   onFrozen(why: string): void
   onShowRaw(line: number): void
+  onOpenLocal(target: string): Promise<boolean>
 }
 
 /** Mounts Raw or Rendered into the card body. A switch or Reload of this document keeps the previous lens's top line. */
-function LensHost({ core, session, budget, retained, lens, jumpTo, place, hadFocus, restoreFocus, atLine, opened, name, lines, indexed, limits, frozen, mode, build, onFrozen, onShowRaw }: LensHostProps) {
+function LensHost({ core, session, budget, retained, lens, jumpTo, place, hadFocus, restoreFocus, atLine, opened, name, lines, indexed, limits, frozen, mode, build, onFrozen, onShowRaw, onOpenLocal }: LensHostProps) {
   const host = useRef<HTMLDivElement>(null)
   const onFrozenNow = useRef(onFrozen)
   onFrozenNow.current = onFrozen
   const onShowRawNow = useRef(onShowRaw)
   onShowRawNow.current = onShowRaw
+  const onOpenLocalNow = useRef(onOpenLocal)
+  onOpenLocalNow.current = onOpenLocal
   useEffect(() => {
     // `place` outlives the document. Use it only for the document that saved it, so a second file opens at `atLine`
     // (or the top). Clear it only after that check: Reload is the same document, and its line has to survive.
@@ -661,7 +697,8 @@ function LensHost({ core, session, budget, retained, lens, jumpTo, place, hadFoc
       } else {
         kept?.view.dispose()
         const made = new RenderedLens(host.current!, core, opened, build, limits, {
-          onFrozen: onFrozenHere, atLine: at, onShowRaw: (line) => onShowRawNow.current(line), budget: budget ?? undefined
+          onFrozen: onFrozenHere, atLine: at, onShowRaw: (line) => onShowRawNow.current(line),
+          onOpenLocal: (target) => onOpenLocalNow.current(target), budget: budget ?? undefined
         })
         retained.current = { session, doc: opened.doc, gen: opened.gen, view: made }
         view = made

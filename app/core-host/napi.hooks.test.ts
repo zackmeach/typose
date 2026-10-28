@@ -50,6 +50,69 @@ it('debug stats: a document holds a handle, its index a job, a read a task; once
   expect(alive()).toEqual({ jobs: 0, tasks: 0, handles: 0 })
 })
 
+it.skipIf(process.platform !== 'win32')('local routes share one persistent root, survive source close, and release every handle/reservation', async () => {
+  const sourcePath = join(dir, 'local-source.md')
+  const childPath = join(dir, 'local-child.md')
+  const textPath = join(dir, 'local-final.txt')
+  writeFileSync(sourcePath, '# Source\n')
+  writeFileSync(childPath, '# Child\n')
+  writeFileSync(textPath, 'final\n')
+  const baseline = core.debugStats()
+  const source = core.Doc.open(sourcePath)
+  let child: Core.Doc | undefined
+  let text: Core.Doc | undefined
+  try {
+    expect(core.debugStats().handles).toBe(baseline.handles + 2) // source store + one held root
+    await source.render(1, new core.Cancel())
+    child = source.openLocal(1, 'local-child.md')
+    expect(core.debugStats().handles).toBe(baseline.handles + 3) // root shared, one more store
+    source.close()
+    expect(core.debugStats().handles).toBe(baseline.handles + 2)
+    await child.render(1, new core.Cancel())
+    text = child.openLocal(1, 'local-final.txt')
+    child.close()
+    expect(core.debugStats().handles).toBe(baseline.handles + 2)
+    text.reload()
+    expect(text.localOnly).toBe(true)
+    expect(core.debugStats().handles).toBe(baseline.handles + 2)
+  } finally {
+    text?.close()
+    child?.close()
+    source.close()
+  }
+  await expect.poll(() => core.debugStats().tasks).toBe(baseline.tasks)
+  expect(core.debugStats().handles).toBe(baseline.handles)
+  expect(core.debugStats().ledger.used).toBe(baseline.ledger.used)
+})
+
+it.skipIf(process.platform !== 'win32')('a refused local open/path reservation releases everything and leaves its source usable', async () => {
+  const sourcePath = join(dir, 'local-budget.md')
+  const targetPath = join(dir, 'local-budget.txt')
+  writeFileSync(sourcePath, '# Source\n')
+  writeFileSync(targetPath, 'target\n')
+  const source = core.Doc.open(sourcePath)
+  await source.render(1, new core.Cancel())
+  await expect.poll(() => core.debugStats().tasks).toBe(0)
+  const { used, limit } = core.debugStats().ledger
+  const handles = core.debugStats().handles
+  try {
+    core.setLimit(used)
+    expect(() => source.localPath(1, 'local-budget.txt')).toThrow(expect.objectContaining({ code: 'Memory' }))
+    expect(() => source.openLocal(1, 'local-budget.txt')).toThrow(expect.objectContaining({ code: 'Memory' }))
+    expect(core.debugStats().ledger.used).toBe(used)
+    expect(core.debugStats().handles).toBe(handles)
+  } finally {
+    core.setLimit(limit)
+  }
+  try {
+    const target = source.openLocal(1, 'local-budget.txt')
+    expect(target.localOnly).toBe(true)
+    target.close()
+  } finally {
+    source.close()
+  }
+})
+
 it("plan C1: the ledger refuses an open it can't hold with Memory, and nothing stays charged; close returns it all", () => {
   // Four files of 4 MiB + 1 byte: each one's floor holds a 4-chunk cache (plus its hashes, checkpoints and metadata).
   const paths = [0, 1, 2, 3].map((i) => join(dir, `floor-${i}.txt`))

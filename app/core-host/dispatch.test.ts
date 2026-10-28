@@ -14,6 +14,8 @@ const piece = vi.fn(async (_gen: number, _line: number, _offset: number, _cancel
 const render = vi.fn(async (_gen: number, _cancel: Cancel) => ({ blocks: 1, units: 1, htmlBytes: 8, nodes: 3, noteUnits: 0 }))
 const mdPage = vi.fn(async (_gen: number, _start: number, _count: number, _cancel: Cancel) => ({ items: [] }))
 const headingLine = vi.fn((_gen: number, _fragment: string): number | null => null)
+const localPath = vi.fn((_gen: number, _target: string) => 'C:\\docs\\linked.md')
+const openLocal = vi.fn((_gen: number, _target: string): Doc => localDoc)
 const reload = vi.fn()
 const close = vi.fn()
 const startIndex = vi.fn((_cancel: Cancel, _onProgress: (p: IndexProgress) => void) => {})
@@ -30,10 +32,13 @@ const doc = {
   render,
   mdPage,
   headingLine,
+  localPath,
+  openLocal,
   reload,
   close,
   startIndex
 } as unknown as Doc
+const localDoc = { ...doc, localOnly: true, path: 'C:\\docs\\linked.md' } as unknown as Doc
 const openDoc = vi.fn(() => doc)
 const reserveCache = vi.fn((_bytes: number) => true)
 /** Every cancel flag the dispatcher made, in order. */
@@ -50,6 +55,8 @@ let dispatch: (data: unknown) => Promise<Response>
 let nextId: number
 const call = (method: string, params: Record<string, unknown>) => dispatch({ id: nextId++, method, params })
 beforeEach(async () => {
+  localPath.mockReset().mockReturnValue('C:\\docs\\linked.md')
+  openLocal.mockReset().mockReturnValue(localDoc)
   flags = []
   dispatch = makeDispatcher(addon, 7, () => {})
   nextId = 1
@@ -64,6 +71,10 @@ const TABLE: [method: string, field: string, base: Record<string, unknown>][] = 
   ['hello', 'protocol', {}],
   ['open', 'count', { path: 'b.txt', bytes: 0 }],
   ['open', 'bytes', { path: 'b.txt', count: 1 }],
+  ['openLocal', 'doc', { gen: 1, target: 'b.md', count: 1, bytes: 0 }],
+  ['openLocal', 'gen', { doc: 1, target: 'b.md', count: 1, bytes: 0 }],
+  ['openLocal', 'count', { doc: 1, gen: 1, target: 'b.md', bytes: 0 }],
+  ['openLocal', 'bytes', { doc: 1, gen: 1, target: 'b.md', count: 1 }],
   ['page', 'doc', { lens: 'raw', gen: 1, start: 0, count: 1 }],
   ['page', 'gen', { doc: 1, lens: 'raw', start: 0, count: 1 }],
   ['page', 'start', { doc: 1, lens: 'raw', gen: 1, count: 1 }],
@@ -113,7 +124,7 @@ describe('every numeric parameter takes only integers in its range', () => {
           return
         }
         expect(response).toMatchObject({ id: nextId - 1, session: 7, error: { code: 'InvalidParams', field } })
-        for (const spy of [openDoc, page, piece, render, mdPage, headingLine, reload, close, startIndex, reserveCache]) expect(spy).not.toHaveBeenCalled()
+        for (const spy of [openDoc, page, piece, render, mdPage, headingLine, localPath, openLocal, reload, close, startIndex, reserveCache]) expect(spy).not.toHaveBeenCalled()
         // No state change: document 1 is still open, and the next open is document 2.
         expect(await call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 })).toHaveProperty('result')
         expect(await call('open', { path: 'c.txt', count: 1, bytes: 0 })).toMatchObject({ result: { doc: 2 } })
@@ -270,10 +281,24 @@ describe('thin Markdown link resolution', () => {
     for (const spy of [openDoc, page, piece, render, mdPage, headingLine]) expect(spy).not.toHaveBeenCalled()
   })
 
-  it('leaves local, network, device, other-scheme and malformed targets inert', async () => {
-    for (const href of ['', 'other.md', '../a.md', '/a.md', 'file:///C:/a.md', 'file://host/share/a.md', '//host/share/a.md', '\\\\host\\share\\a.md', '\\\\?\\C:\\a.md', 'smb://host/share/a.md', 'javascript:alert(1)', 'vbscript:x', 'data:text/plain,x', 'http://%', '#%', '#%FF', '#%00', '#%C2%85', '#\ud800'])
+  it('leaves network, device, other-scheme and malformed targets inert', async () => {
+    for (const href of ['', '/a.md', 'file://host/share/a.md', '//host/share/a.md', '\\\\host\\share\\a.md', '\\\\?\\C:\\a.md', '%2f%2fhost/a.md', 'a.md%3astream', 'a.md?query', 'file:///C:/a%3astream.md', 'smb://host/share/a.md', 'javascript:alert(1)', 'vbscript:x', 'data:text/plain,x', 'http://%', '#%', '#%FF', '#%00', '#%C2%85', '#\ud800'])
       expect(await call('resolve', { doc: 1, gen: 1, href })).toMatchObject({ result: { kind: 'inert' } })
-    for (const spy of [openDoc, page, piece, render, mdPage, headingLine]) expect(spy).not.toHaveBeenCalled()
+    for (const spy of [openDoc, page, piece, render, mdPage, headingLine, localPath, openLocal]) expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('checks local candidates through the held document without opening the target', async () => {
+    for (const [href, target] of [['other.md', 'other.md'], ['../caf%C3%A9.md', '../café.md'], ['file:///C:/a%20b.md', 'C:/a b.md'], ['%252f.md', '%2f.md']]) {
+      expect(await call('resolve', { doc: 1, gen: 1, href })).toMatchObject({ result: { kind: 'local', target, path: 'C:\\docs\\linked.md' } })
+      expect(localPath).toHaveBeenLastCalledWith(1, target)
+    }
+    for (const spy of [openDoc, page, piece, render, mdPage, headingLine, openLocal, reserveCache]) expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('keeps native local-capability refusals visible', async () => {
+    localPath.mockImplementationOnce(() => { throw Object.assign(new Error('local links support only .md, .markdown and .txt files'), { code: 'Refused' }) })
+    expect(await call('resolve', { doc: 1, gen: 1, href: 'image.png' })).toMatchObject({ error: { code: 'Refused' } })
+    expect(openLocal).not.toHaveBeenCalled()
   })
 
   it('validates href type, raw controls and both raw/canonical UTF-8 size bounds', async () => {
@@ -296,6 +321,167 @@ describe('thin Markdown link resolution', () => {
     expect(await call('resolve', { doc: 1, gen: 1, href: '#title' })).toMatchObject({ error: { code: 'NoDocument' } })
     expect(headingLine).not.toHaveBeenCalled()
   })
+})
+
+describe('local document navigation', () => {
+  const params = { doc: 1, gen: 1, target: 'linked.md', count: 5, bytes: 100 }
+  const nativeError = (code: string) => Object.assign(new Error('local navigation failed'), { code })
+  const reserved = () => reserveCache.mock.calls.map(([bytes]) => bytes)
+
+  it('uses the native capability and the normal first-page/index registration path', async () => {
+    expect(await call('openLocal', { ...params, target: 'a%2fb.md' })).toMatchObject({
+      result: { doc: 2, gen: 1, localOnly: true, path: 'C:\\docs\\linked.md', reserved: 100, firstPage: { items: [{ next: { session: 7, doc: 2 } }] } }
+    })
+    expect(openLocal).toHaveBeenCalledOnce()
+    expect(openLocal).toHaveBeenCalledWith(1, 'a%2fb.md') // already decoded: percent is literal
+    expect(openDoc).not.toHaveBeenCalled()
+    expect(page).toHaveBeenCalledWith(1, 0, 5, expect.anything())
+    expect(startIndex).toHaveBeenCalledOnce()
+    expect(await call('reload', { doc: 2, count: 1, bytes: 100 })).toMatchObject({ result: { doc: 2, localOnly: true, path: 'C:\\docs\\linked.md' } })
+  })
+
+  it('keeps manual open replies unchanged', async () => {
+    const reply = await call('open', { path: 'chosen.md', count: 1, bytes: 0 })
+    expect(reply).not.toHaveProperty('result.localOnly')
+    expect(reply).not.toHaveProperty('result.path')
+  })
+
+  it('validates the decoded target and source before native calls or reservations', async () => {
+    for (const target of [undefined, null, 7, [], {}, '', '//host/a.md', 'C:a.md', 'a.md:stream', 'file:///C:/a.md', 'a?b.md', 'x'.repeat(32_769), 'é'.repeat(16_385), 'a' + String.fromCharCode(0, 0xd800) + '.md'])
+      expect(await call('openLocal', { ...params, target })).toMatchObject({ error: { code: 'InvalidParams', field: 'target' } })
+    expect(await call('openLocal', { ...params, gen: 2 })).toMatchObject({ error: { code: 'Stale' } })
+    expect(await call('openLocal', { ...params, doc: 2 })).toMatchObject({ error: { code: 'NoDocument' } })
+    for (const spy of [openDoc, openLocal, page, startIndex, reserveCache]) expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('refuses a reservation before native open, leaving the old lens intact', async () => {
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 300 })).toMatchObject({ result: true })
+    reserveCache.mockReturnValueOnce(false)
+    expect(await call('openLocal', { ...params, bytes: 500 })).toMatchObject({ error: { code: 'Memory' } })
+    expect(openLocal).not.toHaveBeenCalled()
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 200 })).toMatchObject({ result: true })
+    expect(reserved()).toEqual([300, 500, 200])
+  })
+
+  it('returns the old reservation when native open fails, without consuming a document id', async () => {
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 300 })).toMatchObject({ result: true })
+    openLocal.mockImplementationOnce(() => { throw nativeError('NotFound') })
+    expect(await call('openLocal', { ...params, bytes: 500 })).toMatchObject({ error: { code: 'NotFound' } })
+    expect(close).not.toHaveBeenCalled()
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 200 })).toMatchObject({ result: true })
+    expect(reserved()).toEqual([300, 500, 300, 200])
+    expect(await call('openLocal', params)).toMatchObject({ result: { doc: 2 } })
+  })
+
+  it('closes a target whose path getter refuses memory before registering it or starting an index', async () => {
+    const targetClose = vi.fn()
+    openLocal.mockReturnValueOnce({
+      ...localDoc,
+      get path(): string { throw nativeError('Memory') },
+      close: targetClose
+    } as unknown as Doc)
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 300 })).toMatchObject({ result: true })
+    expect(await call('openLocal', { ...params, bytes: 500 })).toMatchObject({ error: { code: 'Memory' } })
+    expect(targetClose).toHaveBeenCalledOnce()
+    expect(page).not.toHaveBeenCalled()
+    expect(startIndex).not.toHaveBeenCalled()
+    expect(await call('close', { doc: 2 })).toMatchObject({ result: false })
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 200 })).toMatchObject({ result: true })
+    expect(reserved()).toEqual([300, 500, 300, 200])
+    expect(await call('openLocal', params)).toMatchObject({ result: { doc: 2 } })
+  })
+
+  it('collects the derived path before Reload changes its generation', async () => {
+    const path = vi.fn(() => 'C:\\docs\\linked.md')
+    const targetReload = vi.fn()
+    const target = { ...localDoc, get path() { return path() }, generation: 1, reload: targetReload }
+    targetReload.mockImplementation(() => { target.generation++ })
+    openLocal.mockReturnValueOnce(target as unknown as Doc)
+    expect(await call('openLocal', params)).toMatchObject({ result: { doc: 2 } })
+    expect(await call('reserve', { doc: 2, gen: 1, bytes: 300 })).toMatchObject({ result: true })
+    vi.clearAllMocks()
+    path.mockImplementationOnce(() => { throw nativeError('Memory') })
+    expect(await call('reload', { doc: 2, count: 1, bytes: 500 })).toMatchObject({ error: { code: 'Memory' } })
+    expect(path).toHaveBeenCalledOnce()
+    expect(targetReload).not.toHaveBeenCalled()
+    expect(target.generation).toBe(1)
+    expect(page).not.toHaveBeenCalled()
+    expect(startIndex).not.toHaveBeenCalled()
+    expect(await call('reserve', { doc: 2, gen: 1, bytes: 200 })).toMatchObject({ result: true })
+    expect(reserved()).toEqual([500, 300, 200])
+  })
+
+  it('cancels and deletes an index job whose start throws before registering a target', async () => {
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 300 })).toMatchObject({ result: true })
+    startIndex.mockImplementationOnce(() => { throw nativeError('Memory') })
+    expect(await call('openLocal', { ...params, bytes: 500 })).toMatchObject({ error: { code: 'Memory' } })
+    const failedJob = flags.at(-1)!
+    expect(failedJob.cancel).toHaveBeenCalledOnce()
+    expect(close).toHaveBeenCalledOnce()
+    expect(await call('close', { doc: 2 })).toMatchObject({ result: false })
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 200 })).toMatchObject({ result: true })
+    expect(reserved()).toEqual([300, 500, 300, 200])
+    expect(await call('openLocal', params)).toMatchObject({ result: { doc: 2 } })
+    expect(failedJob.cancel).toHaveBeenCalledOnce() // no stale job left under the reused id
+  })
+
+  it('closes a failed first page and returns its reservation to the old lens', async () => {
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 300 })).toMatchObject({ result: true })
+    page.mockImplementationOnce(async () => { throw nativeError('Frozen') })
+    expect(await call('openLocal', { ...params, bytes: 500 })).toMatchObject({ error: { code: 'Refused' } })
+    expect(close).toHaveBeenCalledOnce()
+    expect(startIndex).not.toHaveBeenCalled()
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: 200 })).toMatchObject({ result: true })
+    expect(reserved()).toEqual([300, 500, 300, 200])
+  })
+
+  it('does not cancel source reads when the target freezes', async () => {
+    const sourcePage = pendingRead()
+    const reading = dispatch({ id: 40, method: 'page', params: { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 } })
+    const sourceFlag = flags.at(-1)!
+    page.mockImplementationOnce(async () => { throw nativeError('Frozen') })
+    expect(await call('openLocal', params)).toMatchObject({ error: { code: 'Refused' } })
+    expect(sourceFlag.cancel).not.toHaveBeenCalled()
+    sourcePage.end({ items: [item()] })
+    expect(await reading).toHaveProperty('result')
+  })
+
+  it('keeps a source freeze distinct and cancels its pending reads', async () => {
+    const sourcePage = pendingRead()
+    const reading = dispatch({ id: 40, method: 'page', params: { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 } })
+    const sourceFlag = flags.at(-1)!
+    openLocal.mockImplementationOnce(() => { throw nativeError('Frozen') })
+    expect(await call('openLocal', params)).toMatchObject({ error: { code: 'Frozen' } })
+    expect(sourceFlag.cancel).toHaveBeenCalledOnce()
+    expect(close).not.toHaveBeenCalled()
+    sourcePage.end({ items: [item()] })
+    await reading
+  })
+
+  it('does not replace a newer reservation when an older local first page fails', async () => {
+    const firstPage = pendingRead()
+    const opening = dispatch({ id: 80, method: 'openLocal', params: { ...params, bytes: 500 } })
+    expect(await call('open', { path: 'chosen.txt', count: 1, bytes: 700 })).toMatchObject({ result: { doc: 2, reserved: 700 } })
+    firstPage.fail(nativeError('Io'))
+    expect(await opening).toMatchObject({ error: { code: 'Io' } })
+    expect(await call('reserve', { doc: 2, gen: 1, bytes: 600 })).toMatchObject({ result: true })
+    expect(reserved()).toEqual([500, 700, 600])
+  })
+
+  for (const change of ['reload', 'close']) {
+    it('rejects a source ' + change + ' while its target first page waits', async () => {
+      const source = doc as unknown as { generation: number }
+      const firstPage = pendingRead()
+      const opening = dispatch({ id: 90, method: 'openLocal', params })
+      try {
+        if (change === 'reload') source.generation = 2
+        else await call('close', { doc: 1 })
+        firstPage.end({ items: [item()] })
+        expect(await opening).toMatchObject({ error: { code: 'Stale' } })
+        expect(startIndex).not.toHaveBeenCalled()
+      } finally { source.generation = 1 }
+    })
+  }
 })
 
 it('an addon error keeps its typed code, and anything else is Internal', async () => {
