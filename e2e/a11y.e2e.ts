@@ -219,12 +219,12 @@ test('the keyboard reaches ☰ and Raw, ☰ runs its commands from the keyboard,
     ...(!MAC ? [['.menu-button', '2px'] as [string, string]] : []),
     ['.file-tab[aria-selected="true"]', '2px'],
     ['.file-pill[data-selected] .file-tab-close', '2px'],
-    ['.card-header .open-button', '-2px'],
+    ['.card-header .card-status', '2px'],
     ['.vl-scroller', '-2px']
   ]
   const atStop = async ([selector, offset]: [string, string]) => {
     await expect(win.locator(selector)).toBeFocused()
-    // Brief §9's accent ring: outside the chrome controls, inset on the open button and Raw.
+    // Brief §9's accent ring: outside the chrome controls and status, inset on Raw.
     expect(await win.locator(selector).evaluate((el) => {
       const style = getComputedStyle(el)
       return [style.outlineStyle, style.outlineColor, style.outlineWidth, style.outlineOffset]

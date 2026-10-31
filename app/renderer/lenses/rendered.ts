@@ -301,8 +301,9 @@ export class RenderedLens {
   }
 
   /**
-   * Put `block` at the top. `content-visibility` sizes a block for real only once it nears the viewport, so one
-   * measurement undershoots; a few frames correct it. `data-ready` waits until that settles.
+   * Put `block` at the top, preserving the reading inset for the first block. `content-visibility` sizes a block
+   * for real only once it nears the viewport, so one measurement undershoots; a few frames correct it.
+   * `data-ready` waits until that settles.
    */
   private reveal(block: HTMLElement | null): void {
     const gen = ++this.placeGen
@@ -310,7 +311,8 @@ export class RenderedLens {
       if (gen !== this.placeGen) return
       if (this.stopped || this.paused || this.moved) return this.finishPlace()
       if (block && this.scroller.getClientRects().length > 0) {
-        const delta = block.getBoundingClientRect().top - this.scroller.getBoundingClientRect().top
+        const inset = block === this.column.firstElementChild ? Number.parseFloat(getComputedStyle(this.column).paddingTop) || 0 : 0
+        const delta = block.getBoundingClientRect().top - this.scroller.getBoundingClientRect().top - inset
         if (Math.abs(delta) >= 2 && left > 0) {
           this.scroller.scrollTop += delta
           requestAnimationFrame(() => align(left - 1))

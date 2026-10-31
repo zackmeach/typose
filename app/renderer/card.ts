@@ -66,6 +66,14 @@ export interface CardView {
 
 export const fileName = (path: string): string => path.split(/[\\/]/).pop() || path
 
+/** Before folder roots exist, the breadcrumb shows only the immediate parent. Paths remain display-only. */
+export const parentName = (path: string): string => {
+  const end = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  if (end < 0) return ''
+  const parent = path.slice(0, end)
+  return parent.split(/[\\/]/).pop() || path.slice(0, end + 1)
+}
+
 const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 })
 const lines = (n: number, format: (n: number) => string) => `${format(n)} line${n === 1 ? '' : 's'}`
 

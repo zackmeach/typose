@@ -4,6 +4,7 @@ import { onA11yMode } from './a11y'
 import { App, appHooks } from './App'
 import { CoreClient, testHooks } from './core'
 import { markBundleEvaluated, markNow, markPresentations } from './perf'
+import { fontsReady } from './font-ready'
 import './style.css'
 
 declare global {
@@ -27,7 +28,17 @@ onA11yMode((on) => (document.documentElement.dataset.a11y = on ? 'on' : 'off'))
 const core = new CoreClient()
 // The test-hooks build's handle for the e2e tests (plan m8): the client, its hooks, and App's.
 if (__TEST_HOOKS__) Object.assign(window, { typoseTest: { core, client: testHooks, app: appHooks } })
-const mount = () => createRoot(document.getElementById('root')!).render(<App core={core} />)
+const fontDelay = __TEST_HOOKS__ ? Number(new URLSearchParams(location.search).get('delayFonts') ?? 0) : 0
+document.documentElement.dataset.fonts = 'loading'
+const fontSource = __TEST_HOOKS__ && fontDelay > 0 ? {
+  load: (font: string, text?: string) => new Promise<FontFace[]>((done, fail) => {
+    setTimeout(() => { void document.fonts.load(font, text).then(done, fail) }, fontDelay)
+  })
+} : document.fonts
+const fonts = fontsReady(fontSource).then((ready) => {
+  document.documentElement.dataset.fonts = ready ? 'ready' : 'fallback'
+})
+const mount = () => createRoot(document.getElementById('root')!).render(<App core={core} fonts={fonts} />)
 // Plan C8's startup control: main passes the delay in the URL, from TYPOSE_TEST_DELAY_MOUNT.
 const delay = __TEST_HOOKS__ ? Number(new URLSearchParams(location.search).get('delayMount') ?? 0) : 0
 if (delay > 0) setTimeout(mount, delay)

@@ -2,7 +2,7 @@
 // covers them all, the slow open and the memory refusal (plan §7 proposal 1, triggered from PR 6) included.
 import { expect, it } from 'vitest'
 import type { Opened } from '../shared/protocol'
-import { type Card, RENDERED_OFF, view } from './card'
+import { type Card, RENDERED_OFF, parentName, view } from './card'
 
 const PATH = 'C:\\logs\\run.jsonl'
 const opened = (over: Partial<Opened> = {}): Opened => ({
@@ -28,6 +28,14 @@ const open = (over: Partial<Extract<Card, { kind: 'open' }>> = {}): Extract<Card
   ...over
 })
 const failed = (code: Extract<Card, { kind: 'failed' }>['code'], message = ''): Card => ({ kind: 'failed', path: PATH, code, message })
+
+it('keeps the immediate breadcrumb parent across Windows, POSIX and root-level paths', () => {
+  for (const [path, parent] of [
+    ['C:\\work\\pulse\\launch-plan.md', 'pulse'], ['/work/pulse/launch-plan.md', 'pulse'],
+    ['C:\\launch-plan.md', 'C:'], ['/launch-plan.md', '/'], ['launch-plan.md', ''],
+    ['C:\\a long parent\\a long filename.md', 'a long parent']
+  ]) expect(parentName(path), path).toBe(parent)
+})
 
 it('shows each file state', () => {
   const rows: [state: string, card: Card, want: Partial<ReturnType<typeof view>>][] = [

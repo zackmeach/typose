@@ -23,6 +23,7 @@ const log = startLifecycle()
 // ready-to-show and the title bar's paint, or delay React's mount.
 const showDelay = __TEST_HOOKS__ ? envWhole('TYPOSE_TEST_DELAY_SHOW', process.env.TYPOSE_TEST_DELAY_SHOW, 'ms') : 0
 const mountDelay = __TEST_HOOKS__ ? envWhole('TYPOSE_TEST_DELAY_MOUNT', process.env.TYPOSE_TEST_DELAY_MOUNT, 'ms') : 0
+const fontDelay = __TEST_HOOKS__ ? envWhole('TYPOSE_TEST_DELAY_FONTS', process.env.TYPOSE_TEST_DELAY_FONTS, 'ms') : 0
 // Plan C5's per-read delay, for the test-hooks addon: every chunk the core reads from disk waits this long first.
 const readDelay = __TEST_HOOKS__ ? envWhole('TYPOSE_TEST_READ_DELAY', process.env.TYPOSE_TEST_READ_DELAY, 'ms') : 0
 // Plan C1's budget override, for the test-hooks addon: the ledger's limit in bytes, in place of a quarter of RAM.
@@ -290,7 +291,10 @@ void app.whenReady().then(() => {
     return r.canceled ? null : (r.filePaths[0] ?? null)
   })
   ipcMain.handle('open-external', (event: IpcMainInvokeEvent, ...args: unknown[]) => openExternal(win, event, args, (url) => shell.openExternal(url)))
-  void win.loadURL(`${ORIGIN}/index.html${mountDelay ? `?delayMount=${mountDelay}` : ''}`)
+  const startupQuery = new URLSearchParams()
+  if (mountDelay) startupQuery.set('delayMount', String(mountDelay))
+  if (fontDelay) startupQuery.set('delayFonts', String(fontDelay))
+  void win.loadURL(`${ORIGIN}/index.html${startupQuery.size ? `?${startupQuery}` : ''}`)
 })
 
 app.on('window-all-closed', () => app.quit())

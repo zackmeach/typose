@@ -2,3 +2,5 @@
 *.cmd text eol=crlf
 # The sh launcher runs on macOS and Linux.
 app/bin/typose text eol=lf
+
+app/renderer/assets/fonts/LICENSE-*.txt text eol=lf whitespace=-blank-at-eol

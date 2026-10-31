@@ -1,7 +1,8 @@
 import { type RefObject, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { Button, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
+import { Button, Menu, MenuItem, MenuTrigger, Popover, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
 import type { Command, Limits, MdBuild, Opened } from '../shared/protocol'
-import { type Action, type Card, fileName, view } from './card'
+import { type Action, type Card, fileName, parentName, view } from './card'
+import { AppIcon, FileIcon } from './file-icon'
 import { type CoreClient, CoreCallError } from './core'
 import { RenderedLens, renderedCharge } from './lenses/rendered'
 import { LensBudget, type ReloadReservation } from './lenses/lens-budget'
@@ -59,7 +60,14 @@ interface RetainedRendered {
  * framework-free controller mounted into the card body (spec §5.1, Z26). Markdown's switch is React Aria's
  * tablist (brief §9).
  */
-export function App({ core }: { core: CoreClient }) {
+export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> }) {
+  const [fontLayoutReady, setFontLayoutReady] = useState(false)
+  // The shell subscribes to the one-shot core port immediately. Only lens measurements wait for stable fonts.
+  useEffect(() => {
+    let alive = true
+    void fonts.then(() => { if (alive) setFontLayoutReady(true) })
+    return () => { alive = false }
+  }, [fonts])
   const [workspace] = useState(() => new WorkspaceStore())
   const snapshot = useSyncExternalStore(workspace.subscribe, workspace.getSnapshot)
   const [card, setCardState] = useState<Card>({ kind: 'connecting' })
@@ -787,9 +795,15 @@ export function App({ core }: { core: CoreClient }) {
 
   const header = (
     <div className="card-header">
-      <span className="card-name" role="heading" aria-level={1}>{path ? fileName(path) : 'No file open'}</span>
-      <span className="card-status">{shown.status}</span>
+      <span className="card-identity" title={path}>
+        {path ? <FileIcon path={path} markdown={openedNow?.format === 'markdown'} /> : null}
+        <span className="card-breadcrumb">
+          {path && parentName(path) ? <span className="card-parent">{parentName(path)}<span className="breadcrumb-divider"> / </span></span> : null}
+          <span className="card-name" role="heading" aria-level={1}>{path ? fileName(path) : 'No file open'}</span>
+        </span>
+      </span>
       {shown.lenses ? (
+        <>
         <TabList aria-label="Lens" className="lens-switch">
           <Tab id="rendered" className="lens-tab" isDisabled={!!shown.lenses.renderedOff}>
             {/* `Tab` doesn't take a DOM `title`. The span carries the reason, which is the tooltip (Z71, Z34). */}
@@ -798,15 +812,26 @@ export function App({ core }: { core: CoreClient }) {
             </span>
           </Tab>
           <Tab id="raw" className="lens-tab">
-            Raw
+            <span className="lens-tab-tip">Raw</span>
           </Tab>
         </TabList>
+        <MenuTrigger>
+          <Button className="lens-dropdown" aria-label={`Lens: ${shown.lenses.showing === 'rendered' ? 'Rendered' : 'Raw'}`}>
+            {shown.lenses.showing === 'rendered' ? 'Rendered' : 'Raw'} <span aria-hidden="true">⌄</span>
+          </Button>
+          <Popover className="menu-popover" placement="bottom end">
+            <Menu className="menu" aria-label="Lens" onAction={onLens} disabledKeys={shown.lenses.renderedOff ? ['rendered'] : []}>
+              <MenuItem id="rendered" className="menu-item" textValue="Rendered">
+                Rendered{shown.lenses.renderedOff ? <span className="lens-unavailable"> · {shown.lenses.renderedOff}</span> : null}
+              </MenuItem>
+              <MenuItem id="raw" className="menu-item">Raw</MenuItem>
+            </Menu>
+          </Popover>
+        </MenuTrigger>
+        </>
       ) : null}
-      {card.kind === 'open' || card.kind === 'failed' ? (
-        <Button className="open-button" onPress={() => void pick()}>
-          Open file…
-        </Button>
-      ) : null}
+      <span className="card-status" title={shown.status} tabIndex={shown.status ? 0 : undefined}>{shown.status}</span>
+      <span className="card-status-tooltip" aria-hidden="true">{shown.status}</span>
     </div>
   )
   const progress = shown.progress === null ? null : <ProgressLine value={shown.progress} />
@@ -840,7 +865,7 @@ export function App({ core }: { core: CoreClient }) {
   )
 
   const body =
-    card.kind === 'open' && limits && 'raw' in shown.body ? (
+    fontLayoutReady && card.kind === 'open' && limits && 'raw' in shown.body ? (
       <LensHost
         core={core}
         session={session}
@@ -863,7 +888,7 @@ export function App({ core }: { core: CoreClient }) {
         onShowRaw={() => {}}
         onOpenLocal={(target, path) => openLocal(card.opened, target, path)}
       />
-    ) : card.kind === 'open' && limits && 'rendered' in shown.body && card.build ? (
+    ) : fontLayoutReady && card.kind === 'open' && limits && 'rendered' in shown.body && card.build ? (
       <LensHost
         core={core}
         session={session}
@@ -900,9 +925,7 @@ export function App({ core }: { core: CoreClient }) {
       <header className={MAC ? 'titlebar mac' : 'titlebar'}>
         {MAC ? null : (
           <span className="titlebar-start">
-            <span className="glyph" aria-hidden="true">
-              ▣
-            </span>
+            <AppIcon />
             <AppMenu run={run} />
           </span>
         )}

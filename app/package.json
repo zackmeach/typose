@@ -21,7 +21,7 @@
   },
   "build": {
     "appId": "dev.typose.app",
-    "files": ["out/**", "!**/node_modules/typose-node/hooks{,/**}"],
+    "files": ["out/**", "!**/node_modules/typose-node/hooks{,/**}", { "from": "renderer/assets/fonts", "to": "third-party/fonts", "filter": ["README.md", "LICENSE-*.txt"] }],
     "asarUnpack": ["**/*.node"],
     "extraResources": ["bin/**"],
     "electronDist": "../node_modules/electron/dist",

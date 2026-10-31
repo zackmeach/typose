@@ -1,10 +1,9 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { Button, Menu, MenuItem, MenuTrigger, Popover } from 'react-aria-components'
-import { fileName } from './card'
+import { fileName, parentName } from './card'
+import { FileIcon } from './file-icon'
 import type { TabId, WorkspaceTab } from './workspace'
 import './file-tabs.css'
-
-const parentName = (path: string): string => path.split(/[\\/]/).slice(0, -1).pop() || path
 
 /** Permanent files on the canvas; the selected card alone owns a document lens. */
 export function FileTabs({ tabs, selected, onSelect, onClose }: {
@@ -56,7 +55,7 @@ export function FileTabs({ tabs, selected, onSelect, onClose }: {
                 } else move(event, index) // Enter and Space use the button's native click activation
               }}>
               <span className="file-tab-label" id={`file-label-${tab.id}`}>
-                <span className="file-icon" aria-hidden="true">{tab.path.match(/\.(md|markdown)$/i) ? '▤' : '≡'}</span>
+                <FileIcon path={tab.path} />
                 <span className="file-tab-name">{fileName(tab.path)}</span>
                 {(names.get(fileName(tab.path)) ?? 0) > 1 ? <span className="file-tab-parent"> · {parentName(tab.path)}</span> : null}
               </span>
