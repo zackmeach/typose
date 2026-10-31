@@ -6,6 +6,8 @@ Selection retains each tab's source line and explicit Raw/Rendered choice. The s
 
 The active tab has a close control and Close tab menu command. Arrow keys, Home and End select within the file row; Enter/Space activates its focused tab and Delete closes it. Ctrl+W closes the selected tab; Ctrl+Tab/Ctrl+Shift+Tab and the platform's specified alternatives select adjacent tabs. Closing the last tab leaves the empty card. Mac accelerators require separate Mac qualification.
 
+Ctrl+mouse-wheel adjusts the whole view from 50% to 200%, including Raw's logical scrolling mode for large files. Wheel input without Ctrl keeps scrolling the document.
+
 ## Ownership and refusal
 
 Manual and capability-derived tabs use distinct keys. Following a local link still performs the existing capability check before replacing its source tab. An inactive derived tab keeps that capability, but a core restart cannot recreate it from its display path: manual selection remains required.

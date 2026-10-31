@@ -143,13 +143,38 @@ test('close cancels active and queued image reads within the measured chunk dela
   test.skip(process.platform !== 'win32', 'local capability backend is currently Windows-only')
   fixture('image-cancel.png', imagePng(2048, 2048))
   const file = fixture('image-cancel.md', '# Cancel images\n\n![First](image-cancel.png) ![Second](image-cancel.png)\n')
-  const l = await launch({ hooks: true, env: { TYPOSE_TEST_READ_DELAY: '100' } })
+  const l = await launch({ hooks: true, env: { TYPOSE_TEST_READ_DELAY: '500' } })
   const { win } = l
   await expect(win.locator('.open-button')).toBeVisible()
+  await win.evaluate(() => {
+    const state = window as unknown as { typoseTest: TestHooks & { core: { call(method: string, params: object, signal?: AbortSignal): Promise<unknown> } }; pendingImagePrepares: number }
+    const core = state.typoseTest.core
+    const call = core.call.bind(core)
+    state.pendingImagePrepares = 0
+    core.call = async (method, params, signal?: AbortSignal) => {
+      const image = method === 'prepareImage'
+      if (image) state.pendingImagePrepares++
+      try { return await call(method, params, signal) }
+      finally { if (image) state.pendingImagePrepares-- }
+    }
+  })
   await open(l, file)
   await ready(win)
-  await expect.poll(async () => (await debugStats(win)).tasks, { intervals: [5] }).toBeGreaterThanOrEqual(2)
-  await win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.app.close?.())
+  const active = await win.evaluate(async () => {
+    const state = window as unknown as { typoseTest: TestHooks; pendingImagePrepares: number }
+    const deadline = performance.now() + 10_000
+    while (performance.now() < deadline) {
+      const s = await state.typoseTest.core.call('debugStats', {}) as { jobs: number; tasks: number; handles: number }
+      // Source + local root + active target snapshot, with both image prepares still pending.
+      if (s.jobs === 0 && s.tasks >= 2 && s.handles === 3 && state.pendingImagePrepares === 2) {
+        state.typoseTest.app.close!() // no browser-driver roundtrip between observation and close
+        return s
+      }
+      await new Promise(done => setTimeout(done, 5))
+    }
+    throw new Error('Did not observe an active target snapshot and two pending image prepares')
+  })
+  expect(active.handles).toBe(3)
   await expect.poll(async () => { const s = await debugStats(win); return [s.docs, s.jobs, s.tasks, s.handles] }).toEqual([0, 0, 0, 0])
   const after = await debugStats(win)
   expect(after.cancels).toBeGreaterThanOrEqual(2)
