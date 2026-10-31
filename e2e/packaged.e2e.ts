@@ -11,7 +11,7 @@ test('no test-hooks code ships: the asar holds none of its names, and the addon 
   // The asar stores its files uncompressed, so a byte search sees every bundle in it.
   const asar = readFileSync(PACKAGED.asar)
   expect(asar.includes('TYPOSE_MARKS')).toBe(true) // the search works: the read-only hook's name is there
-  for (const name of ['TYPOSE_TEST', 'TYPOSE_TEST_ALLOW_SPECULATIVE', 'delayMount', '__TEST_HOOKS__', 'typoseTest', 'debugStats', 'typose-node/hooks'])
+  for (const name of ['TYPOSE_TEST', 'TYPOSE_TEST_ALLOW_SPECULATIVE', 'delayMount', 'delayFonts', '__TEST_HOOKS__', 'typoseTest', 'debugStats', 'typose-node/hooks'])
     expect(asar.includes(name), name).toBe(false)
   // The addon is unpacked beside the asar (plan m8): the release build, without the test-hooks addon's calls, and
   // without the test-hooks addon itself.

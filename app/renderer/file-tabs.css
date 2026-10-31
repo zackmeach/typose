@@ -1,8 +1,8 @@
 .file-tabs {
   position: absolute;
   top: env(titlebar-area-height, 40px);
-  left: 8px;
-  right: 8px;
+  left: 16px;
+  right: 16px;
   height: 36px;
   display: flex;
   align-items: center;
