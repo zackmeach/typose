@@ -501,6 +501,7 @@ body {
   font: 16px/1.6 var(--font-ui);
 }
 .md-block {
+  display: flow-root;
   content-visibility: auto;
   contain-intrinsic-size: auto 24px;
 }
@@ -534,6 +535,9 @@ html[data-a11y='on'] .md-block,
   font-weight: 600;
   line-height: 1.3;
   overflow-wrap: anywhere;
+}
+.md-column :where(h2, h3, h4, h5, h6) {
+  margin-top: 16px;
 }
 .md-column h1 {
   font-size: 30px;

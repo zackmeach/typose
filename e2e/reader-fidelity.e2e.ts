@@ -52,6 +52,20 @@ test('reader uses bundled typography and fixed Raw geometry before content mount
   expect(type.code).toContain('JetBrains Mono')
   expect(Number(type.strong)).toBeGreaterThanOrEqual(600)
   expect(Number.parseFloat(type.codeLine)).toBeCloseTo(20.15, 2)
+  const originalA11y = await win.evaluate(() => document.documentElement.dataset.a11y)
+  for (const mode of ['off', 'on']) {
+    await win.evaluate(mode => { document.documentElement.dataset.a11y = mode }, mode)
+    const sectionGap = await win.evaluate(() => {
+      const heading = document.querySelector('.md-column h2')!
+      const paragraph = heading.closest('.md-block')!.previousElementSibling!.querySelector('p')!
+      return heading.getBoundingClientRect().top - paragraph.getBoundingClientRect().bottom
+    })
+    expect(sectionGap, `paragraph to H2 with accessibility ${mode}`).toBeCloseTo(32, 1)
+  }
+  await win.evaluate(mode => {
+    if (mode === undefined) delete document.documentElement.dataset.a11y
+    else document.documentElement.dataset.a11y = mode
+  }, originalA11y)
   await win.getByRole('tab', { name: 'Raw', exact: true }).click()
   await waitOpen(win)
   const raw = await win.locator('.vl-row').first().evaluate((element) => {
