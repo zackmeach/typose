@@ -64,6 +64,53 @@ test('reader uses bundled typography and fixed Raw geometry before content mount
   await finish(l)
 })
 
+test('opening, switching and reloading at the top preserve the reading inset while middle anchors still align', async () => {
+  const l = await launch({ file: fixture('reader-top-inset.md', source) })
+  const { win } = l
+  const ready = () => expect(win.locator('.md-scroller')).toHaveAttribute('data-ready', '1')
+  const atTop = async () => {
+    await ready()
+    const metrics = await win.locator('.md-scroller').evaluate((scroller) => {
+      const column = scroller.querySelector('.md-column')!, first = column.firstElementChild!
+      return { scroll: scroller.scrollTop, inset: first.getBoundingClientRect().top - scroller.getBoundingClientRect().top, padding: Number.parseFloat(getComputedStyle(column).paddingTop) }
+    })
+    expect(metrics.scroll).toBe(0)
+    expect(metrics.inset).toBeCloseTo(metrics.padding, 1)
+    expect(metrics.padding).toBe(32)
+  }
+  await atTop()
+  await win.getByRole('tab', { name: 'Raw', exact: true }).click()
+  await waitOpen(win)
+  expect(await win.locator('.vl-scroller').evaluate(el => el.scrollTop)).toBe(0)
+  await win.getByRole('tab', { name: 'Rendered', exact: true }).click()
+  await atTop()
+  await win.locator('.md-scroller').focus()
+  await win.keyboard.press('Control+r')
+  await expect(win.locator('.rendered-host')).toHaveAttribute('data-gen', '2')
+  await atTop()
+
+  await win.locator('.md-scroller').evaluate((scroller) => {
+    scroller.scrollTop = scroller.querySelectorAll<HTMLElement>('.md-block')[30].offsetTop
+  })
+  const topBlock = () => win.locator('.md-scroller').evaluate((scroller) => {
+    const edge = scroller.getBoundingClientRect().top
+    const block = [...scroller.querySelectorAll<HTMLElement>('.md-block')].find(block => block.getBoundingClientRect().bottom > edge + 1)!
+    return { line: Number(block.dataset.line), end: Number(block.dataset.line) + Number(block.dataset.lines) - 1 }
+  })
+  const before = await topBlock()
+  expect(before.line).toBeGreaterThan(0)
+  await win.getByRole('tab', { name: 'Raw', exact: true }).click()
+  await waitOpen(win)
+  await win.getByRole('tab', { name: 'Rendered', exact: true }).click()
+  await ready()
+  const after = await topBlock()
+  expect(after.line).toBeLessThanOrEqual(before.end)
+  expect(after.end).toBeGreaterThanOrEqual(before.line)
+  expect(await win.locator('.md-scroller').evaluate(el => el.scrollTop)).toBeGreaterThan(32)
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
 test('long breadcrumbs preserve the filename and working lens controls through narrow zoomed layouts', async () => {
   const parent = 'a-long-parent-directory-for-breadcrumb-shrinking'
   mkdirSync(join(FIXTURES, parent), { recursive: true })
