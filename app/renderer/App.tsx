@@ -1,4 +1,4 @@
-import { type ReactNode, type RefObject, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { type RefObject, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { Button, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
 import type { Command, Limits, MdBuild, Opened } from '../shared/protocol'
 import { type Action, type Card, fileName, view } from './card'
@@ -8,6 +8,9 @@ import { LensBudget, type ReloadReservation } from './lenses/lens-budget'
 import { ROW_HEIGHT, RawLens, viewportCap } from './lenses/raw'
 import { AppMenu, LINUX } from './menu'
 import { inputMark, markNow, markPainted } from './perf'
+import { WorkspaceStore, WorkspaceMetadataQueue, type SelectionTicket, type TabId, type WorkspaceTab } from './workspace'
+import { FileTabs } from './file-tabs'
+import { WorkspaceBudget } from './workspace-budget'
 
 /** macOS has its native menu bar and traffic lights in place of the glyph and ☰ (brief §3.1). */
 const MAC = navigator.platform.startsWith('Mac')
@@ -20,7 +23,7 @@ const markOnce = (name: string) => performance.getEntriesByName(name).length ===
 const firstCount = (l: Limits) => Math.min(l.maxItems, 3 * Math.ceil(window.innerHeight / ROW_HEIGHT) + 1)
 
 /** The test-hooks build's way in for the e2e tests (plan m8): App's own close, as the empty card's would do it. */
-export const appHooks: { close?: () => void } = {}
+export const appHooks: { close?: () => void; workspace?: () => ReturnType<WorkspaceBudget['snapshot']> | null } = {}
 
 const failed = (path: string, e: unknown): Extract<Card, { kind: 'failed' }> => ({
   kind: 'failed',
@@ -52,23 +55,34 @@ interface RetainedRendered {
 }
 
 /**
- * The M1 chrome (brief §3.1): the title bar region and one card. React renders the frame; a lens is a
+ * One-card workspace (brief §3.1, §3.6). React renders permanent file pills and the frame; one lens is a
  * framework-free controller mounted into the card body (spec §5.1, Z26). Markdown's switch is React Aria's
  * tablist (brief §9).
  */
 export function App({ core }: { core: CoreClient }) {
-  const [card, setCard] = useState<Card>({ kind: 'connecting' })
+  const [workspace] = useState(() => new WorkspaceStore())
+  const snapshot = useSyncExternalStore(workspace.subscribe, workspace.getSnapshot)
+  const [card, setCardState] = useState<Card>({ kind: 'connecting' })
   const [limits, setLimits] = useState<Limits | null>(null)
+  const [workspaceNotice, setWorkspaceNotice] = useState('')
+  const workspaceBudget = useRef<WorkspaceBudget | null>(null)
+  const workspacePeak = useRef(0)
+  const [metadataQueue] = useState(() => new WorkspaceMetadataQueue())
+  /** Pending local replacements pay their metadata alongside all already published tabs. */
+  const pendingWorkspace = useRef(new Map<TabId, { units: number }>())
+  const pendingNative = useRef(new Set<symbol>())
   const [session, setSession] = useState(0)
   const currentSession = useRef(0)
+  const displayed = useRef<TabId | null>(null)
   const latest = useRef({ card, limits })
   latest.current = { card, limits }
-  /** The open or reload in progress; a newer one, or Close, abandons it. */
-  const attempt = useRef(0)
-  /** A Reload under way: Ctrl+R, F5 and Retry wait for it, so Reloads never overlap at the core (plan C1). */
-  const reloading = useRef(false)
+  /** Reloads serialize per native document, without blocking another tab. */
+  const reloading = useRef(new Set<TabId>())
+  const activationFailed = useRef(new Set<TabId>())
   /** The document and generation on screen, set as soon as its reply arrives (progress events can't wait for React). */
-  const live = useRef<{ doc: number; gen: number } | null>(null)
+  const live = useRef<{ session: number; doc: number; gen: number } | null>(null)
+  /** Retained activation can be canceled before a lens exists and before its first-page reply reaches App. */
+  const pendingActivation = useRef<{ session: number; doc: number; gen: number; operation: symbol; selection: SelectionTicket } | null>(null)
   /** The lens on screen, if any: where Reopen goes back to after a core death (plan C7). */
   const lens = useRef<ShownLens | null>(null)
   /** The lens the reader chose. Null until they use the switch: a move in Raw then keeps Raw (plan §2.2). */
@@ -87,8 +101,8 @@ export function App({ core }: { core: CoreClient }) {
   /** Single-tree high water. Each next view pays two empirical allowances for disposed trees awaiting GC. */
   const retiredRendered = useRef(0)
   const rendered = useRef<RetainedRendered | null>(null)
-  /** A file chosen before the core first came up: it's opened then, ahead of the command line's. */
-  const waiting = useRef<string | null>(null)
+  /** Files named before the first handshake retain arrival order. */
+  const waiting = useRef<string[]>([])
   /** Plan C1: the next lens's viewport-only cache cap, reserved with the open's floor: the shown lens's height, else the
    *  window's, which bounds the card's. */
   const floorBytes = (l: Limits) => lens.current?.floorBytes() ?? viewportCap(l, window.innerHeight)
@@ -97,7 +111,29 @@ export function App({ core }: { core: CoreClient }) {
   const shown = view(card)
   const openedNow = card.kind === 'open' ? card.opened : null
 
-  const budgetFor = (opened: Opened): LensBudget | null => {
+  /** Selected payload lives here alone; the workspace stores only scalar metadata. */
+  function setCard(update: Card | ((before: Card) => Card)): void {
+    const next = typeof update === 'function' ? update(latest.current.card) : update
+    latest.current.card = next
+    setCardState(next)
+    if (next.kind === 'open') workspace.updateDocument({ session: currentSession.current, doc: next.opened.doc, gen: next.opened.gen },
+      (stored) => ({ ...next, opened: stored.opened }))
+  }
+
+  function display(id: TabId | null, next: Card): void {
+    if (id !== displayed.current) picked.current = id ? workspace.tab(id)?.preferredLens ?? null : null
+    displayed.current = id
+    setCard(next)
+  }
+
+  function displays(tab: WorkspaceTab): boolean {
+    const current = latest.current.card
+    return displayed.current === tab.id && current.kind === 'open' && tab.card.kind === 'open' &&
+      live.current?.session === tab.session && live.current.doc === tab.card.opened.doc && live.current.gen === tab.card.opened.gen &&
+      current.opened.doc === tab.card.opened.doc && current.opened.gen === tab.card.opened.gen
+  }
+
+  const budgetFor = (opened: Pick<Opened, 'doc' | 'gen'>): LensBudget | null => {
     const owner = budget.current
     return owner?.session === currentSession.current && owner.doc === opened.doc && owner.current(opened.gen) ? owner : null
   }
@@ -112,6 +148,46 @@ export function App({ core }: { core: CoreClient }) {
     owner.invalidate()
   }
 
+  /** Freeze image grants before snapshotting the retired tree; inactive tabs retain no lens DOM. */
+  function leave(): void {
+    const native = live.current ?? pendingActivation.current // replacement metadata may already name a different document
+    hadFocus.current = lens.current?.element.contains(document.activeElement) ?? false
+    const id = displayed.current
+    if (id) {
+      const tab = workspace.tab(id)
+      if (tab && displays(tab)) workspace.remember(id, lens.current?.topLine() ?? tab.anchor ?? 0, picked.current)
+    }
+    const owner = budget.current
+    if (owner) owner.reloadReservation(owner.rawReserved)
+    lens.current?.yieldReservation()
+    retireBudget()
+    discardRendered()
+    lens.current?.dispose(false)
+    lens.current = null
+    live.current = null
+    holding.current = null
+    if (native && native.session === currentSession.current && workspace.getSnapshot().ready)
+      void core.call('deactivate', { doc: native.doc, gen: native.gen }).catch(() => {})
+  }
+
+  function closeNative(tab: WorkspaceTab): void {
+    if (tab.session === currentSession.current && tab.card.kind === 'open')
+      void core.call('close', { doc: tab.card.opened.doc }).catch(() => {})
+  }
+
+  /** A fresh open that missed selection remains owned, but must not retain the one active cache share. */
+  function deactivateInactive(native: { session: number; doc: number; gen: number }): void {
+    if (native.session !== currentSession.current || !workspace.getSnapshot().ready) return
+    const selected = workspace.getSnapshot().selected
+    const tab = selected ? workspace.tab(selected) : undefined
+    const matches = (ref: { session: number; doc: number; gen: number } | null) =>
+      ref?.session === native.session && ref.doc === native.doc && ref.gen === native.gen
+    const activating = pendingActivation.current
+    if (tab?.session === native.session && tab.card.kind === 'open' && tab.card.opened.doc === native.doc && tab.card.opened.gen === native.gen &&
+      (matches(live.current) || matches(activating) && activating && workspace.selected(activating.selection))) return
+    void core.call('deactivate', { doc: native.doc, gen: native.gen }).catch(() => {})
+  }
+
   useEffect(() => {
     document.title = title
   }, [title])
@@ -123,22 +199,39 @@ export function App({ core }: { core: CoreClient }) {
     // Plan C7: the card says the core stopped, and offers Reopen at the same line once a new core is up.
     // Without a lens on screen (a Reopen still opening, say), the line is the one the card was going back to.
     const offGone = core.onGone(() => {
-      const top = lens.current?.topLine()
-      retireBudget()
-      discardRendered()
-      setCard((c) => ({ kind: 'gone', path: 'path' in c ? c.path : undefined, line: top ?? ('atLine' in c ? c.atLine : 'line' in c ? c.line : undefined), ready: false,
-        localOnly: c.kind === 'open' ? c.opened.localOnly : 'localOnly' in c ? c.localOnly : undefined }))
+      leave()
+      if (workspaceBudget.current) workspacePeak.current = Math.max(workspacePeak.current, workspaceBudget.current.snapshot().peakBytes)
+      workspaceBudget.current?.invalidate()
+      workspaceBudget.current = null
+      metadataQueue.invalidate()
+      pendingWorkspace.current.clear()
+      pendingNative.current.clear()
+      workspace.coreGone(currentSession.current)
+      const selected = workspace.getSnapshot().selected
+      const tab = selected ? workspace.tab(selected) : undefined
+      display(selected, tab?.card.kind === 'gone' ? tab.card : { kind: 'gone', ready: false })
     })
     const offReady = core.onReady((hello) => {
+      const reconnect = currentSession.current !== 0
       currentSession.current = hello.session
       setSession(hello.session)
       latest.current.limits = hello.limits
       setLimits(hello.limits)
+      workspace.coreReady(hello.session)
+      workspaceBudget.current = new WorkspaceBudget(core, hello.session, workspacePeak.current)
+      if (workspace.getSnapshot().tabs.length) void metadata((current) => chargeWorkspace(workspace.getSnapshot().tabs, current))
+      reloading.current.clear()
+      activationFailed.current.clear()
       setCard((c) => (c.kind === 'gone' ? { ...c, ready: true } : c))
+      if (reconnect) {
+        const paths = waiting.current.splice(0)
+        void (async () => { for (const path of paths) await open(path) })()
+      }
     })
     // Subscribed before any open, so no event is missed between the open reply and the lens mounting.
     const offProgress = core.onProgress((e) => {
-      if (live.current?.doc !== e.doc || live.current.gen !== e.gen) return // another document's, or an old generation's
+      workspace.progress(e)
+      if (live.current?.session !== e.session || live.current.doc !== e.doc || live.current.gen !== e.gen) return // another document's, or an old generation's
       // The scan has passed the first line's end once it has found a second line, or finished (Z37).
       if (e.lines > 1 || e.done) markOnce('typose:line-scan')
       if (e.done) markOnce('typose:index-done')
@@ -152,6 +245,23 @@ export function App({ core }: { core: CoreClient }) {
     // reloaded the page, is gone (main).
     const onKey = (e: KeyboardEvent) => {
       const modified = e.ctrlKey || e.metaKey || e.shiftKey || e.altKey
+      const command = MAC ? e.metaKey : e.ctrlKey
+      if (command && e.key.toLowerCase() === 'w' && !e.altKey && !e.shiftKey) {
+        e.preventDefault()
+        if (workspace.getSnapshot().selected) close()
+        else if (MAC) window.close()
+        return
+      }
+      const next = e.ctrlKey && e.key === 'Tab' && !e.metaKey && !e.altKey ? (e.shiftKey ? -1 : 1)
+        : !MAC && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && (e.key === 'PageDown' || e.key === 'PageUp') ? (e.key === 'PageDown' ? 1 : -1)
+          : MAC && e.metaKey && e.shiftKey && !e.ctrlKey && !e.altKey && (e.key === ']' || e.key === '[') ? (e.key === ']' ? 1 : -1) : 0
+      if (next) {
+        e.preventDefault()
+        const state = workspace.getSnapshot()
+        const index = state.tabs.findIndex((tab) => tab.id === state.selected)
+        if (state.tabs.length) void selectTab(state.tabs[(index + next + state.tabs.length) % state.tabs.length].id)
+        return
+      }
       // Brief §7.2: Ctrl+Q quits on Linux, as ☰'s Quit does.
       if (LINUX && e.key.toLowerCase() === 'q' && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey) return run('exit')
       const ctrlR = e.key.toLowerCase() === 'r' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey
@@ -168,16 +278,17 @@ export function App({ core }: { core: CoreClient }) {
       async (hello) => {
         setLimits(hello.limits)
         latest.current.limits = hello.limits // `open` below runs before React re-renders
-        const launched = await window.typose.launchPath()
-        const initial = waiting.current ?? launched
-        if (initial) void open(initial)
+        const launched = await window.typose.launchPaths()
+        const initial = [...launched, ...waiting.current]
+        waiting.current = []
+        if (initial.length) for (const path of initial) await open(path)
         else setCard({ kind: 'empty' })
       },
       async () => {
         // The first core died before its handshake: keep the file named, for Reopen.
-        const launched = (await window.typose.launchPath()) ?? undefined
-        const initial = waiting.current ?? launched
-        setCard((c) => (c.kind === 'gone' ? { ...c, path: c.path ?? initial } : { kind: 'gone', path: initial, ready: false }))
+        const initial = [...await window.typose.launchPaths(), ...waiting.current]
+        waiting.current = []
+        for (const path of initial) openNamed(path)
       }
     )
     return () => {
@@ -195,7 +306,6 @@ export function App({ core }: { core: CoreClient }) {
   useEffect(() => {
     if (!openedNow || openedNow.format !== 'markdown' || openedNow.blank) return
     const opened = openedNow
-    picked.current = null
     const ac = new AbortController()
     let alive = true
     const slow = window.setTimeout(() => {
@@ -203,7 +313,10 @@ export function App({ core }: { core: CoreClient }) {
     }, 50)
     void (async () => {
       try {
-        const build = await core.call('render', { doc: opened.doc, gen: opened.gen }, ac.signal)
+        const saved = displayed.current ? workspace.tab(displayed.current)?.card : undefined
+        if (saved?.kind === 'open' && saved.renderedOff) return
+        const build = saved?.kind === 'open' && saved.opened.doc === opened.doc && saved.opened.gen === opened.gen && saved.build
+          ? saved.build : await core.call('render', { doc: opened.doc, gen: opened.gen }, ac.signal)
         if (!alive) return
         const moved = lens.current?.readerMoved() ?? false
         const go = picked.current === 'rendered' || (picked.current !== 'raw' && !moved)
@@ -291,6 +404,8 @@ export function App({ core }: { core: CoreClient }) {
     const c = latest.current.card
     if (c.kind !== 'open' || (c.lens ?? 'raw') === key) return
     picked.current = key
+    const id = displayed.current
+    if (id) workspace.remember(id, lens.current?.topLine() ?? 0, key)
     if (key === 'raw') {
       setCard((d) => (d.kind === 'open' && d.opened === c.opened ? { ...d, lens: 'raw' } : d))
       return
@@ -306,156 +421,373 @@ export function App({ core }: { core: CoreClient }) {
     })
   }
 
-  /** Opens `path`; Reopen passes the line to go back to. */
-  async function open(path: string, atLine?: number): Promise<void> {
+  const manualKey = (path: string) => 'manual:' + path
+  const pathUnits = (tabs: readonly Pick<WorkspaceTab, 'key' | 'path'>[]) => tabs.reduce((units, tab) => units + tab.key.length + tab.path.length, 0)
+
+  /** Serialize precharge plus publication, not native opens: two callers cannot spend the same workspace allowance. */
+  function metadata<T>(run: (current: () => boolean) => Promise<T>): Promise<T | null> {
+    const ownerSession = currentSession.current
+    return metadataQueue.run(run, () => ownerSession === currentSession.current && workspace.getSnapshot().ready)
+      .finally(() => releaseEmptyWorkspace())
+  }
+
+  async function chargeWorkspace(tabs: readonly Pick<WorkspaceTab, 'key' | 'path'>[], current: () => boolean): Promise<boolean> {
+    const bank = workspaceBudget.current
+    const ownerSession = currentSession.current
+    if (!bank || !workspace.getSnapshot().ready || !current()) return false
+    const pending = [...pendingWorkspace.current.values()]
+    const held = await bank.hold(tabs.length + pending.length, pathUnits(tabs) + pending.reduce((units, item) => units + item.units, 0))
+    if (!current() || bank !== workspaceBudget.current || ownerSession !== currentSession.current || !workspace.getSnapshot().ready) return false
+    if (!held) setWorkspaceNotice("Can't open another tab: Typose's memory budget is full")
+    else setWorkspaceNotice('')
+    return held
+  }
+
+  /** Empty means both the committed pills and every async controller have stopped retaining their metadata. */
+  function releaseEmptyWorkspace(): void {
+    window.requestAnimationFrame(() => {
+      const bank = workspaceBudget.current
+      if (!bank || workspace.getSnapshot().tabs.length || metadataQueue.pending || pendingNative.current.size || pendingWorkspace.current.size) return
+      if (document.querySelector('.file-pill')) { releaseEmptyWorkspace(); return }
+      void bank.release().then((released) => {
+        if (released && bank === workspaceBudget.current && !workspace.getSnapshot().tabs.length) workspacePeak.current = 0
+      })
+    })
+  }
+
+  function pendingCard(tab: WorkspaceTab): Card {
+    if (tab.card.kind !== 'open') return tab.card
+    return { kind: 'opening', path: tab.path, slow: false, atLine: tab.anchor }
+  }
+
+  /** A selected retained document borrows its native identity. A stale activation must never close it. */
+  async function selectTab(id: TabId, force = false): Promise<void> {
+    const ready = workspace.getSnapshot().ready
+    const selected = workspace.getSnapshot().selected
+    const tab = workspace.tab(id)
+    if (!tab) return
+    if (!force && selected === id && displays(tab)) return
+    leave()
+    const selection = workspace.select(id, true)
+    if (!selection) return
+    picked.current = tab.preferredLens
+    display(id, pendingCard(tab))
+    if (tab.card.kind !== 'open' || !ready || !latest.current.limits) return
+    if (!await metadata((current) => chargeWorkspace(workspace.getSnapshot().tabs, current)) || !workspace.selected(selection)) return
     const l = latest.current.limits
-    if (!l) return void (waiting.current = path) // the core isn't up yet: opened once it is
-    const rawBytes = floorBytes(l)
-    const mine = ++attempt.current
-    retireBudget()
+    const rawBytes = viewportCap(l, window.innerHeight)
     const retired = retiredRendered.current
-    discardRendered()
-    live.current = null
-    for (const m of MARKS) performance.clearMarks(m)
+    const operation = Symbol()
+    pendingNative.current.add(operation)
+    try {
+      pendingActivation.current = { session: tab.session, doc: tab.card.opened.doc, gen: tab.card.opened.gen, operation, selection }
+      const opened = await core.call('activate', { doc: tab.card.opened.doc, gen: tab.card.opened.gen,
+        count: firstCount(l), bytes: rawBytes + 2 * retired })
+      if (!workspace.selected(selection)) return
+      const current = workspace.tab(id)
+      if (current?.card.kind !== 'open' || current.card.opened.doc !== opened.doc || current.card.opened.gen !== opened.gen) return
+      show(id, opened, current, rawBytes, undefined, retired)
+    } catch (e) {
+      if (!workspace.selected(selection) || e instanceof CoreCallError && e.code === 'CoreGone') return
+      if (e instanceof CoreCallError && e.code === 'Memory') activationFailed.current.add(id)
+      else activationFailed.current.delete(id)
+      // The tab still owns its native document. Retry activates it; Close releases it even while this message shows.
+      display(id, { ...failed(tab.path, e), ...(tab.card.opened.localOnly ? { localOnly: true } : {}),
+        ...(e instanceof CoreCallError && e.code === 'Frozen' ? { reloadable: true } : {}) })
+    } finally {
+      if (pendingActivation.current?.operation === operation) pendingActivation.current = null
+      pendingNative.current.delete(operation)
+      releaseEmptyWorkspace()
+    }
+  }
+
+  /** Manual paths create permanent tabs; an equal caller key focuses the existing tab. */
+  async function open(path: string, atLine?: number, replace?: TabId): Promise<void> {
+    if (!latest.current.limits || !workspace.getSnapshot().ready) {
+      waiting.current.push(path)
+      if (currentSession.current) setWorkspaceNotice('Queued until the core restarts: ' + fileName(path))
+      return
+    }
+    const request = await metadata(async (current) => {
+      const state = workspace.getSnapshot()
+      const existing = workspace.find(manualKey(path))
+      if (existing && existing.id !== replace) {
+        void selectTab(existing.id)
+        return null
+      }
+      if (replace) {
+        const tab = workspace.tab(replace)
+        if (!tab || !await chargeWorkspace(state.tabs.map((item) => item.id === replace ? { key: manualKey(path), path } : item), current) || !current()) return null
+        const ticket = workspace.begin(replace)
+        if (!ticket) return null
+        leave()
+        const selection = workspace.select(replace)!
+        display(replace, { kind: 'opening', path, slow: false, atLine })
+        return { ticket, selection, key: manualKey(path), previous: tab }
+      }
+      if (!await chargeWorkspace([...state.tabs, { key: manualKey(path), path }], current) || !current()) return null
+      leave()
+      const result = workspace.beginOpen(manualKey(path), path)
+      if (result.kind !== 'open') return null
+      display(result.ticket.tab, { kind: 'opening', path, slow: false, atLine })
+      return { ticket: result.ticket, selection: result.selection, key: manualKey(path), previous: undefined }
+    })
+    if (!request) return
+    const { ticket, selection, key, previous } = request
+    const l = latest.current.limits!
+    const rawBytes = viewportCap(l, window.innerHeight)
+    const retired = retiredRendered.current
+    const operation = Symbol()
+    pendingNative.current.add(operation)
+    for (const mark of MARKS) performance.clearMarks(mark)
     performance.mark('typose:open-start')
     markNow('openRequested')
-    inputMark('open', performance.now()) // an open-then-scroll interval starts here (plan C8)
-    setCard({ kind: 'opening', path, slow: false, atLine })
-    // Brief §7.9's slow open: "Opening…" only once 300 ms pass without a first screen.
-    const slow = setTimeout(() => setCard((c) => (c.kind === 'opening' && attempt.current === mine ? { ...c, slow: true } : c)), 300)
+    inputMark('open', performance.now())
+    const slow = window.setTimeout(() => {
+      workspace.markSlow(ticket)
+      if (workspace.selected(selection)) setCard((c) => c.kind === 'opening' ? { ...c, slow: true } : c)
+    }, 300)
     try {
       const opened = await core.call('open', { path, count: firstCount(l), bytes: rawBytes + 2 * retired })
-      if (attempt.current !== mine) return void core.call('close', { doc: opened.doc }).catch(() => {}) // closed meanwhile
-      show(path, opened, atLine, rawBytes, undefined, retired)
+      const next: Extract<Card, { kind: 'open' }> = { kind: 'open', path, opened, lines: opened.lines, bytes: 0,
+        indexed: opened.indexed, atLine, lens: 'raw' }
+      if (!workspace.complete(ticket, key, next)) {
+        if (ticket.session === currentSession.current) void core.call('close', { doc: opened.doc }).catch(() => {})
+        return
+      }
+      if (previous) closeNative(previous)
+      const tab = workspace.tab(ticket.tab)!
+      if (workspace.selected(selection)) show(ticket.tab, opened, tab, rawBytes, undefined, retired)
+      else if (workspace.getSnapshot().selected === ticket.tab) void selectTab(ticket.tab)
+      else deactivateInactive({ session: ticket.session, doc: opened.doc, gen: opened.gen })
     } catch (e) {
-      if (attempt.current === mine && !(e instanceof CoreCallError && e.code === 'CoreGone')) setCard(failed(path, e)) // onGone shows that
+      if (!workspace.current(ticket) || e instanceof CoreCallError && e.code === 'CoreGone') return
+      const error = failed(path, e)
+      // Reopen/Locate keeps an already owned document on failure; a new tab keeps the bounded error metadata.
+      if (previous?.card.kind === 'open') workspace.cancel(ticket)
+      else workspace.complete(ticket, key, error)
+      if (workspace.selected(selection)) display(ticket.tab, error)
     } finally {
-      clearTimeout(slow)
+      window.clearTimeout(slow)
+      pendingNative.current.delete(operation)
+      releaseEmptyWorkspace()
     }
   }
 
-  /** Keep the source alive until the capability-relative open has returned its first page. */
-  async function openLocal(source: Opened, target: string): Promise<boolean> {
+  /** Capability checks always precede replacement, even if a privileged manual tab has the same display path. */
+  async function openLocal(source: Opened, target: string, resolvedPath: string): Promise<boolean> {
+    const id = displayed.current
     const { card: c, limits: l } = latest.current
-    if (c.kind !== 'open' || c.opened !== source || !l || reloading.current) return false
-    const mine = ++attempt.current
+    if (!id || c.kind !== 'open' || c.opened !== source || !l || reloading.current.has(id) || pendingWorkspace.current.has(id)) return false
+    const tab = workspace.tab(id)
+    const selection = workspace.selection()
+    if (!tab || !selection) return false
     const sourceSession = currentSession.current
-    const rawBytes = floorBytes(l)
-    const owner = budgetFor(source)
-    const plan = owner?.reloadReservation(rawBytes)
-    const retired = Math.max(retiredRendered.current, plan?.retiredTreeMax ?? 0)
+    const keyBound = 'local:' + sourceSession + ':' + Number.MAX_SAFE_INTEGER
+    const pending = { units: keyBound.length + resolvedPath.length }
+    pendingWorkspace.current.set(id, pending)
+    let plan: ReloadReservation | undefined
+    let owner: LensBudget | null = null
     try {
-      const opened = await core.call('openLocal', { doc: source.doc, gen: source.gen, target, count: firstCount(l), bytes: rawBytes + 2 * retired })
-      if (attempt.current !== mine || currentSession.current !== sourceSession || latest.current.card.kind !== 'open' || latest.current.card.opened !== source) {
-        if (currentSession.current === sourceSession) void core.call('close', { doc: opened.doc }).catch(() => {})
+      // Count the pending path in every concurrent precharge, before any native holder changes.
+      const paid = await metadata(async (current) => workspace.selected(selection) && latest.current.card.kind === 'open' &&
+        latest.current.card.opened === source && await chargeWorkspace(workspace.getSnapshot().tabs, current) && current())
+      if (!paid || !workspace.selected(selection) || latest.current.card.kind !== 'open' || latest.current.card.opened !== source) return false
+      const ticket = workspace.begin(id)
+      if (!ticket) return false
+      const rawBytes = floorBytes(l)
+      owner = budgetFor(source)
+      plan = owner?.reloadReservation(rawBytes)
+      const retired = Math.max(retiredRendered.current, plan?.retiredTreeMax ?? 0)
+      try {
+        const opened = await core.call('openLocal', { doc: source.doc, gen: source.gen, target,
+          count: firstCount(l), bytes: rawBytes + 2 * retired })
+        const key = 'local:' + sourceSession + ':' + opened.doc
+        const accepted = workspace.current(ticket) && workspace.selected(selection) &&
+          opened.path === resolvedPath && key.length <= keyBound.length
+        if (!accepted) {
+          if (workspace.selected(selection)) {
+            workspace.cancel(ticket)
+            if (opened.path !== resolvedPath || key.length > keyBound.length) setWorkspaceNotice("Local file changed while opening; source kept")
+            void selectTab(id, true) // disposes the source before closing the temporary holder
+          }
+          if (sourceSession === currentSession.current) void core.call('close', { doc: opened.doc }).catch(() => {})
+          return false
+        }
+        const next: Extract<Card, { kind: 'open' }> = { kind: 'open', path: resolvedPath, opened, lines: opened.lines,
+          bytes: 0, indexed: opened.indexed, lens: 'raw' }
+        leave()
+        if (!workspace.complete(ticket, key, next)) {
+          if (sourceSession === currentSession.current) void core.call('close', { doc: opened.doc }).catch(() => {})
+          return false
+        }
+        restoreFocus.current = true
+        show(id, opened, workspace.tab(id)!, rawBytes, undefined, retired)
+        closeNative(tab)
+        return true
+      } catch (e) {
+        workspace.cancel(ticket)
+        if (workspace.selected(selection) && e instanceof CoreCallError && e.code === 'Frozen')
+          setCard((d) => d.kind === 'open' && d.opened === source ? { ...d, frozen: d.frozen ?? e.message } : d)
         return false
       }
-      retireBudget()
-      discardRendered()
-      restoreFocus.current = true
-      show(opened.path!, opened, undefined, rawBytes, undefined, retired)
-      return true
-    } catch (e) {
-      if (attempt.current === mine && e instanceof CoreCallError && e.code === 'Frozen')
-        setCard((d) => d.kind === 'open' && d.opened === source ? { ...d, frozen: d.frozen ?? e.message } : d)
-      return false // no replacement: the source and its reservation remain usable
     } finally {
+      if (pendingWorkspace.current.get(id) === pending) pendingWorkspace.current.delete(id)
       if (plan) owner?.cancelTransition(plan)
+      releaseEmptyWorkspace()
     }
   }
 
-  /** Ctrl+R: the next generation of the open document, or another try at a file that failed to open. */
   async function reload(): Promise<void> {
-    if (!restoreFocus.current && lens.current?.element.contains(document.activeElement)) restoreFocus.current = true
+    const id = workspace.getSnapshot().selected
+    const tab = id ? workspace.tab(id) : undefined
     const { card: c, limits: l } = latest.current
-    if (c.kind === 'failed') return c.localOnly ? pick() : open(c.path)
-    if (c.kind !== 'open' || !l || reloading.current) return
-    const mine = ++attempt.current
-    reloading.current = true
+    if (!id || !tab) return
+    if (c.kind === 'failed') {
+      if (tab.card.kind === 'open' && activationFailed.current.has(id)) return selectTab(id)
+      if (tab.card.kind !== 'open') return c.localOnly ? pick() : open(c.path, tab.anchor, id)
+    }
+    const source = c.kind === 'open' ? c : c.kind === 'failed' && tab.card.kind === 'open' ? tab.card : undefined
+    if (!source || !l || reloading.current.has(id)) return
+    if (lens.current?.element.contains(document.activeElement)) restoreFocus.current = true
+    const ticket = workspace.begin(id)
+    const selection = workspace.selection()
+    if (!ticket || !selection) return
+    reloading.current.add(id)
+    const atLine = lens.current?.topLine() ?? tab.anchor
+    workspace.remember(id, atLine ?? 0, picked.current)
     const rawBytes = floorBytes(l)
-    const owner = budgetFor(c.opened)
+    const owner = budgetFor(source.opened)
     const plan = owner?.reloadReservation(rawBytes)
+    const operation = Symbol()
+    pendingNative.current.add(operation)
     try {
-      const opened = await core.call('reload', { doc: c.opened.doc, count: firstCount(l), bytes: plan?.bytes ?? rawBytes })
-      if (attempt.current === mine) show(c.path, opened, lens.current?.topLine() ?? c.atLine, rawBytes, plan)
+      const opened = await core.call('reload', { doc: source.opened.doc, count: firstCount(l), bytes: plan?.bytes ?? rawBytes + 2 * retiredRendered.current })
+      const next: Extract<Card, { kind: 'open' }> = { kind: 'open', path: source.path, opened, lines: opened.lines, bytes: 0,
+        indexed: opened.indexed, atLine, lens: 'raw' }
+      if (!workspace.complete(ticket, tab.key, next)) return // borrowed native document, never close
+      if (workspace.selected(selection)) show(id, opened, workspace.tab(id)!, rawBytes, plan)
+      else if (workspace.getSnapshot().selected === id) void selectTab(id)
+      else deactivateInactive({ session: ticket.session, doc: opened.doc, gen: opened.gen })
     } catch (e) {
-      if (attempt.current !== mine || (e instanceof CoreCallError && e.code === 'CoreGone')) return // onGone shows that
-      // Plan C1: the ledger refused it. The lens stays at its generation, under a banner offering Retry (Z34's "keeps Raw").
-      if (e instanceof CoreCallError && e.code === 'Memory') setCard((d) => (d.kind === 'open' && d.opened === c.opened ? { ...d, refused: true } : d))
-      else {
-        retireBudget()
-        discardRendered()
-        setCard({ ...failed(c.path, e), localOnly: c.opened.localOnly }) // a lost local route requires explicit selection
+      if (!workspace.current(ticket) || e instanceof CoreCallError && e.code === 'CoreGone') return
+      if (e instanceof CoreCallError && e.code === 'Memory') {
+        workspace.cancel(ticket)
+        workspace.updateDocument({ session: ticket.session, doc: source.opened.doc, gen: source.opened.gen }, (stored) => ({ ...stored, refused: true }))
+        if (workspace.getSnapshot().selected !== id) return
+        if (latest.current.card.kind === 'open')
+          setCard((d) => d.kind === 'open' && d.opened.doc === source.opened.doc && d.opened.gen === source.opened.gen ? { ...d, refused: true } : d)
+        else display(id, { ...failed(source.path, e), ...(source.opened.localOnly ? { localOnly: true } : {}) })
+      } else if (e instanceof CoreCallError && (e.code === 'Stale' || e.code === 'Cancelled')) {
+        workspace.cancel(ticket) // selection cancellation is not a terminal filesystem failure
+        if (workspace.getSnapshot().selected === id) {
+          if (displayed.current === id) leave()
+          display(id, { ...failed(source.path, e), ...(source.opened.localOnly ? { localOnly: true } : {}), reloadable: true })
+        }
+      } else {
+        const error: Extract<Card, { kind: 'failed' }> = { ...failed(source.path, e), ...(source.opened.localOnly ? { localOnly: true } : {}) }
+        const selected = workspace.getSnapshot().selected === id
+        if (selected && displayed.current === id) leave()
+        if (!workspace.complete(ticket, tab.key, error)) return
+        closeNative(tab) // current ticket and session still own this native document, even when the tab is inactive
+        if (selected) display(id, error)
       }
     } finally {
       if (plan) owner?.cancelTransition(plan)
-      reloading.current = false
+      reloading.current.delete(id)
+      pendingNative.current.delete(operation)
+      releaseEmptyWorkspace()
     }
   }
 
-  function show(path: string, opened: Opened, atLine: number | undefined, rawBytes: number, plan?: ReloadReservation, retired = 0): void {
+  function show(id: TabId, opened: Opened, tab: WorkspaceTab, rawBytes: number, plan?: ReloadReservation, retired = retiredRendered.current): void {
+    activationFailed.current.delete(id)
     discardRendered()
-    if (opened.format === 'markdown' || retired > 0 || plan) {
-      const previous = budget.current
-      if (!previous || previous.session !== currentSession.current || previous.doc !== opened.doc || !plan || !previous.adopt(opened.gen, opened.reserved, plan)) {
-        previous?.invalidate()
-        budget.current = new LensBudget(core, currentSession.current, opened.doc, opened.gen, rawBytes, opened.reserved, Math.max(retired, plan?.retiredTreeMax ?? 0))
-      }
-    } else {
-      budget.current?.invalidate()
-      budget.current = null
+    const previous = budget.current
+    if (!previous || previous.session !== currentSession.current || previous.doc !== opened.doc || !plan || !previous.adopt(opened.gen, opened.reserved, plan)) {
+      previous?.invalidate()
+      budget.current = new LensBudget(core, currentSession.current, opened.doc, opened.gen, rawBytes, opened.reserved,
+        Math.max(retired, plan?.retiredTreeMax ?? 0))
     }
-    live.current = { doc: opened.doc, gen: opened.gen }
-    // Raw's first page is already in the reply (Z37). Markdown switches to Rendered once `render` fits.
-    setCard({ kind: 'open', path, opened, lines: opened.lines, bytes: 0, indexed: opened.indexed, atLine, lens: 'raw' })
+    live.current = { session: currentSession.current, doc: opened.doc, gen: opened.gen }
+    picked.current = tab.preferredLens
+    place.current = undefined
+    jumpTo.current = undefined
+    const saved = tab.card.kind === 'open' ? tab.card : undefined
+    display(id, { ...saved, kind: 'open', path: tab.path, opened, lines: saved?.lines ?? opened.lines,
+      bytes: saved?.bytes ?? 0, indexed: saved?.indexed ?? opened.indexed, atLine: tab.anchor ?? saved?.atLine, lens: 'raw', rendering: false })
   }
 
   async function pick(): Promise<void> {
     const chosen = await window.typose.openDialog()
     if (!chosen) return
+    const tab = workspace.getSnapshot().selected
     const c = latest.current.card
-    if (c.kind === 'gone' && c.localOnly && c.ready) void open(chosen)
-    else openNamed(chosen)
+    // Recovery replaces the unusable slot but obtains new manual authority from the real dialog.
+    await open(chosen, undefined, tab && (c.kind === 'gone' || c.kind === 'failed') && c.localOnly ? tab : undefined)
   }
 
-  /**
-   * A file named after the first (spec §8.1: a second launch, macOS's open-file) or chosen in the Open dialog: it
-   * replaces the card's. While the core is stopped, it's the file Reopen opens.
-   */
   function openNamed(path: string): void {
-    if (latest.current.card.kind === 'gone') setCard((c) => (c.kind === 'gone' ? { ...c, path, line: undefined, localOnly: undefined } : c))
-    else void open(path)
+    if (!workspace.getSnapshot().ready) { waiting.current.push(path); return }
+    void open(path)
   }
 
-  /** The menu's commands: ☰'s, and macOS's native menu's (spec §9). */
   function run(command: Command): void {
     if (command === 'open') void pick()
-    else if (command === 'reload') void reload()
-    else if (command === 'exit') window.close() // the last window's close quits (main's window-all-closed)
+    else if (command === 'close-tab') {
+      if (workspace.getSnapshot().selected) close()
+      else if (MAC) window.close()
+    } else if (command === 'reload') void reload()
+    else if (command === 'exit') window.close()
   }
 
-  /** Close leaves the empty card; an open still on its way is closed when it arrives. */
-  function close(): void {
-    attempt.current++
-    retireBudget()
-    discardRendered()
-    live.current = null
-    setCard({ kind: 'empty' })
+  /** Tab ownership closes native documents; changing the displayed card never does. */
+  function close(id = workspace.getSnapshot().selected): void {
+    if (!id) return
+    const selected = workspace.getSnapshot().selected === id
+    if (selected) leave()
+    const removed = workspace.close(id)
+    if (!removed) return
+    if (!workspace.getSnapshot().tabs.length) {
+      metadataQueue.invalidate()
+      workspaceBudget.current?.cancelPending()
+    }
+    activationFailed.current.delete(id)
+    closeNative(removed)
+    if (selected) {
+      const next = workspace.getSnapshot().selected
+      display(null, { kind: 'empty' })
+      if (next) void selectTab(next)
+    }
+    // UI removal commits before a zero workspace share can be released; a held precharge cannot block this.
+    releaseEmptyWorkspace()
+    window.requestAnimationFrame(() => {
+      const next = workspace.getSnapshot().selected
+      if (selected && next) document.getElementById('file-' + next)?.focus()
+      else if (selected) document.querySelector<HTMLElement>('.card-state button')?.focus()
+    })
   }
-  if (__TEST_HOOKS__) appHooks.close = close
+  if (__TEST_HOOKS__) {
+    appHooks.close = () => close()
+    appHooks.workspace = () => workspaceBudget.current?.snapshot() ?? null
+  }
 
   const actions: Record<Action, () => void> = {
     'Open file…': () => void pick(),
     'Locate…': () => void pick(),
-    Retry: () => card.kind === 'failed' && card.localOnly ? void pick() : path && void open(path),
-    Close: close,
-    Reopen: () => card.kind === 'gone' && !card.localOnly && card.path && void open(card.path, card.line)
+    Retry: () => void reload(),
+    Reload: () => void reload(),
+    Close: () => close(),
+    Reopen: () => {
+      const id = workspace.getSnapshot().selected
+      if (id && card.kind === 'gone' && !card.localOnly && card.path) void open(card.path, card.line, id)
+    }
   }
   const frozen = card.kind === 'open' ? card.frozen : undefined
 
   const header = (
     <div className="card-header">
-      <span className="card-name">{path ? fileName(path) : 'No file open'}</span>
+      <span className="card-name" role="heading" aria-level={1}>{path ? fileName(path) : 'No file open'}</span>
       <span className="card-status">{shown.status}</span>
       {shown.lenses ? (
         <TabList aria-label="Lens" className="lens-switch">
@@ -529,7 +861,7 @@ export function App({ core }: { core: CoreClient }) {
         mode="raw"
         onFrozen={(why) => setCard((c) => (c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c))}
         onShowRaw={() => {}}
-        onOpenLocal={(target) => openLocal(card.opened, target)}
+        onOpenLocal={(target, path) => openLocal(card.opened, target, path)}
       />
     ) : card.kind === 'open' && limits && 'rendered' in shown.body && card.build ? (
       <LensHost
@@ -557,7 +889,7 @@ export function App({ core }: { core: CoreClient }) {
           picked.current = 'raw'
           setCard((c) => (c.kind === 'open' && c.opened === card.opened ? { ...c, lens: 'raw' } : c))
         }}
-        onOpenLocal={(target) => openLocal(card.opened, target)}
+        onOpenLocal={(target, path) => openLocal(card.opened, target, path)}
       />
     ) : (
       message
@@ -579,9 +911,12 @@ export function App({ core }: { core: CoreClient }) {
           {title}
         </span>
       </header>
+      <FileTabs tabs={snapshot.tabs} selected={snapshot.selected} onSelect={(id) => void selectTab(id)} onClose={(id) => close(id)} />
       <main className="card">
+        <div className="file-card-panel" id="file-card" role={snapshot.selected ? 'tabpanel' : undefined} aria-labelledby={snapshot.selected ? `file-label-${snapshot.selected}` : undefined}>
+        {workspaceNotice ? <div className="banner" role="status">{workspaceNotice}</div> : null}
         {card.kind === 'open' ? (
-          <DocLifetime doc={card.opened.doc} core={core} lens={lens}>
+          <>
             {shown.lenses ? (
               <Tabs className="card-tabs" selectedKey={shown.lenses.showing} onSelectionChange={onLens}>
                 {header}
@@ -604,7 +939,7 @@ export function App({ core }: { core: CoreClient }) {
                 <div className="card-body">{body}</div>
               </>
             )}
-          </DocLifetime>
+          </>
         ) : (
           <>
             {header}
@@ -613,6 +948,7 @@ export function App({ core }: { core: CoreClient }) {
             <div className="card-body">{message}</div>
           </>
         )}
+        </div>
       </main>
     </>
   )
@@ -633,17 +969,6 @@ function ProgressLine({ value }: { value: number | 'indeterminate' }) {
   )
 }
 
-/** Closes the document when the card stops showing it. A lens switch stays inside, so it doesn't close (plan C6). */
-function DocLifetime({ doc, core, lens, children }: { doc: number; core: CoreClient; lens: RefObject<ShownLens | null>; children: ReactNode }) {
-  useEffect(
-    () => () => {
-      lens.current = null
-      void core.call('close', { doc }).catch(() => {})
-    },
-    [core, doc, lens]
-  )
-  return children
-}
 
 interface LensHostProps {
   core: CoreClient
@@ -673,7 +998,7 @@ interface LensHostProps {
   build?: MdBuild
   onFrozen(why: string): void
   onShowRaw(line: number): void
-  onOpenLocal(target: string): Promise<boolean>
+  onOpenLocal(target: string, path: string): Promise<boolean>
 }
 
 /** Mounts Raw or Rendered into the card body. A switch or Reload of this document keeps the previous lens's top line. */
@@ -703,7 +1028,7 @@ function LensHost({ core, session, budget, retained, lens, jumpTo, place, hadFoc
         kept?.view.dispose()
         const made = new RenderedLens(host.current!, core, opened, build, limits, {
           onFrozen: onFrozenHere, atLine: at, onShowRaw: (line) => onShowRawNow.current(line),
-          onOpenLocal: (target) => onOpenLocalNow.current(target), budget: budget ?? undefined
+          onOpenLocal: (target, path) => onOpenLocalNow.current(target, path), budget: budget ?? undefined
         })
         retained.current = { session, doc: opened.doc, gen: opened.gen, view: made }
         view = made
@@ -715,7 +1040,7 @@ function LensHost({ core, session, budget, retained, lens, jumpTo, place, hadFoc
     if (!interim && (hadFocus.current || restoreFocus.current)) view.focus()
     if (restoreFocus.current && !interim) restoreFocus.current = false
     return () => {
-      hadFocus.current = view.element.contains(document.activeElement)
+      if (view.element.isConnected) hadFocus.current = view.element.contains(document.activeElement)
       // A note's Show in Raw wins over the line on screen for the lens this cleanup mounts next.
       place.current = { session, doc: opened.doc, line: jumpTo.current ?? view.topLine() }
       jumpTo.current = undefined

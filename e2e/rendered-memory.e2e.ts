@@ -7,6 +7,15 @@ import { mib, processMemory } from './memory'
 
 const CEILING = 8 << 20
 
+/** These cases qualify replacement/empty intervals; explicitly close the now-inactive permanent tab. */
+async function closeInactive(win: Awaited<ReturnType<typeof launch>>['win']): Promise<void> {
+  const inactive = win.locator('.file-pill:not([data-selected])')
+  while (await inactive.count()) {
+    await inactive.first().hover()
+    await inactive.first().locator('.file-tab-close').click()
+  }
+}
+
 /** A file of `grapheme` repeated into wrapped paragraphs, as close to the 8 MiB ceiling as it fits. */
 function ceiling(name: string, grapheme: string): { path: string; bytes: number } {
   const gBytes = Buffer.byteLength(grapheme)
@@ -166,6 +175,7 @@ for (const sampleCase of CASES)
           await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), path)
           await expect(win.locator('.card-name')).toHaveText(path.split(/[\\/]/).pop()!)
           await ready()
+          await closeInactive(win)
           const current = (await stats())!
           expect(current.retiredReserved).toBe(2 * initial.reserved)
           expect(current.totalReserved).toBe(current.rawReserved + current.reserved + current.retiredReserved)
@@ -176,6 +186,7 @@ for (const sampleCase of CASES)
       await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), smallMarkdown)
       await expect(win.locator('.card-name')).toHaveText(`memory-small-${slug}.md`)
       await ready()
+      await closeInactive(win)
       expect((await stats())!.retiredReserved).toBe(Math.max(2 * final.reserved, final.retiredReserved))
       await stableSample()
       stage = 'text replacement'
@@ -183,6 +194,7 @@ for (const sampleCase of CASES)
       await expect(win.locator('.card-name')).toHaveText(`memory-text-${slug}.txt`)
       await waitOpen(win)
       await waitIndexed(win)
+      await closeInactive(win)
       await frames()
       await stableSample()
       expect((await debugStats(win)).ledger.rendererCache).toBeGreaterThanOrEqual(final.reserved)

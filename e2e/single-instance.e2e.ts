@@ -64,6 +64,10 @@ test('a second launch opens its file in the first instance and exits 0, with eve
     expect(await second(first.userData, args), label).toEqual({ code: 0, signal: null })
     await expect.poll(() => card(page), label).toEqual({ title: `${name} — Typose`, text: label })
   }
+  await page.getByRole('tab', { name: 'si-a.txt', exact: true }).click()
+  await expect.poll(() => card(page)).toEqual({ title: 'si-a.txt — Typose', text: 'not the newest' })
+  await page.getByRole('tab', { name: 'si-b.txt', exact: true }).click()
+  await expect.poll(() => card(page)).toEqual({ title: 'si-b.txt — Typose', text: 'the newest of several' })
   // C9: no second launch logged anything or left a marker, and the first's is still there.
   expect(readdirSync(join(first.userData, 'logs')).filter((n) => n.startsWith('running-'))).toEqual([`running-${first.pid}.json`])
   expect(lifecycle(first.userData).filter((r) => r.pid !== first.pid)).toEqual([])

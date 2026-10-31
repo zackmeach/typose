@@ -12,6 +12,7 @@ ipcRenderer.on('a11y', (_event, on: boolean) => window.postMessage({ type: 'a11y
 
 const typose: TyposeApi = {
   launchPath: () => ipcRenderer.invoke('launch-path'),
+  launchPaths: () => ipcRenderer.invoke('launch-paths'),
   onOpenPath: (cb) => {
     const listener = (_event: unknown, path: string) => cb(path)
     ipcRenderer.on('open-path', listener)

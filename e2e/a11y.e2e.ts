@@ -88,11 +88,11 @@ test('Raw is a named region whose text leaves out the gutter, and ☰ exposes me
   if (!MAC) {
     const [trigger] = cdp.find('button', 'Menu')
     expect({ popup: cdp.prop(trigger, 'hasPopup'), expanded: cdp.prop(trigger, 'expanded') }).toEqual({ popup: 'menu', expanded: false })
-    await win.getByRole('button', { name: 'Menu' }).click()
+    await win.getByRole('button', { name: 'Menu', exact: true }).click()
     await expect(win.getByRole('menu')).toBeVisible()
     const open = await axTree(win)
     const [menu] = open.find('menu')
-    expect(open.under(menu).filter((n) => n.role?.value === 'menuitem').map((n) => n.name?.value)).toEqual(['Open file…', 'Reload', EXIT])
+    expect(open.under(menu).filter((n) => n.role?.value === 'menuitem').map((n) => n.name?.value)).toEqual(['Open file…', 'Reload', 'Close tab', EXIT])
     await win.keyboard.press('Escape')
   }
 
@@ -104,10 +104,10 @@ test('Raw is a named region whose text leaves out the gutter, and ☰ exposes me
     for (const r of shown) expect(uiaSaid).toContain(r.text)
     expect(uiaSaid).not.toMatch(/\d/)
     expect(tree.find((n) => n.name === 'Menu')).toMatchObject({ type: 'Button', expand: 'Collapsed' })
-    await win.getByRole('button', { name: 'Menu' }).click()
+    await win.getByRole('button', { name: 'Menu', exact: true }).click()
     await expect(win.getByRole('menu')).toBeVisible()
     const menu = uiaNodes(await uiaTree(app)).find((n) => n.type === 'Menu')
-    expect(menu?.children?.filter((n) => n.type === 'MenuItem').map((n) => n.name)).toEqual(['Open file…', 'Reload', EXIT])
+    expect(menu?.children?.filter((n) => n.type === 'MenuItem').map((n) => n.name)).toEqual(['Open file…', 'Reload', 'Close tab', EXIT])
     await win.keyboard.press('Escape')
   }
   expect(l.pageErrors).toEqual([])
@@ -199,20 +199,46 @@ async function tabTo(win: Page, target: string, key = 'Tab'): Promise<number> {
   throw new Error(`${key} didn't reach ${target} in 6 presses`)
 }
 
+/** Blur preserves Chromium's sequential focus position; focus the body to start before the page's first control. */
+async function focusStart(win: Page): Promise<void> {
+  await win.evaluate(() => {
+    const body = document.body
+    const before = body.getAttribute('tabindex')
+    body.tabIndex = -1
+    body.focus({ preventScroll: true })
+    if (before === null) body.removeAttribute('tabindex')
+    else body.setAttribute('tabindex', before)
+  })
+}
+
 test('the keyboard reaches ☰ and Raw, ☰ runs its commands from the keyboard, and the focus ring shows', async () => {
   const l = await opened()
   const { win } = l
-  await win.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
-  if (!MAC) {
-    expect(await tabTo(win, '.menu-button')).toBe(1) // the first stop
-    // Brief §9's ring: the accent, outside the element.
-    expect(await win.locator('.menu-button').evaluate((el) => [getComputedStyle(el).outlineStyle, getComputedStyle(el).outlineColor])).toEqual(['solid', 'rgb(143, 176, 255)'])
+  await focusStart(win)
+  const stops: [selector: string, ringOffset: string][] = [
+    ...(!MAC ? [['.menu-button', '2px'] as [string, string]] : []),
+    ['.file-tab[aria-selected="true"]', '2px'],
+    ['.file-pill[data-selected] .file-tab-close', '2px'],
+    ['.card-header .open-button', '-2px'],
+    ['.vl-scroller', '-2px']
+  ]
+  const atStop = async ([selector, offset]: [string, string]) => {
+    await expect(win.locator(selector)).toBeFocused()
+    // Brief §9's accent ring: outside the chrome controls, inset on the open button and Raw.
+    expect(await win.locator(selector).evaluate((el) => {
+      const style = getComputedStyle(el)
+      return [style.outlineStyle, style.outlineColor, style.outlineWidth, style.outlineOffset]
+    })).toEqual(['solid', 'rgb(143, 176, 255)', '2px', offset])
   }
-  await tabTo(win, '.vl-scroller')
-  if (!MAC) {
-    await tabTo(win, '.menu-button', 'Shift+Tab')
-    await keyboardMenu(win)
+  for (const stop of stops) {
+    await win.keyboard.press('Tab')
+    await atStop(stop)
   }
+  for (const stop of stops.slice(0, -1).reverse()) {
+    await win.keyboard.press('Shift+Tab')
+    await atStop(stop)
+  }
+  if (!MAC) await keyboardMenu(win)
   expect(l.pageErrors).toEqual([])
   await finish(l)
 })
@@ -248,7 +274,7 @@ test('axe finds no violations on the chrome: empty, with Raw, with ☰ open, and
   const { app, win } = l
   report.raw = await axe(win)
   if (!MAC) {
-    await win.getByRole('button', { name: 'Menu' }).click()
+    await win.getByRole('button', { name: 'Menu', exact: true }).click()
     await expect(win.getByRole('menu')).toBeVisible()
     report.menu = await axe(win)
     await win.keyboard.press('Escape')
@@ -285,7 +311,7 @@ test('at 200% zoom in the smallest window, the chrome and Raw stay reachable, an
       return r.width > 0 && r.height > 0 && r.left >= 0 && r.top >= 0 && r.right <= innerWidth && r.bottom <= innerHeight
     })
   expect(await inView('.vl-scroller')).toBe(true)
-  await win.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
+  await focusStart(win)
   if (!MAC) {
     expect(await inView('.menu-button')).toBe(true)
     if (process.platform === 'win32') {
@@ -298,7 +324,7 @@ test('at 200% zoom in the smallest window, the chrome and Raw stay reachable, an
     }
     await tabTo(win, '.menu-button')
     await win.keyboard.press('Enter')
-    await expect(win.getByRole('menuitem')).toHaveCount(3)
+    await expect(win.getByRole('menuitem')).toHaveText(['Open file…', 'Reload', 'Close tab', EXIT])
     for (const item of await win.getByRole('menuitem').all()) expect(await item.evaluate((el) => el.getBoundingClientRect().right <= innerWidth && el.getBoundingClientRect().bottom <= innerHeight)).toBe(true)
     await win.keyboard.press('Escape')
   }

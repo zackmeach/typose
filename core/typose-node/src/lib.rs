@@ -566,6 +566,19 @@ impl Doc {
         Ok(self.raw()?.document().generation())
     }
 
+    /// Retained inactive tabs keep their store floor. This only changes cache policy; it performs no identity/path IO.
+    #[napi]
+    pub fn set_cache_active(&self, generation: f64, active: bool) -> std::result::Result<(), Error<Code>> {
+        let generation = int("gen", generation)? as u32;
+        let document = self.raw()?.document();
+        let current = document.generation();
+        if generation != current {
+            return Err(doc_error(DocError::Stale { current, asked: generation }));
+        }
+        document.store().set_cache_active(active);
+        Ok(())
+    }
+
     #[napi(getter)]
     pub fn encoding(&self) -> std::result::Result<String, Error<Code>> {
         Ok(self.raw()?.encoding().into())

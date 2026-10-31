@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { RENDERED_OFF } from '../app/renderer/card'
 import { viewportCap } from '../app/renderer/lenses/page-cache'
 import type { Limits } from '../app/shared/protocol'
-import { type TestHooks, assertNetLog, debugStats, finish, fixture, launch, lifecycle, stubExternal, test, visibleRows, waitIndexed, waitOpen } from './app'
+import { type TestHooks, assertNetLog, debugStats, finish, fixture, launch, lifecycle, stubExternal, test, visibleRows, waitIndexed, waitOpen, workspaceHeld } from './app'
 
 type ReserveProbe = { held: boolean; bRendered: boolean; release?: () => void }
 type ShrinkProbe = { held: boolean; bytes?: number; release?: () => void }
@@ -135,7 +135,7 @@ test('a Markdown file opens in Rendered, and Raw keeps the top line within one b
   await expect(win.locator('main a')).toHaveAttribute('href', '#')
   await expect(win.locator('main a')).toHaveAttribute('title', 'https://example.invalid/a')
   await expect(win.getByRole('tablist', { name: 'Lens' })).toBeVisible()
-  await expect(win.getByRole('tab', { name: 'Rendered' })).toHaveAttribute('aria-selected', 'true')
+  await expect(win.getByRole('tab', { name: 'Rendered', exact: true })).toHaveAttribute('aria-selected', 'true')
   // Offscreen blocks stay mounted and skip their paint, except a heading's (plan §2.2).
   const visibility = await win.evaluate(() => {
     const blocks = [...document.querySelectorAll<HTMLElement>('.md-block')]
@@ -151,12 +151,12 @@ test('a Markdown file opens in Rendered, and Raw keeps the top line within one b
     el.scrollTop = block.offsetTop
   })
   const before = await topBlock(win)
-  await win.getByRole('tab', { name: 'Raw' }).click()
+  await win.getByRole('tab', { name: 'Raw', exact: true }).click()
   await expect(win.locator('.raw-host')).toBeAttached()
   const rawTop = (await visibleRows(win))[0].line
   expect(rawTop).toBeGreaterThanOrEqual(before.line)
   expect(rawTop).toBeLessThanOrEqual(before.end)
-  await win.getByRole('tab', { name: 'Rendered' }).click()
+  await win.getByRole('tab', { name: 'Rendered', exact: true }).click()
   await waitRendered(win)
   const after = await topBlock(win)
   expect(after.line).toBeLessThanOrEqual(rawTop)
@@ -168,11 +168,11 @@ test('a Markdown file opens in Rendered, and Raw keeps the top line within one b
 test('a non-Markdown file has no switch, and an empty Markdown file says Empty file', async () => {
   const text = await launch({ file: fixture('plain.txt', 'hello\n') })
   await waitOpen(text.win)
-  await expect(text.win.getByRole('tablist')).toHaveCount(0)
+  await expect(text.win.getByRole('tablist', { name: 'Lens', exact: true })).toHaveCount(0)
   await finish(text)
   const empty = await launch({ file: fixture('empty.md', '') })
   await expect(empty.win.locator('.card-message')).toHaveText('Empty file')
-  await expect(empty.win.getByRole('tablist')).toHaveCount(0)
+  await expect(empty.win.getByRole('tablist', { name: 'Lens', exact: true })).toHaveCount(0)
   await finish(empty)
 })
 
@@ -180,7 +180,7 @@ test('a file over the ceiling opens in Raw, with Rendered disabled and the reaso
   const l = await launch({ file: fixture('over.md', 'a'.repeat((8 << 20) + 1)) })
   const { win } = l
   await waitOpen(win)
-  const rendered = win.getByRole('tab', { name: 'Rendered' })
+  const rendered = win.getByRole('tab', { name: 'Rendered', exact: true })
   await expect(rendered).toBeDisabled()
   await expect(rendered.getByTitle(RENDERED_OFF.ceiling)).toBeVisible()
   await expect(win.locator('.md-scroller')).toHaveCount(0)
@@ -251,8 +251,6 @@ test('a different file after a core restart starts at its first line despite reu
   await expect(win.locator('.card-message p')).toHaveText("Typose's core stopped")
   await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), fixture('session-place-b.txt', body('B')))
   await expect(win.locator('.card-name')).toHaveText('session-place-b.txt')
-  await expect(win.locator('.card-message .open-button')).toHaveText(['Reopen'])
-  await win.locator('.card-message .open-button').click()
   await waitOpen(win)
   await waitIndexed(win)
   await expect.poll(() => win.locator('.vl-scroller').evaluate((el) => el.scrollHeight)).toBeGreaterThan(200 * 20)
@@ -332,7 +330,7 @@ test('reading Raw during a delayed Rendered reservation keeps Raw and releases t
   await expect(win.locator('.md-scroller')).toHaveCount(0)
   await expect.poll(async () => {
     const raw = await win.evaluate(() => (window as unknown as { typoseTest: { client: { cache: () => { reserved: number } } } }).typoseTest.client.cache())
-    return (await debugStats(win)).ledger.rendererCache - raw.reserved
+    return (await debugStats(win)).ledger.rendererCache - raw.reserved - await workspaceHeld(win)
   }).toBe(0)
   expect(l.pageErrors).toEqual([])
   await finish(l)
@@ -366,12 +364,12 @@ test('a write Raw finds raises the banner, and Rendered keeps what it showed', a
   await expect(win.locator('main h1')).toHaveText('Original heading')
   // Same size, so the identity check is the mtime, not the length. Raw's next page finds it (plan §2.2).
   writeFileSync(file, ['# Original heading', '', ...Array.from({ length: 400 }, () => 'CHANGED line stays!!')].join('\n') + '\n')
-  await win.getByRole('tab', { name: 'Raw' }).click()
+  await win.getByRole('tab', { name: 'Raw', exact: true }).click()
   await waitOpen(win)
   await win.locator('.vl-scroller').focus()
   await win.keyboard.press('Control+End')
   await expect(win.locator('.banner')).toHaveText('Changed on disk · Reload (Ctrl+R)')
-  await win.getByRole('tab', { name: 'Rendered' }).click()
+  await win.getByRole('tab', { name: 'Rendered', exact: true }).click()
   await waitRendered(win)
   await expect(win.locator('.banner')).toHaveText('Changed on disk · Reload (Ctrl+R)')
   await expect(win.locator('main h1')).toHaveText('Original heading')
@@ -390,18 +388,19 @@ test('a low memory budget refuses Rendered, and Raw stays', async () => {
   })
   const inner = await probe.win.evaluate(() => window.innerHeight)
   const { ledger, charges } = await debugStats(probe.win)
+  const workspace = await workspaceHeld(probe.win)
   await finish(probe)
   // `total` includes the held Markdown build. This launch's open holds only Raw's floor, so the budget is sized from
   // that: the slack stays under a render's temporary, Rendered is refused, and Raw stays.
   const floor = charges[1].hashes + charges[1].checkpoints + charges[1].cache + charges[1].metadata
   expect(charges[1].total).toBeGreaterThan(floor)
   const view = viewportCap(hello.limits, inner)
-  const budget = ledger.pool + floor + hello.limits.openTemp + view + (1 << 20)
+  const budget = ledger.pool + floor + hello.limits.openTemp + view + (1 << 20) + workspace
   console.log(`rendered budget ${budget} (pool ${ledger.pool}, floor ${floor}, build ${charges[1].total - floor}, view ${view}, window ${inner}px)`)
   const l = await launch({ hooks: true, file, env: { TYPOSE_TEST_BUDGET: String(budget) } })
   const { win } = l
   await waitOpen(win)
-  const rendered = win.getByRole('tab', { name: 'Rendered' })
+  const rendered = win.getByRole('tab', { name: 'Rendered', exact: true })
   await expect(rendered).toBeDisabled({ timeout: 30_000 })
   await expect(rendered.getByTitle(RENDERED_OFF.memory)).toBeVisible()
   await expect(win.locator('.md-scroller')).toHaveCount(0)
@@ -499,18 +498,20 @@ test('retired Rendered allowance survives Close, refused open and core restart w
   await waitRendered(win)
   const original = await win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.client.rendered!())
   const first = await debugStats(win)
+  const firstWorkspace = await workspaceHeld(win)
   await win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.app.close!())
   await expect.poll(async () => {
     const { ledger } = await debugStats(win)
     return ledger.used - ledger.pool
   }).toBe(0)
-  await debugStats(win, { limit: first.ledger.pool + 1 })
+  await debugStats(win, { limit: first.ledger.pool + firstWorkspace })
   await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), file)
   await expect(win.locator('.card-message p')).toContainText("Typose's memory budget is full")
+  expect((await debugStats(win)).docs).toBe(0)
   await expect.poll(async () => {
     const { ledger } = await debugStats(win)
     return ledger.used - ledger.pool
-  }).toBe(0)
+  }).toBe(firstWorkspace)
   await debugStats(win, { limit: first.ledger.limit })
   await win.getByRole('button', { name: 'Retry', exact: true }).click()
   await waitRendered(win)
@@ -522,13 +523,11 @@ test('retired Rendered allowance survives Close, refused open and core restart w
   await expect(win.locator('.card-message p')).toHaveText("Typose's core stopped")
   await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), text)
   await expect(win.locator('.card-name')).toHaveText('retired-restart.txt')
-  await expect(win.locator('.card-message .open-button')).toHaveText(['Reopen'])
-  await win.locator('.card-message .open-button').click()
   await waitOpen(win)
   await waitIndexed(win)
   await expect.poll(async () => {
     const raw = await win.evaluate(() => (window as unknown as { typoseTest: { client: { cache: () => { reserved: number } } } }).typoseTest.client.cache())
-    return (await debugStats(win)).ledger.rendererCache - raw.reserved
+    return (await debugStats(win)).ledger.rendererCache - raw.reserved - await workspaceHeld(win)
   }).toBe(2 * original.reserved)
   expect(l.pageErrors).toEqual([])
   await finish(l)
@@ -544,6 +543,12 @@ test('terminal Reload failure disposes the retained Rendered tree and releases t
   await win.keyboard.press('Control+R')
   await expect(win.locator('.card-message p')).toContainText('File not found')
   expect(await win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.client.rendered)).toBeNull()
+  await expect.poll(async () => (await debugStats(win)).docs).toBe(0)
+  await expect.poll(async () => {
+    const { ledger } = await debugStats(win)
+    return ledger.used - ledger.pool
+  }).toBe(await workspaceHeld(win))
+  await win.locator('.file-tab-close').click()
   await expect.poll(async () => {
     const { ledger } = await debugStats(win)
     return ledger.used - ledger.pool
@@ -577,7 +582,8 @@ test('axe finds nothing in Rendered, at 200% zoom too, and every heading of a lo
   await cdp.detach()
   const axHeadings = nodes.filter((n) => n.role?.value === 'heading' && !n.ignored)
   const names = new Set(axHeadings.map((n) => n.name?.value))
-  expect(names.size).toBe(2000)
+  expect(names.has('headings.md')).toBe(true) // the visible file title is a heading in the reader chrome
+  expect(names.size).toBe(2001)
   for (let i = 0; i < 2000; i++) expect(names.has(`Heading ${i}`), `heading ${i}`).toBe(true)
   expect(deep.pageErrors).toEqual([])
   await finish(deep)

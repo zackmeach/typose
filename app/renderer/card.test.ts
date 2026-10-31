@@ -89,3 +89,12 @@ it('requires manual selection after a local capability is lost', () => {
     })
   }
 })
+
+it('offers Reload for an owned inactive snapshot without granting path-based local recovery', () => {
+  expect(view({ kind: 'failed', path: PATH, code: 'Frozen', message: 'changed on disk', localOnly: true, reloadable: true }).body).toEqual({
+    message: "Can't open " + PATH + ' · changed on disk', actions: ['Reload', 'Close']
+  })
+  expect(view({ kind: 'failed', path: PATH, code: 'Frozen', message: 'route unavailable', localOnly: true }).body).toEqual({
+    message: "Can't open " + PATH + ' · route unavailable', actions: ['Locate…', 'Close']
+  })
+})

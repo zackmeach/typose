@@ -61,11 +61,11 @@ export const test = base.extend<{ finishLaunches: void }>({
 })
 
 /** `hooks` launches the test-hooks build (`npm run build:hooks`, plan m8), with `env` added to the environment. */
-export async function launch(opts: { file?: string; userData?: string; netlog?: string; hooks?: boolean; env?: Record<string, string> } = {}): Promise<Launched> {
+export async function launch(opts: { file?: string | string[]; userData?: string; netlog?: string; hooks?: boolean; env?: Record<string, string> } = {}): Promise<Launched> {
   const userData = opts.userData ?? mkdtempSync(join(tmpdir(), 'typose-e2e-'))
   const args = [opts.hooks ? join(APP_DIR, 'out-hooks/main/index.js') : APP_DIR, `--user-data-dir=${userData}`]
   if (opts.netlog) args.push(`--log-net-log=${opts.netlog}`)
-  if (opts.file) args.push(opts.file)
+  if (opts.file) args.push(...(Array.isArray(opts.file) ? opts.file : [opts.file]))
   const app = await electron.launch({ args, ...(opts.env ? { env: { ...process.env, ...opts.env } as Record<string, string> } : {}) })
   const proc = app.process()
   const exited = new Promise<Exit>((ok) => {
@@ -252,7 +252,7 @@ export interface TestHooks {
     /** The mounted Raw lens's cached items, when one is. */
     items: (() => { key: number | string; text: string }[]) | null
   }
-  app: { close?: () => void }
+  app: { close?: () => void; workspace: () => { held: number; peakBytes: number; settled: boolean } | null }
 }
 
 /** The mounted Raw lens's cached items, on the test-hooks build: whole pieces, which Z66 shows over rows (PR 6b). */
@@ -262,6 +262,14 @@ export const cachedItems = (win: Page): Promise<{ key: number | string; text: st
 /** The core host's debug stats, on the test-hooks build (plan C5, C6). */
 export const debugStats = (win: Page, params: { gc?: boolean; resetHigh?: boolean; limit?: number } = {}): Promise<DebugStats> =>
   win.evaluate((p) => (window as unknown as { typoseTest: TestHooks }).typoseTest.core.call('debugStats', p) as Promise<DebugStats>, params)
+
+/** Independent renderer-side workspace share, so native aggregate assertions remain exact. */
+export const workspaceHeld = (win: Page): Promise<number> =>
+  win.evaluate(() => {
+    const bank = (window as unknown as { typoseTest: TestHooks }).typoseTest.app.workspace()
+    if (!bank?.settled) throw new Error('workspace reservation is not settled')
+    return bank.held
+  })
 
 /** The rows on screen, top to bottom: their line numbers (from the gutter) and their text. */
 export async function visibleRows(win: Page): Promise<{ line: number; text: string }[]> {

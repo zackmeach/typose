@@ -393,6 +393,23 @@ fn shape(i: usize, s: &Shape) {
     assert!(leaked.unsigned_abs() < 64 << 10, "{}: {leaked} bytes still live after close", s.name);
 }
 
+/// A charge-release negative control: the elastic vectors still exist, but the comparison withholds their charge.
+/// The allocator normally runs only on allocations, so an explicit checkpoint is needed to make a shrink-before-free
+/// mistake observable even when no allocation would occur between those operations. Production state stays intact.
+fn cache_charge_negative(elastic: u64) -> bool {
+    let over = OVER.load(SeqCst);
+    let worst = WORST.each_ref().map(|value| value.load(SeqCst));
+    let baseline = RESERVED_BASELINE.swap(elastic, SeqCst);
+    check(0);
+    let detected = OVER.load(SeqCst) > over;
+    RESERVED_BASELINE.store(baseline, SeqCst);
+    OVER.store(over, SeqCst);
+    for (slot, value) in WORST.iter().zip(worst) {
+        slot.store(value, SeqCst);
+    }
+    detected
+}
+
 #[derive(Clone, Copy)]
 enum ImageExpected {
     Ready,
@@ -736,6 +753,7 @@ fn main() {
     *RAW.lock().unwrap() = Some(raw.clone());
     run(touch_job); // chunks 0-7: the cache grows to 8
     let grown = raw.charges().cache;
+    let cache_negative = cache_charge_negative(grown - floor);
     let limit = budget::totals().limit;
     budget::set_limit(budget::totals().used).unwrap();
     TOUCH_FROM.store(8, SeqCst);
@@ -743,12 +761,31 @@ fn main() {
     TOUCH_FROM.store(0, SeqCst);
     budget::set_limit(limit).unwrap();
     let held = raw.charges().cache;
+    raw.document().store().set_cache_active(false);
+    let trimmed = raw.charges().cache;
+    check(0); // real trim has already freed its removed Vecs before returning the elastic charge
+    TOUCH_FROM.store(16, SeqCst);
+    run(touch_job); // concurrent misses finishing while inactive must replace within the four-chunk floor
+    let inactive = raw.charges().cache;
+    raw.document().store().set_cache_active(true);
+    let reactivated = raw.charges().cache;
+    TOUCH_FROM.store(24, SeqCst);
+    run(touch_job); // future misses may grow again after reactivation
+    let regrown = raw.charges().cache;
+    TOUCH_FROM.store(0, SeqCst);
     *RAW.lock().unwrap() = None;
     drop(raw);
     ARMED.store(false, SeqCst);
-    println!("elastic cache: {floor} bytes at open, {grown} grown, {held} after 8 more chunks at the limit");
+    println!(
+        "elastic cache: {floor} floor, {grown} grown, {held} at limit; {trimmed} trimmed, {inactive} inactive, {reactivated} reactivated, {regrown} grown again; negative charge withdrawal detected={cache_negative}"
+    );
     assert!(grown >= floor + (4 << 20), "the cache didn't grow past its floor");
     assert_eq!(held, grown, "the cache grew past the limit, or gave back what it held");
+    assert!(cache_negative, "withholding the elastic charge while its vectors live did not trip the allocator check");
+    assert_eq!(trimmed, floor, "inactive cache did not return to its paid floor");
+    assert_eq!(inactive, floor, "late inactive misses regrew the cache");
+    assert_eq!(reactivated, floor, "reactivation allocated before a future miss");
+    assert!(regrown >= floor + (4 << 20), "reactivated cache could not grow on future misses");
     assert_eq!(budget::totals().used, used);
     // A path too long for this OS to open fails, as it should, within the open's own reservation.
     let too_long = PathBuf::from(format!("{}\\{}", dir.display(), "x\\".repeat(16_000)));

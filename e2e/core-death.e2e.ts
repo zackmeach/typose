@@ -141,7 +141,7 @@ test('a second death during a Reopen keeps its line: once 60 s have passed, the 
   await finish(l)
 })
 
-test('☰’s Open file… while the core is stopped names the file Reopen opens, as a second launch does (plan C7, PR 8)', async () => {
+test('Open file… while the core is stopped acknowledges the queued file and opens a new tab after restart', async () => {
   test.skip(process.platform === 'darwin', 'macOS has the native menu bar instead of ☰')
   test.setTimeout(3 * 60_000)
   const l = await launch({ hooks: true, file: fixture('core-death-first.txt', lines(50)) })
@@ -152,14 +152,15 @@ test('☰’s Open file… while the core is stopped names the file Reopen opens
   await expect(win.locator('.card-message .open-button')).toHaveText(['Reopen']) // respawned at once
   killCore(l) // a second death within 60 s: stopped, with nothing offered
   await expect(win.locator('.card-message .open-button')).toHaveCount(0)
-  await win.getByRole('button', { name: 'Menu' }).click()
+  await win.getByRole('button', { name: 'Menu', exact: true }).click()
   await win.getByRole('menuitem', { name: 'Open file…' }).click()
-  // The stopped card names the chosen file, and says it's stopped; Reopen opens that file once the core is back.
-  await expect(win.locator('.card-name')).toHaveText('core-death-chosen.txt')
+  // The lost document keeps its tab. The explicit manual request is acknowledged, then opens when the core returns.
+  await expect(win.locator('.card-name')).toHaveText('core-death-first.txt')
   await expect(win.locator('.card-message p')).toHaveText("Typose's core stopped")
-  await expect(win.locator('.card-message .open-button')).toHaveText(['Reopen'], { timeout: 70_000 })
-  await win.locator('.card-message .open-button').click()
+  await expect(win.locator('.banner')).toHaveText('Queued until the core restarts: core-death-chosen.txt')
+  await expect(win.locator('.card-name')).toHaveText('core-death-chosen.txt', { timeout: 70_000 })
   await waitOpen(win)
+  await expect(win.locator('.file-tab-name')).toHaveText(['core-death-first.txt', 'core-death-chosen.txt'])
   expect((await visibleRows(win))[0]).toEqual({ line: 1, text: 'the chosen file' })
   expect(await app.evaluate(() => (globalThis as { dialogCalls?: number }).dialogCalls)).toBe(1)
   expect(l.pageErrors).toEqual([])

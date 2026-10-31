@@ -7,7 +7,7 @@ import { rmSync, statSync, truncateSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { GARBAGE_PER_UNIT, WRAP, capFor, rowCost, rowsFor } from '../app/renderer/lenses/page-cache'
 import type { Limits, Opened, Page as CorePage } from '../app/shared/protocol'
-import { FIXTURES, type Launched, type TestHooks, debugStats, finish, fixture, launch, sparseFixture, test, visibleRows, waitIndexed, waitOpen } from './app'
+import { FIXTURES, type Launched, type TestHooks, debugStats, finish, fixture, launch, sparseFixture, test, visibleRows, waitIndexed, waitOpen, workspaceHeld } from './app'
 import { mib, processMemory, summed } from './memory'
 
 type CacheStats = { charged: number; cap: number; reserved: number }
@@ -105,7 +105,7 @@ async function layoutGate(s: (typeof SCRIPTS)[number]): Promise<void> {
       const host = await win.evaluate(() => document.querySelector('.raw-host')!.clientHeight)
       const reserved = capFor(L, 3 * Math.ceil(host / 20) + 1)
       await expect.poll(async () => (await cacheStats(win))?.reserved, { timeout: 30_000 }).toBe(reserved)
-      expect((await debugStats(win)).ledger.rendererCache).toBe(reserved)
+      expect((await debugStats(win)).ledger.rendererCache).toBe(reserved + await workspaceHeld(win))
       await expect.poll(() => win.evaluate(() => {
         const rows = [...document.querySelectorAll('.vl-row')]
         return rows.length > 0 && rows.every((r) => r.querySelector('.text'))
@@ -185,7 +185,7 @@ async function viewportOnly(win: Page, L: Limits, step: string): Promise<void> {
   console.log(`${step}: Raw ${host} px (${viewport} px of rows), ${mounted} rows mounted; cache charged ${mib(s.charged)} of ${mib(s.reserved)} reserved`)
   expect(mounted, step).toBeLessThanOrEqual(Math.ceil(viewport / 20) + 1) // the viewport's rows, no overscan
   expect(s.charged, step).toBeLessThanOrEqual(s.reserved)
-  expect((await debugStats(win)).ledger.rendererCache, step).toBe(s.reserved)
+  expect((await debugStats(win)).ledger.rendererCache, step).toBe(s.reserved + await workspaceHeld(win))
 }
 
 /**
@@ -205,11 +205,12 @@ test('under a budget that holds only the viewport, Raw mounts only the viewport,
     const hello = await core<{ limits: Limits }>(probe.win, 'hello', { protocol: 1 })
     if (!('ok' in hello)) throw new Error(`hello: ${hello.code}`)
     const { ledger, charges } = await debugStats(probe.win)
+    const workspace = await workspaceHeld(probe.win)
     const inner = await probe.win.evaluate(() => window.innerHeight)
     await finish(probe)
     const L = hello.ok.limits
     const floor = capFor(L, Math.ceil(inner / 20) + 1, false) // the open's viewport-only cap, at the window's height
-    const budget = ledger.pool + charges[1].total + L.openTemp + floor + statSync(path).size + rowCost(L)
+    const budget = ledger.pool + charges[1].total + L.openTemp + floor + statSync(path).size + rowCost(L) + workspace
     console.log(`budget ${mib(budget)}: pool ${mib(ledger.pool)}, document ${mib(charges[1].total)}, view ${mib(floor)} (${inner} px of window)`)
     const l = await launch({ hooks: true, file: path, env: { TYPOSE_TEST_BUDGET: String(budget) } })
     const { win } = l
@@ -243,7 +244,7 @@ test('under a budget that holds only the viewport, Raw mounts only the viewport,
 /** The lens on screen has its reservation settled, and the core holds exactly that for it. */
 async function holdsItsReservation(win: Page): Promise<boolean> {
   const [s, { ledger }] = [await cacheStats(win), await debugStats(win)]
-  return s !== null && s.reserved > 0 && s.reserved === ledger.rendererCache
+  return s !== null && s.reserved > 0 && s.reserved + await workspaceHeld(win) === ledger.rendererCache
 }
 
 /**
@@ -272,7 +273,7 @@ test('a Reload the ledger refuses keeps Raw at its generation, with a banner, an
     expect(rows.every((r) => r.text === `line ${r.line - 1}`)).toBe(true) // still showing, gutter numbers from 1
     const s = (await cacheStats(win))!
     expect(s.charged).toBeLessThanOrEqual(s.reserved)
-    expect((await debugStats(win)).ledger.rendererCache).toBe(s.reserved) // given back to the lens that stayed
+    expect((await debugStats(win)).ledger.rendererCache).toBe(s.reserved + await workspaceHeld(win)) // given back to the lens that stayed
     await debugStats(win, { limit: ledger.limit })
     await win.locator('.banner-button').click()
     await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '2')
@@ -505,23 +506,27 @@ for (const size of ['1 GiB', '10 GiB'] as const) {
 
 /**
  * Plan C1: an open the ledger can't hold is refused with `Memory`, and the card says so (plan §7 proposal 1, PR 4's
- * card). The budget override holds the pool and 1 MiB more, so neither a 10 GiB document's floor (≈ 4.31 MiB) nor its
+ * card). After paying the persistent tab UI, the override holds the pool and 1 MiB more, so neither a 10 GiB document's floor (≈ 4.31 MiB) nor its
  * view's fits; or 40 MiB more, so the document's would, and only the view's floor, the viewport-only cache cap, doesn't.
  */
 for (const over of [1, 40])
-  test(`an open with the pool and ${over} MiB as its budget shows the memory-refused card, and the ledger doesn't change`, () => refusedOpen(over))
+  test(`an open with workspace paid and ${over} MiB above the pool refuses the native floor and retains only the UI share`, () => refusedOpen(over))
 
 async function refusedOpen(over: number): Promise<void> {
-  const probe = await launch({ hooks: true })
-  await expect(probe.win.locator('.open-button')).toHaveText('Open file…')
+  const path = fixture('memory-refused.txt', HEAD)
+  const probe = await launch({ hooks: true, file: path })
+  await waitOpen(probe.win)
   const pool = (await debugStats(probe.win)).ledger.pool
+  const workspace = await workspaceHeld(probe.win)
   await finish(probe)
-  const path = sparseFixture('memory-refused.txt', 10 * GIB, HEAD)
+  sparseFixture('memory-refused.txt', 10 * GIB, HEAD)
   try {
-    const l = await launch({ hooks: true, file: path, env: { TYPOSE_TEST_BUDGET: String(pool + over * (1 << 20)) } })
+    const l = await launch({ hooks: true, file: path, env: { TYPOSE_TEST_BUDGET: String(pool + workspace + over * (1 << 20)) } })
     await expect(l.win.locator('.card-state p')).toHaveText("Can't open memory-refused.txt · Typose's memory budget is full. Close a file, then Retry.")
     await expect(l.win.locator('.card-state .open-button')).toHaveText(['Retry', 'Close'])
-    expect(await debugStats(l.win)).toMatchObject({ docs: 0, handles: 0, jobs: 0, ledger: { used: pool, rendererCache: 0 } })
+    expect(await debugStats(l.win)).toMatchObject({ docs: 0, handles: 0, jobs: 0, ledger: { used: pool + workspace, rendererCache: workspace } })
+    await l.win.getByRole('button', { name: 'Close', exact: true }).click()
+    await expect.poll(async () => { const { ledger } = await debugStats(l.win); return ledger.used - ledger.pool }).toBe(0)
     expect(l.pageErrors).toEqual([])
     await finish(l)
   } finally {

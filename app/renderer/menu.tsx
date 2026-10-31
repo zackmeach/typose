@@ -19,6 +19,9 @@ export function AppMenu({ run }: { run: (command: Command) => void }) {
           <MenuItem id="reload" className="menu-item">
             Reload
           </MenuItem>
+          <MenuItem id="close-tab" className="menu-item">
+            Close tab
+          </MenuItem>
           <MenuItem id="exit" className="menu-item">
             {LINUX ? 'Quit' : 'Exit'}
           </MenuItem>
