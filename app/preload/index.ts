@@ -1,5 +1,13 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webFrame } from 'electron'
 import type { Command, MainMessage, TyposeApi } from '../shared/protocol'
+
+// Brief §6.5: scale the whole view from 50–200%, before a lens can consume Ctrl+wheel as scrolling.
+window.addEventListener('wheel', (event) => {
+  if (!event.ctrlKey || event.deltaY === 0) return
+  event.preventDefault()
+  const step = event.deltaY < 0 ? 1.1 : 1 / 1.1
+  webFrame.setZoomFactor(Math.max(0.5, Math.min(2, webFrame.getZoomFactor() * step)))
+}, { capture: true, passive: false })
 
 // The sandboxed page can't receive a MessagePort over contextBridge, so main's messages are forwarded with
 // window.postMessage, to this page's own origin only (the spike posted with '*'). The page accepts them only

@@ -41,6 +41,7 @@ export class VirtualList {
     this.element.addEventListener(
       'wheel',
       (e) => {
+        if (e.ctrlKey) return // Ctrl+wheel is view zoom, including in logical scrolling mode.
         // Shift turns a vertical wheel horizontal. Native scrolling does that on Windows and Linux, not on macOS.
         const shifted = e.shiftKey && e.deltaX === 0
         if (!shifted && !isLogical(this.state.geometry.total)) return // native scrolling handles both axes

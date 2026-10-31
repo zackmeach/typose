@@ -168,6 +168,8 @@ function createWindow(): BrowserWindow {
   })
   win.webContents.on('will-navigate', (e) => e.preventDefault())
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  // View zoom belongs to this window rather than every page with the app's origin.
+  win.webContents.setZoomMode('isolated')
   // Not once a quit has begun: the window would only flash up as it closes.
   win.once('ready-to-show', () => {
     mark?.('readyToShow')
