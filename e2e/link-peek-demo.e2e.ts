@@ -3,7 +3,7 @@
 import { expect, type ElementHandle, type Locator, type Page } from '@playwright/test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { debugStats, finish, fixture, FIXTURES, launch, test, waitIndexed, waitOpen } from './app'
+import { debugStats, finish, fixture, FIXTURES, launch, test, waitIndexed } from './app'
 import { closePackaged, launchPackaged, unrequested } from './packaged'
 
 function makeLinkFixtures(sourceName: string, destinationName: string): { source: string; destination: string } {
@@ -74,7 +74,6 @@ test('local-link preview closes with button, Escape, or Ctrl+W and transfers its
   try {
     live = await launch({ hooks: true, file: sourcePath })
     const { win } = live
-    await waitOpen(win)
     await waitIndexed(win)
     const card = win.locator('.reader-card').first()
     await card.getByRole('tab', { name: 'Rendered', exact: true }).click()

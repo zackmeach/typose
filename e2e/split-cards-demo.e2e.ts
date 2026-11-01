@@ -1,7 +1,7 @@
 // Focused split-surface workflow smoke. Native IDs are checked in the hooks build; the production package
 // confirms that the visible Raw/Rendered split and card merge work without test hooks.
 import { expect, type Locator } from '@playwright/test'
-import { fixture, finish, launch, debugStats, stubOpenDialog, test, waitIndexed, waitOpen } from './app'
+import { fixture, finish, launch, debugStats, stubOpenDialog, test } from './app'
 import { closePackaged, launchPackaged, unrequested } from './packaged'
 
 async function splitRight(win: Awaited<ReturnType<typeof launch>>['win']): Promise<void> {
@@ -36,11 +36,11 @@ test('split clones the source place, opens into the focused card, and preserves 
   try {
     live = await launch({ hooks: true, file: a })
     const { win } = live
-    await waitOpen(win)
-    await waitIndexed(win)
-
     const left = win.getByRole('region', { name: 'Reader card 1', exact: true })
+    await renderedReady(left)
+    await cardIndexed(left)
     await left.getByRole('tab', { name: 'Raw', exact: true }).click()
+    await rawReady(left)
     const anchorText = left.getByText('Split source anchor stays visible', { exact: true })
     await anchorText.scrollIntoViewIfNeeded()
     await expect(anchorText).toBeInViewport()
