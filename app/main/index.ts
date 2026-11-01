@@ -204,6 +204,8 @@ function macMenu(win: BrowserWindow): Menu {
     { role: 'appMenu' },
     { label: 'File', submenu: [
       { label: 'Open File…', click: run('open') },
+      { label: 'Open Folder…', click: run('open-folder') },
+      { label: 'Toggle Sidebar', accelerator: 'Cmd+B', click: run('toggle-sidebar') },
       { label: 'Reload', click: run('reload') },
       { label: 'Close Tab', accelerator: 'Cmd+W', click: run('close-tab') },
       { label: 'Reopen Closed Tab', accelerator: 'Cmd+Shift+T', click: run('reopen-tab') },
@@ -290,6 +292,10 @@ void app.whenReady().then(() => {
   })
   handle(win, 'open-dialog', async () => {
     const r = await dialog.showOpenDialog(win, { properties: ['openFile'] })
+    return r.canceled ? null : (r.filePaths[0] ?? null)
+  })
+  handle(win, 'folder-dialog', async () => {
+    const r = await dialog.showOpenDialog(win, { properties: ['openDirectory'] })
     return r.canceled ? null : (r.filePaths[0] ?? null)
   })
   ipcMain.handle('open-external', (event: IpcMainInvokeEvent, ...args: unknown[]) => openExternal(win, event, args, (url) => shell.openExternal(url)))

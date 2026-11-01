@@ -222,6 +222,7 @@ export interface TyposeApi {
   onOpenPath(cb: (path: string) => void): () => void
   /** The OS Open dialog; null when cancelled. */
   openDialog(): Promise<string | null>
+  folderDialog(): Promise<string | null>
   /** A user-activated external link. Main independently checks the app's main frame, size and allowed scheme. */
   openExternal(url: string): Promise<boolean>
   /** A startup mark at a wall-clock time (ms); main records it only under the TYPOSE_MARKS hook (plan C8). */
@@ -234,7 +235,7 @@ export interface TyposeApi {
 }
 
 /** The menu's commands (brief §3.2's M1 subset): ☰ on Windows and Linux, the native menu on macOS. */
-export type Command = 'open' | 'reload' | 'close-tab' | 'reopen-tab' | 'clear-closed' | 'exit'
+export type Command = 'open' | 'open-folder' | 'toggle-sidebar' | 'refresh-folders' | 'reload' | 'close-tab' | 'reopen-tab' | 'clear-closed' | 'exit'
 
 /** The renderer's startup marks (plan C8, §5). */
 export const STARTUP_MARKS = [

@@ -16,6 +16,8 @@ export function AppMenu({ run }: { run: (command: Command) => void }) {
           <MenuItem id="open" className="menu-item">
             Open file…
           </MenuItem>
+          <MenuItem id="open-folder" className="menu-item">Open folder…</MenuItem>
+          <MenuItem id="toggle-sidebar" className="menu-item">Toggle sidebar</MenuItem>
           <MenuItem id="reload" className="menu-item">
             Reload
           </MenuItem>

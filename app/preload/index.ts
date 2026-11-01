@@ -27,6 +27,7 @@ const typose: TyposeApi = {
     return () => void ipcRenderer.off('open-path', listener)
   },
   openDialog: () => ipcRenderer.invoke('open-dialog'),
+  folderDialog: () => ipcRenderer.invoke('folder-dialog'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   mark: (name, t) => ipcRenderer.send('mark', name, t),
   onShown: (cb) => void ipcRenderer.once('shown', () => cb()),

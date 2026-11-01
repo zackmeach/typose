@@ -1,4 +1,4 @@
-import { type RefObject, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { type CSSProperties, type RefObject, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { Button, Menu, MenuItem, MenuTrigger, Popover, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
 import type { CapturedLocation, Command, Limits, MdBuild, Opened } from '../shared/protocol'
 import { type Action, type Card, fileName, parentName, view } from './card'
@@ -12,6 +12,8 @@ import { inputMark, markNow, markPainted } from './perf'
 import { WorkspaceStore, WorkspaceMetadataQueue, type SavedLocation, type SelectionTicket, type TabId, type WorkspaceTab } from './workspace'
 import { FileTabs } from './file-tabs'
 import { WorkspaceBudget } from './workspace-budget'
+import { FolderSidebar } from './folder-sidebar'
+import { entryView, folderNode, foldersCharge, rootView, updateFolder, type RootView } from './folders'
 
 /** macOS has its native menu bar and traffic lights in place of the glyph and ☰ (brief §3.1). */
 const MAC = navigator.platform.startsWith('Mac')
@@ -78,6 +80,13 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   const [navigationBusy, setNavigationBusy] = useState(false)
   const pendingHistoryBytes = useRef(0)
   const recharged = useRef(false)
+  const [folderRoots, setFolderRoots] = useState<readonly RootView[]>([])
+  const folders = useRef<readonly RootView[]>([])
+  const folderRequests = useRef(new Map<string, number>())
+  const pendingFolders = useRef(new Map<symbol, number>())
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [sidebarWidth, setSidebarWidth] = useState(240)
+  const [sidebarOverlay, setSidebarOverlay] = useState(() => window.matchMedia('(max-width: 999px)').matches)
   const workspaceBudget = useRef<WorkspaceBudget | null>(null)
   const workspacePeak = useRef(0)
   const [metadataQueue] = useState(() => new WorkspaceMetadataQueue())
@@ -205,6 +214,18 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     document.title = title
   }, [title])
 
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 999px)')
+    const resize = () => {
+      setSidebarOverlay(media.matches)
+      if (media.matches) setSidebarOpen(false)
+    }
+    media.addEventListener('change', resize)
+    const focus = () => refreshFolders()
+    window.addEventListener('focus', focus)
+    return () => { media.removeEventListener('change', resize); window.removeEventListener('focus', focus) }
+  }, [])
+
   // Plan C8's titlebarPainted, for the startup breakdown: React's first commit of the title bar, once that frame is produced.
   useLayoutEffect(() => markPainted('titlebarPainted'), [])
 
@@ -213,6 +234,9 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     // Without a lens on screen (a Reopen still opening, say), the line is the one the card was going back to.
     const offGone = core.onGone(() => {
       recharged.current = false
+      folderRequests.current.clear()
+      setFolders(folders.current.map(root => ({ ...root, unavailable: true, node: { ...root.node, expanded: false,
+        loading: false, children: undefined, cursor: undefined, error: 'Core restarted · select the folder again' } })))
       leave()
       if (workspaceBudget.current) workspacePeak.current = Math.max(workspacePeak.current, workspaceBudget.current.snapshot().peakBytes)
       workspaceBudget.current?.invalidate()
@@ -233,7 +257,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       setLimits(hello.limits)
       workspace.coreReady(hello.session)
       workspaceBudget.current = new WorkspaceBudget(core, hello.session, workspacePeak.current)
-      recharged.current = !workspace.getSnapshot().tabs.length && !closed.current.length
+      recharged.current = !workspace.getSnapshot().tabs.length && !closed.current.length && !folders.current.length
       const recharge = recharged.current ? Promise.resolve(true) : metadata((current) => chargeWorkspace(workspace.getSnapshot().tabs, current))
       reloading.current.clear()
       activationFailed.current.clear()
@@ -241,7 +265,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       void recharge.then(async (paid) => {
         if (hello.session !== currentSession.current) return
         recharged.current = !!paid
-        if (!paid) { setWorkspaceNotice("Memory budget is full · close a tab or clear recently closed tabs, then Retry"); return }
+        if (!paid) { setWorkspaceNotice("Memory budget is full · close a tab, Remove a folder or clear recently closed tabs, then Retry"); return }
         if (reconnect) for (const path of waiting.current.splice(0)) await open(path)
       })
     })
@@ -263,6 +287,11 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     const onKey = (e: KeyboardEvent) => {
       const modified = e.ctrlKey || e.metaKey || e.shiftKey || e.altKey
       const command = MAC ? e.metaKey : e.ctrlKey
+      if (command && e.key.toLowerCase() === 'b' && !e.shiftKey && !e.altKey) {
+        e.preventDefault()
+        setSidebarOpen(open => !open)
+        return
+      }
       if (command && e.shiftKey && e.key.toLowerCase() === 't' && !e.altKey) {
         e.preventDefault()
         void reopenClosed()
@@ -289,6 +318,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       const ctrlR = e.key.toLowerCase() === 'r' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey
       if (!ctrlR && (e.key !== 'F5' || modified)) return
       e.preventDefault()
+      if (ctrlR) refreshFolders()
       // show() unmounts the scroller before the lens's cleanup can see document.activeElement. Record it now.
       if (lens.current?.element.contains(document.activeElement)) restoreFocus.current = true
       void reload()
@@ -460,7 +490,13 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     const pending = [...pendingWorkspace.current.values()]
     const history = [...workspace.getSnapshot().tabs.flatMap(tab => tab.back ?? []), ...closed.current.map(item => item.entry)]
     const units = history.reduce((sum, entry) => sum + entry.path.length + (entry.location.kind === 'manual' ? entry.location.path.length : entry.location.ticket.id.length), 0)
-    const extra = history.length * 16_384 + 128 * units + pendingHistoryBytes.current
+    const documentFolders = workspace.getSnapshot().tabs.reduce((bytes, tab) => {
+      const folder = tab.card.kind === 'open' ? tab.card.opened.folder : undefined
+      return bytes + (folder ? 16_384 + 128 * (folder.label.length + folder.root.length + (folder.node?.length ?? 0) +
+        folder.segments.reduce((units, segment) => units + segment.length, 0)) + 256 * folder.segments.length : 0)
+    }, 0)
+    const extra = history.length * 16_384 + 128 * units + pendingHistoryBytes.current + foldersCharge(folders.current) +
+      documentFolders + [...pendingFolders.current.values()].reduce((sum, bytes) => sum + bytes, 0)
     const held = await bank.hold(tabs.length + pending.length, pathUnits(tabs) + pending.reduce((units, item) => units + item.units, 0), extra)
     if (!current() || bank !== workspaceBudget.current || ownerSession !== currentSession.current || !workspace.getSnapshot().ready) return false
     if (!held) setWorkspaceNotice("Can't open another tab: Typose's memory budget is full")
@@ -472,10 +508,13 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   function releaseEmptyWorkspace(): void {
     window.requestAnimationFrame(() => {
       const bank = workspaceBudget.current
-      if (!bank || workspace.getSnapshot().tabs.length || closed.current.length || navigating.current || metadataQueue.pending || pendingNative.current.size || pendingWorkspace.current.size) return
+      if (!bank || workspace.getSnapshot().tabs.length || closed.current.length || folders.current.length || pendingFolders.current.size || navigating.current || metadataQueue.pending || pendingNative.current.size || pendingWorkspace.current.size) return
       if (document.querySelector('.file-pill')) { releaseEmptyWorkspace(); return }
       void bank.release().then((released) => {
-        if (released && bank === workspaceBudget.current && !workspace.getSnapshot().tabs.length) workspacePeak.current = 0
+        if (released && bank === workspaceBudget.current && !workspace.getSnapshot().tabs.length && !folders.current.length && !closed.current.length) {
+          workspacePeak.current = 0
+          recharged.current = true
+        }
       })
     })
   }
@@ -683,7 +722,8 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   }
 
   // The workspace's live + two retired graph allowance also pays the draft firstPage while source DOM stays mounted.
-  const historyDraftBytes = (l: Limits, page = true) => 16_384 + 128 * 32_767 + (page ? 2 * l.pageWireMax + 1024 * l.maxItems + (64 << 10) : 0)
+  const historyDraftBytes = (l: Limits, page = true) => 16_384 + 128 * 32_767 + (page ?
+    256 * 16_384 + 2 * l.pageWireMax + 1024 * l.maxItems + (64 << 10) : 0)
 
   function releaseLocation(location: CapturedLocation): void {
     if (location.kind === 'derived' && location.ticket.session === currentSession.current)
@@ -868,6 +908,162 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       bytes: saved?.bytes ?? 0, indexed: saved?.indexed ?? opened.indexed, atLine: tab.anchor ?? saved?.atLine, lens: 'raw', rendering: false })
   }
 
+  function setFolders(next: readonly RootView[]): void {
+    folders.current = next
+    setFolderRoots(next)
+  }
+
+  async function pickFolder(replace?: string): Promise<void> {
+    const path = await window.typose.folderDialog()
+    if (!path || !workspace.getSnapshot().ready || !recharged.current) return
+    const ownerSession = currentSession.current
+    const operation = Symbol()
+    pendingFolders.current.set(operation, 16_384 + 128 * 32_767)
+    let added: RootView | undefined
+    try {
+      if (!await metadata(current => chargeWorkspace(workspace.getSnapshot().tabs, current))) return
+      added = rootView(await core.call('addRoot', { path }))
+      if (ownerSession !== currentSession.current || replace && !folders.current.some(root => root.id === replace)) return
+      const next = added
+      setFolders([...folders.current.filter(root => root.id !== replace && root.id !== next.id), next])
+      added = undefined
+      if (replace && replace !== next.id) void core.call('removeRoot', { root: replace, session: ownerSession }).catch(() => {})
+      setSidebarOpen(true)
+      if (latest.current.card.kind === 'connecting') setCard({ kind: 'empty' })
+      void listDirectory(next.id, next.node.id)
+    } catch (e) {
+      setWorkspaceNotice('Cannot add folder · ' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      if (added && ownerSession === currentSession.current) void core.call('removeRoot', { root: added.id, session: added.ref.session }).catch(() => {})
+      pendingFolders.current.delete(operation)
+      releaseEmptyWorkspace()
+    }
+  }
+
+  async function listDirectory(rootId: string, nodeId: string, more = false): Promise<void> {
+    const root = folders.current.find(root => root.id === rootId)
+    const node = root && folderNode(root, nodeId)
+    if (!root || !node || root.ref.session !== currentSession.current || !recharged.current || node.loading || more && !node.cursor) return
+    const key = rootId + ':' + nodeId
+    const epoch = (folderRequests.current.get(key) ?? 0) + 1
+    folderRequests.current.set(key, epoch)
+    const valid = () => root.ref.session === currentSession.current && folders.current.some(item => item.id === rootId && folderNode(item, nodeId)) && folderRequests.current.get(key) === epoch
+    const operation = Symbol()
+    // At most 128 labels/rows and 64KiB names per native page; the workspace adds two retired copies.
+    pendingFolders.current.set(operation, 128 * 16_384 + 128 * 65_536)
+    setFolders(updateFolder(folders.current, rootId, nodeId, before => ({ ...before, loading: true, error: undefined })))
+    try {
+      if (!await metadata(async current => valid() && chargeWorkspace(workspace.getSnapshot().tabs, current))) return
+      const page = await core.call('listFolder', { folder: node.ref, ...(more ? { cursor: node.cursor } : {}), hidden: false })
+      if (!valid()) return
+      setFolders(updateFolder(folders.current, rootId, nodeId, before => {
+        const entries = page.entries.map(entry => {
+          const existing = before.children?.find(child => child.id === entry.ref.node)
+          return existing && entry.kind === 'directory' ? { ...existing, ...entryView(entry) } : entryView(entry)
+        })
+        return { ...before, children: more ? [...(before.children ?? []), ...entries] : entries,
+          cursor: page.cursor, hasMore: !!page.cursor, error: undefined }
+      }))
+    } catch (e) {
+      if (valid()) {
+        setFolders(updateFolder(folders.current, rootId, nodeId, before => ({ ...before, error: e instanceof Error ? e.message : String(e) })))
+        if (nodeId === root.node.id && e instanceof CoreCallError && e.code === 'NotFound')
+          setFolders(folders.current.map(item => item.id === rootId ? { ...item, unavailable: true } : item))
+      }
+    } finally {
+      if (valid()) setFolders(updateFolder(folders.current, rootId, nodeId, before => ({ ...before, loading: false })))
+      pendingFolders.current.delete(operation)
+      releaseEmptyWorkspace()
+    }
+  }
+
+  function toggleFolder(rootId: string, nodeId: string): void {
+    const root = folders.current.find(item => item.id === rootId)
+    const node = root && folderNode(root, nodeId)
+    if (!root || !node) return
+    if (root.ref.session !== currentSession.current) { setWorkspaceNotice('Select the folder again using Locate…'); return }
+    const expanded = !node.expanded
+    setFolders(updateFolder(folders.current, rootId, nodeId, before => ({ ...before, expanded, ...(!expanded ? { loading: false } : {}) })))
+    if (expanded) refreshDirectory(rootId, nodeId)
+    else {
+      const key = rootId + ':' + nodeId
+      folderRequests.current.set(key, (folderRequests.current.get(key) ?? 0) + 1)
+    }
+  }
+
+  function refreshDirectory(rootId: string, nodeId: string): void {
+    const root = folders.current.find(item => item.id === rootId)
+    const node = root && folderNode(root, nodeId)
+    if (!node) return
+    void listDirectory(rootId, nodeId)
+    if (node.expanded) node.children?.filter(child => child.kind === 'directory' && child.expanded)
+      .forEach(child => refreshDirectory(rootId, child.id))
+  }
+
+  function refreshFolders(): void {
+    folders.current.filter(root => root.node.expanded).forEach(root => refreshDirectory(root.id, root.node.id))
+  }
+
+  function removeFolder(rootId: string): void {
+    if (navigating.current) { setWorkspaceNotice('Finish opening the file before removing its folder'); return }
+    const root = folders.current.find(item => item.id === rootId)
+    setFolders(folders.current.filter(item => item.id !== rootId))
+    if (root?.ref.session === currentSession.current) void core.call('removeRoot', { root: rootId, session: root.ref.session }).catch(() => {})
+    if (!recharged.current && workspace.getSnapshot().ready)
+      void metadata(current => chargeWorkspace(workspace.getSnapshot().tabs, current)).then(paid => { recharged.current = !!paid })
+    releaseEmptyWorkspace()
+  }
+
+  async function openFolderChild(rootId: string, nodeId: string): Promise<void> {
+    const root = folders.current.find(root => root.id === rootId)
+    const node = root && folderNode(root, nodeId)
+    if (!root || !node) return
+    if (node.kind !== 'file') { setWorkspaceNotice('Unsupported file · ' + node.name); return }
+    const l = latest.current.limits
+    if (!l || navigating.current || !recharged.current || root.ref.session !== currentSession.current) return
+    const existing = workspace.getSnapshot().tabs.find(tab => tab.session === currentSession.current && tab.card.kind === 'open' &&
+      tab.card.opened.folder?.root === rootId && tab.card.opened.folder.node === nodeId)
+    if (existing) { await selectTab(existing.id); return }
+    navigating.current = true
+    setNavigationBusy(true)
+    pendingHistoryBytes.current = historyDraftBytes(l)
+    const ownerSession = currentSession.current
+    let candidate: Opened | undefined
+    let owner: LensBudget | null = null
+    let plan: ReloadReservation | undefined
+    try {
+      if (!await metadata(current => chargeWorkspace([...workspace.getSnapshot().tabs, { key: rootId + ':' + nodeId, path: node.name }], current))) return
+      const rawBytes = floorBytes(l)
+      owner = live.current ? budgetFor(live.current) : null
+      plan = owner?.reloadReservation(rawBytes)
+      const retired = Math.max(retiredRendered.current, plan?.retiredTreeMax ?? 0)
+      candidate = await core.call('openChild', { entry: node.ref, count: firstCount(l), bytes: rawBytes + 2 * retired })
+      if (ownerSession !== currentSession.current || !folders.current.some(root => root.id === rootId)) return
+      if (!candidate.path || !candidate.localOnly) throw new Error('Folder open did not return a local document')
+      const key = 'folder:' + ownerSession + ':' + rootId + ':' + nodeId
+      const request = workspace.beginOpen(key, candidate.path)
+      if (request.kind !== 'open') return
+      const next: Extract<Card, { kind: 'open' }> = { kind: 'open', path: candidate.path, opened: candidate, lines: candidate.lines,
+        bytes: 0, indexed: candidate.indexed, lens: 'raw' }
+      if (!workspace.complete(request.ticket, key, next)) return
+      leave()
+      const opened = candidate
+      candidate = undefined
+      restoreFocus.current = true
+      show(request.ticket.tab, opened, workspace.tab(request.ticket.tab)!, rawBytes, undefined, retired)
+      if (sidebarOverlay) setSidebarOpen(false)
+    } catch (e) {
+      setWorkspaceNotice('Cannot open folder file · ' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      if (candidate && ownerSession === currentSession.current) void core.call('close', { doc: candidate.doc }).catch(() => {})
+      if (plan) owner?.cancelTransition(plan)
+      pendingHistoryBytes.current = 0
+      navigating.current = false
+      setNavigationBusy(false)
+      releaseEmptyWorkspace()
+    }
+  }
+
   async function pick(): Promise<void> {
     const chosen = await window.typose.openDialog()
     if (!chosen) return
@@ -884,10 +1080,13 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
 
   function run(command: Command): void {
     if (command === 'open') void pick()
+    else if (command === 'open-folder') void pickFolder()
+    else if (command === 'toggle-sidebar') setSidebarOpen(open => !open)
+    else if (command === 'refresh-folders') refreshFolders()
     else if (command === 'close-tab') {
       if (workspace.getSnapshot().selected) close()
       else if (MAC) window.close()
-    } else if (command === 'reload') void reload()
+    } else if (command === 'reload') { refreshFolders(); void reload() }
     else if (command === 'reopen-tab') void reopenClosed()
     else if (command === 'clear-closed') clearClosed()
     else if (command === 'exit') window.close()
@@ -967,6 +1166,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     }
   }
   const frozen = card.kind === 'open' ? card.frozen : undefined
+  const breadcrumbParent = openedNow?.folder ? [openedNow.folder.label, ...openedNow.folder.segments.slice(0, -1)].join(' / ') : path ? parentName(path) : ''
 
   const header = (
     <div className="card-header">
@@ -974,7 +1174,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       <span className="card-identity" title={path}>
         {path ? <FileIcon path={path} markdown={openedNow?.format === 'markdown'} /> : null}
         <span className="card-breadcrumb">
-          {path && parentName(path) ? <span className="card-parent">{parentName(path)}<span className="breadcrumb-divider"> / </span></span> : null}
+          {breadcrumbParent ? <span className="card-parent">{breadcrumbParent}<span className="breadcrumb-divider"> / </span></span> : null}
           <span className="card-name" role="heading" aria-level={1}>{path ? fileName(path) : 'No file open'}</span>
         </span>
       </span>
@@ -1099,17 +1299,24 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   return (
     <>
       <header className={MAC ? 'titlebar mac' : 'titlebar'}>
-        {MAC ? null : (
-          <span className="titlebar-start">
-            <AppIcon />
-            <AppMenu run={run} />
-          </span>
-        )}
+        <span className="titlebar-start">
+          {MAC ? null : <><AppIcon /><AppMenu run={run} /></>}
+          <Button className="sidebar-toggle" aria-label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'} onPress={() => setSidebarOpen(open => !open)}>»</Button>
+        </span>
         {/* Element Timing: shellVisible is when this text reaches the screen (plan C8). */}
         <span className="title" {...{ elementtiming: 'titlebar' }}>
           {title}
         </span>
       </header>
+      <div className="workspace-canvas" style={{ '--sidebar-offset': `${sidebarOpen && !sidebarOverlay ? sidebarWidth + 16 : 0}px` } as CSSProperties}>
+      {sidebarOpen ? <FolderSidebar roots={folderRoots} width={sidebarWidth} overlay={sidebarOverlay}
+        activeNode={openedNow?.folder?.node ? openedNow.folder.root + ':' + openedNow.folder.node : undefined}
+        onWidth={setSidebarWidth} onCollapse={() => {
+          setSidebarOpen(false)
+          requestAnimationFrame(() => document.querySelector<HTMLElement>('.sidebar-toggle')?.focus())
+        }} onAdd={() => void pickFolder()} onToggle={toggleFolder} onOpen={(root, node) => void openFolderChild(root, node)}
+        onRefresh={refreshDirectory} onMore={(root, node) => void listDirectory(root, node, true)}
+        onRemove={removeFolder} onLocate={root => void pickFolder(root)} /> : null}
       <FileTabs tabs={snapshot.tabs} selected={snapshot.selected} onSelect={(id) => void selectTab(id)} onClose={(id) => close(id)} />
       <main className="card">
         <div className="file-card-panel" id="file-card" role={snapshot.selected ? 'tabpanel' : undefined} aria-labelledby={snapshot.selected ? `file-label-${snapshot.selected}` : undefined}>
@@ -1149,6 +1356,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
         )}
         </div>
       </main>
+      </div>
     </>
   )
 }

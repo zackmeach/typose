@@ -77,9 +77,10 @@ export type OpenRequest =
   | { kind: 'open'; ticket: TabTicket; selection: SelectionTicket }
 
 function retainOpened(opened: StoredOpenCard['opened']): StoredOpenCard['opened'] {
-  const { doc, gen, format, size, encoding, lines, indexed, blank, localOnly, path } = opened
+  const { doc, gen, format, size, encoding, lines, indexed, blank, localOnly, path, folder } = opened
   return Object.freeze({ doc, gen, format, size, encoding, lines, indexed, blank,
-    ...(localOnly ? { localOnly } : {}), ...(path !== undefined ? { path } : {}) })
+    ...(localOnly ? { localOnly } : {}), ...(path !== undefined ? { path } : {}),
+    ...(folder ? { folder: { ...folder, segments: [...folder.segments] } } : {}) })
 }
 
 function retain(card: FinishedCard): StoredCard {

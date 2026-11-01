@@ -130,7 +130,7 @@ test('macOS: a minimal native menu, and Cmd+R is the page’s Reload', async () 
   // dead-key test below is Windows' and Linux's.)
   const menu = await appMenu(l)
   expect(menu?.map((m) => m.role ?? m.label)).toEqual(['appmenu', 'File', 'editmenu', 'windowmenu'])
-  expect(menu?.[1].items).toEqual(['Open File…', 'Reload', 'Close Tab', 'Reopen Closed Tab', 'Clear Recently Closed Tabs', 'close'])
+  expect(menu?.[1].items).toEqual(['Open File…', 'Open Folder…', 'Toggle Sidebar', 'Reload', 'Close Tab', 'Reopen Closed Tab', 'Clear Recently Closed Tabs', 'close'])
   await win.evaluate(() => Object.assign(window, { pageLifetime: 'the first page' }))
   await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '1')
   await pressAsOS(l, 'R', ['meta'])
@@ -211,7 +211,7 @@ test('☰ is a menu of Open file…, Reload and Exit, each wired to its command;
   const opened = async () => {
     await trigger.click()
     await expect(win.getByRole('menu')).toBeVisible()
-    await expect(win.getByRole('menuitem')).toHaveText(['Open file…', 'Reload', 'Close tab', 'Reopen closed tab', 'Clear recently closed tabs', exit])
+    await expect(win.getByRole('menuitem')).toHaveText(['Open file…', 'Open folder…', 'Toggle sidebar', 'Reload', 'Close tab', 'Reopen closed tab', 'Clear recently closed tabs', exit])
   }
   // Escape closes it and gives focus back to ☰.
   await opened()
