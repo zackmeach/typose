@@ -24,6 +24,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   const [focused, setFocused] = useState('card-1')
   const focusedRef = useRef(focused)
   const handles = useRef(new Map<string, ReaderHandle>())
+  const readerWaiters = useRef(new Set<{ id: string; start(handle: ReaderHandle): void; cancel(message: string): void }>())
   const reports = useRef(new Map<string, { title: string; node?: string }>())
   const [title, setTitle] = useState('Typose')
   const [activeNode, setActiveNode] = useState<string>()
@@ -59,7 +60,14 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     pendingHistory: pendingHistory.current, recharged, paid: () => payment.current,
     charge: async () => false, release: () => {}, notice: () => {}, opened: () => {}, report: () => {}, register: () => () => {} }))
 
-  function updateGroups(next: readonly ReaderGroup[]): void { groupRef.current = next; setGroups(next) }
+  function cancelReaderWaiters(message: string, id?: string): void {
+    for (const waiter of readerWaiters.current) if (id === undefined || waiter.id === id) waiter.cancel(message)
+  }
+  function updateGroups(next: readonly ReaderGroup[]): void {
+    for (const group of groupRef.current) if (!next.some(item => item.id === group.id)) cancelReaderWaiters('Reader card was removed', group.id)
+    groupRef.current = next
+    setGroups(next)
+  }
   function focusCard(id: string): void {
     if (!groupRef.current.some(group => group.id === id)) return
     focusedRef.current = id
@@ -110,9 +118,16 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   shared.opened = () => { if (sidebarOverlay) setSidebarOpen(false) }
   shared.report = (id, text, node) => { reports.current.set(id, { title: text, node }); if (focusedRef.current === id) { setTitle(text); setActiveNode(node) } }
   shared.register = (id, handle) => {
+    if (!groupRef.current.some(group => group.id === id)) return () => {}
     handles.current.set(id, handle)
+    for (const waiter of readerWaiters.current) if (waiter.id === id) waiter.start(handle)
     if (id === focusedRef.current) for (const path of waiting.current.splice(0)) handle.open(path)
-    return () => { if (handles.current.get(id) === handle) handles.current.delete(id) }
+    return () => {
+      if (handles.current.get(id) === handle) {
+        handles.current.delete(id)
+        cancelReaderWaiters('Reader card was unmounted', id)
+      }
+    }
   }
 
   useEffect(() => { document.title = title }, [title])
@@ -127,6 +142,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   }, [])
   useEffect(() => {
     const gone = core.onGone(() => {
+      cancelReaderWaiters('The core stopped while creating the reader card')
       recharged.current = false
       hello.current = null
       folderRequests.current.clear()
@@ -159,7 +175,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     }
     window.addEventListener('keydown', key)
     void core.connect().then(async () => { await payment.current; for (const path of await window.typose.launchPaths()) openPath(path) }, () => {})
-    return () => { gone(); ready(); offOpen(); offCommand(); window.removeEventListener('keydown', key) }
+    return () => { cancelReaderWaiters('The workspace was unmounted'); gone(); ready(); offOpen(); offCommand(); window.removeEventListener('keydown', key) }
   }, [core])
 
   function setFolders(next: readonly RootView[]): void {
@@ -270,12 +286,38 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
 
 
   async function waitForReader(id: string): Promise<ReaderHandle> {
-    let handle = handles.current.get(id)
-    if (!handle) { await new Promise<void>(done => requestAnimationFrame(() => done())); handle = handles.current.get(id) }
-    if (!handle) throw new Error('Reader card could not mount')
-    await handle.ready()
-    if (!handle.surface()) throw new Error('Reader surface could not be created')
-    return handle
+    const session = hello.current?.session
+    if (!session || !groupRef.current.some(group => group.id === id)) throw new Error('Reader card is unavailable')
+    return new Promise<ReaderHandle>((resolve, reject) => {
+      let started = false, settled = false
+      const waiter = {
+        id,
+        cancel(message: string) {
+          if (settled) return
+          settled = true
+          readerWaiters.current.delete(waiter)
+          reject(new Error(message))
+        },
+        start(handle: ReaderHandle) {
+          if (started || settled) return
+          started = true
+          void handle.ready().then(() => {
+            if (settled) return
+            if (hello.current?.session !== session || handles.current.get(id) !== handle || !groupRef.current.some(group => group.id === id)) {
+              waiter.cancel('Reader card changed while creating its surface')
+              return
+            }
+            if (handle.surface()?.session !== session) { waiter.cancel('Reader surface could not be created'); return }
+            settled = true
+            readerWaiters.current.delete(waiter)
+            resolve(handle)
+          }, error => waiter.cancel(String(error)))
+        }
+      }
+      readerWaiters.current.add(waiter)
+      const handle = handles.current.get(id)
+      if (handle) waiter.start(handle)
+    })
   }
   function releaseLocation(entry: ClosedLocation['entry']): void {
     if (entry.location.kind === 'derived' && entry.location.ticket.session === currentSession.current) void core.call('releaseSaved', { ticket: entry.location.ticket }).catch(() => {})
@@ -319,7 +361,16 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   }
   async function closeCard(id: string): Promise<void> {
     const source = groupRef.current.find(group => group.id === id), handle = handles.current.get(id)
-    if (!source || !handle || closingCards.current.has(id)) return
+    if (!source || closingCards.current.has(id)) return
+    if (!handle) {
+      if (groupRef.current.length > 1 && source.workspace.getSnapshot().tabs.length === 0) {
+        updateGroups(groupRef.current.filter(group => group.id !== id))
+        pendingHistory.current.delete(id)
+        if (focusedRef.current === id) focusCard(groupRef.current[0].id)
+        releaseEmptyWorkspace()
+      }
+      return
+    }
     if (groupRef.current.length === 1) { await handle.close(); return }
     closingCards.current.add(id)
     const index = groupRef.current.indexOf(source)
