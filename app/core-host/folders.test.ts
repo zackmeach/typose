@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir, totalmem } from 'node:os'
 import { join } from 'node:path'
 import { Cancel, Doc, FolderRoot, limits, reserveCache, setBudget } from 'typose-node'
@@ -68,6 +68,53 @@ windows('real host remove cancels unpublished child first page while existing do
   expect(reopened).toHaveProperty('result.folder.root', root.ref.root)
   await call('releaseSaved', { ticket }); await call('close', { doc: 1 })
   if ('result' in reopened) await call('close', { doc: (reopened.result as { doc: number }).doc })
+})
+
+windows('real host resolves and opens root-relative links only through the source selected folder', async () => {
+  setBudget(totalmem())
+  const path = scratch(), outside = scratch()
+  mkdirSync(join(path, 'guide'))
+  writeFileSync(join(path, 'source.md'), '# Source\n[Next](/guide/B.md)\n')
+  writeFileSync(join(path, 'guide', 'B.md'), '# Target\n')
+  writeFileSync(join(outside, 'manual.md'), '# Outside\n')
+  const dispatch = makeDispatcher({ limits, coreVersion: () => 'test', openDoc: (p) => Doc.open(p),
+    captureFolder: (p, id) => FolderRoot.capture(p, id), cancelFlag: () => new Cancel(), reserveCache }, 7, () => {})
+  let next = 1
+  const call = (method: string, params: Record<string, unknown>) => dispatch({ id: next++, method, params })
+  const opened: number[] = []
+  let rootId: string | undefined
+  try {
+    const added = await call('addRoot', { path })
+    if (!('result' in added)) throw Error(JSON.stringify(added))
+    const root = added.result as RootInfo
+    rootId = root.ref.root
+    const listed = await call('listFolder', { folder: root.ref })
+    if (!('result' in listed)) throw Error(JSON.stringify(listed))
+    const source = (listed.result as FolderPage).entries.find((e) => e.name === 'source.md')!
+    const sourceReply = await call('openChild', { entry: source.ref, count: 1, bytes: 100 })
+    if (!('result' in sourceReply)) throw Error(JSON.stringify(sourceReply))
+    const doc = (sourceReply.result as { doc: number }).doc
+    opened.push(doc)
+    expect(await call('render', { doc, gen: 1 })).toHaveProperty('result.blocks')
+    for (const target of ['/guide/B.md', '\\guide\\B.md']) {
+      expect(await call('resolve', { doc, gen: 1, href: target })).toMatchObject({ result: { kind: 'local', target, path: join(path, 'guide', 'B.md') } })
+      const reply = await call('openLocal', { doc, gen: 1, target, count: 1, bytes: 100 })
+      expect(reply).toMatchObject({ result: { localOnly: true, folder: { root: rootId, segments: ['guide', 'B.md'] } } })
+      if ('result' in reply) opened.push((reply.result as { doc: number }).doc)
+    }
+    expect(await call('openLocal', { doc, gen: 1, target: '/../outside.md', count: 1, bytes: 100 })).toMatchObject({ error: { code: 'Refused' } })
+    expect(await call('page', { doc, gen: 1, lens: 'raw', start: 0, count: 1 })).toHaveProperty('result.items')
+    const manual = await call('open', { path: join(outside, 'manual.md'), count: 1, bytes: 100 })
+    if (!('result' in manual)) throw Error(JSON.stringify(manual))
+    const manualDoc = (manual.result as { doc: number }).doc
+    opened.push(manualDoc)
+    expect(await call('resolve', { doc: manualDoc, gen: 1, href: '/guide/B.md' })).toMatchObject({ result: { kind: 'inert' } })
+    expect(await call('openLocal', { doc: manualDoc, gen: 1, target: '/guide/B.md', count: 1, bytes: 100, allowRooted: true }))
+      .toMatchObject({ error: { code: 'InvalidParams' } })
+  } finally {
+    for (const doc of opened) await call('close', { doc })
+    if (rootId) await call('removeRoot', { root: rootId, session: 7 })
+  }
 })
 
 it('precharges root metadata and preserves source across rejected admission and removed pending listing', async () => {

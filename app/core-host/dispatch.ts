@@ -442,10 +442,12 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     },
     openLocal: async (p, req): Promise<Opened> => {
       const [id, gen, count, bytes] = [int(p, 'doc'), int(p, 'gen'), int(p, 'count'), int(p, 'bytes')]
-      if (typeof p.target !== 'string' || !decodedLocalTarget(p.target))
+      if (typeof p.target !== 'string' || !decodedLocalTarget(p.target, true))
         throw new Refusal('InvalidParams', 'target must be a safe decoded local path of at most 32 KiB', 'target')
       const source = getDoc(id)
       if (source.generation !== gen) throw new Refusal('Stale', `generation ${gen} was replaced`)
+      if (/^[\\/]/.test(p.target) && !source.folder)
+        throw new Refusal('InvalidParams', 'root-relative links require a source in a selected folder', 'target')
       reclaimInactive()
       const pending = take(req, bytes)
       let doc: Doc | undefined
@@ -610,7 +612,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         const line = doc.headingLine(gen, fragment)
         return line == null ? { kind: 'inert' } : { kind: 'heading', line }
       }
-      const target = localTarget(p.href)
+      const target = localTarget(p.href, !!doc.folder)
       if (target !== null) {
         try { return { kind: 'local', target, path: doc.localPath(gen, target) } }
         catch (e) {

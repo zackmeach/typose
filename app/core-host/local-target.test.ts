@@ -43,4 +43,22 @@ describe('local link syntax, before any native call', () => {
       expect(decodedLocalTarget(target)).toBe(false)
     for (const value of [undefined, null, 0, {}, []]) expect(boundedLink(value)).toBe(false)
   })
+
+  it('allows one leading separator only when the owned source has a selected folder', () => {
+    for (const [href, target] of [
+      ['/guide/B.md', '/guide/B.md'], ['\\guide\\B.md', '\\guide\\B.md'],
+      ['%2fguide/B.md', '/guide/B.md'], ['%5cguide%5cB.md', '\\guide\\B.md']
+    ]) {
+      expect(localTarget(href)).toBeNull()
+      expect(localTarget(href, true)).toBe(target)
+      expect(decodedLocalTarget(target)).toBe(false)
+      expect(decodedLocalTarget(target, true)).toBe(true)
+    }
+    for (const href of ['/', '\\', '//host/a.md', '\\\\host\\a.md', '/\\host/a.md', '\\/host/a.md',
+      '%2f%2fhost/a.md', '%5c%5chost/a.md', '%2f%5chost/a.md', '\\\\?\\C:\\a.md', '\\\\.\\NUL',
+      '/C:/a.md', '/a.md:stream', '/a%3astream.md', '/a%3fb.md', '/a//b.md', '/a/CON.md'])
+      expect(localTarget(href, true), href).toBeNull()
+    for (const target of ['//host/a.md', '\\\\host\\a.md', '/\\host/a.md', '/C:/a.md', '/a.md:stream', '/a?b.md'])
+      expect(decodedLocalTarget(target, true), target).toBe(false)
+  })
 })
