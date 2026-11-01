@@ -27,6 +27,8 @@ export class WorkspaceBudget {
     this.peak = previousPeakBytes
   }
 
+  get reservationEpoch(): number { return this.epoch }
+
   snapshot() {
     // An intercepted/delayed response can make the last acknowledged amount older than the native amount.
     return { session: this.session, held: this.held, peakBytes: Math.max(this.peak, this.requestedPeak), settled: this.sent === this.acknowledged }

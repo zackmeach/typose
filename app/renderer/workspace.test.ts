@@ -41,6 +41,21 @@ it('last-close invalidates a held metadata grant and queued requests without blo
   expect(published).toEqual(['C'])
 })
 
+it("cancels one card's metadata lane without invalidating another card's queued work", async () => {
+  const queue = new WorkspaceMetadataQueue()
+  let release!: () => void
+  const grant = new Promise<void>(done => { release = done })
+  const a = queue.runFor('card-a', async current => { await grant; return current() ? 'stale A' : 'cancelled A' }, () => true)
+  const b = queue.runFor('card-b', async current => current() ? 'B' : 'cancelled B', () => true)
+  await Promise.resolve()
+  queue.invalidate('card-a')
+  expect(await b).toBe('B')
+  expect(await queue.runFor('card-a', async current => current() ? 'fresh A' : 'cancelled A', () => true)).toBe('fresh A')
+  release()
+  expect(await a).toBeNull()
+  expect(queue.pending).toBe(0)
+})
+
 it('a session invalidated while a queued metadata callback waits cannot publish afterward', async () => {
   const queue = new WorkspaceMetadataQueue()
   let session = 1

@@ -1021,6 +1021,26 @@ describe('retained tab activation', () => {
       expect(await call('reserve', { doc: 1, gen: 1, bytes: 250 })).toMatchObject({ result: true })
     })
 
+    it('retires only the exact activation owner after its response was committed', async () => {
+      const surfaceReply = await call('createSurface', {})
+      if (!('result' in surfaceReply)) throw new Error('surface was not created')
+      const surface = surfaceReply.result
+      const opened = await call('open', { surface, path: 'owned.txt', count: 1, bytes: 0 })
+      if (!('result' in opened)) throw new Error('owned document was not opened')
+      const docId = (opened.result as { doc: number }).doc
+      const firstId = '00000000-0000-4000-8000-000000000001'
+      const nextId = '00000000-0000-4000-8000-000000000002'
+      const first = await call('activate', { surface, activationId: firstId, doc: docId, gen: 1, count: 1, bytes: 300 })
+      if (!('result' in first)) throw new Error(`first activation did not receive a view: ${JSON.stringify(first)}`)
+      const view = (first.result as { view?: Record<string, unknown> }).view
+      if (!view) throw new Error(`first activation did not receive a view: ${JSON.stringify(first)}`)
+      await call('deactivate', { view })
+      await call('activate', { surface, activationId: nextId, doc: docId, gen: 1, count: 1, bytes: 300 })
+
+      expect(await call('deactivateActivation', { surface, activationId: firstId })).toMatchObject({ result: false })
+      expect(await call('deactivateActivation', { surface, activationId: nextId })).toMatchObject({ result: true })
+    })
+
     it('does not deactivate a newer activation of the same generation when its disposed Reload answers', async () => {
       const { b } = await tabs()
       const delayed = holdPage(b)

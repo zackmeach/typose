@@ -248,6 +248,16 @@ for (const sampleCase of CASES)
         expect(worst.private - baseline.private, `${sampleCase.name}: ${worst.stage}`).toBeLessThanOrEqual(worst.reserved + (32 << 20))
       }
       expect(l.pageErrors).toEqual([])
+    } catch (error) {
+      const state = await win.evaluate(() => ({
+        notices: Array.from(document.querySelectorAll('.banner')).map(banner => banner.textContent),
+        generation: document.querySelector('[data-lens="rendered"]')?.getAttribute('data-gen'),
+        ready: document.querySelector('.md-scroller')?.getAttribute('data-ready'),
+        focus: document.activeElement?.className
+      })).catch(() => null)
+      const ownership = await debugStats(win).catch(() => null)
+      console.log(JSON.stringify({ failedStage: stage, state, ledger: ownership?.ledger, surfaces: ownership?.surfaces }))
+      throw error
     } finally {
       watching = false
       await sampling

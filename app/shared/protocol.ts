@@ -175,9 +175,11 @@ export interface Methods {
   /** `bytes`: the lens's viewport-only cache cap, reserved with the document's floor (plan C1); refused, `Memory`. */
   open: { params: { surface?: SurfaceRef; path: string; count: number; bytes: number }; result: Opened }
   /** First screen of a retained document, without reopening or restarting its index. One renderer lens is active. */
-  activate: { params: { surface?: SurfaceRef; doc: number; gen: number; count: number; bytes: number }; result: Opened }
+  activate: { params: { surface?: SurfaceRef; activationId?: string; doc: number; gen: number; count: number; bytes: number }; result: Opened }
   /** Dispose a current view or Reload's exact old settled view, retaining the document/index. Pending activation cannot hand it back. */
   deactivate: { params: { view: ViewRef } | { doc: number; gen: number }; result: boolean }
+  /** Revoke only the exact activation token, including after its lease committed but before the caller received it. */
+  deactivateActivation: { params: { surface: SurfaceRef; activationId: string }; result: boolean }
   /** A window of lines of generation `gen`, or the one piece a continuation token names (plan C3). Rendered: a window of
    *  blocks of the generation's Markdown build (`render`). Cancellable. */
   page: {

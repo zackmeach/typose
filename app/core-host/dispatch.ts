@@ -340,9 +340,9 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     return { session, doc: id, gen, id: resource }
   }
 
-  type Lease = { ref: ViewRef; bytes: number; sourceFind?: number; csvFind?: { id: number; order: CsvOrderRef } }
+  type Lease = { ref: ViewRef; bytes: number; activationId?: string; sourceFind?: number; csvFind?: { id: number; order: CsvOrderRef } }
   type SurfaceState = { ref: SurfaceRef; alive: boolean; views: Map<number, Lease>; current?: number; latest?: Pending }
-  type Pending = { request: number; surface: SurfaceState; bytes: number; doc?: number; gen?: number; disposed: boolean; previousView?: number; kind?: 'activate' | 'reload' }
+  type Pending = { request: number; surface: SurfaceState; bytes: number; activationId?: string; doc?: number; gen?: number; disposed: boolean; previousView?: number; kind?: 'activate' | 'reload' }
   // Surface zero is an isolated compatibility owner. Explicit documents never accept its doc/gen-only cleanup.
   const surfaces = new Map<number, SurfaceState>([[0, { ref: { session, id: 0 }, alive: true, views: new Map() }]])
   const pendingViews = new Map<number, Pending>()
@@ -439,7 +439,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     const ref: ViewRef = { session, surface: surface.ref.id, id: nextView++, doc: id, gen }
     const previous = currentLease(surface)
     if (previous) { closeSourceFind(previous); closeCsvInteractions(previous) }
-    surface.views.set(ref.id, { ref, bytes: pending.bytes })
+    surface.views.set(ref.id, { ref, bytes: pending.bytes, ...(pending.activationId ? { activationId: pending.activationId } : {}) })
     surface.current = ref.id
     giveBack(pending, true) // the previous view remains paid until its exact lease is detached
     return { reserved: pending.bytes, view: ref }
@@ -1110,12 +1110,14 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     },
     activate: async (p, req): Promise<Opened> => {
       const [id, gen, count, bytes] = [int(p, 'doc'), int(p, 'gen'), int(p, 'count'), int(p, 'bytes')]
+      if (p.activationId !== undefined && (typeof p.activationId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(p.activationId)))
+        throw new Refusal('InvalidParams', 'activationId must be a canonical UUID v4', 'activationId')
       const surface = requestSurface(p)
       const doc = ownedDoc(surface, id)
       if (doc.generation !== gen) throw new Refusal('Stale', 'the tab generation was replaced')
       reclaimInactive()
       const pending = take(req, bytes, surface)
-      pending.doc = id; pending.gen = gen; pending.kind = 'activate'
+      pending.doc = id; pending.gen = gen; pending.kind = 'activate'; if (typeof p.activationId === 'string') pending.activationId = p.activationId
       try {
         const local = localInfo(doc)
         const firstPage = await read(req, id, (cancel) => doc.page(gen, 0, count, cancel))
@@ -1138,6 +1140,19 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         return true
       }
       detach(owned.surface, owned.lease)
+      return true
+    },
+    deactivateActivation: (p): boolean => {
+      if (typeof p.activationId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(p.activationId))
+        throw new Refusal('InvalidParams', 'activationId must be a canonical UUID v4', 'activationId')
+      const surface = surfaceRef(p.surface)
+      const lease = currentLease(surface)
+      if (lease?.activationId === p.activationId) { detach(surface, lease); return true }
+      const pending = surface.latest
+      if (pending?.kind !== 'activate' || pending.activationId !== p.activationId) return false
+      pending.disposed = true
+      const entry = reads.get(pending.request)
+      if (entry) { entry.cancelled = true; entry.cancel.cancel() }
       return true
     },
     openLocal: async (p, req): Promise<Opened> => {

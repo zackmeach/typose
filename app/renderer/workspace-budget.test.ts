@@ -106,6 +106,31 @@ it('last-close bypasses old queued grants before the DOM is ready to release its
   expect(calls).toHaveLength(3)
 })
 
+it('retries another card from the fresh aggregate after a pending workspace grant is cancelled', async () => {
+  const old = pending()
+  const calls: number[] = []
+  const bank = new WorkspaceBudget({ call: (_, p) => {
+    calls.push(p.bytes)
+    return calls.length === 1 ? old.promise : Promise.resolve(true)
+  } }, 1)
+  const closingCard = bank.hold(4, 40)
+  const otherCard = bank.hold(3, 30)
+  await Promise.resolve()
+  const beforeCancel = bank.reservationEpoch
+  bank.cancelPending()
+  expect(bank.reservationEpoch).toBe(beforeCancel + 1)
+
+  const retry = bank.hold(5, 50) // recomputed aggregate includes the other card and current tabs
+  expect(await retry).toBe(true)
+  const committed = bank.snapshot()
+  expect(committed.peakBytes).toBe(workspaceCharge(5, 50))
+  old.resolve(true)
+  expect(await closingCard).toBe(false)
+  expect(await otherCard).toBe(false)
+  expect(bank.snapshot()).toEqual(committed)
+  expect(calls).toEqual([3 * workspaceCharge(4, 40), 3 * workspaceCharge(5, 50)])
+})
+
 it('core death invalidates old grants without a zero RPC into the next session', async () => {
   const reply = pending()
   const calls: number[] = []

@@ -269,6 +269,8 @@ export const debugStats = (win: Page, params: { gc?: boolean; resetHigh?: boolea
 export async function expectReleasedDocuments(win: Page): Promise<void> {
   const owner = [...running].find(run => run.win === win)
   if (!owner) throw new Error('Expected an owned Electron window')
+  // Some probes initiate Close through a synchronous input hook. Wait until its history entry is published.
+  await expect(win.locator('.file-tab')).toHaveCount(0)
   await owner.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('command', 'clear-closed'))
   await expect.poll(async () => {
     const stats = await debugStats(win, { gc: true })
