@@ -7,7 +7,7 @@ import { rmSync, statSync, truncateSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { GARBAGE_PER_UNIT, WRAP, capFor, rowCost, rowsFor } from '../app/renderer/lenses/page-cache'
 import type { Limits, Opened, Page as CorePage } from '../app/shared/protocol'
-import { FIXTURES, type Launched, type TestHooks, debugStats, finish, fixture, launch, sparseFixture, test, visibleRows, waitIndexed, waitOpen, workspaceHeld } from './app'
+import { FIXTURES, type Launched, type TestHooks, debugStats, expectReleasedDocuments, finish, fixture, launch, sparseFixture, test, visibleRows, waitIndexed, waitOpen, workspaceHeld } from './app'
 import { mib, processMemory, summed } from './memory'
 
 type CacheStats = { charged: number; cap: number; reserved: number }
@@ -75,7 +75,7 @@ async function layoutGate(s: (typeof SCRIPTS)[number]): Promise<void> {
   const l = await launch({ hooks: true })
   try {
     const { app, win } = l
-    await expect(win.locator('.open-button')).toHaveText('Open file…') // the empty card: no lens yet
+    await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
     if (s.ax) await app.evaluate(({ app }) => app.setAccessibilitySupportEnabled(true))
     const size = await resize(l, 1280, 480) // the smallest window brief §9 allows
     const hello = await core<{ limits: Limits }>(win, 'hello', { protocol: 1 })
@@ -216,10 +216,14 @@ test('under a budget that holds only the viewport, Raw mounts only the viewport,
     const { win } = l
     await waitOpen(win)
     await viewportOnly(win, L, 'open')
+    // A reload precharges its new lease while the old viewport is still readable.
+    const oldView = (await debugStats(win)).surfaces!.bytes
+    await debugStats(win, { limit: budget + oldView })
     await win.locator('.vl-scroller').focus()
     await win.keyboard.press('F5')
     await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '2')
     await viewportOnly(win, L, 'Reload')
+    await debugStats(win, { limit: budget })
     console.log(`window ${(await resize(l, 1280, 600)).content.join('×')} px`)
     await viewportOnly(win, L, 'resized down')
     console.log(`window ${(await resize(l, 1280, 800)).content.join('×')} px`)
@@ -359,7 +363,7 @@ interface Cycle {
 async function exhaust(docs: string[], budget: number | null, cycles: number): Promise<{ cycles: Cycle[]; openTemp: number }> {
   const l = await launch({ hooks: true, env: budget ? { TYPOSE_TEST_BUDGET: String(budget) } : {} })
   const { win } = l
-  await expect(win.locator('.open-button')).toHaveText('Open file…') // the empty card: no lens, so no cache reserved
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   const hello = await core<{ limits: { openTemp: number } }>(win, 'hello', { protocol: 1 })
   if (!('ok' in hello)) throw new Error(`hello: ${hello.code}`)
   const open = async (path: string) => {
@@ -367,18 +371,20 @@ async function exhaust(docs: string[], budget: number | null, cycles: number): P
     return 'ok' in opened ? opened.ok : opened.code
   }
   const jobs = (n: number) => expect.poll(async () => (await debugStats(win)).jobs, { intervals: [5], timeout: 30_000 }).toBe(n)
+  // The host's view table keeps its paid high-water capacity as the number of concurrent readers grows.
+  const withoutViewTable = (s: Awaited<ReturnType<typeof debugStats>>) => s.ledger.used - s.surfaces!.hostBytes
   const out: Cycle[] = []
   for (let cycle = 0; cycle < cycles; cycle++) {
     const [closing, truncating] = ['exhaust-close.txt', 'exhaust-truncate.txt'].map((name) => sparseFixture(name, 10 * GIB, HEAD))
     try {
-      const baseline = (await debugStats(win, { resetHigh: true })).ledger.used
+      const baseline = withoutViewTable(await debugStats(win, { resetHigh: true }))
       // C6: close mid-index returns every reservation.
       const a = await open(closing)
       if (typeof a === 'string') throw new Error(`open: ${a}`)
       await jobs(1)
       await core(win, 'close', { doc: a.doc })
       await jobs(0)
-      expect((await debugStats(win)).ledger.used).toBe(baseline)
+      expect(withoutViewTable(await debugStats(win))).toBe(baseline)
       // C6: a truncation mid-index freezes the document, which keeps exactly its charges.
       const t = await open(truncating)
       if (typeof t === 'string') throw new Error(`open: ${t}`)
@@ -386,17 +392,17 @@ async function exhaust(docs: string[], budget: number | null, cycles: number): P
       truncateSync(truncating, 2 ** 20)
       await jobs(0)
       const frozen = await debugStats(win)
-      expect(frozen.ledger.used).toBe(baseline + frozen.charges[t.doc].total)
+      expect(withoutViewTable(frozen)).toBe(baseline + frozen.charges[t.doc].total)
       // Documents one at a time, each indexed before the next, until the ledger refuses one.
       const floors = [frozen.charges[t.doc].total]
       const opened = [t.doc]
       let refused: string | null = null
       for (const path of docs) {
-        const before = (await debugStats(win)).ledger.used
+        const before = withoutViewTable(await debugStats(win))
         const d = await open(path)
         if (typeof d === 'string') {
           refused = d
-          expect((await debugStats(win)).ledger.used).toBe(before) // the refused open changed nothing
+          expect(withoutViewTable(await debugStats(win))).toBe(before)
           break
         }
         opened.push(d.doc)
@@ -414,7 +420,8 @@ async function exhaust(docs: string[], budget: number | null, cycles: number): P
       for (const doc of opened) await core(win, 'close', { doc })
       const after = await debugStats(win, { gc: true })
       expect(after).toMatchObject({ jobs: 0, tasks: 0, handles: 0, docs: 0 })
-      expect(after.ledger.used).toBe(baseline) // byte-exact
+      expect(after.surfaces).toMatchObject({ views: 0, pending: 0, bytes: 0 })
+      expect(withoutViewTable(after)).toBe(baseline)
       const coreHost = (await processMemory(l.app)).find((p) => p.name === 'typose-core')!
       out.push({ refused, floors, high: full.ledger.high, limit: full.ledger.limit, baseline: after.ledger.used, private: coreHost.private })
     } finally {
@@ -524,9 +531,10 @@ async function refusedOpen(over: number): Promise<void> {
     const l = await launch({ hooks: true, file: path, env: { TYPOSE_TEST_BUDGET: String(pool + workspace + over * (1 << 20)) } })
     await expect(l.win.locator('.card-state p')).toHaveText("Can't open memory-refused.txt · Typose's memory budget is full. Close a file, then Retry.")
     await expect(l.win.locator('.card-state .open-button')).toHaveText(['Retry', 'Close'])
-    expect(await debugStats(l.win)).toMatchObject({ docs: 0, handles: 0, jobs: 0, ledger: { used: pool + workspace, rendererCache: workspace } })
+    const held = await workspaceHeld(l.win)
+    expect(await debugStats(l.win)).toMatchObject({ docs: 0, handles: 0, jobs: 0, ledger: { used: pool + held, rendererCache: held } })
     await l.win.getByRole('button', { name: 'Close', exact: true }).click()
-    await expect.poll(async () => { const { ledger } = await debugStats(l.win); return ledger.used - ledger.pool }).toBe(0)
+    await expectReleasedDocuments(l.win)
     expect(l.pageErrors).toEqual([])
     await finish(l)
   } finally {

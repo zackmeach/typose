@@ -367,8 +367,9 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       if (opened) { focusCard(destination.id); focusReader(destination.id) }
       return opened
     } catch (error) {
-      setWorkspaceNotice('Cannot open local link · ' + String(error))
       if (freshPreview) previewCloseRequested.current = true
+      if (error instanceof CoreCallError && error.code === 'Frozen') throw error
+      setWorkspaceNotice('Cannot open local link · ' + String(error))
       return false
     } finally {
       pendingSplit.current = 0

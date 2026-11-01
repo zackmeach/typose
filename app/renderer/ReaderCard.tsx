@@ -667,7 +667,14 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   function routeLocal(source: Opened, target: string, path: string, gesture: LocalGesture): Promise<boolean> {
     const current = latest.current.card
     if (current.kind !== 'open' || current.opened !== source || navigating.current || closing.current) return Promise.resolve(false)
-    return shared.openLink(id, source, target, path, gesture)
+    const session = currentSession.current
+    return shared.openLink(id, source, target, path, gesture).catch(error => {
+      if (error instanceof CoreCallError && error.code === 'Frozen') {
+        workspace.updateDocument({ session, doc: source.doc, gen: source.gen }, stored => ({ ...stored, frozen: stored.frozen ?? error.message }))
+        setCard(card => card.kind === 'open' && card.opened === source ? { ...card, frozen: card.frozen ?? error.message } : card)
+      }
+      return false
+    })
   }
 
   /** A target card opens only through the originating document's held capability, never its display path. */
@@ -701,6 +708,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       show(result.ticket.tab, opened, workspace.tab(result.ticket.tab)!, rawBytes, undefined, retired)
       return true
     } catch (error) {
+      if (error instanceof CoreCallError && error.code === 'Frozen') throw error
       setWorkspaceNotice('Cannot open local file · ' + String(error))
       return false
     } finally {

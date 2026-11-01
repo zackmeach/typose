@@ -133,9 +133,10 @@ for (const peakEntries of [1, 256]) windows(`fresh peak-${peakEntries} host meas
     return location.ticket
   }
   // Warm this fresh host at peak one before baseline. The peak-one run never gets a large-table allowance.
+  const viewTableBytes = core.debugStats().ledger.rendererCache
   for (let i = 0; i < 256; i++) await call('releaseSaved', { ticket: await capture() })
   await collect()
-  expect(core.debugStats().ledger.rendererCache).toBe(3 * ((64 << 10) + (16 << 10)))
+  expect(core.debugStats().ledger.rendererCache - viewTableBytes).toBe(3 * ((64 << 10) + (16 << 10)))
   const baseline = heap(), wrapperBase = core.savedStats().wrapperBytes
   let maxRise = 0, maxAllowance = 0, margin = Infinity, samples = 0
   const stable = () => {
@@ -145,8 +146,9 @@ for (const peakEntries of [1, 256]) windows(`fresh peak-${peakEntries} host meas
       const after = core.savedStats(), ledgerAfter = core.debugStats().ledger
       if (before.wrapperBytes !== after.wrapperBytes || before.wrappers !== after.wrappers ||
         ledgerBefore.used !== ledgerAfter.used || ledgerBefore.rendererCache !== ledgerAfter.rendererCache) continue
-      return { rise: Math.max(0, currentHeap - baseline), allowance: ledgerAfter.rendererCache + after.wrapperBytes - wrapperBase,
-        wrappers: after, hostBytes: ledgerAfter.rendererCache }
+      const hostBytes = ledgerAfter.rendererCache - viewTableBytes
+      return { rise: Math.max(0, currentHeap - baseline), allowance: hostBytes + after.wrapperBytes - wrapperBase,
+        wrappers: after, hostBytes }
     }
     throw Error('could not obtain stable contemporaneous heap/ledger/wrapper sample')
   }

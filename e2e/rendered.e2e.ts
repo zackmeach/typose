@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { RENDERED_OFF } from '../app/renderer/card'
 import { viewportCap } from '../app/renderer/lenses/page-cache'
 import type { Limits } from '../app/shared/protocol'
-import { type TestHooks, assertNetLog, debugStats, finish, fixture, launch, lifecycle, stubExternal, test, visibleRows, waitIndexed, waitOpen, workspaceHeld } from './app'
+import { type TestHooks, assertNetLog, debugStats, expectReleasedDocuments, finish, fixture, launch, lifecycle, stubExternal, test, visibleRows, waitIndexed, waitOpen, workspaceHeld } from './app'
 
 type ReserveProbe = { held: boolean; bRendered: boolean; release?: () => void }
 type ShrinkProbe = { held: boolean; bytes?: number; release?: () => void }
@@ -264,7 +264,7 @@ test('a delayed old Rendered reservation response does not block a replacement f
   const b = fixture('pending-reserve-b.md', '# B\n\nParagraph B.\n\n'.repeat(12))
   const l = await launch({ hooks: true })
   const { win } = l
-  await expect(win.locator('.open-button')).toBeVisible()
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   await win.evaluate(({ a, b }) => {
     const core = (window as unknown as {
       typoseTest: { core: { call(method: string, params: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> } }
@@ -314,7 +314,7 @@ test('a delayed old Rendered reservation response does not block a replacement f
 test('reading Raw during a delayed Rendered reservation keeps Raw and releases the unmounted tree allowance', async () => {
   const l = await launch({ hooks: true })
   const { win } = l
-  await expect(win.locator('.open-button')).toBeVisible()
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   await pauseRender(win, 'reserve-response')
   const file = fixture('read-during-reserve.md', Array.from({ length: 400 }, (_, i) => `Paragraph ${i}.\n\n`).join(''))
   await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), file)
@@ -339,7 +339,7 @@ test('reading Raw during a delayed Rendered reservation keeps Raw and releases t
 test('a render that detects a write after indexing freezes Raw with the Reload banner', async () => {
   const l = await launch({ hooks: true })
   const { win } = l
-  await expect(win.locator('.open-button')).toBeVisible()
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   await pauseRender(win, 'request')
   const file = fixture('write-before-render.md', '# First version\n\nA paragraph.\n')
   await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), file)
@@ -500,10 +500,7 @@ test('retired Rendered allowance survives Close, refused open and core restart w
   const first = await debugStats(win)
   const firstWorkspace = await workspaceHeld(win)
   await win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.app.close!())
-  await expect.poll(async () => {
-    const { ledger } = await debugStats(win)
-    return ledger.used - ledger.pool
-  }).toBe(0)
+  await expectReleasedDocuments(win)
   await debugStats(win, { limit: first.ledger.pool + firstWorkspace })
   await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), file)
   await expect(win.locator('.card-message p')).toContainText("Typose's memory budget is full")
@@ -549,10 +546,7 @@ test('terminal Reload failure disposes the retained Rendered tree and releases t
     return ledger.used - ledger.pool
   }).toBe(await workspaceHeld(win))
   await win.locator('.file-tab-close').click()
-  await expect.poll(async () => {
-    const { ledger } = await debugStats(win)
-    return ledger.used - ledger.pool
-  }).toBe(0)
+  await expectReleasedDocuments(win)
   expect(l.pageErrors).toEqual([])
   await finish(l)
 })
@@ -717,7 +711,7 @@ test('an inserted dns-prefetch is not in the NetLog when speculative networking 
   const l = await launch({ netlog: log })
   const host = `dns${Date.now().toString(36)}.invalid`
   const pre = `pre${Date.now().toString(36)}.invalid`
-  await expect(l.win.locator('.open-button')).toBeVisible()
+  await expect(l.win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   await l.win.evaluate(
     ({ host, pre }) => {
       for (const [rel, name] of [
@@ -748,7 +742,7 @@ test('with the speculative switch withheld, an inserted dns-prefetch is in the N
   const log = test.info().outputPath('speculative-on-netlog.json')
   const host = `dns${Date.now().toString(36)}.invalid`
   const l = await launch({ hooks: true, netlog: log, env: { TYPOSE_TEST_ALLOW_SPECULATIVE: '1' } })
-  await expect(l.win.locator('.open-button')).toBeVisible()
+  await expect(l.win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   await l.win.evaluate((host) => {
     const link = document.createElement('link')
     link.rel = 'dns-prefetch'

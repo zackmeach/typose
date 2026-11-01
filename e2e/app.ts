@@ -61,9 +61,11 @@ export const test = base.extend<{ finishLaunches: void }>({
 })
 
 /** `hooks` launches the test-hooks build (`npm run build:hooks`, plan m8), with `env` added to the environment. */
-export async function launch(opts: { file?: string | string[]; userData?: string; netlog?: string; hooks?: boolean; env?: Record<string, string> } = {}): Promise<Launched> {
+export async function launch(opts: { file?: string | string[]; userData?: string; netlog?: string; hooks?: boolean; controlledAccessibility?: boolean; env?: Record<string, string> } = {}): Promise<Launched> {
   const userData = opts.userData ?? mkdtempSync(join(tmpdir(), 'typose-e2e-'))
   const args = [opts.hooks ? join(APP_DIR, 'out-hooks/main/index.js') : APP_DIR, `--user-data-dir=${userData}`]
+  // Windows otherwise auto-enables accessibility after a document opens. The test explicitly switches both native modes.
+  if (process.platform === 'win32' && opts.controlledAccessibility) args.push('--disable-renderer-accessibility')
   if (opts.netlog) args.push(`--log-net-log=${opts.netlog}`)
   if (opts.file) args.push(...(Array.isArray(opts.file) ? opts.file : [opts.file]))
   const app = await electron.launch({ args, ...(opts.env ? { env: { ...process.env, ...opts.env } as Record<string, string> } : {}) })
@@ -263,13 +265,30 @@ export const cachedItems = (win: Page): Promise<{ key: number | string; text: st
 export const debugStats = (win: Page, params: { gc?: boolean; resetHigh?: boolean; limit?: number } = {}): Promise<DebugStats> =>
   win.evaluate((p) => (window as unknown as { typoseTest: TestHooks }).typoseTest.core.call('debugStats', p) as Promise<DebugStats>, params)
 
-/** Independent renderer-side workspace share, so native aggregate assertions remain exact. */
-export const workspaceHeld = (win: Page): Promise<number> =>
-  win.evaluate(() => {
+/** An empty window can retain history. Clear it, then distinguish the host's paid table capacities from leaked readers. */
+export async function expectReleasedDocuments(win: Page): Promise<void> {
+  const owner = [...running].find(run => run.win === win)
+  if (!owner) throw new Error('Expected an owned Electron window')
+  await owner.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('command', 'clear-closed'))
+  await expect.poll(async () => {
+    const stats = await debugStats(win, { gc: true })
+    return { docs: stats.docs, jobs: stats.jobs, tasks: stats.tasks, handles: stats.handles, saved: stats.saved.tickets,
+      views: stats.surfaces?.views, pending: stats.surfaces?.pending, workspace: stats.surfaces?.workspaceBytes,
+      unaccounted: stats.ledger.used - stats.ledger.pool - stats.saved.hostBytes - (stats.surfaces?.hostBytes ?? 0) }
+  }).toEqual({ docs: 0, jobs: 0, tasks: 0, handles: 0, saved: 0, views: 0, pending: 0, workspace: 0, unaccounted: 0 })
+}
+
+/** Non-lens cache charges: the renderer's bank and distinct native-host table capacities. */
+export const workspaceHeld = async (win: Page): Promise<number> => {
+  const held = await win.evaluate(() => {
     const bank = (window as unknown as { typoseTest: TestHooks }).typoseTest.app.workspace()
     if (!bank?.settled) throw new Error('workspace reservation is not settled')
     return bank.held
   })
+  const stats = await debugStats(win)
+  expect(stats.surfaces?.workspaceBytes).toBe(held)
+  return held + stats.surfaces!.hostBytes + stats.saved.hostBytes
+}
 
 /** The rows on screen, top to bottom: their line numbers (from the gutter) and their text. */
 export async function visibleRows(win: Page): Promise<{ line: number; text: string }[]> {

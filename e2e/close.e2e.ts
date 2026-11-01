@@ -1,10 +1,10 @@
 // Plan C6 on the test-hooks build: what close and a failure release, read from the core's debug stats, the ledger's
-// included (plan C1). With nothing open and no lens mounted, the ledger holds only its pool: that's the baseline. The
+// included (plan C1). With readers and history closed, only the pool and retained host table capacities remain. The
 // 10 GiB fixture is sparse: 2,000 lines of text, then zeros the disk doesn't store but the index still reads.
 import { expect } from '@playwright/test'
 import { rmSync, truncateSync } from 'node:fs'
 import { join } from 'node:path'
-import { FIXTURES, type TestHooks, debugStats, finish, launch, sparseFixture, test, waitOpen } from './app'
+import { FIXTURES, type TestHooks, debugStats, expectReleasedDocuments, finish, launch, sparseFixture, test, waitOpen } from './app'
 
 const GIB = 2 ** 30
 const HEAD = Array.from({ length: 2000 }, (_, i) => `line ${i}`).join('\n') + '\n'
@@ -41,10 +41,8 @@ test('close mid-index on 10 GiB: the job stops within 50 ms, and 0 jobs, 0 tasks
   expect(stoppedMs).toBeLessThan(50)
   expect(await debugStats(l.win)).toMatchObject({ jobs: 0, tasks: 0, handles: 0, docs: 0 })
   // The ledger is back to its baseline, byte for byte: the document's charges and the lens's cache are released.
-  await expect.poll(async () => (await debugStats(l.win)).ledger).toMatchObject({ rendererCache: 0 })
-  const { ledger } = await debugStats(l.win)
-  expect(ledger.used).toBe(ledger.pool)
-  await expect(l.win.locator('.open-button')).toHaveText('Open file…') // the empty card
+  await expectReleasedDocuments(l.win)
+  await expect(l.win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   expect(l.pageErrors).toEqual([])
   await finish(l)
 })
@@ -64,9 +62,7 @@ test('a truncation mid-index freezes the document: 0 jobs and 0 tasks remain, it
   console.log(`frozen: ${total} bytes retained (${hashes} hashes, ${checkpoints} checkpoints, ${cache} cache, ${metadata} metadata)`)
   await l.win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.app.close!())
   await expect.poll(() => debugStats(l.win)).toMatchObject({ jobs: 0, tasks: 0, handles: 0, docs: 0 })
-  await expect.poll(async () => (await debugStats(l.win)).ledger).toMatchObject({ rendererCache: 0 })
-  const { ledger } = await debugStats(l.win)
-  expect(ledger.used).toBe(ledger.pool) // a later close returns it to the baseline
+  await expectReleasedDocuments(l.win)
   expect(l.pageErrors).toEqual([])
   await finish(l)
 })
@@ -75,11 +71,22 @@ test('a double Reload mid-index on 10 GiB keeps one index job, and close then le
   const l = await midIndex()
   // Two Reloads in one task, so the second reaches the core host while the first's first page is being read. They're
   // sent from the page's core client: App starts no Reload while one is under way (plan C1).
-  const replies = await l.win.evaluate(async () => {
+  await l.win.evaluate(() => {
     const { core } = (window as unknown as { typoseTest: TestHooks }).typoseTest
-    const reload = () => core.call('reload', { doc: 1, count: 1, bytes: 0 }).then((r) => (r as { gen: number }).gen, (e: { code: string }) => e.code)
-    return Promise.all([reload(), reload()])
+    const call = core.call.bind(core)
+    core.call = (method, params) => {
+      if (method !== 'reload') return call(method, params)
+      core.call = call
+      const first = call(method, params), second = call(method, params)
+      const result = (reply: Promise<unknown>) => reply.then(r => (r as { gen: number }).gen, (e: { code: string }) => e.code)
+      const state = window as unknown as { doubleReload: Promise<unknown[]> }
+      state.doubleReload = Promise.all([result(first), result(second)])
+      return second
+    }
   })
+  await l.win.keyboard.press(process.platform === 'darwin' ? 'Meta+r' : 'Control+r')
+  await l.win.waitForFunction(() => 'doubleReload' in window)
+  const replies = await l.win.evaluate(() => (window as unknown as { doubleReload: Promise<unknown[]> }).doubleReload)
   // The first ends Stale, or Frozen when generation 3 supersedes its first page's read; the second gives generation 3.
   expect(['Stale', 'Frozen']).toContain(replies[0])
   expect(replies[1]).toBe(3)

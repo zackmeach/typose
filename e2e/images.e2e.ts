@@ -1,7 +1,7 @@
 import { type Page, expect } from '@playwright/test'
 import { writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
-import { type TestHooks, assertNetLog, debugStats, finish, fixture, launch, test } from './app'
+import { type TestHooks, assertNetLog, debugStats, expectReleasedDocuments, finish, fixture, launch, test } from './app'
 import { imageGif, imageJpeg, imagePng, imageWebp } from './image-fixtures'
 import { processMemory } from './memory'
 
@@ -48,7 +48,7 @@ test('two image loads at most; hidden and resumed trees retain their blobs and c
   const file = fixture('image-queue.md', '# Queue\n\n![First](image-queue.png) ![Second](image-queue.png) ![Third](image-queue.png)\n')
   const l = await launch({ hooks: true })
   const { win } = l
-  await expect(win.locator('.open-button')).toBeVisible()
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   await win.evaluate(() => {
     const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core
     const call = core.call.bind(core)
@@ -89,7 +89,7 @@ test('two image loads at most; hidden and resumed trees retain their blobs and c
   }
   expect(await win.evaluate(() => (window as unknown as { imageQueue: { starts: number; max: number } }).imageQueue)).toMatchObject({ starts: 3, max: 2 })
   await win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.app.close?.())
-  await expect(win.locator('.open-button')).toBeVisible()
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   await expect.poll(async () => { const s = await debugStats(win); return [s.docs, s.jobs, s.tasks, s.handles] }).toEqual([0, 0, 0, 0])
   expect(l.pageErrors).toEqual([])
   await finish(l)
@@ -101,7 +101,7 @@ test('a tight image budget keeps alt text and the reader; a delayed resource can
   const file = fixture('image-delayed.md', '# Delayed\n\n![Delayed image](image-delayed.png)\n')
   const l = await launch({ hooks: true })
   const { win } = l
-  await expect(win.locator('.open-button')).toBeVisible()
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   await win.evaluate(() => {
     const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core
     const call = core.call.bind(core)
@@ -145,7 +145,7 @@ test('close cancels active and queued image reads within the measured chunk dela
   const file = fixture('image-cancel.md', '# Cancel images\n\n![First](image-cancel.png) ![Second](image-cancel.png)\n')
   const l = await launch({ hooks: true, env: { TYPOSE_TEST_READ_DELAY: '500' } })
   const { win } = l
-  await expect(win.locator('.open-button')).toBeVisible()
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   await win.evaluate(() => {
     const state = window as unknown as { typoseTest: TestHooks & { core: { call(method: string, params: object, signal?: AbortSignal): Promise<unknown> } }; pendingImagePrepares: number }
     const core = state.typoseTest.core
@@ -180,7 +180,7 @@ test('close cancels active and queued image reads within the measured chunk dela
   expect(after.cancels).toBeGreaterThanOrEqual(2)
   expect(after.cancelled).toBe(after.cancels)
   expect(after.cancelMs).toBeLessThan(after.delayMs + 50)
-  expect(after.ledger.used).toBe(after.ledger.pool)
+  await expectReleasedDocuments(win)
   console.log(`image close: ${after.cancelled} cancelled, ${after.cancelMs.toFixed(3)}ms after cancel, measured read delay ${after.delayMs.toFixed(3)}ms; native ownership at baseline`)
   expect(l.pageErrors).toEqual([])
   await finish(l)
@@ -192,7 +192,7 @@ test('an image request rechecks its Markdown source and raises the source-change
   const file = fixture('image-source.md', '# Original\n\n![Source image](image-source.png)\n')
   const l = await launch({ hooks: true })
   const { win } = l
-  await expect(win.locator('.open-button')).toBeVisible()
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   await win.evaluate(() => {
     const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core
     const call = core.call.bind(core)
@@ -220,7 +220,7 @@ for (const method of ['reload', 'openLocal'] as const) test(`${method} freezes l
   const source = fixture(`image-handoff-${method}.md`, `# Handoff\n\n[Next](image-handoff-${method}-target.md)\n\n![Late image](image-handoff-${method}.png)\n`)
   const l = await launch({ hooks: true })
   const { win } = l
-  await expect(win.locator('.open-button')).toBeVisible()
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   await win.evaluate((heldMethod) => {
     const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core
     const call = core.call.bind(core)
@@ -241,7 +241,7 @@ for (const method of ['reload', 'openLocal'] as const) test(`${method} freezes l
   await ready(win)
   await expect.poll(() => win.evaluate(() => typeof (window as unknown as { imageHandoff: { image?: () => void } }).imageHandoff.image)).toBe('function')
   if (method === 'reload') await win.keyboard.press('Control+r')
-  else await win.getByRole('link', { name: 'Next', exact: true }).click()
+  else await win.getByRole('link', { name: 'Next', exact: true }).click({ modifiers: ['Control'] })
   await expect.poll(() => win.evaluate(() => typeof (window as unknown as { imageHandoff: { handoff?: () => void } }).imageHandoff.handoff)).toBe('function')
   await win.evaluate(() => (window as unknown as { imageHandoff: { image: () => void } }).imageHandoff.image())
   await expect(win.locator('.tp-img')).toContainText('Memory budget is full')
@@ -260,7 +260,7 @@ for (const side of [1024, 2048]) test(`local image ${side}px allocation, switche
   const file = fixture(`image-memory-${side}.md`, `# Image memory\n\n![Memory image](image-memory-${side}.png)\n`)
   const l = await launch({ hooks: true })
   const { win } = l
-  await expect(win.locator('.open-button')).toBeVisible()
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   const cdp = await win.context().newCDPSession(win)
   await cdp.send('HeapProfiler.collectGarbage')
   const renderer = async () => (await processMemory(l.app)).find((p) => p.type === 'Tab')!

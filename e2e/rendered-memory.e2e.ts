@@ -2,7 +2,7 @@
 // Reload without collecting garbage. Compare each private-byte sample with the ledger held then.
 import { expect } from '@playwright/test'
 import { rmSync } from 'node:fs'
-import { type TestHooks, debugStats, finish, fixture, launch, test, waitOpen, waitIndexed } from './app'
+import { type TestHooks, debugStats, expectReleasedDocuments, finish, fixture, launch, test, waitOpen, waitIndexed } from './app'
 import { mib, processMemory } from './memory'
 
 const CEILING = 8 << 20
@@ -57,7 +57,7 @@ for (const sampleCase of CASES)
     const slug = sampleCase.name.replaceAll(' ', '-')
     const smallMarkdown = fixture(`memory-small-${slug}.md`, '# Small replacement\n\nA paragraph.\n')
     const text = fixture(`memory-text-${slug}.txt`, 'A plain text replacement.\n')
-    const l = await launch({ hooks: true })
+    const l = await launch({ hooks: true, controlledAccessibility: true })
     const { win } = l
     let stage = 'empty'
     let watching = false
@@ -66,7 +66,7 @@ for (const sampleCase of CASES)
     let discarded = 0
     const samples: { stage: string; private?: number; reserved: number }[] = []
     try {
-      await expect(win.locator('.open-button')).toBeVisible()
+      await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
       const originalLimit = (await debugStats(win)).ledger.limit
       const qualification = await debugStats(win, { limit: QUALIFICATION_BUDGET })
       expect(qualification.ledger.limit).toBe(QUALIFICATION_BUDGET)
@@ -208,11 +208,8 @@ for (const sampleCase of CASES)
       watching = false
       await sampling
       await win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.app.close!())
-      await expect(win.locator('.open-button')).toBeVisible()
-      await expect.poll(async () => {
-        const { ledger } = await debugStats(win)
-        return ledger.used - ledger.pool
-      }).toBe(0)
+      await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
+      await expectReleasedDocuments(win)
       stage = 'reopen after Close'
       await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), smallMarkdown)
       await expect(win.locator('.card-name')).toHaveText(`memory-small-${slug}.md`)

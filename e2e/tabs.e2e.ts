@@ -2,7 +2,7 @@ import AxeBuilder from '@axe-core/playwright'
 import { type Page, expect } from '@playwright/test'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { FIXTURES, type TestHooks, debugStats, finish, fixture, launch, lifecycle, osFocus, pressAsOS, stubOpenDialog, test, visibleRows, waitIndexed, waitOpen } from './app'
+import { FIXTURES, type TestHooks, debugStats, expectReleasedDocuments, finish, fixture, launch, lifecycle, osFocus, pressAsOS, stubOpenDialog, test, visibleRows, waitIndexed, waitOpen } from './app'
 import { processMemory } from './memory'
 import { workspaceCharge } from '../app/renderer/workspace-budget'
 
@@ -14,13 +14,13 @@ test('a refused workspace precharge preserves the empty card and retries once th
   const file = fixture('tabs-workspace-refused.txt', 'Retry works\n')
   const l = await launch({ hooks: true })
   const { win } = l
-  await expect(win.locator('.open-button')).toBeVisible()
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   const { ledger } = await debugStats(win)
-  await debugStats(win, { limit: ledger.pool + 1 })
+  await debugStats(win, { limit: ledger.used + 1 })
   await open(l, file)
   await expect(win.locator('.banner')).toHaveText("Can't open another tab: Typose's memory budget is full")
   await expect(win.locator('.file-tab')).toHaveCount(0)
-  expect(await debugStats(win)).toMatchObject({ docs: 0, handles: 0, jobs: 0, ledger: { used: ledger.pool, rendererCache: 0 } })
+  expect(await debugStats(win)).toMatchObject({ docs: 0, handles: 0, jobs: 0, ledger: { used: ledger.used, rendererCache: ledger.rendererCache } })
   await debugStats(win, { limit: ledger.limit })
   await open(l, file)
   await waitOpen(win)
@@ -65,9 +65,8 @@ async function closeTabs(win: Page): Promise<void> {
     await win.locator('.file-pill[data-selected] .file-tab-close').click()
     await expect(win.locator('.file-tab-close')).toHaveCount(before - 1)
   }
-  await expect(win.locator('.open-button')).toBeVisible()
-  await expect.poll(async () => { const s = await debugStats(win); return [s.docs, s.jobs, s.tasks, s.handles] }).toEqual([0, 0, 0, 0])
-  await expect.poll(async () => { const final = await debugStats(win); return final.ledger.used - final.ledger.pool }).toBe(0)
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
+  await expectReleasedDocuments(win)
 }
 
 test('permanent tabs retain document identity, Raw choice and source position; duplicate opens focus the existing tab', async () => {
@@ -231,7 +230,7 @@ test('a delayed replacement after A-B-A displays the new owned document identity
   const l = await launch({ hooks: true, file: source })
   const { win } = l
   await rendered(win)
-  await win.getByRole('link', { name: 'Next', exact: true }).click()
+  await win.getByRole('link', { name: 'Next', exact: true }).click({ modifiers: ['Control'] })
   await expect(win.locator('.card-name')).toHaveText('tabs-replace-a.md')
   await rendered(win)
   await open(l, b)
@@ -270,7 +269,7 @@ test('a delayed replacement after A-B-A displays the new owned document identity
   await expect(win.locator('.card-name')).toHaveText('tabs-replace-c.txt', { timeout: 10_000 })
   await waitOpen(win)
   await expect(win.locator('.vl-row .text').first()).toHaveText('C replacement')
-  await expect(win.locator('.file-tab')).toHaveCount(2)
+  await expect(win.locator('.file-tab')).toHaveCount(3)
   await closeTabs(win)
   expect(l.pageErrors).toEqual([])
   await finish(l)
@@ -414,7 +413,7 @@ test('derived local tabs retain their capability across selection and cannot reg
   const l = await launch({ hooks: true, file: source })
   const { win } = l
   await rendered(win)
-  await win.getByRole('link', { name: 'Next', exact: true }).click()
+  await win.getByRole('link', { name: 'Next', exact: true }).click({ modifiers: ['Control'] })
   await expect(win.locator('.card-name')).toHaveText('tabs-derived-target.md')
   await rendered(win)
   await open(l, other)
@@ -427,6 +426,7 @@ test('derived local tabs retain their capability across selection and cannot reg
   const spawned = lifecycle(l.userData).filter((r) => r.event === 'utility-spawn').at(-1)!
   process.kill(spawned.utilityPid as number)
   await expect(win.locator('.card-message p')).toContainText("Typose's core stopped")
+  await expect(win.getByRole('button', { name: 'Reopen', exact: true })).toBeEnabled()
   await tab(win, 'tabs-derived-target.md').click()
   await expect(win.getByRole('button', { name: 'Open file…', exact: true })).toBeEnabled()
   await expect(win.getByRole('button', { name: 'Reopen', exact: true })).toHaveCount(0)
@@ -457,7 +457,8 @@ test('an unexpected local result path is abandoned and the still-owned source ca
       return method === 'openLocal' ? { ...(reply as object), path: 'unexpected different path' } : reply
     }
   })
-  await win.getByRole('link', { name: 'Next', exact: true }).click()
+  await win.getByRole('link', { name: 'Next', exact: true }).click({ modifiers: ['Control'] })
+  await expect(win.getByRole('link', { name: 'Next', exact: true })).toHaveAttribute('title', /Not opened/)
   await expect(win.getByRole('heading', { name: 'Original source', exact: true })).toBeVisible()
   await expect(win.locator('.file-tab')).toHaveCount(1)
   await expect.poll(async () => (await debugStats(win)).docs).toBe(1)
@@ -471,7 +472,7 @@ for (const ax of [false, true]) for (const count of [16, 64]) test(count + ' tab
   const files = Array.from({ length: count }, (_, i) => fixture('tabs-memory-' + count + '-' + i + '.txt', 'Small file ' + i + '\n'))
   const l = await launch({ hooks: true })
   const { win } = l
-  await expect(win.locator('.open-button')).toBeVisible()
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   if (ax) await l.app.evaluate(({ app }) => app.setAccessibilitySupportEnabled(true))
   const cdp = await win.context().newCDPSession(win)
   await cdp.send('HeapProfiler.collectGarbage')
