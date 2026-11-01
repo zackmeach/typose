@@ -114,6 +114,10 @@ impl Raw {
         self.doc.verified(generation, |store| crate::index::locate_line(store, &index, line))
     }
 
+    pub fn source_encoding(&self) -> &'static Encoding {
+        self.index.read().unwrap().encoding
+    }
+
     pub fn bind_folder(&mut self, folder: &crate::local::folder::Folder) -> Result<bool, DocError> {
         self.doc.bind_folder(folder)
     }

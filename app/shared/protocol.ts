@@ -88,6 +88,12 @@ export interface Opened {
 export interface SurfaceRef { session: number; id: number }
 export interface ViewRef { session: number; surface: number; id: number; doc: number; gen: number }
 
+export interface SourceFindRef { view: ViewRef; id: number }
+export interface SourceFindInfo { ref: SourceFindRef; count: number; scannedBytes: number; complete: boolean }
+export interface SourceHit { start: number; end: number; line: number; lineStart: number; text: string; map: WireMap; matchStart: number; matchEnd: number }
+export interface SourceFindPage extends SourceFindInfo { hits: SourceHit[] }
+export interface SourceFindSeek { hit?: SourceHit; wrapped: boolean; ordinal?: number }
+
 export type CsvDelimiter = ',' | '\t' | ';' | '|'
 export interface CsvRef { session: number; doc: number; gen: number; revision: number }
 export interface CsvSpan { start: number; end: number }
@@ -118,6 +124,10 @@ export interface SavedTicket { session: number; id: string }
 export type CapturedLocation = { kind: 'manual'; path: string } | { kind: 'derived'; ticket: SavedTicket }
 
 export interface Methods {
+  sourceFindStart: { params: { view: ViewRef; query: string; matchCase: boolean }; result: SourceFindInfo }
+  sourceFindScan: { params: { ref: SourceFindRef }; result: SourceFindPage }
+  sourceFindSeek: { params: { ref: SourceFindRef; from?: number; direction: 'next' | 'previous' }; result: SourceFindSeek }
+  sourceFindClose: { params: { ref: SourceFindRef }; result: boolean }
   csvConfigure: { params: { surface?: SurfaceRef; doc: number; gen: number; options: CsvOptions }; result: CsvInfo }
   csvPage: { params: { ref: CsvRef; rowStart: number; rowCount: number; columnStart: number; columnCount: number }; result: CsvPage }
   csvPiece: { params: { continuation: CsvContinuation }; result: CsvCellPiece }
@@ -272,7 +282,7 @@ export interface TyposeApi {
 }
 
 /** The menu's commands (brief §3.2's M1 subset): ☰ on Windows and Linux, the native menu on macOS. */
-export type Command = 'open' | 'open-folder' | 'toggle-sidebar' | 'refresh-folders' | 'split-right' | 'close-card' | 'move-tab-right' | 'reload' | 'close-tab' | 'reopen-tab' | 'clear-closed' | 'exit'
+export type Command = 'open' | 'open-folder' | 'toggle-sidebar' | 'refresh-folders' | 'split-right' | 'close-card' | 'move-tab-right' | 'reload' | 'close-tab' | 'reopen-tab' | 'clear-closed' | 'find' | 'find-next' | 'find-previous' | 'exit'
 
 /** The renderer's startup marks (plan C8, §5). */
 export const STARTUP_MARKS = [

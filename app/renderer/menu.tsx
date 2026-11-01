@@ -24,6 +24,9 @@ export function AppMenu({ run }: { run: (command: Command) => void }) {
           <MenuItem id="reload" className="menu-item">
             Reload
           </MenuItem>
+          <MenuItem id="find" className="menu-item">Find in file…</MenuItem>
+          <MenuItem id="find-next" className="menu-item">Next match</MenuItem>
+          <MenuItem id="find-previous" className="menu-item">Previous match</MenuItem>
           <MenuItem id="close-tab" className="menu-item">
             Close tab
           </MenuItem>

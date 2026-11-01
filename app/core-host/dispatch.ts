@@ -37,10 +37,15 @@ import {
   type FolderRoot,
   type FolderPage,
   type SurfaceRef,
+  type SourceFindRef,
+  type SourceFindInfo,
+  type SourceFindPage,
+  type SourceFindSeek,
   type ViewRef
 } from '../shared/protocol'
 import { isValid } from './numbers'
 import { boundedLink, decodedLocalTarget, localTarget } from './local-target'
+import { findNumber, findProgress, sourceHit, sourceHits } from './find-validation'
 
 declare const __TEST_HOOKS__: boolean
 
@@ -269,6 +274,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   type ReadEntry = {
     doc?: number; cancel: Cancel; retainOnLeave: boolean; cancelled: boolean; cancelledAt?: number
     candidate?: true; saved?: SavedRoute; folder?: NativeFolderRoot; surface?: number; csv?: true; csvConfig?: true
+    findView?: number; findId?: number
   }
   const reads = new Map<number, ReadEntry>()
   const saved = new Map<string, SavedRoute>()
@@ -325,7 +331,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     return { session, doc: id, gen, id: resource }
   }
 
-  type Lease = { ref: ViewRef; bytes: number }
+  type Lease = { ref: ViewRef; bytes: number; sourceFind?: number }
   type SurfaceState = { ref: SurfaceRef; alive: boolean; views: Map<number, Lease>; current?: number; latest?: Pending }
   type Pending = { request: number; surface: SurfaceState; bytes: number; doc?: number; gen?: number; disposed: boolean; previousView?: number; kind?: 'activate' | 'reload' }
   // Surface zero is an isolated compatibility owner. Explicit documents never accept its doc/gen-only cleanup.
@@ -422,6 +428,8 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     if (!reserveTable(surfaces.size, leaseCount() + 1, pendingViews.size)) throw new Refusal('Memory', 'the view lease table cannot grow')
     doc.setCacheActive(gen, true)
     const ref: ViewRef = { session, surface: surface.ref.id, id: nextView++, doc: id, gen }
+    const previous = currentLease(surface)
+    if (previous) closeSourceFind(previous)
     surface.views.set(ref.id, { ref, bytes: pending.bytes })
     surface.current = ref.id
     giveBack(pending, true) // the previous view remains paid until its exact lease is detached
@@ -448,7 +456,59 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     }
     return { surface, lease }
   }
+  const findLease = (view: unknown): Lease => {
+    if (view === undefined) throw new Refusal('InvalidParams', 'Find requires an exact activation lease', 'view')
+    const owned = requestedLease({ view })
+    if (!owned || owned.surface.current !== owned.lease.ref.id) throw new Refusal('Stale', 'the Find view was replaced')
+    const { lease } = owned
+    if (docOwners.get(lease.ref.doc) !== lease.ref.surface || getDoc(lease.ref.doc).generation !== lease.ref.gen)
+      throw new Refusal('Stale', 'the Find document or owner was replaced')
+    return lease
+  }
+  const findQuery = (p: Params): string => {
+    if (typeof p.query !== 'string' || p.query.length < 1 || p.query.length > 512)
+      throw new Refusal('InvalidParams', 'query must contain 1–512 valid UTF-16 units', 'query')
+    try { encodeURIComponent(p.query) } catch { throw new Refusal('InvalidParams', 'query contains an unpaired surrogate', 'query') }
+    if (typeof p.matchCase !== 'boolean') throw new Refusal('InvalidParams', 'matchCase must be boolean', 'matchCase')
+    return p.query
+  }
+  const findDirection = (p: Params): boolean => {
+    if (p.direction !== 'next' && p.direction !== 'previous') throw new Refusal('InvalidParams', 'direction must be next or previous', 'direction')
+    return p.direction === 'previous'
+  }
+  const sourceFindRef = (value: unknown): { ref: SourceFindRef; lease: Lease; doc: Doc } => {
+    if (!isRecord(value)) throw new Refusal('InvalidParams', 'ref must be a Find reference', 'ref')
+    const lease = findLease(value.view)
+    const id = int(value, 'id', 'ref.id')
+    if (lease.sourceFind !== id) throw new Refusal('Stale', 'the Find query was replaced')
+    return { ref: { view: lease.ref, id }, lease, doc: getDoc(lease.ref.doc) }
+  }
+  const cancelFindReads = (lease: Lease, id: number): void => {
+    for (const entry of reads.values()) if (entry.findView === lease.ref.id && entry.findId === id) {
+      entry.cancelled = true; entry.cancel.cancel()
+    }
+  }
+  const closeSourceFind = (lease: Lease): void => {
+    const id = lease.sourceFind
+    if (id === undefined) return
+    lease.sourceFind = undefined
+    cancelFindReads(lease, id)
+    const doc = docs.get(lease.ref.doc)
+    if (doc?.generation === lease.ref.gen) doc.sourceFindClose(lease.ref.gen, id)
+  }
+  const closeDocumentFind = (id: number): void => {
+    for (const surface of surfaces.values()) for (const lease of surface.views.values()) if (lease.ref.doc === id) closeSourceFind(lease)
+  }
+  const sourceFindRead = <T>(req: number, ref: SourceFindRef, lease: Lease, start: (cancel: Cancel) => Promise<T>): Promise<T> =>
+    read(req, ref.view.doc, async (cancel) => {
+      Object.assign(reads.get(req)!, { findView: lease.ref.id, findId: ref.id })
+      const result = await start(cancel)
+      if (reads.get(req)?.cancelled) throw new Refusal('Cancelled', 'the Find request was cancelled')
+      if (findLease(ref.view) !== lease || lease.sourceFind !== ref.id) throw new Refusal('Stale', 'the Find query was replaced while reading')
+      return result
+    })
   const detach = (surface: SurfaceState, lease: Lease): void => {
+    closeSourceFind(lease)
     surface.views.delete(lease.ref.id)
     if (surface.current === lease.ref.id) surface.current = undefined
     for (const pending of pendingViews.values()) if (pending.surface === surface && pending.doc === lease.ref.doc
@@ -460,6 +520,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   const closeDoc = (id: number): boolean => {
     const doc = docs.get(id)
     if (!doc) return false
+    closeDocumentFind(id)
     invalidateCsv(id)
     jobs.get(id)?.cancel()
     cancelReads(id)
@@ -575,6 +636,44 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
 
   // Each handler checks all of its parameters before it calls the addon or changes state. `id` is the request's.
   const handlers: Record<string, (params: Params, id: number) => unknown> = {
+    sourceFindStart: (p): SourceFindInfo => {
+      const query = findQuery(p), lease = findLease(p.view)
+      const doc = getDoc(lease.ref.doc)
+      const native = doc.sourceFindStart(lease.ref.gen, query, p.matchCase as boolean)
+      const id = findNumber(native.id, 0xffff_ffff)
+      if (id === 0) throw new Refusal('Internal', 'the core returned an invalid Find identity')
+      try {
+        const progress = findProgress(native, doc.size)
+        closeDocumentFind(lease.ref.doc)
+        lease.sourceFind = id
+        return { ref: { view: lease.ref, id }, ...progress }
+      } catch (e) { doc.sourceFindClose(lease.ref.gen, id); throw e }
+    },
+    sourceFindScan: (p, req): Promise<SourceFindPage> => {
+      const { ref, lease, doc } = sourceFindRef(p.ref)
+      return sourceFindRead(req, ref, lease, async (cancel) => {
+        const value = await doc.sourceFindScan(ref.view.gen, ref.id, cancel)
+        return { ref, ...findProgress(value, doc.size), hits: sourceHits(value.hits, doc.size) }
+      })
+    },
+    sourceFindSeek: (p, req): Promise<SourceFindSeek> => {
+      const previous = findDirection(p)
+      const { ref, lease, doc } = sourceFindRef(p.ref)
+      const from = p.from === undefined ? undefined : csvRequestNumber(p.from, 'from', 0, doc.size)
+      return sourceFindRead(req, ref, lease, async (cancel) => {
+        const value = await doc.sourceFindSeek(ref.view.gen, ref.id, from, previous, cancel)
+        if (typeof value.wrapped !== 'boolean') throw new Refusal('Internal', 'the core returned invalid Find wrap state')
+        const hit = value.hit == null ? undefined : sourceHit(value.hit, doc.size)
+        const ordinal = value.ordinal == null ? undefined : findNumber(value.ordinal)
+        if ((hit === undefined) !== (ordinal === undefined)) throw new Refusal('Internal', 'the core returned invalid Find position')
+        return { ...(hit ? { hit, ordinal } : {}), wrapped: value.wrapped }
+      })
+    },
+    sourceFindClose: (p): boolean => {
+      const { lease } = sourceFindRef(p.ref)
+      closeSourceFind(lease)
+      return true
+    },
     createSurface: (): SurfaceRef => {
       if (!isValid(nextSurface, 1, ranges.get('id')!.max)) throw new Refusal('Refused', 'surface identities are exhausted')
       if (!reserveTable(surfaces.size + 1, leaseCount(), pendingViews.size)) throw new Refusal('Memory', 'the surface table cannot grow')
@@ -1039,6 +1138,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         const path = !doc.localOnly && !doc.folder && roots.size ? resolve(doc.path).toLocaleLowerCase('en-US') : undefined
         const root = path && [...roots.values()].sort((a, b) => b.path.length - a.path.length)
           .find((r) => path.startsWith(r.path.replace(/[\\/]+$/, '').toLocaleLowerCase('en-US') + '\\'))
+        closeDocumentFind(id)
         if (root) doc.reloadInFolder(root.native)
         else doc.reload()
         const gen = doc.generation

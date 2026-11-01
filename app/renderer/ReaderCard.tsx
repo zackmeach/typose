@@ -14,6 +14,8 @@ import { type SavedLocation, type SelectionTicket, type TabId, type WorkspaceSto
 import { FileTabs } from './file-tabs'
 import { folderNode } from './folders'
 import type { LocalGesture, ReaderHandle, ReaderWindow } from './reader-window'
+import { FindBar } from './FindBar'
+import type { FindController } from './find'
 
 /** Z37's scan marks (plan A's veto, `afc58f9`), on the renderer's User Timing timeline: the gate reads them. */
 const MARKS = ['typose:open-start', 'typose:first-screen', 'typose:line-scan', 'typose:index-done']
@@ -43,6 +45,7 @@ interface ShownLens {
   yieldReservation(): void
   resumeReservation(): void
   dispose(release?: boolean): void
+  readonly find?: FindController
 }
 
 interface RetainedRendered {
@@ -89,6 +92,39 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   const live = useRef<{ session: number; doc: number; gen: number; view?: ViewRef } | null>(null)
   const pendingActivation = useRef<{ session: number; doc: number; gen: number; operation: symbol; selection: SelectionTicket } | null>(null)
   const lens = useRef<ShownLens | null>(null)
+  const [findController, setFindController] = useState<FindController | undefined>(undefined)
+  const [findOpen, setFindOpen] = useState(false)
+  const [findQuery, setFindQuery] = useState('')
+  const [findCase, setFindCase] = useState(false)
+  const findNow = useRef({ open: findOpen, query: findQuery, controller: findController })
+  findNow.current = { open: findOpen, query: findQuery, controller: findController }
+  const findDirection = useRef<1 | -1 | undefined>(undefined)
+  useEffect(() => {
+    if (!findOpen || !findController) return
+    findController.search({ text: findQuery, matchCase: findCase })
+    if (findDirection.current) { findController.next(findDirection.current); findDirection.current = undefined }
+    return () => findController.close()
+  }, [findOpen, findController, findQuery, findCase])
+
+  function findAction(action: 'open' | 'next' | 'previous' | 'close'): boolean {
+    const state = findNow.current
+    if (action === 'close') {
+      if (!state.open) return false
+      state.controller?.close()
+      setFindOpen(false)
+      lens.current?.focus()
+      return true
+    }
+    if (action === 'open' || !state.open) {
+      if (action !== 'open' && state.query) findDirection.current = action === 'previous' ? -1 : 1
+      setFindOpen(true)
+      requestAnimationFrame(() => {
+        const input = document.querySelector<HTMLInputElement>(`[data-card="${CSS.escape(id)}"] .find-bar input[type="search"]`)
+        input?.focus(); input?.select()
+      })
+    } else state.controller?.next(action === 'previous' ? -1 : 1)
+    return true
+  }
   const picked = useRef<'raw' | 'rendered' | 'grid' | null>(null)
   const [csvChanging, setCsvChanging] = useState(false)
   const csvChangingNow = useRef(false)
@@ -150,7 +186,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     const owner = budget.current
     if (!owner) return
     const snapshot = owner.snapshot()
-    retiredRendered.current = Math.max(retiredRendered.current, snapshot.rendered + snapshot.grid, owner.retiredTreeMax)
+    retiredRendered.current = Math.max(retiredRendered.current, snapshot.rendered + snapshot.grid + (snapshot.search ?? 0), owner.retiredTreeMax)
     owner.invalidate()
   }
 
@@ -1097,6 +1133,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     fontLayoutReady && card.kind === 'open' && limits && 'raw' in shown.body ? (
       <LensHost
         core={core}
+        onFind={setFindController}
         session={session}
         budget={budgetFor(card.opened)}
         retained={rendered}
@@ -1119,7 +1156,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         onDisposed={disposedView}
       />
     ) : fontLayoutReady && card.kind === 'open' && limits && 'grid' in shown.body && card.csv ? (
-      <LensHost core={core} session={session} budget={budgetFor(card.opened)} retained={rendered} lens={lens}
+      <LensHost core={core} onFind={setFindController} session={session} budget={budgetFor(card.opened)} retained={rendered} lens={lens}
         jumpTo={jumpTo} place={place} hadFocus={hadFocus} restoreFocus={restoreFocus} atLine={card.atLine}
         opened={card.opened} name={fileName(card.path)} lines={card.lines} indexed={card.indexed} limits={limits}
         frozen={frozen !== undefined} mode="grid" csv={card.csv} csvOptions={card.csvOptions ?? CSV_OPTIONS}
@@ -1130,6 +1167,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     ) : fontLayoutReady && card.kind === 'open' && limits && 'rendered' in shown.body && card.build ? (
       <LensHost
         core={core}
+        onFind={setFindController}
         session={session}
         budget={budgetFor(card.opened)}
         retained={rendered}
@@ -1165,6 +1203,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       ready: () => surface.current || readyError.current ? Promise.resolve() : new Promise<void>(done => readyWaiters.current.push(done)),
       open: openNamed, openChild: openFolderChild, openDerived, navigateLocal: openLocal, pick, reload, back, close: () => close(), reopen: reopenClosed, clearClosed,
       cycle: step => { const state = workspace.getSnapshot(); const index = state.tabs.findIndex(tab => tab.id === state.selected); if (state.tabs.length) void selectTab(state.tabs[(index + step + state.tabs.length) % state.tabs.length].id) },
+      find: findAction,
       capture: async () => {
         const c = latest.current.card
         if (c.kind !== 'open' || navigating.current || !latest.current.limits) return null
@@ -1222,11 +1261,13 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     return shared.register(id, handle)
   }, [])
 
-  return <section className={preview ? 'reader-card preview-reader' : 'reader-card'} role="region" aria-label={preview ? 'Preview reader' : 'Reader card ' + label} data-card={id} data-focused={focused || undefined} onPointerDownCapture={onFocus} onFocusCapture={onFocus}>
+  return <section className={preview ? 'reader-card preview-reader' : 'reader-card'} role="region" aria-label={preview ? 'Preview reader' : 'Reader card ' + label} data-card={id} data-focused={focused || undefined} onPointerDownCapture={onFocus} onFocusCapture={onFocus}
+    onKeyDown={event => { if (!event.defaultPrevented && event.key === 'Escape' && !event.nativeEvent.isComposing && findAction('close')) { event.preventDefault(); event.stopPropagation() } }}>
       {preview ? null : <FileTabs panelId={'file-card-' + id} tabs={snapshot.tabs} selected={snapshot.selected} onSelect={(id) => void selectTab(id)} onClose={(id) => close(id)} />}
       <div className="card">
         <div className="file-card-panel" id={'file-card-' + id} role={snapshot.selected ? 'tabpanel' : undefined} aria-labelledby={snapshot.selected ? `file-label-${snapshot.selected}` : undefined}>
         {(workspaceNotice || focused && windowNotice) ? <div className="banner" role="status">{workspaceNotice || windowNotice}</div> : null}
+        {findOpen ? <FindBar controller={findController} query={findQuery} matchCase={findCase} onQuery={setFindQuery} onCase={setFindCase} onClose={() => findAction('close')} /> : null}
         {card.kind === 'open' ? (
           <>
             {shown.lenses ? (
@@ -1283,6 +1324,7 @@ function ProgressLine({ value }: { value: number | 'indeterminate' }) {
 
 interface LensHostProps {
   core: CoreClient
+  onFind(controller: FindController | undefined): void
   /** The immutable session of this host's document, captured by its cleanup. */
   session: number
   budget: LensBudget | null
@@ -1317,7 +1359,7 @@ interface LensHostProps {
 }
 
 /** Mounts Raw or Rendered into the card body. A switch or Reload of this document keeps the previous lens's top line. */
-function LensHost({ core, session, budget, retained, lens, jumpTo, place, hadFocus, restoreFocus, atLine, opened, name, lines, indexed, limits, frozen, mode, build, csv, csvOptions, onCsvInfo, onFrozen, onShowRaw, onOpenLocal, onDisposed }: LensHostProps) {
+function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place, hadFocus, restoreFocus, atLine, opened, name, lines, indexed, limits, frozen, mode, build, csv, csvOptions, onCsvInfo, onFrozen, onShowRaw, onOpenLocal, onDisposed }: LensHostProps) {
   const host = useRef<HTMLDivElement>(null)
   const onFrozenNow = useRef(onFrozen)
   onFrozenNow.current = onFrozen
@@ -1358,11 +1400,14 @@ function LensHost({ core, session, budget, retained, lens, jumpTo, place, hadFoc
       }
     } else view = new RawLens(host.current!, core, opened, name, limits, { onFrozen: onFrozenHere, atLine: at, budget: budget ?? undefined })
     lens.current = view
+    onFind(view.find)
     // A Markdown reload mounts Raw first, then Rendered. Focusing Raw would consume the flag before Rendered exists.
     const interim = restoreFocus.current && mode === 'raw' && opened.format === 'markdown' && !opened.blank
     if (!interim && (hadFocus.current || restoreFocus.current)) view.focus()
     if (restoreFocus.current && !interim) restoreFocus.current = false
     return () => {
+      view.find?.close()
+      onFind(undefined)
       if (view.element.isConnected) hadFocus.current = view.element.contains(document.activeElement)
       // A note's Show in Raw wins over the line on screen for the lens this cleanup mounts next.
       place.current = { session, doc: opened.doc, line: jumpTo.current ?? view.topLine() }

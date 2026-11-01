@@ -5,6 +5,7 @@ import { viewportCap } from './raw'
 import type { LensBudget } from './lens-budget'
 import { RenderedImages } from './images'
 import type { LocalGesture } from '../reader-window'
+import { RenderedFind } from './rendered-find'
 
 export { RENDERED_PER_UNIT, renderedCharge } from './rendered-charge'
 
@@ -31,6 +32,7 @@ interface Flight {
  */
 export class RenderedLens {
   readonly element: HTMLElement
+  readonly find: RenderedFind
   private readonly scroller: HTMLElement
   private readonly column: HTMLElement
   private readonly images: RenderedImages
@@ -74,6 +76,7 @@ export class RenderedLens {
     this.scroller.append(this.column)
     host.append(this.scroller)
     this.element = this.scroller
+    this.find = new RenderedFind(this.scroller, this.column, () => this.cursor >= this.blocks, options.budget, opened.gen)
     this.images = new RenderedImages(this.scroller, core, opened, options.budget, options.onFrozen)
     // Every link click, including one a key fires. `href="#"` would otherwise jump. Capture, so it runs first.
     this.scroller.addEventListener('click', this.onLink, true)
@@ -162,6 +165,7 @@ export class RenderedLens {
 
   /** Keep this generation's DOM, but stop paging and alignment while Raw is on screen. */
   pause(): void {
+    this.find.close()
     this.remember()
     this.paused = true
     this.images.pause()
@@ -186,6 +190,7 @@ export class RenderedLens {
 
   /** `release` is Raw's. Closing the document releases the reservation; a lens switch must not zero it first. */
   dispose(_release = true): void {
+    this.find.destroy()
     this.stopped = true
     this.images.dispose()
     this.placeGen++
@@ -349,6 +354,7 @@ export class RenderedLens {
     // The estimate until Chromium has drawn the block once (`contain-intrinsic-size: auto`). Our own, not the file's.
     el.style.containIntrinsicSize = `auto ${Math.max(1, item.lines) * 24}px`
     if (item.note) {
+      el.dataset.findNoteUnits = String(item.note.length)
       const button = document.createElement('button')
       button.type = 'button'
       button.className = 'md-note'

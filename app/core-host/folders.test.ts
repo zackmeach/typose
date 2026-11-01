@@ -54,7 +54,7 @@ windows('real host remove cancels unpublished child first page while existing do
   const listed = await call('listFolder', { folder: root.ref })
   if (!('result' in listed)) throw Error(JSON.stringify(listed))
   const entry = (listed.result as FolderPage).entries.find((e) => e.name === 'data.csv')!
-  expect(await call('openChild', { entry: entry.ref, count: 1, bytes: 100 })).toMatchObject({ result: { doc: 1, localOnly: true, format: 'text' } })
+  expect(await call('openChild', { entry: entry.ref, count: 1, bytes: 100 })).toMatchObject({ result: { doc: 1, localOnly: true, format: 'csv' } })
   const captured = await call('captureLocation', { doc: 1, gen: 1 })
   if (!('result' in captured)) throw Error(JSON.stringify(captured))
   const { ticket } = captured.result as { ticket: unknown }

@@ -4,6 +4,7 @@ import { inputMark, markPainted, setPaintProbe } from '../perf'
 import { VirtualList } from '../virtual/virtual-list'
 import { type Key, type Mounted, PageCache, ROW_HEIGHT, capFor, rowsFor, rowsOf, viewportCap } from './page-cache'
 import type { LensBudget } from './lens-budget'
+import { SourceFind } from './source-find'
 
 export { ROW_HEIGHT, viewportCap }
 
@@ -54,6 +55,7 @@ const size = (bytes: number) => (bytes >= 1e6 ? `${mb.format(bytes / 1e6)} MB` :
  */
 export class RawLens {
   readonly list: VirtualList
+  readonly find: SourceFind
   private readonly cache: PageCache
   private readonly long = new Map<number, LongLine>()
   /** The long lines, ascending, and each one's rows past one in the lines before it: rows are found by bisection. */
@@ -61,6 +63,7 @@ export class RawLens {
   private before: number[] = []
   private extraRows = 0
   private lineCount = 0
+  private findLineFloor = 0
   private atLine: number | undefined
   /** The reader scrolled, or pressed a key, or pointed: an open stays in Raw instead of switching to Rendered. */
   private moved = false
@@ -105,6 +108,15 @@ export class RawLens {
     for (const item of opened.firstPage.items) this.setRows(item.line, 0, rowsOf(item).length - 1)
     this.reindex()
     this.list = new VirtualList(host, ROW_HEIGHT, (i, el) => this.paint(i, el), (r) => this.want(r), this.coveredRows())
+    this.find = new SourceFind(host, this.list.element, core, opened, options.budget, line => {
+      this.moved = true
+      this.atLine = line
+      this.findLineFloor = Math.max(this.findLineFloor, line + 1)
+      this.lineCount = Math.max(this.lineCount, this.findLineFloor)
+      this.list.setRowCount(this.rowCount())
+      this.list.scrollToRow(this.rowOf(line))
+      this.shownLine = line
+    }, options.onFrozen)
     if (__TEST_HOOKS__) {
       testHooks.cache = () => ({ charged: this.cache.charged, cap: this.cache.cap, reserved: this.reserved })
       testHooks.items = () => [...this.cache.all()].map(([key, item]) => ({ key, text: item.text }))
@@ -146,7 +158,7 @@ export class RawLens {
 
   /** Lines known so far: the index's count, but never fewer than the first page already showed (Z37). */
   setLineCount(lines: number): void {
-    this.lineCount = Math.max(lines, this.opened.firstPage.items.length)
+    this.lineCount = Math.max(lines, this.opened.firstPage.items.length, this.findLineFloor)
     this.list.setRowCount(this.rowCount())
     if (this.atLine !== undefined && this.lineCount > this.atLine) {
       const row = this.rowOf(this.atLine)
@@ -214,6 +226,7 @@ export class RawLens {
 
   /** The document froze (spec §3.1): keep what's shown, ask for nothing more. Called once the banner is up. */
   freeze(): void {
+    this.find.freeze('file changed on disk')
     this.stopped = true
     this.frozen = true
   }
@@ -223,6 +236,7 @@ export class RawLens {
    * it here would race the hold. Close releases it with the document.
    */
   dispose(release = true): void {
+    this.find.destroy()
     this.stopped = true
     for (const q of this.inflight) q.abort.abort()
     setPaintProbe(null)

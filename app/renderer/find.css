@@ -1,0 +1,12 @@
+.find-bar { display: flex; flex: none; align-items: center; flex-wrap: wrap; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--surface); color: var(--text); font: 12px/20px var(--font-ui); }
+.find-bar input[type='search'] { width: 160px; min-width: 70px; flex: 1; padding: 5px 8px; border: 1px solid var(--border); border-radius: 4px; color: var(--text); background: var(--canvas); font: inherit; }
+.find-bar button { border: 1px solid var(--border); border-radius: 4px; background: var(--surface-raised); color: var(--text); min-width: 26px; min-height: 26px; font: inherit; }
+.find-bar button:disabled { opacity: .4; }
+.find-bar :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.find-case { display: flex; align-items: center; gap: 2px; }
+.find-status { color: var(--text2); flex: 1 0 90px; overflow-wrap: anywhere; }
+.raw-find-excerpt { position: absolute; left: 10px; right: 10px; bottom: 10px; z-index: 4; padding: 8px 10px; max-height: 35%; overflow: auto; border: 1px solid var(--accent); border-radius: 5px; background: var(--surface); color: var(--text); font: 13px/1.55 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.raw-find-excerpt small { display: block; color: var(--text2); font: 11px/1.5 var(--font-ui); }
+.raw-find-excerpt mark { color: var(--canvas); background: var(--accent); }
+::highlight(typose-find) { background-color: #8fb0ff55; }
+::highlight(typose-find-current) { color: #111113; background-color: #8fb0ff; text-decoration: underline; }

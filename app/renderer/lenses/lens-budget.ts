@@ -19,6 +19,7 @@ export class LensBudget {
   private serial = Promise.resolve()
   private rendered = 0
   private grid = 0
+  private search = 0
   private transitioning = false
 
   constructor(
@@ -45,7 +46,7 @@ export class LensBudget {
   }
 
   snapshot() {
-    return { generation: this.generation, raw: this.raw, rendered: this.rendered, grid: this.grid, retired: 2 * this.treeMax, total: this.held }
+    return { generation: this.generation, raw: this.raw, rendered: this.rendered, grid: this.grid, ...(this.search ? { search: this.search } : {}), retired: 2 * this.treeMax, total: this.held }
   }
 
   reserveRaw(generation: number, bytes: number): Promise<boolean> {
@@ -59,6 +60,11 @@ export class LensBudget {
   /** Grid's bounded peak also pays its detached DOM across Raw/Grid switches on this exact view. */
   reserveGrid(generation: number, bytes: number): Promise<boolean> {
     return this.change(generation, 'grid', bytes)
+  }
+
+  /** Active query projection, bounded locators and the current highlight/excerpt. */
+  reserveSearch(generation: number, bytes: number): Promise<boolean> {
+    return this.change(generation, 'search', bytes)
   }
 
   /** A retained tree keeps its image leases when the lens switch asks for its base allowance again. */
@@ -76,7 +82,7 @@ export class LensBudget {
     this.transitioning = true
     this.epoch++
     this.serial = Promise.resolve()
-    const retiredTreeMax = Math.max(this.treeMax, this.rendered + this.grid)
+    const retiredTreeMax = Math.max(this.treeMax, this.rendered + this.grid + this.search)
     return { generation: this.generation, epoch: this.epoch, raw, retiredTreeMax, bytes: raw + 2 * retiredTreeMax }
   }
 
@@ -96,6 +102,7 @@ export class LensBudget {
     this.raw = plan.raw
     this.rendered = 0
     this.grid = 0
+    this.search = 0
     this.treeMax = plan.retiredTreeMax
     this.held = held
     this.serial = Promise.resolve()
@@ -107,19 +114,21 @@ export class LensBudget {
     this.epoch++
   }
 
-  private change(generation: number, share: 'raw' | 'rendered' | 'rendered-min' | 'rendered-add' | 'grid', bytes: number): Promise<boolean> {
+  private change(generation: number, share: 'raw' | 'rendered' | 'rendered-min' | 'rendered-add' | 'grid' | 'search', bytes: number): Promise<boolean> {
     const epoch = this.epoch
     const changed = this.serial.then(async () => {
       if (this.transitioning || !this.current(generation) || epoch !== this.epoch) return false
       const raw = share === 'raw' ? bytes : this.raw
       const rendered = share === 'rendered' ? bytes : share === 'rendered-min' ? Math.max(this.rendered, bytes) : share === 'rendered-add' ? this.rendered + bytes : this.rendered
       const grid = share === 'grid' ? Math.max(this.grid, bytes) : this.grid
-      const total = raw + rendered + grid + 2 * this.treeMax
+      const search = share === 'search' ? bytes : this.search
+      const total = raw + rendered + grid + search + 2 * this.treeMax
       const granted = total === this.held || await this.core.call('reserve', this.view ? { view: this.view, bytes: total } : { doc: this.doc, gen: generation, bytes: total }).catch(() => false)
       if (!granted || this.transitioning || !this.current(generation) || epoch !== this.epoch) return false
       this.raw = raw
       this.rendered = rendered
       this.grid = grid
+      this.search = search
       this.held = total
       return true
     })

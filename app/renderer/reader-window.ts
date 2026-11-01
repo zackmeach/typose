@@ -21,6 +21,7 @@ export interface ReaderHandle {
   reopen(): Promise<void>
   clearClosed(): void
   cycle(step: number): void
+  find(action: 'open' | 'next' | 'previous' | 'close'): boolean
   capture(): Promise<SavedLocation | null>
   restore(entry: SavedLocation): Promise<boolean>
   detach(closing: boolean): Promise<number>

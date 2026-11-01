@@ -143,3 +143,19 @@ it('Grid peak stays paid through Raw switches and a refused Reload, then enters 
   expect(budget.snapshot()).toMatchObject({ raw: 20, grid: 60, retired: 160, total: 240 })
   expect(totals).toEqual([90, 95, 90, 240])
 })
+
+it('Find has an independent charged share and retires with the replaced view', async () => {
+  const totals: number[] = []
+  const budget = new LensBudget({ call: async (_, params) => { totals.push(params.bytes); return true } }, 1, 1, 1, 10, 10)
+  expect(await budget.reserveSearch(1, 40)).toBe(true)
+  await budget.reserveRaw(1, 20)
+  await budget.reserveRendered(1, 30)
+  expect(budget.snapshot()).toMatchObject({ raw: 20, rendered: 30, search: 40, total: 90 })
+  const transition = budget.reloadReservation(10)
+  expect(transition.bytes).toBe(150)
+  expect(await budget.reserveSearch(1, 0)).toBe(false)
+  budget.cancelTransition(transition)
+  await budget.reserveSearch(1, 0)
+  expect(budget.snapshot().total).toBe(50)
+  expect(totals).toEqual([50, 60, 90, 50])
+})

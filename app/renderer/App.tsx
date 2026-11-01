@@ -187,7 +187,10 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     const offOpen = window.typose.onOpenPath(openPath)
     const offCommand = window.typose.onCommand(run)
     const key = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing) return
       const command = MAC ? event.metaKey : event.ctrlKey
+      if (command && event.key.toLowerCase() === 'f' && !event.shiftKey && !event.altKey) { event.preventDefault(); run('find'); return }
+      if (event.key === 'F3' && !command && !event.altKey) { event.preventDefault(); run(event.shiftKey ? 'find-previous' : 'find-next'); return }
       if (command && event.key.toLowerCase() === 'b' && !event.shiftKey && !event.altKey) { event.preventDefault(); run('toggle-sidebar'); return }
       if (command && event.key === '\\' && !event.altKey) { event.preventDefault(); run('split-right'); return }
       if (command && event.key.toLowerCase() === 't' && event.shiftKey && !event.altKey) { event.preventDefault(); run('reopen-tab'); return }
@@ -640,6 +643,11 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     }
   }
   function run(command: Command): void {
+    if (command === 'find' || command === 'find-next' || command === 'find-previous') {
+      const reader = previewRef.current ? handles.current.get(previewRef.current.id) : focusedReader()
+      reader?.find(command === 'find' ? 'open' : command === 'find-next' ? 'next' : 'previous')
+      return
+    }
     if (previewRef.current) {
       if (command === 'close-tab' || command === 'close-card') void closePreview()
       else if (command === 'split-right' || command === 'move-tab-right') void promotePreview(true)
