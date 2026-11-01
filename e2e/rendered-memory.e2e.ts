@@ -12,9 +12,10 @@ const QUALIFICATION_BUDGET = 8 * 2 ** 30
 /** These cases qualify replacement/empty intervals; explicitly close the now-inactive permanent tab. */
 async function closeInactive(win: Awaited<ReturnType<typeof launch>>['win']): Promise<void> {
   const inactive = win.locator('.file-pill:not([data-selected])')
-  while (await inactive.count()) {
+  for (let remaining = await inactive.count(); remaining > 0; remaining--) {
     await inactive.first().hover()
     await inactive.first().locator('.file-tab-close').click()
+    await expect(inactive).toHaveCount(remaining - 1)
   }
 }
 
