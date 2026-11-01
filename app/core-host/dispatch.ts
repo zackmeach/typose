@@ -1,9 +1,11 @@
 // The core host's side of protocol v1. Every request is validated before anything acts on it (plan C4):
 // numbers against the core's own range table, methods by own property only, and no addon call on a refusal.
-import type { Cancel, Doc, IndexProgress, Limits, Page as CorePage } from 'typose-node'
+import { randomUUID } from 'node:crypto'
+import type { Cancel, Doc, IndexProgress, Limits, SavedRoute, Page as CorePage } from 'typose-node'
 import {
   PROTOCOL,
   type Charges,
+  type CapturedLocation,
   type CoreError,
   type DebugStats,
   type ErrorCode,
@@ -16,7 +18,8 @@ import {
   type Opened,
   type Page,
   type ProgressEvent,
-  type Response
+  type Response,
+  type SavedTicket
 } from '../shared/protocol'
 import { isValid } from './numbers'
 import { boundedLink, decodedLocalTarget, localTarget } from './local-target'
@@ -42,6 +45,8 @@ export interface Addon {
   resetHigh?(): void
   /** The test-hooks addon's budget override (plan C1): the ledger's limit, in bytes. */
   setLimit?(bytes: number): void
+  savedStats?(): { wrappers: number; wrapperBytes: number }
+  savedRouteBytes?(route: SavedRoute): number
 }
 
 class Refusal extends Error {
@@ -61,7 +66,7 @@ type Params = Record<string, unknown>
 const isRecord = (v: unknown): v is Params => typeof v === 'object' && v !== null && !Array.isArray(v)
 const codeOf = (e: unknown): unknown => (e as { code?: unknown } | null)?.code
 
-export function makeDispatcher(addon: Addon, session: number, emit: (event: ProgressEvent) => void): (data: unknown) => Promise<Response> {
+export function makeDispatcher(addon: Addon, session: number, emit: (event: ProgressEvent) => void, ticketId: () => string = randomUUID): (data: unknown) => Promise<Response> {
   const limits = addon.limits()
   const ranges = new Map(limits.ranges.map((r) => [r.field, r]))
   /** `params[field]`, checked against the core's range for `field`; `name` is how the error names it. */
@@ -76,7 +81,12 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   /** Each document's index job (plan C6). */
   const jobs = new Map<number, Cancel>()
   /** Page reads in flight, by request id (plan C5). `cancelledAt` is the test-hooks build's. */
-  const reads = new Map<number, { doc: number; cancel: Cancel; retainOnLeave: boolean; cancelledAt?: number }>()
+  type ReadEntry = { doc?: number; cancel: Cancel; retainOnLeave: boolean; cancelled: boolean; cancelledAt?: number;
+    candidate?: true; saved?: SavedRoute }
+  const reads = new Map<number, ReadEntry>()
+  const saved = new Map<string, SavedRoute>()
+  let savedPeak = 0
+  let savedHostBytes = 0
   /** The test-hooks build's account of cancels (plan C5's acceptance). */
   const cancels = { cancels: 0, cancelled: 0, cancelMs: 0 }
   /** The test-hooks build keeps closed documents referenced, so only `Doc.close()`, never GC, can release them (C6). */
@@ -86,6 +96,14 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     const doc = docs.get(id)
     if (!doc) throw new Refusal('NoDocument', `no document ${id}`)
     return doc
+  }
+  const savedTicket = (p: Params): SavedTicket => {
+    if (!isRecord(p.ticket)) throw new Refusal('InvalidParams', 'ticket must be a saved-location ticket', 'ticket')
+    const ticketSession = int(p.ticket, 'session', 'ticket.session')
+    const id = p.ticket.id
+    if (typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id))
+      throw new Refusal('InvalidParams', 'ticket.id must be an opaque UUID', 'ticket.id')
+    return { session: ticketSession, id }
   }
   const imageRef = (p: Params, id: number, gen: number): ImageRef => {
     if (!isRecord(p.ref)) throw new Refusal('InvalidParams', 'ref must be an image reference', 'ref')
@@ -112,13 +130,14 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
    *  back. It's never a request: requests only take the reservation, and the takes only grow it. */
   let settled: { lens: string; bytes: number } | null = null
   const hold = (bytes: number): boolean => {
-    const total = bytes + workspaceBytes
+    const total = bytes + workspaceBytes + savedHostBytes
     if (!Number.isSafeInteger(total) || !addon.reserveCache(total)) return false
     held = bytes
     return true
   }
   /** Request `req` takes the reservation for the lens it opens; refused, it's `Memory` and nothing has changed. */
   const take = (req: number, bytes: number): string => {
+    if (reads.has(req) || pendingViews.has(`#${req}`)) throw new Refusal('InvalidParams', 'request id is already pending', 'id')
     if (!hold(Math.max(held, bytes))) throw new Refusal('Memory', `the memory budget can't hold the view's ${bytes} bytes`)
     return (holder = `#${req}`)
   }
@@ -138,7 +157,10 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   }
   /** Close and freeze cancel all reads. Leaving a view retains Reload's first page for its new metadata/index. */
   const cancelReads = (doc: number, leaving = false) => {
-    for (const read of reads.values()) if (read.doc === doc && (!leaving || !read.retainOnLeave)) read.cancel.cancel()
+    for (const read of reads.values()) if (read.doc === doc && (!leaving || !read.retainOnLeave)) {
+      read.cancelled = true
+      read.cancel.cancel()
+    }
   }
   /** Inactive tabs keep their document/index, but only the native cache floor. Late reads cannot regrow it. */
   const reclaimInactive = (): void => {
@@ -172,9 +194,10 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   }
   /** Request `id`'s read of document `doc`, a page or a Markdown build, which `cancel` can stop while it runs (plan C5). */
   const read = async <T>(id: number, doc: number, start: (cancel: Cancel) => Promise<T>, retainOnLeave = false): Promise<T> => {
+    if (reads.has(id)) throw new Refusal('InvalidParams', 'request id is already pending', 'id')
     const source = getDoc(doc)
     const gen = source.generation
-    const entry: { doc: number; cancel: Cancel; retainOnLeave: boolean; cancelledAt?: number } = { doc, cancel: addon.cancelFlag(), retainOnLeave }
+    const entry: ReadEntry = { doc, cancel: addon.cancelFlag(), retainOnLeave, cancelled: false }
     reads.set(id, entry)
     try {
       return await start(entry.cancel)
@@ -186,7 +209,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       }
       throw e
     } finally {
-      reads.delete(id)
+      if (reads.get(id) === entry) reads.delete(id)
     }
   }
   type LocalInfo = { localOnly: true; path: string } | undefined
@@ -219,6 +242,46 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     return opened
   }
 
+  /** Registration spans first-page wait through synchronous publication, not just the native read. */
+  const candidate = async (req: number, pending: string, doc: Doc, count: number, local: LocalInfo,
+    valid: () => boolean = () => true, source?: number, route?: SavedRoute): Promise<Opened> => {
+    let entry: ReadEntry | undefined
+    let published = false
+    let registered: number | undefined
+    let indexed: number | undefined
+    try {
+      entry = { doc: source, cancel: addon.cancelFlag(), retainOnLeave: true, cancelled: false, candidate: true, saved: route }
+      reads.set(req, entry)
+      const firstPage = await doc.page(doc.generation, 0, count, entry.cancel)
+      if (!valid()) throw new Refusal('Stale', 'the navigation source or saved location was replaced')
+      if (entry.cancelled) throw new Refusal('Cancelled', 'the navigation was cancelled')
+      const id = nextDoc++ // a partially started index must never alias a later document's id/generation
+      indexed = id
+      const opened = begin(id, doc, firstPage, local)
+      docs.set(id, doc)
+      registered = id
+      handoff(pending, id, doc, opened.gen) // another holder may win; a fresh background tab remains valid
+      published = true
+      return { ...opened, reserved: held }
+    } catch (e) {
+      if (!published) {
+        // begin can start an index before a later registration/handoff failure.
+        if (indexed !== undefined) { jobs.get(indexed)?.cancel(); jobs.delete(indexed) }
+        if (registered !== undefined) docs.delete(registered)
+        doc.close()
+      }
+      giveBack(pending)
+      if (__TEST_HOOKS__ && codeOf(e) === 'Cancelled' && entry?.cancelledAt !== undefined) {
+        cancels.cancelled++
+        cancels.cancelMs = Math.max(cancels.cancelMs, performance.now() - entry.cancelledAt)
+      }
+      if (local && codeOf(e) === 'Frozen') throw new Refusal('Refused', 'navigation target changed while opening')
+      throw e
+    } finally {
+      if (reads.get(req) === entry) reads.delete(req)
+    }
+  }
+
   // Each handler checks all of its parameters before it calls the addon or changes state. `id` is the request's.
   const handlers: Record<string, (params: Params, id: number) => unknown> = {
     hello: (p): Hello => {
@@ -231,28 +294,13 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         throw new Refusal('InvalidParams', 'path must be a non-empty string of at most 32,767 characters, without NUL', 'path')
       reclaimInactive()
       const pending = take(req, bytes)
-      let doc: Doc
       try {
-        doc = addon.openDoc(p.path)
+        const doc = addon.openDoc(p.path)
+        return candidate(req, pending, doc, count, undefined)
       } catch (e) {
-        settle(pending, null)
+        giveBack(pending)
         throw e
       }
-      // The first page reads from byte 0, so it doesn't wait for the index (Z37). It's read before the document is
-      // registered, and a failure closes it, so nothing is left behind.
-      let opened: Omit<Opened, 'reserved'>
-      try {
-        const firstPage = await doc.page(doc.generation, 0, count, addon.cancelFlag())
-        opened = begin(nextDoc, doc, firstPage)
-      } catch (e) {
-        doc.close()
-        settle(pending, null)
-        throw e
-      }
-      const id = nextDoc++
-      docs.set(id, doc)
-      handoff(pending, id, doc, opened.gen)
-      return { ...opened, reserved: held }
     },
     activate: async (p, req): Promise<Opened> => {
       const [id, gen, count, bytes] = [int(p, 'doc'), int(p, 'gen'), int(p, 'count'), int(p, 'bytes')]
@@ -303,14 +351,10 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       reclaimInactive()
       const pending = take(req, bytes)
       let doc: Doc | undefined
-      let opened: Omit<Opened, 'reserved'>
       try {
         doc = source.openLocal(gen, p.target)
         const local = localInfo(doc)
-        const firstPage = await doc.page(doc.generation, 0, count, addon.cancelFlag())
-        if (docs.get(id) !== source || source.generation !== gen)
-          throw new Refusal('Stale', `generation ${gen} was replaced while the local file opened`)
-        opened = begin(nextDoc, doc, firstPage, local)
+        return candidate(req, pending, doc, count, local, () => docs.get(id) === source && source.generation === gen, id)
       } catch (e) {
         doc?.close()
         giveBack(pending) // the source lens remains mounted when navigation fails
@@ -320,10 +364,66 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         }
         throw e
       }
-      const next = nextDoc++
-      docs.set(next, doc)
-      handoff(pending, next, doc, opened.gen)
-      return { ...opened, reserved: held }
+    },
+    captureLocation: (p): CapturedLocation => {
+      const [id, gen] = [int(p, 'doc'), int(p, 'gen')]
+      const doc = getDoc(id)
+      if (doc.generation !== gen) throw new Refusal('Stale', 'the saved generation was replaced')
+      if (!doc.localOnly) return { kind: 'manual', path: doc.path }
+      const peak = Math.max(savedPeak, saved.size + 1)
+      const bytes = 3 * ((64 << 10) + (16 << 10) * peak)
+      const total = held + workspaceBytes + bytes
+      if (!Number.isSafeInteger(total) || !addon.reserveCache(total)) throw new Refusal('Memory', 'the saved-location table cannot grow')
+      const previous = savedHostBytes
+      savedHostBytes = bytes
+      let route: SavedRoute | undefined
+      let attempted = false
+      try {
+        route = doc.saveRoute(gen)
+        const id = ticketId()
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id) || saved.has(id))
+          throw new Refusal('Refused', 'a unique saved-location identity could not be allocated')
+        attempted = true
+        savedPeak = peak
+        saved.set(id, route)
+        return { kind: 'derived', ticket: { session, id } }
+      } catch (e) {
+        route?.release()
+        if (!attempted) { savedHostBytes = previous; hold(held) }
+        throw e
+      }
+    },
+    openSaved: (p, req): Promise<Opened> => {
+      const ticket = savedTicket(p)
+      const [count, bytes] = [int(p, 'count'), int(p, 'bytes')]
+      const route = ticket.session === session ? saved.get(ticket.id) : undefined
+      if (!route) throw new Refusal('Stale', 'the saved location is unavailable; select the file manually again')
+      reclaimInactive()
+      const pending = take(req, bytes)
+      let doc: Doc | undefined
+      try {
+        doc = route.open()
+        const local = localInfo(doc)
+        if (!local) throw new Refusal('Internal', 'a saved route returned manual authority')
+        return candidate(req, pending, doc, count, local, () => saved.get(ticket.id) === route, undefined, route)
+      } catch (e) {
+        doc?.close()
+        giveBack(pending)
+        if (codeOf(e) === 'Frozen') throw new Refusal('Refused', 'navigation target changed while opening')
+        throw e
+      }
+    },
+    releaseSaved: (p): boolean => {
+      const ticket = savedTicket(p)
+      const route = ticket.session === session ? saved.get(ticket.id) : undefined
+      if (!route) return false
+      for (const entry of reads.values()) if (entry.candidate && entry.saved === route) {
+        entry.cancelled = true
+        entry.cancel.cancel()
+      }
+      saved.delete(ticket.id)
+      route.release()
+      return true
     },
     page: (p, req): Promise<Page | MdPage> => {
       const id = int(p, 'doc')
@@ -479,6 +579,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     cancel: (p) => {
       const running = reads.get(int(p, 'id'))
       if (!running) return false
+      running.cancelled = true
       running.cancel.cancel()
       if (__TEST_HOOKS__) {
         cancels.cancels++
@@ -495,7 +596,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     },
     reserveWorkspace: (p) => {
       const bytes = int(p, 'bytes')
-      const total = held + bytes
+      const total = held + bytes + savedHostBytes
       if (!Number.isSafeInteger(total) || !addon.reserveCache(total)) return false
       workspaceBytes = bytes
       return true
@@ -509,7 +610,10 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
             const charges: Record<number, Charges> = {}
             for (const [id, doc] of docs) charges[id] = addon.docCharges!(doc)
             const { rss, heapUsed, external, arrayBuffers } = process.memoryUsage()
-            return { ...addon.debugStats!(), docs: docs.size, ...cancels, charges, heap: { rss, heapUsed, external, arrayBuffers } }
+            return { ...addon.debugStats!(), docs: docs.size, ...cancels, charges, heap: { rss, heapUsed, external, arrayBuffers },
+              saved: { tickets: saved.size, routeBytes: [...saved.values()].reduce((sum, route) => sum + (addon.savedRouteBytes?.(route) ?? 0), 0),
+                ...(addon.savedStats?.() ?? { wrappers: 0, wrapperBytes: 0 }), hostBytes: savedHostBytes, peakEntries: savedPeak,
+                candidates: [...reads.values()].filter((entry) => entry.candidate).length } }
           }
         }
       : {})
@@ -527,6 +631,8 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     if (typeof method !== 'string' || !Object.hasOwn(handlers, method))
       return fail(id, { code: 'UnknownMethod', message: `unknown method ${String(method).slice(0, 64)}` })
     if (!isRecord(data.params)) return fail(id, { code: 'InvalidParams', message: 'params must be an object', field: 'params' })
+    if (reads.has(id) || pendingViews.has(`#${id}`))
+      return fail(id, { code: 'InvalidParams', message: 'request id is already pending', field: 'id' })
     try {
       return { id, session, result: await handlers[method](data.params, id) }
     } catch (e) {

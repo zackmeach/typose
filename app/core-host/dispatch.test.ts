@@ -74,6 +74,7 @@ beforeEach(async () => {
 
 const token = { session: 7, doc: 1, gen: 1, line: 0, offset: 1 }
 const imageRef = { session: 7, doc: 1, gen: 1, id: 1 }
+const savedTicket = { session: 7, id: '00000000-0000-4000-8000-000000000001' }
 
 // Each method's numeric fields, with valid values for the others. `continuation.x` is a token's field.
 const TABLE: [method: string, field: string, base: Record<string, unknown>][] = [
@@ -106,6 +107,12 @@ const TABLE: [method: string, field: string, base: Record<string, unknown>][] = 
   ['openLocal', 'gen', { doc: 1, target: 'b.md', count: 1, bytes: 0 }],
   ['openLocal', 'count', { doc: 1, gen: 1, target: 'b.md', bytes: 0 }],
   ['openLocal', 'bytes', { doc: 1, gen: 1, target: 'b.md', count: 1 }],
+  ['captureLocation', 'doc', { gen: 1 }],
+  ['captureLocation', 'gen', { doc: 1 }],
+  ['openSaved', 'ticket.session', { ticket: savedTicket, count: 1, bytes: 0 }],
+  ['openSaved', 'count', { ticket: savedTicket, bytes: 0 }],
+  ['openSaved', 'bytes', { ticket: savedTicket, count: 1 }],
+  ['releaseSaved', 'ticket.session', { ticket: savedTicket }],
   ['page', 'doc', { lens: 'raw', gen: 1, start: 0, count: 1 }],
   ['page', 'gen', { doc: 1, lens: 'raw', start: 0, count: 1 }],
   ['page', 'start', { doc: 1, lens: 'raw', gen: 1, count: 1 }],
@@ -145,7 +152,7 @@ function withValue(base: Record<string, unknown>, field: string, value: unknown)
 
 describe('every numeric parameter takes only integers in its range', () => {
   for (const [method, field, base] of TABLE) {
-    const { min, max } = range(field.replace(/^(continuation|ref)\./, ''))
+    const { min, max } = range(field.replace(/^(continuation|ref|ticket)\./, ''))
     for (const value of [...HOSTILE, min, max, max + 1]) {
       it(`${method}${base.lens === 'rendered' ? ' (rendered)' : ''}.${field} = ${String(value)}`, async () => {
         const response = await call(method, withValue(base, field, value))
@@ -552,7 +559,7 @@ describe('local document navigation', () => {
     expect(await call('close', { doc: 2 })).toMatchObject({ result: false })
     expect(await call('reserve', { doc: 1, gen: 1, bytes: 200 })).toMatchObject({ result: true })
     expect(reserved()).toEqual([300, 500, 300, 200])
-    expect(await call('openLocal', params)).toMatchObject({ result: { doc: 2 } })
+    expect(await call('openLocal', params)).toMatchObject({ result: { doc: 3 } })
     expect(failedJob.cancel).toHaveBeenCalledOnce() // no stale job left under the reused id
   })
 
@@ -1181,10 +1188,11 @@ describe("the renderer cache's reservation (plan C1)", () => {
   it('preserves the workspace share and retained documents after a failed new-tab open disposes its view', async () => {
     expect(await call('reserveWorkspace', { bytes: 100 })).toMatchObject({ result: true })
     expect(await call('reserve', { doc: 1, gen: 1, bytes: 300 })).toMatchObject({ result: true })
+    expect(await call('deactivate', { doc: 1, gen: 1 })).toMatchObject({ result: true })
     openDoc.mockImplementationOnce(() => { throw Object.assign(new Error('missing'), { code: 'NotFound' }) })
     expect(await call('open', { path: 'gone.txt', count: 1, bytes: 500 })).toMatchObject({ error: { code: 'NotFound' } })
     expect(close).not.toHaveBeenCalled()
-    expect(reserved()).toEqual([100, 400, 600, 100])
+    expect(reserved()).toEqual([100, 400, 100, 600, 100])
     expect(await call('activate', { doc: 1, gen: 1, count: 1, bytes: 200 })).toMatchObject({ result: { doc: 1, reserved: 200 } })
     expect(reserved().at(-1)).toBe(300)
   })

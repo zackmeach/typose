@@ -80,6 +80,10 @@ export interface Opened {
   path?: string
 }
 
+/** Session-only authority: display paths and caller flags can never reconstruct this ticket. */
+export interface SavedTicket { session: number; id: string }
+export type CapturedLocation = { kind: 'manual'; path: string } | { kind: 'derived'; ticket: SavedTicket }
+
 export interface Methods {
   /** Decode a local image from this generation's held Markdown. Ref carries no path or URL. */
   prepareImage: { params: { doc: number; gen: number; src: string }; result: PreparedImage }
@@ -110,6 +114,12 @@ export interface Methods {
   resolve: { params: { doc: number; gen: number; href: string }; result: LinkTarget }
   /** Open a decoded local target through the source document's inherited capability. Failure keeps its lens. */
   openLocal: { params: { doc: number; gen: number; target: string; count: number; bytes: number }; result: Opened }
+  /** Capture only from an owned generation. Manual paths retain manual-open policy; derived locations retain routes. */
+  captureLocation: { params: { doc: number; gen: number }; result: CapturedLocation }
+  /** Non-consuming reopen through saved derived authority; never a manual display-path fallback. */
+  openSaved: { params: { ticket: SavedTicket; count: number; bytes: number }; result: Opened }
+  /** Releases route authority and cancels unpublished reopens; repeated/old-session cleanup is harmless. */
+  releaseSaved: { params: { ticket: SavedTicket }; result: boolean }
   /** Ctrl+R (spec §3.1): the document's next generation, opened again, with its first page. `bytes` as for `open`. */
   reload: { params: { doc: number; count: number; bytes: number }; result: Opened }
   /** Plan C6: cancels the document's index and page reads, and releases it. */
@@ -149,6 +159,7 @@ export interface DebugStats {
   /** The core host's `process.memoryUsage()`, after a forced GC when the call asked for one (`{ gc: true }`). With
    *  `{ resetHigh: true }`, the ledger's high-water mark starts again from what's charged; `{ limit }` sets its limit. */
   heap: { rss: number; heapUsed: number; external: number; arrayBuffers: number }
+  saved: { tickets: number; routeBytes: number; wrappers: number; wrapperBytes: number; hostBytes: number; peakEntries: number; candidates: number }
 }
 
 /** What one document holds charged (plan C1): its floor and what's grown since. */

@@ -309,6 +309,26 @@ impl Document {
         self.local_only
     }
 
+    /// Retain authority, not this document's bytes/index. Manual opens never become derived locations.
+    /// Saving an owned generation needs no filesystem access; reopen verifies the route's current bytes.
+    pub fn saved_route(&self, generation: u32) -> Result<LocalRoute, DocError> {
+        if generation != self.generation {
+            return Err(DocError::Stale { current: self.generation, asked: generation });
+        }
+        if !self.local_only {
+            return Err(DocError::Refused("manual locations use manual-open policy".into()));
+        }
+        self.local
+            .as_ref()
+            .ok_or_else(|| DocError::Refused("the derived location has no local route".into()))?
+            .try_clone()
+            .map_err(local_error)
+    }
+
+    pub(crate) fn from_saved(route: &LocalRoute, cache_chunks: usize) -> Result<Document, DocError> {
+        Self::from_local(route.try_clone().map_err(local_error)?, cache_chunks, 1)
+    }
+
     /// Resolve a decoded local target without opening it. Only the source route is checked for mutation.
     pub fn local_path(&self, generation: u32, target: &str) -> Result<LocalRoute, DocError> {
         self.local_target(generation, target)
@@ -1088,5 +1108,34 @@ mod tests {
         assert!(matches!(source.local_path(1, "target.txt"), Err(DocError::Refused(_))));
         assert!(matches!(source.open_local(1, "target.txt"), Err(DocError::Refused(_))));
         assert!(!source.local_only());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn saved_routes_keep_no_document_and_never_follow_a_retargeted_pipe_ancestor() {
+        let scratch = Scratch::new("saved-pipe-route");
+        let server = PipeServer::new("saved-target.txt");
+        let sub = scratch.0.join("sub");
+        fs::create_dir(&sub).unwrap();
+        let source_path = scratch.0.join("source.md");
+        fs::write(&source_path, b"# Source").unwrap();
+        fs::write(sub.join(server.name()), b"original").unwrap();
+        let source = Document::open(&source_path).unwrap();
+        assert!(source.local.is_some());
+        assert!(matches!(source.saved_route(1), Err(DocError::Refused(_))));
+        let derived = source.open_local(1, &format!("sub/{}", server.name())).unwrap();
+        let _ = derived.freeze("old generation was frozen".into());
+        let saved = derived.saved_route(1).unwrap();
+        assert!(matches!(derived.saved_route(2), Err(DocError::Stale { .. })));
+        drop(derived);
+        drop(source);
+        fs::write(sub.join(server.name()), b"current bytes").unwrap();
+        let current = crate::raw::Raw::open_saved(&saved).unwrap();
+        assert_eq!(current.page(1, 0, 1).unwrap()[0].text, "current bytes");
+        drop(current);
+        fs::rename(&sub, scratch.0.join("moved")).unwrap();
+        junction(&sub, r"\??\pipe\");
+        assert!(matches!(crate::raw::Raw::open_saved(&saved), Err(DocError::Refused(_))));
+        assert!(!server.connected());
     }
 }

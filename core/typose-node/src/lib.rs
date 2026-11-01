@@ -14,6 +14,7 @@ use typose_core::doc::DocError;
 use typose_core::hooks;
 use typose_core::image_resource::{self, Pending, Resources};
 use typose_core::limits::{self, RANGES};
+use typose_core::local::LocalRoute;
 use typose_core::md::{self, Rendered};
 use typose_core::pages::{self, LinePiece};
 use typose_core::raw::Raw;
@@ -529,6 +530,41 @@ impl Task for ImageChunk {
     }
 }
 
+/// Pays the native wrapper and its host UUID/entry garbage until finalization, including after release.
+const SAVED_WRAPPER_BYTES: u64 = 16 * 1024;
+#[cfg(feature = "test-hooks")]
+static SAVED_WRAPPERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Session-only route authority. It never owns a Raw, Document, index or page payload.
+#[napi]
+pub struct SavedRoute {
+    route: Option<LocalRoute>,
+    // Remains charged while JS still holds even an empty wrapper; released only by Drop.
+    _wrapper: Reservation,
+}
+
+#[napi]
+impl SavedRoute {
+    #[napi]
+    pub fn open(&self) -> std::result::Result<Doc, Error<Code>> {
+        let route = self.route.as_ref().ok_or_else(|| Error::new(Code::NoDocument, "the saved route was released"))?;
+        let raw = Raw::open_saved(route).map_err(doc_error)?;
+        Ok(Doc { images: None, raw: Some(Arc::new(raw)), built: Built::default() })
+    }
+
+    #[napi]
+    pub fn release(&mut self) -> bool {
+        self.route.take().is_some()
+    }
+}
+
+impl Drop for SavedRoute {
+    fn drop(&mut self) {
+        #[cfg(feature = "test-hooks")]
+        SAVED_WRAPPERS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// An open document in Raw. Offsets and sizes are exact numbers: `Raw::open` refuses files over 2^53 − 1 bytes.
 /// `close` drops it at once; until then it lives as long as the JS object does.
 #[napi]
@@ -600,6 +636,17 @@ impl Doc {
     #[napi(getter)]
     pub fn local_only(&self) -> std::result::Result<bool, Error<Code>> {
         Ok(self.raw()?.document().local_only())
+    }
+
+    /// Origin and generation are native-owned; unlike local links this also works for derived TXT/frozen sources.
+    #[napi]
+    pub fn save_route(&self, generation: f64) -> std::result::Result<SavedRoute, Error<Code>> {
+        let generation = int("gen", generation)? as u32;
+        let route = self.raw()?.document().saved_route(generation).map_err(doc_error)?;
+        let wrapper = Reservation::new(SAVED_WRAPPER_BYTES).map_err(|e| doc_error(DocError::Memory(e)))?;
+        #[cfg(feature = "test-hooks")]
+        SAVED_WRAPPERS.fetch_add(1, Ordering::Relaxed);
+        Ok(SavedRoute { route: Some(route), _wrapper: wrapper })
     }
 
     #[napi(getter)]
@@ -903,6 +950,24 @@ impl Doc {
 #[cfg(feature = "test-hooks")]
 pub mod test_hooks {
     use super::*;
+
+    #[napi(object)]
+    pub struct SavedStats {
+        pub wrappers: f64,
+        pub wrapper_bytes: f64,
+    }
+
+    /// Includes released wrappers that remain reachable or await finalization, not only logical tickets.
+    #[napi]
+    pub fn saved_stats() -> SavedStats {
+        let wrappers = SAVED_WRAPPERS.load(Ordering::Relaxed) as u64;
+        SavedStats { wrappers: wrappers as f64, wrapper_bytes: (wrappers * SAVED_WRAPPER_BYTES) as f64 }
+    }
+
+    #[napi]
+    pub fn saved_route_bytes(route: &SavedRoute) -> f64 {
+        route.route.as_ref().map_or(0, LocalRoute::charged) as f64
+    }
 
     /// The ledger (plan C1): its limit, what's charged now and at most, the pool's share, the renderer cache's.
     #[napi(object)]

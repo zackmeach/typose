@@ -8,6 +8,7 @@ use crate::budget::{self, NoSlot, Reservation, Work};
 use crate::doc::{Charges, DocError, Document};
 use crate::encoding::{Sniffed, sniff};
 use crate::index::{IndexConfig, LineIndex, Progress, build};
+use crate::local::LocalRoute;
 use crate::md;
 use crate::pages::{self, Caps, LinePiece, MAX_PATH_BYTES};
 use crate::store::{CHUNK, cancelled};
@@ -79,6 +80,12 @@ impl Raw {
         let next = Self::from_document(target).map_err(crate::doc::local_target_error)?;
         self.doc.check_local_source(generation)?;
         Ok(next)
+    }
+
+    /// Non-consuming reopen: only a saved route survives, and current bytes get a new verified index.
+    pub fn open_saved(route: &LocalRoute) -> Result<Raw, DocError> {
+        let _temp = Reservation::new(OPEN_TEMP).map_err(DocError::Memory)?;
+        Document::from_saved(route, CACHE_CHUNKS).and_then(Self::from_document).map_err(crate::doc::local_target_error)
     }
 
     pub fn document(&self) -> &Document {
