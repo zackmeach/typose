@@ -149,9 +149,12 @@ export class RawLens {
     this.lineCount = Math.max(lines, this.opened.firstPage.items.length)
     this.list.setRowCount(this.rowCount())
     if (this.atLine !== undefined && this.lineCount > this.atLine) {
-      this.list.scrollToRow(this.rowOf(this.atLine)) // a source line can span several rows
+      const row = this.rowOf(this.atLine)
+      this.list.scrollToRow(row) // a source line can span several rows
       this.shownLine = this.atLine // shownLine stays a source line
-      this.atLine = undefined
+      // A progressive prefix (or the bottom of Raw) can clamp the scroll before this line reaches the top.
+      // Retain the source anchor for later index growth and for an automatic switch back to Rendered.
+      if (this.list.state.top >= row * ROW_HEIGHT) this.atLine = undefined
     }
   }
 
