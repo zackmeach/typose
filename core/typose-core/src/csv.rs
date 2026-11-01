@@ -525,6 +525,17 @@ impl Csv {
         column_start: u64,
         column_count: usize,
     ) -> Result<Page, DocError> {
+        self.ordered_page(doc, row_start, row_count, column_start, column_count, None)
+    }
+    pub fn ordered_page(
+        &self,
+        doc: &Document,
+        row_start: u64,
+        row_count: usize,
+        column_start: u64,
+        column_count: usize,
+        order: Option<&Order>,
+    ) -> Result<Page, DocError> {
         let charge = Reservation::new(TEMP_BYTES).map_err(DocError::Memory)?;
         if row_count == 0 || row_count > MAX_ROWS || column_count == 0 || column_count > MAX_COLUMNS {
             return Err(DocError::Invalid("CSV rectangle exceeds its row/column bounds".into()));
@@ -541,7 +552,13 @@ impl Csv {
         let mut wire = 1024;
         for data_row in row_start..row_start.saturating_add(row_count as u64) {
             check_cancel()?;
-            let record = data_row + u64::from(self.header);
+            let record = match order {
+                Some(order) => match order.source(data_row) {
+                    Some(record) => record,
+                    None => break,
+                },
+                None => data_row + u64::from(self.header),
+            };
             let Some(info) = self.row(doc, record)? else {
                 if page.indexing {
                     page.complete = false;
@@ -588,8 +605,11 @@ impl Csv {
 mod tests {
     use super::*;
     use crate::store::testutil::{Temp, temp_file};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
     fn csv(bytes: &[u8], delimiter: u8) -> (Temp, Document, Csv) {
-        let path = temp_file("csv-core", bytes);
+        let name = format!("csv-core-{}", NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed));
+        let path = temp_file(&name, bytes);
         let doc = Document::open(&path).unwrap();
         let csv = Csv::new(&doc, 1, 1, Options { delimiter: Some(delimiter), header: Some(false) }, UTF_8).unwrap();
         csv.build(&doc, |_, _, _| true).unwrap();
@@ -769,4 +789,456 @@ fn sniff(sample: &[u8], whole: bool, encoding: &'static Encoding, forced: Option
         }
     }
     (best.0, best.2)
+}
+
+/// A stable permutation and its inverse; strings used for sorting are transient and separately charged.
+pub struct Order {
+    pub rows: u64,
+    pub header: u64,
+    pub column: u64,
+    pub direction: i32,
+    source: Vec<u64>,
+    inverse: Vec<u64>,
+    _charge: Reservation,
+}
+impl Order {
+    pub fn source(&self, row: u64) -> Option<u64> {
+        if row >= self.rows {
+            None
+        } else if self.direction == 0 {
+            Some(row + self.header)
+        } else {
+            Some(self.source[row as usize])
+        }
+    }
+    pub fn locate(&self, record: u64) -> Option<u64> {
+        let row = record.checked_sub(self.header)?;
+        if row >= self.rows {
+            None
+        } else if self.direction == 0 {
+            Some(row)
+        } else {
+            Some(self.inverse[row as usize])
+        }
+    }
+    pub fn charged(&self) -> u64 {
+        self._charge.bytes()
+    }
+}
+struct SortKey {
+    record: u64,
+    text: String,
+    number: Option<f64>,
+}
+impl Csv {
+    pub fn order(&self, doc: &Document, column: u64, direction: i32) -> Result<Order, DocError> {
+        let index = self.index.read().unwrap();
+        if !index.done {
+            return Err(DocError::Refused("Wait for CSV indexing before sorting".into()));
+        }
+        let rows = index.records.saturating_sub(u64::from(self.header));
+        drop(index);
+        let retained = 4096
+            + if direction == 0 {
+                0
+            } else {
+                rows.checked_mul(16).ok_or_else(|| DocError::Invalid("sort size overflow".into()))?
+            };
+        let charge = Reservation::new(retained).map_err(DocError::Memory)?;
+        let mut result = Order {
+            rows,
+            header: u64::from(self.header),
+            column,
+            direction,
+            source: Vec::new(),
+            inverse: Vec::new(),
+            _charge: charge,
+        };
+        if direction == 0 {
+            return Ok(result);
+        }
+        let temp = doc
+            .len()
+            .checked_mul(10)
+            .and_then(|n| n.checked_add(rows * 256 + TEMP_BYTES))
+            .ok_or_else(|| DocError::Invalid("sort temporary size overflow".into()))?;
+        let _temp = Reservation::new(temp).map_err(DocError::Memory)?;
+        let mut keys = Vec::<SortKey>::with_capacity(rows as usize);
+        let mut value = Vec::new();
+        let mut scan = self.index.read().unwrap().checkpoints[0].clone();
+        let mut out = [0; 4096];
+        loop {
+            check_cancel()?;
+            let until = (scan.pos + READ_BYTES as u64).min(doc.len());
+            let bytes = read(doc, self.generation, scan.pos, until)?;
+            let base = scan.pos;
+            while scan.pos < until {
+                check_cancel()?;
+                let capture = scan.column == column;
+                let event = scan.step(&bytes[(scan.pos - base) as usize..], &mut out, |b, _| {
+                    if capture {
+                        value.push(b);
+                    }
+                });
+                collect_key(self, &mut keys, &mut value, &event, column);
+            }
+            if scan.pos == doc.len() {
+                if scan.in_record {
+                    let capture = scan.column == column;
+                    let event = scan.step(&[], &mut out, |b, _| {
+                        if capture {
+                            value.push(b);
+                        }
+                    });
+                    collect_key(self, &mut keys, &mut value, &event, column);
+                }
+                break;
+            }
+        }
+        let numeric = keys.iter().all(|k| k.text.trim().is_empty() || k.number.is_some())
+            && keys.iter().any(|k| k.number.is_some());
+        let compare = |a: usize, b: usize| {
+            let (a, b) = (&keys[a], &keys[b]);
+            let cmp = if numeric {
+                match (a.number, b.number) {
+                    (Some(a), Some(b)) => a.total_cmp(&b),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+            } else {
+                a.text.cmp(&b.text)
+            };
+            (if direction < 0 { cmp.reverse() } else { cmp }).then(a.record.cmp(&b.record))
+        };
+        let mut indices: Vec<usize> = (0..keys.len()).collect();
+        for run in indices.chunks_mut(4096) {
+            check_cancel()?;
+            run.sort_unstable_by(|a, b| compare(*a, *b));
+        }
+        let mut scratch = vec![0; indices.len()];
+        let mut width = 4096;
+        while width < indices.len() {
+            for start in (0..indices.len()).step_by(2 * width) {
+                let middle = (start + width).min(indices.len());
+                let end = (start + 2 * width).min(indices.len());
+                let (mut a, mut b) = (start, middle);
+                for (i, target) in scratch.iter_mut().enumerate().take(end).skip(start) {
+                    if i % 4096 == 0 {
+                        check_cancel()?;
+                    }
+                    if a < middle && (b == end || compare(indices[a], indices[b]).is_le()) {
+                        *target = indices[a];
+                        a += 1;
+                    } else {
+                        *target = indices[b];
+                        b += 1;
+                    }
+                }
+            }
+            std::mem::swap(&mut indices, &mut scratch);
+            width *= 2;
+        }
+        check_cancel()?;
+        result.source = Vec::with_capacity(rows as usize);
+        result.inverse = vec![0; rows as usize];
+        for (index, row) in indices.into_iter().zip(0..rows) {
+            let key = &keys[index];
+            result.inverse[(key.record - result.header) as usize] = row;
+            result.source.push(key.record);
+        }
+        Ok(result)
+    }
+}
+fn collect_key(csv: &Csv, keys: &mut Vec<SortKey>, value: &mut Vec<u8>, event: &Event, column: u64) {
+    if let Event::Field { record, column: c, row, .. } = event {
+        if *c == column {
+            if *record >= u64::from(csv.header) {
+                let text = csv.encoding.decode_without_bom_handling(value).0.into_owned();
+                let number = text.trim().parse::<f64>().ok().filter(|n| n.is_finite());
+                keys.push(SortKey { record: *record, text, number });
+            }
+            value.clear();
+        }
+        if row.is_some() && *record >= u64::from(csv.header) && keys.last().is_none_or(|k| k.record != *record) {
+            keys.push(SortKey { record: *record, text: String::new(), number: None });
+        }
+    }
+}
+
+#[cfg(test)]
+mod interaction_tests {
+    use super::*;
+    use crate::store::testutil::temp_file;
+    #[test]
+    fn stable_numeric_order_preserves_source_numbers_and_bounded_pages() {
+        let file = temp_file("csv-sort", b"name,rank\na,10\nb,2\nc,2\n");
+        let doc = Document::open(&file).unwrap();
+        let csv = Csv::new(&doc, 1, 1, Options { delimiter: Some(b','), header: Some(true) }, UTF_8).unwrap();
+        csv.build(&doc, |_, _, _| true).unwrap();
+        let order = csv.order(&doc, 1, 1).unwrap();
+        assert_eq!((0..3).map(|r| order.source(r).unwrap()).collect::<Vec<_>>(), vec![2, 3, 1]);
+        assert_eq!(order.locate(1), Some(2));
+        let page = csv.ordered_page(&doc, 0, 3, 0, 2, Some(&order)).unwrap();
+        assert_eq!(page.rows[0].info.record, 2);
+        assert_eq!(page.rows[0].data_row, 0);
+        let desc = csv.order(&doc, 1, -1).unwrap();
+        assert_eq!((0..3).map(|r| desc.source(r).unwrap()).collect::<Vec<_>>(), vec![1, 2, 3]);
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GridHit {
+    pub data_row: u64,
+    pub record: u64,
+    pub column: u64,
+    pub start: u64,
+    pub end: u64,
+    pub within_row: u64,
+}
+impl GridHit {
+    fn key(&self) -> (u64, u64, u64) {
+        (self.data_row, self.column, self.start)
+    }
+}
+#[derive(Clone)]
+struct GridCursor {
+    scan: Scanner,
+    matcher: crate::find::Matcher,
+    pending: Vec<u8>,
+    positions: Vec<u64>,
+    pending_start: u64,
+    count: u64,
+    counts: Vec<u64>,
+    complete: bool,
+}
+pub struct GridProgress {
+    pub count: u64,
+    pub bytes: u64,
+    pub complete: bool,
+    pub hits: Vec<GridHit>,
+}
+pub struct GridFind {
+    pattern: crate::find::Pattern,
+    order: std::sync::Arc<Order>,
+    cursor: std::sync::Mutex<GridCursor>,
+    closed: std::sync::atomic::AtomicBool,
+    _charge: Reservation,
+}
+impl GridFind {
+    pub fn new(csv: &Csv, order: std::sync::Arc<Order>, query: &str, match_case: bool) -> Result<Self, DocError> {
+        let charge = Reservation::new(
+            crate::find::STATE_BYTES
+                + order.rows.checked_mul(8).ok_or_else(|| DocError::Invalid("Grid Find state size overflow".into()))?,
+        )
+        .map_err(DocError::Memory)?;
+        let pattern = crate::find::Pattern::new(query, match_case)?;
+        let scan = csv.index.read().unwrap().checkpoints[0].clone();
+        let matcher = crate::find::Matcher::new(&pattern);
+        let cursor = GridCursor {
+            pending_start: scan.field_start,
+            scan,
+            matcher,
+            pending: Vec::new(),
+            positions: Vec::new(),
+            count: 0,
+            counts: vec![0; order.rows as usize],
+            complete: false,
+        };
+        Ok(Self {
+            pattern,
+            order,
+            cursor: std::sync::Mutex::new(cursor),
+            closed: std::sync::atomic::AtomicBool::new(false),
+            _charge: charge,
+        })
+    }
+    pub fn close(&self) {
+        self.closed.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn charged(&self) -> u64 {
+        self._charge.bytes()
+    }
+    pub fn order_charged(&self) -> u64 {
+        self.order.charged()
+    }
+    fn feed(
+        &self,
+        csv: &Csv,
+        c: &mut GridCursor,
+        record: u64,
+        column: u64,
+        last: bool,
+        mut found: impl FnMut(GridHit),
+    ) -> Result<(), DocError> {
+        let (slice, used) = decode_prefix(&c.pending, csv.encoding, 1, c.pending.len(), last);
+        let mut units = 0;
+        for ch in slice.text.chars() {
+            let from = (slice.map.start_byte(units) - 1) as usize;
+            units += ch.len_utf16() as u32;
+            let to = (slice.map.end_byte(units) - 1) as usize;
+            let start = if from == 0 { c.pending_start } else { c.positions[from - 1] };
+            let end = c.positions[to - 1];
+            if let Some(data_row) = self.order.locate(record) {
+                let position = crate::find::Hit { start, end, line: 0, line_start: 0, ordinal: 0 };
+                c.matcher.feed(&self.pattern, ch, position, |hit| {
+                    c.count += 1;
+                    c.counts[(record - self.order.header) as usize] += 1;
+                    found(GridHit {
+                        data_row,
+                        record,
+                        column,
+                        start: hit.start,
+                        end: hit.end,
+                        within_row: c.counts[(record - self.order.header) as usize],
+                    });
+                });
+            }
+        }
+        if used > 0 {
+            c.pending_start = c.positions[used - 1];
+            c.pending.drain(..used);
+            c.positions.drain(..used);
+        }
+        if last {
+            c.pending.clear();
+            c.positions.clear();
+            c.matcher.reset();
+            c.pending_start = c.scan.field_start;
+        }
+        Ok(())
+    }
+    fn step(
+        &self,
+        csv: &Csv,
+        doc: &Document,
+        c: &mut GridCursor,
+        limit: u64,
+        mut found: impl FnMut(GridHit),
+    ) -> Result<(), DocError> {
+        let stop = (c.scan.pos + limit).min(doc.len());
+        let mut out = [0; 4096];
+        while c.scan.pos < stop {
+            check_cancel()?;
+            if self.closed.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(DocError::Cancelled);
+            }
+            let until = (c.scan.pos + READ_BYTES as u64).min(doc.len());
+            let bytes = read(doc, csv.generation, c.scan.pos, until)?;
+            let base = c.scan.pos;
+            while c.scan.pos < until {
+                check_cancel()?;
+                let (record, column) = (c.scan.record, c.scan.column);
+                let event = c.scan.step(&bytes[(c.scan.pos - base) as usize..], &mut out, |b, p| {
+                    c.pending.push(b);
+                    c.positions.push(p);
+                });
+                if matches!(event, Event::Start) {
+                    c.pending_start = c.scan.field_start;
+                }
+                self.feed(csv, c, record, column, matches!(event, Event::Field { .. }), &mut found)?;
+            }
+        }
+        if c.scan.pos == doc.len() {
+            if c.scan.in_record {
+                let (record, column) = (c.scan.record, c.scan.column);
+                let event = c.scan.step(&[], &mut out, |b, p| {
+                    c.pending.push(b);
+                    c.positions.push(p);
+                });
+                self.feed(csv, c, record, column, matches!(event, Event::Field { .. }), &mut found)?;
+            }
+            c.complete = true;
+        }
+        Ok(())
+    }
+    pub fn scan(&self, csv: &Csv, doc: &Document) -> Result<GridProgress, DocError> {
+        let _temp = Reservation::new(TEMP_BYTES + self.order.rows * 8).map_err(DocError::Memory)?;
+        let mut held = self.cursor.lock().unwrap();
+        let mut c = held.clone();
+        let mut hits = Vec::with_capacity(crate::find::HIT_LIMIT);
+        self.step(csv, doc, &mut c, crate::find::SCAN_BYTES, |h| {
+            if hits.len() < crate::find::HIT_LIMIT {
+                hits.push(h);
+            }
+        })?;
+        let result = GridProgress { count: c.count, bytes: c.scan.pos, complete: c.complete, hits };
+        *held = c;
+        Ok(result)
+    }
+    pub fn seek(
+        &self,
+        csv: &Csv,
+        doc: &Document,
+        from: Option<GridHit>,
+        previous: bool,
+    ) -> Result<(Option<GridHit>, bool, Option<u64>), DocError> {
+        let _temp = Reservation::new(TEMP_BYTES + self.order.rows * 8).map_err(DocError::Memory)?;
+        let scan = csv.index.read().unwrap().checkpoints[0].clone();
+        let mut c = GridCursor {
+            pending_start: scan.field_start,
+            scan,
+            matcher: crate::find::Matcher::new(&self.pattern),
+            pending: Vec::new(),
+            positions: Vec::new(),
+            count: 0,
+            counts: vec![0; self.order.rows as usize],
+            complete: false,
+        };
+        let (mut first, mut last, mut chosen): (Option<GridHit>, Option<GridHit>, Option<GridHit>) = (None, None, None);
+        while !c.complete {
+            self.step(csv, doc, &mut c, crate::find::SCAN_BYTES, |h| {
+                if first.is_none_or(|old| h.key() < old.key()) {
+                    first = Some(h);
+                }
+                if last.is_none_or(|old| h.key() > old.key()) {
+                    last = Some(h);
+                }
+                let eligible = from.is_none_or(|at| if previous { h.key() < at.key() } else { h.key() > at.key() });
+                if eligible && chosen.is_none_or(|old| if previous { h.key() > old.key() } else { h.key() < old.key() })
+                {
+                    chosen = Some(h);
+                }
+            })?;
+        }
+        let wrapped = chosen.is_none() && from.is_some();
+        let selected = chosen.or(if previous { last } else { first });
+        let ordinal = selected.map(|h| {
+            let mut count = h.within_row;
+            for row in 0..h.data_row {
+                count += c.counts[(self.order.source(row).unwrap() - self.order.header) as usize];
+            }
+            count
+        });
+        Ok((selected, wrapped, ordinal))
+    }
+}
+
+#[cfg(test)]
+mod grid_find_tests {
+    use super::*;
+    use crate::store::testutil::temp_file;
+    use std::sync::Arc;
+    #[test]
+    fn native_find_crosses_quoted_chunks_and_seeks_in_stable_sort_order() {
+        let mut data = b"name,rank\n\"".to_vec();
+        data.extend(vec![b'x'; 70_000]);
+        data.extend_from_slice("ÉCOLE\",10\nÉcole,2\nÉCOLE,2\n".as_bytes());
+        let file = temp_file("grid-find", &data);
+        let doc = Document::open(&file).unwrap();
+        let csv = Csv::new(&doc, 1, 1, Options { delimiter: Some(b','), header: Some(true) }, UTF_8).unwrap();
+        csv.build(&doc, |_, _, _| true).unwrap();
+        let order = Arc::new(csv.order(&doc, 1, 1).unwrap());
+        let search = GridFind::new(&csv, order, "école", false).unwrap();
+        let p = search.scan(&csv, &doc).unwrap();
+        assert_eq!(p.count, 3);
+        assert!(p.complete);
+        let (first, wrapped, n) = search.seek(&csv, &doc, None, false).unwrap();
+        let first = first.unwrap();
+        assert!(!wrapped);
+        assert_eq!((first.record, first.data_row, n), (2, 0, Some(1)));
+        let (last, wrapped, n) = search.seek(&csv, &doc, Some(first), true).unwrap();
+        assert!(wrapped);
+        assert_eq!((last.unwrap().record, n), (1, Some(3)));
+    }
 }

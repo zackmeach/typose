@@ -59,6 +59,10 @@ impl Matcher {
     pub fn new(pattern: &Pattern) -> Self {
         Self { matched: 0, recent: VecDeque::with_capacity(pattern.chars.len()) }
     }
+    pub fn reset(&mut self) {
+        self.matched = 0;
+        self.recent.clear();
+    }
     pub fn feed(&mut self, pattern: &Pattern, c: char, position: Hit, mut found: impl FnMut(Hit)) {
         if pattern.match_case {
             self.feed_folded(pattern, c, position, &mut found);

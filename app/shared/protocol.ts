@@ -23,6 +23,8 @@ export interface Page {
 }
 
 export const PROTOCOL = 1
+export const MAX_CLIPBOARD_BYTES = 16 << 20
+export const LARGE_COPY_CONFIRM_BYTES = 10 << 20
 
 /** Typed errors. `CoreGone` is the renderer's own: the core host died with the call pending (plan C7). */
 export type ErrorCode =
@@ -96,6 +98,13 @@ export interface SourceFindSeek { hit?: SourceHit; wrapped: boolean; ordinal?: n
 
 export type CsvDelimiter = ',' | '\t' | ';' | '|'
 export interface CsvRef { session: number; doc: number; gen: number; revision: number }
+export interface CsvOrderRef { csv: CsvRef; id: number }
+export interface CsvOrderInfo { order: CsvOrderRef; rows: number; column: number; direction: 'asc' | 'desc' | 'none' }
+export interface CsvFindRef { view: ViewRef; order: CsvOrderRef; id: number }
+export interface CsvFindHit { dataRow: number; sourceRecord: number; column: number; start: number; end: number; text?: string; matchStart?: number; matchEnd?: number }
+export interface CsvFindInfo { ref: CsvFindRef; count: number; scannedBytes: number; complete: boolean }
+export interface CsvFindPage extends CsvFindInfo { hits: CsvFindHit[] }
+export interface CsvFindSeek { hit?: CsvFindHit; ordinal?: number; wrapped: boolean }
 export interface CsvSpan { start: number; end: number }
 export interface CsvOptions { delimiter: 'auto' | CsvDelimiter; header: 'auto' | boolean }
 export interface CsvInfo {
@@ -128,9 +137,19 @@ export interface Methods {
   sourceFindScan: { params: { ref: SourceFindRef }; result: SourceFindPage }
   sourceFindSeek: { params: { ref: SourceFindRef; from?: number; direction: 'next' | 'previous' }; result: SourceFindSeek }
   sourceFindClose: { params: { ref: SourceFindRef }; result: boolean }
+  csvSort: { params: { view: ViewRef; ref: CsvRef; interactionId: string; column: number; direction: 'asc' | 'desc' | 'none' }; result: CsvOrderInfo }
+  /** Retire this Grid instance's current/pending order, including an unobserved sort completion. */
+  csvOrderClose: { params: { view: ViewRef; order: CsvOrderRef; interactionId: string }; result: boolean }
+  csvOrderedPage: { params: { order: CsvOrderRef; rowStart: number; rowCount: number; columnStart: number; columnCount: number }; result: CsvPage }
+  csvOrderLocate: { params: { order: CsvOrderRef; sourceRecord: number }; result: { dataRow: number } }
+  csvFindStart: { params: { view: ViewRef; order: CsvOrderRef; query: string; matchCase: boolean }; result: CsvFindInfo }
+  csvFindScan: { params: { ref: CsvFindRef }; result: CsvFindPage }
+  csvFindSeek: { params: { ref: CsvFindRef; from?: CsvFindHit; direction: 'next' | 'previous' }; result: CsvFindSeek }
+  csvFindClose: { params: { ref: CsvFindRef }; result: boolean }
   csvConfigure: { params: { surface?: SurfaceRef; doc: number; gen: number; options: CsvOptions }; result: CsvInfo }
   csvPage: { params: { ref: CsvRef; rowStart: number; rowCount: number; columnStart: number; columnCount: number }; result: CsvPage }
   csvPiece: { params: { continuation: CsvContinuation }; result: CsvCellPiece }
+  csvCell: { params: { ref: CsvRef; sourceRecord: number; column: number }; result: CsvCell }
   csvColumns: { params: { ref: CsvRef; start: number; count: number }; result: CsvColumnPage }
   csvLocate: { params: { ref: CsvRef; rawLine: number } | { ref: CsvRef; sourceOffset: number }; result: CsvLocated }
   csvSource: { params: { ref: CsvRef; sourceRecord: number; column?: number }; result: CsvSource }
@@ -272,6 +291,11 @@ export interface TyposeApi {
   folderDialog(): Promise<string | null>
   /** A user-activated external link. Main independently checks the app's main frame, size and allowed scheme. */
   openExternal(url: string): Promise<boolean>
+  /** Claim/revoke the one-use token armed by a trusted Grid copy shortcut. */
+  beginClipboardWrite(): string | null
+  cancelClipboardWrite(token: string): void
+  /** A bounded plain-text write. Main independently checks the app's main frame and byte cap; no read API exists. */
+  writeClipboardText(text: string, token: string): Promise<boolean>
   /** A startup mark at a wall-clock time (ms); main records it only under the TYPOSE_MARKS hook (plan C8). */
   mark(name: StartupMark, t: number): void
   /** Called once, when main has shown the window; main only tells the page under the TYPOSE_MARKS hook (plan C8). */

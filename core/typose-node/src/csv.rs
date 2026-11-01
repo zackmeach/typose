@@ -12,6 +12,11 @@ pub struct State {
     csv: core_csv::Csv,
     cancel: Arc<AtomicBool>,
     error: Mutex<Option<String>>,
+    order: Mutex<Option<(u32, Arc<core_csv::Order>)>>,
+    next_order: AtomicU32,
+    sort_epoch: AtomicU64,
+    find: Mutex<Option<(u32, u32, Arc<core_csv::GridFind>)>>,
+    next_find: AtomicU32,
 }
 #[derive(Default)]
 pub(super) struct Owner {
@@ -23,12 +28,24 @@ pub(super) struct Owner {
 impl Owner {
     #[cfg(feature = "test-hooks")]
     pub(super) fn charged(&self) -> u64 {
-        self.state.lock().unwrap().as_ref().map_or(0, |state| state.csv.charged())
+        self.state.lock().unwrap().as_ref().map_or(0, |state| {
+            state.csv.charged()
+                + state.order.lock().unwrap().as_ref().map_or(0, |(_, order)| order.charged())
+                + state
+                    .find
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map_or(0, |(_, order, find)| find.charged() + if *order == 0 { find.order_charged() } else { 0 })
+        })
     }
     pub(super) fn close(&self) {
         self.closed.store(true, Ordering::Relaxed);
         if let Some(state) = self.state.lock().unwrap().take() {
             state.cancel.store(true, Ordering::Relaxed);
+            if let Some((_, _, find)) = state.find.lock().unwrap().take() {
+                find.close();
+            }
         }
     }
     fn current(&self, state: &Arc<State>) -> bool {
@@ -236,7 +253,16 @@ impl Task for Configure {
                 })?);
                 self.build_temp = Some(Reservation::new(core_csv::TEMP_BYTES).map_err(DocError::Memory)?);
             }
-            Ok(Arc::new(State { csv, cancel: Arc::new(AtomicBool::new(false)), error: Mutex::new(None) }))
+            Ok(Arc::new(State {
+                csv,
+                cancel: Arc::new(AtomicBool::new(false)),
+                error: Mutex::new(None),
+                order: Mutex::new(None),
+                next_order: AtomicU32::new(0),
+                sort_epoch: AtomicU64::new(0),
+                find: Mutex::new(None),
+                next_find: AtomicU32::new(0),
+            }))
         }))
     }
     fn resolve(&mut self, env: Env, output: Self::Output) -> Result<CsvInfo> {
@@ -283,6 +309,9 @@ impl Task for Configure {
             }
             if let Some(old) = self.owner.state.lock().unwrap().replace(state.clone()) {
                 old.cancel.store(true, Ordering::Relaxed);
+                if let Some((_, _, find)) = old.find.lock().unwrap().take() {
+                    find.close();
+                }
             }
             Ok(info(&state))
         })();
@@ -316,6 +345,9 @@ pub trait Query: Send + 'static {
     type JsValue: ToNapiValue + TypeName;
     fn run(&self, ctx: &Context) -> std::result::Result<Self::Output, DocError>;
     fn convert(&self, output: Self::Output) -> Self::JsValue;
+    fn check(&self, _ctx: &Context) -> std::result::Result<(), DocError> {
+        Ok(())
+    }
 }
 pub struct ReadCsv<Q: Query> {
     ctx: Context,
@@ -329,12 +361,14 @@ impl<Q: Query> Task for ReadCsv<Q> {
         Ok(cancellable(&flag, || {
             self.ctx.slot = Some(page_slot()?);
             self.ctx.check()?;
+            self.query.check(&self.ctx)?;
             self.query.run(&self.ctx)
         }))
     }
     fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Self::JsValue> {
         let result = output.and_then(|out| {
             self.ctx.check()?;
+            self.query.check(&self.ctx)?;
             Ok(self.query.convert(out))
         });
         result.map_err(|e| err(env, e))
@@ -345,12 +379,26 @@ pub struct PageQuery {
     rows: usize,
     column: u64,
     columns: usize,
+    order: Option<(u32, Arc<core_csv::Order>)>,
 }
 impl Query for PageQuery {
     type Output = core_csv::Page;
     type JsValue = CsvPage;
     fn run(&self, c: &Context) -> std::result::Result<Self::Output, DocError> {
-        c.state.csv.page(c.raw.document(), self.row, self.rows, self.column, self.columns)
+        c.state.csv.ordered_page(
+            c.raw.document(),
+            self.row,
+            self.rows,
+            self.column,
+            self.columns,
+            self.order.as_ref().map(|(_, o)| &**o),
+        )
+    }
+    fn check(&self, c: &Context) -> std::result::Result<(), DocError> {
+        if let Some((id, _)) = &self.order {
+            check_order(&c.state, *id)?;
+        }
+        Ok(())
     }
     fn convert(&self, p: Self::Output) -> CsvPage {
         CsvPage {
@@ -384,13 +432,13 @@ impl Query for PageQuery {
 pub struct PieceQuery {
     record: u64,
     column: u64,
-    offset: u64,
+    offset: Option<u64>,
 }
 impl Query for PieceQuery {
     type Output = core_csv::Piece;
     type JsValue = CsvCellPiece;
     fn run(&self, c: &Context) -> std::result::Result<Self::Output, DocError> {
-        c.state.csv.piece(c.raw.document(), self.record, self.column, Some(self.offset))
+        c.state.csv.piece(c.raw.document(), self.record, self.column, self.offset)
     }
     fn convert(&self, p: Self::Output) -> CsvCellPiece {
         piece(p)
@@ -654,6 +702,7 @@ impl Doc {
             rows: count(rows, core_csv::MAX_ROWS, "rowCount")?,
             column: int("start", column)?,
             columns: count(columns, core_csv::MAX_COLUMNS, "columnCount")?,
+            order: None,
         };
         self.csv_context(generation, revision, cancel, query)
     }
@@ -667,8 +716,11 @@ impl Doc {
         offset: f64,
         cancel: &Cancel,
     ) -> std::result::Result<AsyncTask<ReadCsv<PieceQuery>>, Error<Code>> {
-        let query =
-            PieceQuery { record: int("start", record)?, column: int("start", column)?, offset: int("offset", offset)? };
+        let query = PieceQuery {
+            record: int("start", record)?,
+            column: int("start", column)?,
+            offset: Some(int("offset", offset)?),
+        };
         self.csv_context(generation, revision, cancel, query)
     }
     #[napi(ts_return_type = "Promise<CsvColumnPage>")]
@@ -713,4 +765,508 @@ impl Doc {
         let query = SourceQuery { record: int("start", record)?, column: column.map(|n| int("start", n)).transpose()? };
         self.csv_context(generation, revision, cancel, query)
     }
+}
+
+#[napi(object)]
+pub struct CsvOrderInfo {
+    pub id: u32,
+    pub rows: f64,
+    pub column: f64,
+    pub direction: String,
+}
+#[napi(object)]
+pub struct CsvOrderLocated {
+    pub data_row: f64,
+}
+fn check_order(state: &State, id: u32) -> std::result::Result<(), DocError> {
+    let held = state.order.lock().unwrap();
+    if held.as_ref().map_or(id == 0, |(current, _)| *current == id) { Ok(()) } else { Err(stale(id)) }
+}
+fn get_order(state: &State, id: u32, raw: &Raw) -> std::result::Result<Arc<core_csv::Order>, DocError> {
+    check_order(state, id)?;
+    let held = state.order.lock().unwrap();
+    if let Some((_, order)) = &*held {
+        Ok(order.clone())
+    } else {
+        drop(held);
+        Ok(Arc::new(state.csv.order(raw.document(), 0, 0)?))
+    }
+}
+pub struct SortQuery {
+    state: Arc<State>,
+    id: u32,
+    epoch: u64,
+    column: u64,
+    direction: i32,
+}
+impl Query for SortQuery {
+    type Output = core_csv::Order;
+    type JsValue = CsvOrderInfo;
+    fn check(&self, _: &Context) -> std::result::Result<(), DocError> {
+        if self.state.sort_epoch.load(Ordering::Relaxed) == self.epoch { Ok(()) } else { Err(stale(self.id)) }
+    }
+    fn run(&self, c: &Context) -> std::result::Result<Self::Output, DocError> {
+        c.state.csv.order(c.raw.document(), self.column, self.direction)
+    }
+    fn convert(&self, order: Self::Output) -> Self::JsValue {
+        let rows = order.rows;
+        if let Some((_, _, find)) = self.state.find.lock().unwrap().take() {
+            find.close();
+        }
+        self.state.order.lock().unwrap().replace((self.id, Arc::new(order)));
+        CsvOrderInfo {
+            id: self.id,
+            rows: rows as f64,
+            column: self.column as f64,
+            direction: match self.direction {
+                -1 => "desc",
+                0 => "none",
+                _ => "asc",
+            }
+            .into(),
+        }
+    }
+}
+pub struct OrderLocateQuery {
+    id: u32,
+    record: u64,
+}
+impl Query for OrderLocateQuery {
+    type Output = CsvOrderLocated;
+    type JsValue = CsvOrderLocated;
+    fn check(&self, c: &Context) -> std::result::Result<(), DocError> {
+        check_order(&c.state, self.id)
+    }
+    fn run(&self, c: &Context) -> std::result::Result<Self::Output, DocError> {
+        let order = get_order(&c.state, self.id, &c.raw)?;
+        let row =
+            order.locate(self.record).ok_or_else(|| DocError::Invalid("source record is not a data row".into()))?;
+        Ok(CsvOrderLocated { data_row: row as f64 })
+    }
+    fn convert(&self, value: Self::Output) -> Self::JsValue {
+        value
+    }
+}
+pub struct CellQuery {
+    record: u64,
+    column: u64,
+}
+impl Query for CellQuery {
+    type Output = Option<core_csv::Piece>;
+    type JsValue = CsvCell;
+    fn run(&self, c: &Context) -> std::result::Result<Self::Output, DocError> {
+        match c.state.csv.row(c.raw.document(), self.record)? {
+            Some(row) if self.column < row.fields => {
+                c.state.csv.piece(c.raw.document(), self.record, self.column, None).map(Some)
+            }
+            Some(_) => Ok(None),
+            None => Err(DocError::Invalid("source record is not indexed".into())),
+        }
+    }
+    fn convert(&self, value: Self::Output) -> Self::JsValue {
+        CsvCell { column: self.column as f64, value: value.map(piece) }
+    }
+}
+#[napi]
+impl Doc {
+    #[napi(ts_return_type = "Promise<CsvOrderInfo>")]
+    pub fn csv_sort(
+        &self,
+        generation: f64,
+        revision: f64,
+        column: f64,
+        direction: String,
+        cancel: &Cancel,
+    ) -> std::result::Result<AsyncTask<ReadCsv<SortQuery>>, Error<Code>> {
+        let asked_generation = int("gen", generation)? as u32;
+        let current = self.raw()?.document().generation();
+        if current != asked_generation {
+            return Err(doc_error(DocError::Stale { current, asked: asked_generation }));
+        }
+        let revision_id = int("gen", revision)? as u32;
+        let state = self
+            .csv
+            .state
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|s| s.csv.revision == revision_id)
+            .cloned()
+            .ok_or_else(|| Error::new(Code::Stale, "CSV configuration replaced"))?;
+        let column = int("start", column)?;
+        let direction = match direction.as_str() {
+            "asc" => 1,
+            "desc" => -1,
+            "none" => 0,
+            _ => return Err(Error::new(Code::InvalidParams, "sort direction must be asc, desc or none")),
+        };
+        let id = state
+            .next_order
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .map_err(|_| Error::new(Code::Refused, "sort identities exhausted"))?
+            + 1;
+        let epoch = state.sort_epoch.fetch_add(1, Ordering::Relaxed) + 1;
+        self.csv_context(generation, revision, cancel, SortQuery { state, id, epoch, column, direction })
+    }
+    #[napi(ts_return_type = "Promise<CsvPage>")]
+    #[allow(clippy::too_many_arguments, reason = "native ordered rectangle validates both axes and exact owners")]
+    pub fn csv_ordered_page(
+        &self,
+        generation: f64,
+        revision: f64,
+        order: f64,
+        row: f64,
+        rows: f64,
+        column: f64,
+        columns: f64,
+        cancel: &Cancel,
+    ) -> std::result::Result<AsyncTask<ReadCsv<PageQuery>>, Error<Code>> {
+        let id = order_id(order)?;
+        let revision_id = int("gen", revision)? as u32;
+        let raw = self.raw()?;
+        let state = self
+            .csv
+            .state
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|s| s.csv.revision == revision_id)
+            .cloned()
+            .ok_or_else(|| Error::new(Code::Stale, "CSV configuration replaced"))?;
+        let order = get_order(&state, id, raw).map_err(doc_error)?;
+        self.csv_context(
+            generation,
+            revision,
+            cancel,
+            PageQuery {
+                row: int("start", row)?,
+                rows: count(rows, core_csv::MAX_ROWS, "rowCount")?,
+                column: int("start", column)?,
+                columns: count(columns, core_csv::MAX_COLUMNS, "columnCount")?,
+                order: Some((id, order)),
+            },
+        )
+    }
+    #[napi(ts_return_type = "Promise<CsvOrderLocated>")]
+    pub fn csv_order_locate(
+        &self,
+        generation: f64,
+        revision: f64,
+        order: f64,
+        record: f64,
+        cancel: &Cancel,
+    ) -> std::result::Result<AsyncTask<ReadCsv<OrderLocateQuery>>, Error<Code>> {
+        self.csv_context(
+            generation,
+            revision,
+            cancel,
+            OrderLocateQuery { id: order_id(order)?, record: int("start", record)? },
+        )
+    }
+    #[napi(ts_return_type = "Promise<CsvCell>")]
+    pub fn csv_cell(
+        &self,
+        generation: f64,
+        revision: f64,
+        record: f64,
+        column: f64,
+        cancel: &Cancel,
+    ) -> std::result::Result<AsyncTask<ReadCsv<CellQuery>>, Error<Code>> {
+        self.csv_context(
+            generation,
+            revision,
+            cancel,
+            CellQuery { record: int("start", record)?, column: int("start", column)? },
+        )
+    }
+}
+
+#[napi(object)]
+pub struct CsvFindHit {
+    pub data_row: f64,
+    pub source_record: f64,
+    pub column: f64,
+    pub start: f64,
+    pub end: f64,
+    pub text: Option<String>,
+    pub match_start: Option<u32>,
+    pub match_end: Option<u32>,
+}
+#[napi(object)]
+pub struct CsvFindInfo {
+    pub id: u32,
+    pub count: f64,
+    pub scanned_bytes: f64,
+    pub complete: bool,
+}
+#[napi(object)]
+pub struct CsvFindPage {
+    pub count: f64,
+    pub scanned_bytes: f64,
+    pub complete: bool,
+    pub hits: Vec<CsvFindHit>,
+    pub hit: Option<CsvFindHit>,
+    pub ordinal: Option<f64>,
+    pub wrapped: bool,
+}
+fn grid_hit(h: core_csv::GridHit) -> CsvFindHit {
+    CsvFindHit {
+        data_row: h.data_row as f64,
+        source_record: h.record as f64,
+        column: h.column as f64,
+        start: h.start as f64,
+        end: h.end as f64,
+        text: None,
+        match_start: None,
+        match_end: None,
+    }
+}
+fn grid_excerpt(c: &Context, h: core_csv::GridHit) -> std::result::Result<CsvFindHit, DocError> {
+    let mut result = grid_hit(h);
+    let mut text = String::with_capacity(4096);
+    let (mut matched, mut context) = (0, 0);
+    let mut offset = h.start;
+    for _ in 0..4 {
+        let piece = c.state.csv.piece(c.raw.document(), h.record, h.column, Some(offset))?;
+        let mut units = 0;
+        for ch in piece.text.chars() {
+            if piece.map.start_byte(units) < h.end {
+                matched += ch.len_utf16() as u32;
+            } else {
+                context += ch.len_utf16();
+            }
+            units += ch.len_utf16() as u32;
+            text.push(ch);
+            if context >= 256 {
+                break;
+            }
+        }
+        if context >= 256 {
+            break;
+        }
+        let Some(next) = piece.next else {
+            break;
+        };
+        offset = next;
+    }
+    result.text = Some(text);
+    result.match_start = Some(0);
+    result.match_end = Some(matched);
+    Ok(result)
+}
+pub struct GridFindQuery {
+    id: u32,
+    order: u32,
+    search: Arc<core_csv::GridFind>,
+    seek: bool,
+    from: Option<core_csv::GridHit>,
+    previous: bool,
+}
+impl Query for GridFindQuery {
+    type Output = CsvFindPage;
+    type JsValue = CsvFindPage;
+    fn check(&self, c: &Context) -> std::result::Result<(), DocError> {
+        check_order(&c.state, self.order)?;
+        if c.state
+            .find
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|(id, _, search)| *id == self.id && Arc::ptr_eq(search, &self.search))
+        {
+            Ok(())
+        } else {
+            Err(stale(self.id))
+        }
+    }
+    fn run(&self, c: &Context) -> std::result::Result<Self::Output, DocError> {
+        if self.seek {
+            let (hit, wrapped, ordinal) = self.search.seek(&c.state.csv, c.raw.document(), self.from, self.previous)?;
+            Ok(CsvFindPage {
+                count: 0.,
+                scanned_bytes: 0.,
+                complete: false,
+                hits: Vec::new(),
+                hit: hit.map(|h| grid_excerpt(c, h)).transpose()?,
+                ordinal: ordinal.map(|n| n as f64),
+                wrapped,
+            })
+        } else {
+            let p = self.search.scan(&c.state.csv, c.raw.document())?;
+            Ok(CsvFindPage {
+                count: p.count as f64,
+                scanned_bytes: p.bytes as f64,
+                complete: p.complete,
+                hits: p.hits.into_iter().map(grid_hit).collect(),
+                hit: None,
+                ordinal: None,
+                wrapped: false,
+            })
+        }
+    }
+    fn convert(&self, result: Self::Output) -> Self::JsValue {
+        result
+    }
+}
+#[napi]
+impl Doc {
+    #[napi]
+    pub fn csv_order_close(
+        &self,
+        generation: f64,
+        revision: f64,
+        order: f64,
+    ) -> std::result::Result<bool, Error<Code>> {
+        let generation = int("gen", generation)? as u32;
+        let revision = int("gen", revision)? as u32;
+        let order = order_id(order)?;
+        let raw = self.raw()?;
+        if raw.document().generation() != generation {
+            return Ok(false);
+        }
+        let state = self.csv.state.lock().unwrap().as_ref().filter(|s| s.csv.revision == revision).cloned();
+        let Some(state) = state else {
+            return Ok(false);
+        };
+        if check_order(&state, order).is_err() {
+            return Ok(false);
+        }
+        state.sort_epoch.fetch_add(1, Ordering::Relaxed);
+        state.order.lock().unwrap().take();
+        if let Some((_, _, find)) = state.find.lock().unwrap().take() {
+            find.close();
+        }
+        Ok(true)
+    }
+    #[napi]
+    pub fn csv_find_start(
+        &self,
+        generation: f64,
+        revision: f64,
+        order: f64,
+        query: String,
+        match_case: bool,
+    ) -> std::result::Result<CsvFindInfo, Error<Code>> {
+        let generation = int("gen", generation)? as u32;
+        let revision = int("gen", revision)? as u32;
+        let order_id = order_id(order)?;
+        let raw = self.raw()?;
+        if raw.document().generation() != generation {
+            return Err(doc_error(DocError::Stale { current: raw.document().generation(), asked: generation }));
+        }
+        let state = self
+            .csv
+            .state
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|s| s.csv.revision == revision)
+            .cloned()
+            .ok_or_else(|| Error::new(Code::Stale, "CSV configuration replaced"))?;
+        if state.csv.locked {
+            return Err(Error::new(Code::Refused, core_csv::UTF16_REASON));
+        }
+        let order = get_order(&state, order_id, raw).map_err(doc_error)?;
+        let search = Arc::new(core_csv::GridFind::new(&state.csv, order, &query, match_case).map_err(doc_error)?);
+        let id = state
+            .next_find
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .map_err(|_| Error::new(Code::Refused, "Grid Find identities exhausted"))?
+            + 1;
+        if let Some((_, _, old)) = state.find.lock().unwrap().replace((id, order_id, search)) {
+            old.close();
+        }
+        Ok(CsvFindInfo { id, count: 0., scanned_bytes: 0., complete: false })
+    }
+    fn grid_find_query(
+        &self,
+        revision: f64,
+        id: f64,
+        seek: bool,
+        from: Option<CsvFindHit>,
+        previous: bool,
+    ) -> std::result::Result<GridFindQuery, Error<Code>> {
+        let revision = int("gen", revision)? as u32;
+        let id = int("gen", id)? as u32;
+        let state = self
+            .csv
+            .state
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|s| s.csv.revision == revision)
+            .cloned()
+            .ok_or_else(|| Error::new(Code::Stale, "CSV configuration replaced"))?;
+        let held = state.find.lock().unwrap();
+        let (_, order, search) = held
+            .as_ref()
+            .filter(|(current, _, _)| *current == id)
+            .ok_or_else(|| Error::new(Code::Stale, "Grid Find query replaced"))?;
+        let from = from
+            .map(|h| {
+                Ok::<_, Error<Code>>(core_csv::GridHit {
+                    data_row: int("start", h.data_row)?,
+                    record: int("start", h.source_record)?,
+                    column: int("start", h.column)?,
+                    start: int("offset", h.start)?,
+                    end: int("offset", h.end)?,
+                    within_row: 0,
+                })
+            })
+            .transpose()?;
+        Ok(GridFindQuery { id, order: *order, search: search.clone(), seek, from, previous })
+    }
+    #[napi(ts_return_type = "Promise<CsvFindPage>")]
+    pub fn csv_find_scan(
+        &self,
+        generation: f64,
+        revision: f64,
+        id: f64,
+        cancel: &Cancel,
+    ) -> std::result::Result<AsyncTask<ReadCsv<GridFindQuery>>, Error<Code>> {
+        self.csv_context(generation, revision, cancel, self.grid_find_query(revision, id, false, None, false)?)
+    }
+    #[napi(ts_return_type = "Promise<CsvFindPage>")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Grid Find validates generation, CSV/query identities and navigation locator"
+    )]
+    pub fn csv_find_seek(
+        &self,
+        generation: f64,
+        revision: f64,
+        id: f64,
+        from: Option<CsvFindHit>,
+        previous: bool,
+        cancel: &Cancel,
+    ) -> std::result::Result<AsyncTask<ReadCsv<GridFindQuery>>, Error<Code>> {
+        self.csv_context(generation, revision, cancel, self.grid_find_query(revision, id, true, from, previous)?)
+    }
+    #[napi]
+    pub fn csv_find_close(&self, generation: f64, revision: f64, id: f64) -> std::result::Result<bool, Error<Code>> {
+        let generation = int("gen", generation)? as u32;
+        let revision = int("gen", revision)? as u32;
+        let id = int("gen", id)? as u32;
+        let state = self
+            .csv
+            .state
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|s| s.csv.revision == revision && s.csv.generation == generation)
+            .cloned();
+        let Some(state) = state else {
+            return Ok(false);
+        };
+        let mut held = state.find.lock().unwrap();
+        if held.as_ref().is_some_and(|(current, _, _)| *current == id) {
+            held.take().unwrap().2.close();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+}
+fn order_id(value: f64) -> std::result::Result<u32, Error<Code>> {
+    u32::try_from(int("start", value)?).map_err(|_| Error::new(Code::InvalidParams, "order id exceeds u32"))
 }

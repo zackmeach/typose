@@ -159,3 +159,23 @@ it('Find has an independent charged share and retires with the replaced view', a
   expect(budget.snapshot().total).toBe(50)
   expect(totals).toEqual([50, 60, 90, 50])
 })
+
+it('large copies reserve a transient share, release it, and retire only while buffers are pending', async () => {
+  const totals: number[] = []
+  const budget = new LensBudget({ call: async (_, params) => { totals.push(params.bytes); return true } }, 1, 1, 1, 20, 20)
+  await budget.reserveGrid(1, 100)
+  expect(await budget.reserveCopy(1, 12 << 20)).toBe(true)
+  expect(budget.snapshot()).toMatchObject({ grid: 100, copy: 12 << 20, total: 20 + 100 + (12 << 20) })
+  expect(await budget.reserveCopy(1, 13 << 20)).toBe(true)
+  expect(budget.snapshot().total).toBe(20 + 100 + (13 << 20))
+  expect(await budget.reserveCopy(1, 0)).toBe(true)
+  expect(budget.snapshot().total).toBe(120)
+  expect(await budget.reserveCopy(1, 13 << 20)).toBe(true)
+  expect(budget.reloadReservation(20).retiredTreeMax).toBe(100 + (13 << 20))
+  expect(await budget.reserveCopy(1, 0)).toBe(false)
+  const next = budget.reloadReservation(20)
+  expect(budget.adopt(2, next.bytes, next)).toBe(true)
+  expect(budget.snapshot()).toMatchObject({ grid: 0, retired: 2 * (100 + (13 << 20)) })
+  expect(budget.snapshot()).not.toHaveProperty('copy')
+  expect(totals).toEqual([120, 20 + 100 + (12 << 20), 20 + 100 + (13 << 20), 120, 20 + 100 + (13 << 20)])
+})

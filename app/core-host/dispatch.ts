@@ -20,6 +20,13 @@ import {
   type CsvPage,
   type CsvRef,
   type CsvSource,
+  type CsvOrderRef,
+  type CsvOrderInfo,
+  type CsvFindRef,
+  type CsvFindInfo,
+  type CsvFindPage,
+  type CsvFindSeek,
+  type CsvFindHit,
   type DebugStats,
   type ErrorCode,
   type Hello,
@@ -45,7 +52,7 @@ import {
 } from '../shared/protocol'
 import { isValid } from './numbers'
 import { boundedLink, decodedLocalTarget, localTarget } from './local-target'
-import { findNumber, findProgress, sourceHit, sourceHits } from './find-validation'
+import { findNumber, findProgress, sourceHit, sourceHits, csvFindHit, csvFindHits } from './find-validation'
 
 declare const __TEST_HOOKS__: boolean
 
@@ -149,6 +156,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     }
   }
   const invalidateCsv = (doc: number): void => {
+    closeDocumentCsvInteractions(doc)
     cancelCsvReads(doc)
     csvRevisions.delete(doc)
     csvConfigurations.delete(doc)
@@ -274,7 +282,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   type ReadEntry = {
     doc?: number; cancel: Cancel; retainOnLeave: boolean; cancelled: boolean; cancelledAt?: number
     candidate?: true; saved?: SavedRoute; folder?: NativeFolderRoot; surface?: number; csv?: true; csvConfig?: true
-    findView?: number; findId?: number
+    findView?: number; findId?: number; findKind?: 'source' | 'csv'; findOp?: 'scan' | 'seek'; csvSort?: true
   }
   const reads = new Map<number, ReadEntry>()
   const saved = new Map<string, SavedRoute>()
@@ -284,7 +292,8 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   let nextRoot = 1
   let rootPeak = 0
   let rootHostBytes = 0 // Map capacity remains paid until this host exits, including after removeRoot.
-  const csvRevisions = new Map<number, { generation: number; revision: number }>()
+  const csvRevisions = new Map<number, { generation: number; revision: number; order?: number; orderView?: number; sort?: number; sortView?: number; interactionId?: string }>()
+  let nextSort = 1
   const csvConfigurations = new Map<number, number>()
   let nextCsvConfiguration = 1
   /** The test-hooks build's account of cancels (plan C5's acceptance). */
@@ -331,7 +340,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     return { session, doc: id, gen, id: resource }
   }
 
-  type Lease = { ref: ViewRef; bytes: number; sourceFind?: number }
+  type Lease = { ref: ViewRef; bytes: number; sourceFind?: number; csvFind?: { id: number; order: CsvOrderRef } }
   type SurfaceState = { ref: SurfaceRef; alive: boolean; views: Map<number, Lease>; current?: number; latest?: Pending }
   type Pending = { request: number; surface: SurfaceState; bytes: number; doc?: number; gen?: number; disposed: boolean; previousView?: number; kind?: 'activate' | 'reload' }
   // Surface zero is an isolated compatibility owner. Explicit documents never accept its doc/gen-only cleanup.
@@ -429,7 +438,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     doc.setCacheActive(gen, true)
     const ref: ViewRef = { session, surface: surface.ref.id, id: nextView++, doc: id, gen }
     const previous = currentLease(surface)
-    if (previous) closeSourceFind(previous)
+    if (previous) { closeSourceFind(previous); closeCsvInteractions(previous) }
     surface.views.set(ref.id, { ref, bytes: pending.bytes })
     surface.current = ref.id
     giveBack(pending, true) // the previous view remains paid until its exact lease is detached
@@ -483,8 +492,8 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     if (lease.sourceFind !== id) throw new Refusal('Stale', 'the Find query was replaced')
     return { ref: { view: lease.ref, id }, lease, doc: getDoc(lease.ref.doc) }
   }
-  const cancelFindReads = (lease: Lease, id: number): void => {
-    for (const entry of reads.values()) if (entry.findView === lease.ref.id && entry.findId === id) {
+  const cancelFindReads = (lease: Lease, id: number, kind: 'source' | 'csv' = 'source'): void => {
+    for (const entry of reads.values()) if (entry.findView === lease.ref.id && entry.findId === id && entry.findKind === kind) {
       entry.cancelled = true; entry.cancel.cancel()
     }
   }
@@ -499,16 +508,86 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   const closeDocumentFind = (id: number): void => {
     for (const surface of surfaces.values()) for (const lease of surface.views.values()) if (lease.ref.doc === id) closeSourceFind(lease)
   }
-  const sourceFindRead = <T>(req: number, ref: SourceFindRef, lease: Lease, start: (cancel: Cancel) => Promise<T>): Promise<T> =>
+  const beginFindRead = (req: number, lease: Lease, id: number, kind: 'source' | 'csv', op: 'scan' | 'seek'): void => {
+    for (const [other, entry] of reads) if (other !== req && entry.findView === lease.ref.id && entry.findId === id
+      && entry.findKind === kind && entry.findOp === op) { entry.cancelled = true; entry.cancel.cancel() }
+    Object.assign(reads.get(req)!, { findView: lease.ref.id, findId: id, findKind: kind, findOp: op })
+  }
+  const sourceFindRead = <T>(req: number, ref: SourceFindRef, lease: Lease, op: 'scan' | 'seek', start: (cancel: Cancel) => Promise<T>): Promise<T> =>
     read(req, ref.view.doc, async (cancel) => {
-      Object.assign(reads.get(req)!, { findView: lease.ref.id, findId: ref.id })
+      beginFindRead(req, lease, ref.id, 'source', op)
       const result = await start(cancel)
       if (reads.get(req)?.cancelled) throw new Refusal('Cancelled', 'the Find request was cancelled')
       if (findLease(ref.view) !== lease || lease.sourceFind !== ref.id) throw new Refusal('Stale', 'the Find query was replaced while reading')
       return result
     })
+  const csvLease = (ref: CsvRef): Lease => {
+    csvForRef(ref)
+    const owner = docOwners.get(ref.doc)
+    const lease = owner === undefined ? undefined : currentLease(surfaces.get(owner)!)
+    if (!lease || lease.ref.doc !== ref.doc || lease.ref.gen !== ref.gen) throw new Refusal('Stale', 'the Grid view was replaced')
+    return findLease(lease.ref)
+  }
+  const csvInteractionId = (value: unknown): string => {
+    if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value))
+      throw new Refusal('InvalidParams', 'interactionId must be a Grid UUID', 'interactionId')
+    return value
+  }
+  const orderRef = (value: unknown): { order: CsvOrderRef; lease: Lease; doc: Doc } => {
+    if (!isRecord(value)) throw new Refusal('InvalidParams', 'order must be a Grid order reference', 'order')
+    const csv = csvRef(value.csv), id = csvRequestNumber(value.id, 'order.id', 0, 0xffff_ffff)
+    const lease = csvLease(csv), doc = csvForRef(csv)
+    const config = csvRevisions.get(csv.doc)!
+    if ((config.order ?? 0) !== id || (config.orderView !== undefined && config.orderView !== lease.ref.id))
+      throw new Refusal('Stale', 'the Grid sort order or view was replaced')
+    config.orderView = lease.ref.id
+    return { order: { csv, id }, lease, doc }
+  }
+  const closeCsvFind = (lease: Lease): void => {
+    const found = lease.csvFind
+    if (!found) return
+    lease.csvFind = undefined
+    cancelFindReads(lease, found.id, 'csv')
+    const doc = docs.get(lease.ref.doc)
+    if (doc?.generation === lease.ref.gen) doc.csvFindClose(lease.ref.gen, found.order.csv.revision, found.id)
+  }
+  const closeCsvInteractions = (lease: Lease): void => {
+    closeCsvFind(lease)
+    const doc = docs.get(lease.ref.doc), config = csvRevisions.get(lease.ref.doc)
+    if (doc?.generation === lease.ref.gen && config?.generation === lease.ref.gen
+      && (config.orderView === lease.ref.id || config.sortView === lease.ref.id)) {
+      doc.csvOrderClose(lease.ref.gen, config.revision, config.order ?? 0)
+      config.order = undefined; config.orderView = undefined; config.sort = undefined; config.sortView = undefined; config.interactionId = undefined
+      cancelCsvReads(lease.ref.doc)
+    }
+  }
+  const closeDocumentCsvInteractions = (id: number): void => {
+    for (const surface of surfaces.values()) for (const lease of surface.views.values()) if (lease.ref.doc === id) closeCsvInteractions(lease)
+  }
+  const gridRead = <T>(req: number, order: CsvOrderRef, lease: Lease, start: (cancel: Cancel) => Promise<T>): Promise<T> =>
+    csvRead(req, order.csv.doc, order.csv.gen, order.csv.revision, async (cancel) => {
+      const value = await start(cancel)
+      if (orderRef(order).lease !== lease) throw new Refusal('Stale', 'the Grid view was replaced while reading')
+      return value
+    })
+  const csvSearchRef = (value: unknown): { ref: CsvFindRef; lease: Lease; doc: Doc } => {
+    if (!isRecord(value)) throw new Refusal('InvalidParams', 'ref must be a Grid Find reference', 'ref')
+    const { order, lease, doc } = orderRef(value.order)
+    const explicit = findLease(value.view), id = csvRequestNumber(value.id, 'ref.id', 1, 0xffff_ffff)
+    if (explicit !== lease || lease.csvFind?.id !== id || lease.csvFind.order.id !== order.id)
+      throw new Refusal('Stale', 'the Grid Find query or view was replaced')
+    return { ref: { view: lease.ref, order, id }, lease, doc }
+  }
+  const csvFindRead = <T>(req: number, ref: CsvFindRef, lease: Lease, op: 'scan' | 'seek', start: (cancel: Cancel) => Promise<T>): Promise<T> =>
+    gridRead(req, ref.order, lease, async (cancel) => {
+      beginFindRead(req, lease, ref.id, 'csv', op)
+      const value = await start(cancel)
+      if (csvSearchRef(ref).lease !== lease) throw new Refusal('Stale', 'the Grid Find query was replaced while reading')
+      return value
+    })
   const detach = (surface: SurfaceState, lease: Lease): void => {
     closeSourceFind(lease)
+    closeCsvInteractions(lease)
     surface.views.delete(lease.ref.id)
     if (surface.current === lease.ref.id) surface.current = undefined
     for (const pending of pendingViews.values()) if (pending.surface === surface && pending.doc === lease.ref.doc
@@ -552,7 +631,11 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     try {
       return await start(entry.cancel)
     } catch (e) {
-      if (codeOf(e) === 'Frozen' && docs.get(doc) === source && source.generation === gen) cancelReads(doc)
+      if (codeOf(e) === 'Frozen' && docs.get(doc) === source && source.generation === gen) {
+        closeDocumentFind(doc)
+        closeDocumentCsvInteractions(doc)
+        cancelReads(doc)
+      }
       if (__TEST_HOOKS__ && codeOf(e) === 'Cancelled' && entry.cancelledAt !== undefined) {
         cancels.cancelled++
         cancels.cancelMs = Math.max(cancels.cancelMs, performance.now() - entry.cancelledAt)
@@ -580,7 +663,11 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     try {
       doc.startIndex(cancel, (e: IndexProgress) => {
         // An index error froze the document (plan C6). An older generation's ends with Reload's freeze, not this one's.
-        if (e.error !== undefined && jobs.get(id) === cancel && docs.get(id) === doc && doc.generation === gen) cancelReads(id)
+        if (e.error !== undefined && jobs.get(id) === cancel && docs.get(id) === doc && doc.generation === gen) {
+          closeDocumentFind(id)
+          closeDocumentCsvInteractions(id)
+          cancelReads(id)
+        }
         const event: ProgressEvent = { event: 'progress', session, doc: id, gen, lines: e.lines, bytes: e.bytes, done: e.done }
         if (e.error !== undefined) event.error = e.error
         emit(event)
@@ -651,7 +738,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     },
     sourceFindScan: (p, req): Promise<SourceFindPage> => {
       const { ref, lease, doc } = sourceFindRef(p.ref)
-      return sourceFindRead(req, ref, lease, async (cancel) => {
+      return sourceFindRead(req, ref, lease, 'scan', async (cancel) => {
         const value = await doc.sourceFindScan(ref.view.gen, ref.id, cancel)
         return { ref, ...findProgress(value, doc.size), hits: sourceHits(value.hits, doc.size) }
       })
@@ -660,7 +747,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const previous = findDirection(p)
       const { ref, lease, doc } = sourceFindRef(p.ref)
       const from = p.from === undefined ? undefined : csvRequestNumber(p.from, 'from', 0, doc.size)
-      return sourceFindRead(req, ref, lease, async (cancel) => {
+      return sourceFindRead(req, ref, lease, 'seek', async (cancel) => {
         const value = await doc.sourceFindSeek(ref.view.gen, ref.id, from, previous, cancel)
         if (typeof value.wrapped !== 'boolean') throw new Refusal('Internal', 'the core returned invalid Find wrap state')
         const hit = value.hit == null ? undefined : sourceHit(value.hit, doc.size)
@@ -672,6 +759,121 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     sourceFindClose: (p): boolean => {
       const { lease } = sourceFindRef(p.ref)
       closeSourceFind(lease)
+      return true
+    },
+    csvSort: (p, req): Promise<CsvOrderInfo> => {
+      const ref = csvRef(p.ref), lease = findLease(p.view)
+      if (csvLease(ref) !== lease) throw new Refusal('Stale', 'the sort view does not own this Grid')
+      const interactionId = csvInteractionId(p.interactionId)
+      const column = csvRequestNumber(p.column, 'column')
+      if (!['asc', 'desc', 'none'].includes(p.direction as string)) throw new Refusal('InvalidParams', 'direction must be asc, desc or none', 'direction')
+      const config = csvRevisions.get(ref.doc)!, doc = csvForRef(ref)
+      if (!Number.isSafeInteger(nextSort)) throw new Refusal('Refused', 'sort intents are exhausted')
+      const intent = nextSort++
+      config.sort = intent; config.sortView = lease.ref.id; config.interactionId = interactionId
+      for (const entry of reads.values()) if (entry.doc === ref.doc && entry.csvSort) { entry.cancelled = true; entry.cancel.cancel() }
+      return csvRead(req, ref.doc, ref.gen, ref.revision, async (cancel) => {
+        reads.get(req)!.csvSort = true
+        const value = await doc.csvSort(ref.gen, ref.revision, column, p.direction as string, cancel)
+        if (csvLease(ref) !== lease || csvRevisions.get(ref.doc) !== config || config.sort !== intent)
+          throw new Refusal('Stale', 'the sort request was replaced')
+        const id = csvResultNumber(value.id, 'order identity', 1, 0xffff_ffff)
+        if (value.column !== column || value.direction !== p.direction) throw new Refusal('Internal', 'the core returned the wrong Grid order')
+        const rows = csvResultNumber(value.rows, 'order rows')
+        closeCsvFind(lease)
+        cancelCsvReads(ref.doc, req)
+        config.order = id
+        config.orderView = lease.ref.id
+        return { order: { csv: ref, id }, rows, column, direction: value.direction as CsvOrderInfo['direction'] }
+      })
+    },
+    csvOrderClose: (p): boolean => {
+      if (!isRecord(p.order)) throw new Refusal('InvalidParams', 'order must be a Grid order reference', 'order')
+      const ref = csvRef(p.order.csv), interactionId = csvInteractionId(p.interactionId)
+      csvRequestNumber(p.order.id, 'order.id', 0, 0xffff_ffff)
+      const explicit = findLease(p.view), lease = csvLease(ref)
+      if (explicit !== lease) throw new Refusal('Stale', 'the closing view does not own this Grid')
+      const config = csvRevisions.get(ref.doc)!
+      // A sort may have committed before its reply reached this instance. Its owner may close the host's
+      // authoritative native id; an older instance must not cancel a newer instance's pending sort.
+      if (config.interactionId !== interactionId || config.orderView !== undefined && config.orderView !== lease.ref.id) return false
+      if (config.orderView !== lease.ref.id && config.sortView !== lease.ref.id) return false
+      closeCsvInteractions(lease)
+      return true
+    },
+    csvOrderedPage: (p, req): Promise<CsvPage> => {
+      const { order, lease, doc } = orderRef(p.order)
+      const rowStart = csvRequestNumber(p.rowStart, 'rowStart'), rowCount = csvRequestNumber(p.rowCount, 'rowCount', 1, 128)
+      const columnStart = csvRequestNumber(p.columnStart, 'columnStart'), columnCount = csvRequestNumber(p.columnCount, 'columnCount', 1, 128)
+      if (!Number.isSafeInteger(rowStart + rowCount) || !Number.isSafeInteger(columnStart + columnCount))
+        throw new Refusal('InvalidParams', 'the Grid rectangle exceeds the safe integer range')
+      return gridRead(req, order, lease, async (cancel) => stampCsvPage(await doc.csvOrderedPage(order.csv.gen, order.csv.revision,
+        order.id, rowStart, rowCount, columnStart, columnCount, cancel), order.csv, rowStart, rowCount, columnStart, columnCount))
+    },
+    csvOrderLocate: (p, req): Promise<{ dataRow: number }> => {
+      const { order, lease, doc } = orderRef(p.order), sourceRecord = csvRequestNumber(p.sourceRecord, 'sourceRecord')
+      return gridRead(req, order, lease, async (cancel) => ({ dataRow: csvResultNumber((await doc.csvOrderLocate(order.csv.gen,
+        order.csv.revision, order.id, sourceRecord, cancel)).dataRow, 'data row') }))
+    },
+    csvCell: (p, req): Promise<CsvCell> => {
+      const ref = csvRef(p.ref), lease = csvLease(ref), doc = csvForRef(ref)
+      const sourceRecord = csvRequestNumber(p.sourceRecord, 'sourceRecord'), column = csvRequestNumber(p.column, 'column')
+      return csvRead(req, ref.doc, ref.gen, ref.revision, async (cancel) => {
+        const cell = await doc.csvCell(ref.gen, ref.revision, sourceRecord, column, cancel)
+        if (csvLease(ref) !== lease) throw new Refusal('Stale', 'the Grid view was replaced while reading')
+        if (cell.column !== column) throw new Refusal('Internal', 'the core returned the wrong Grid cell')
+        if (cell.value == null) return { kind: 'missing', column }
+        const piece = stampCsvPiece(cell.value, ref)
+        // Native CSV reads 4096 bytes plus up to four bytes of decoder lookahead; ASCII can return 4100 units.
+        if (piece.sourceRecord !== sourceRecord || piece.column !== column || typeof piece.text !== 'string' || piece.text.length > 4096 + 4
+          || !isRecord(piece.map) || !(piece.map.points instanceof Uint32Array) || piece.map.points.length > 16 << 10
+          || piece.map.start !== piece.pieceSpan.start || piece.map.end !== piece.pieceSpan.end || piece.map.units !== piece.text.length)
+          throw new Refusal('Internal', 'the core returned an invalid Grid cell')
+        return piece
+      })
+    },
+    csvFindStart: (p): CsvFindInfo => {
+      const query = findQuery(p), explicit = findLease(p.view)
+      const { order, lease, doc } = orderRef(p.order)
+      if (lease !== explicit) throw new Refusal('Stale', 'the Find view does not own this Grid')
+      const value = doc.csvFindStart(order.csv.gen, order.csv.revision, order.id, query, p.matchCase as boolean)
+      const id = csvResultNumber(value.id, 'Find identity', 1, 0xffff_ffff)
+      try {
+        const progress = findProgress(value, doc.size)
+        closeCsvFind(lease)
+        lease.csvFind = { id, order }
+        return { ref: { view: lease.ref, order, id }, ...progress }
+      } catch (e) { doc.csvFindClose(order.csv.gen, order.csv.revision, id); throw e }
+    },
+    csvFindScan: (p, req): Promise<CsvFindPage> => {
+      const { ref, lease, doc } = csvSearchRef(p.ref)
+      return csvFindRead(req, ref, lease, 'scan', async (cancel) => {
+        const value = await doc.csvFindScan(ref.view.gen, ref.order.csv.revision, ref.id, cancel)
+        return { ref, ...findProgress(value, doc.size), hits: csvFindHits(value.hits, doc.size) }
+      })
+    },
+    csvFindSeek: (p, req): Promise<CsvFindSeek> => {
+      const previous = findDirection(p), { ref, lease, doc } = csvSearchRef(p.ref)
+      let from: CsvFindHit | undefined
+      if (p.from !== undefined) {
+        if (!isRecord(p.from)) throw new Refusal('InvalidParams', 'from must be a Grid Find hit', 'from')
+        from = { dataRow: csvRequestNumber(p.from.dataRow, 'from.dataRow'), sourceRecord: csvRequestNumber(p.from.sourceRecord, 'from.sourceRecord'),
+          column: csvRequestNumber(p.from.column, 'from.column'), start: csvRequestNumber(p.from.start, 'from.start', 0, doc.size),
+          end: csvRequestNumber(p.from.end, 'from.end', 0, doc.size) }
+        if (from.end <= from.start) throw new Refusal('InvalidParams', 'from must have a positive source span', 'from.end')
+      }
+      return csvFindRead(req, ref, lease, 'seek', async (cancel) => {
+        const value = await doc.csvFindSeek(ref.view.gen, ref.order.csv.revision, ref.id, from, previous, cancel)
+        if (typeof value.wrapped !== 'boolean') throw new Refusal('Internal', 'the core returned invalid Grid Find wrap state')
+        const hit = value.hit == null ? undefined : csvFindHit(value.hit, doc.size)
+        const ordinal = value.ordinal == null ? undefined : findNumber(value.ordinal)
+        if ((hit === undefined) !== (ordinal === undefined)) throw new Refusal('Internal', 'the core returned invalid Grid Find position')
+        return { ...(hit ? { hit, ordinal } : {}), wrapped: value.wrapped }
+      })
+    },
+    csvFindClose: (p): boolean => {
+      const { lease } = csvSearchRef(p.ref)
+      closeCsvFind(lease)
       return true
     },
     createSurface: (): SurfaceRef => {
@@ -798,8 +1000,11 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         currentCsvRead(req, doc, id, gen, undefined, configuration)
         const info = stampCsvInfo(native, id, gen)
         const previous = csvRevisions.get(id)
-        if (!previous || previous.generation !== gen || previous.revision !== info.ref.revision) cancelCsvReads(id, req)
-        csvRevisions.set(id, { generation: gen, revision: info.ref.revision })
+        if (!previous || previous.generation !== gen || previous.revision !== info.ref.revision) {
+          for (const owner of surfaces.values()) for (const lease of owner.views.values()) if (lease.ref.doc === id) closeCsvFind(lease)
+          cancelCsvReads(id, req)
+          csvRevisions.set(id, { generation: gen, revision: info.ref.revision })
+        }
         return info
       }, false, true, true)
     },

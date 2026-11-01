@@ -35,4 +35,4 @@ The host tests use spy documents to exercise classification/config ownership, re
 
 First-1000-row type inference, categorical pills, sampled widths and paged problem metadata are deferred. Column metadata currently supplies bounded names, generic text type and bounded header-based widths, with `metadataDone: false`. Header/delimiter overrides are reversible; encoding overrides and their generation-changing handoff are deferred. UTF-16 CSV/TSV stays Raw-only with an explicit Grid refusal.
 
-No claim is made for Find, sort, range-copy preview, broad throughput/large-file stress, full allocation/GC proof, Linux/macOS runtime behavior or final installed delivery. The focused checks above establish the bounded native preview and its cancellation/revision/authority seams.
+The checks above cover the original parser and preview. [Grid interactions](csv-grid.md) describes the later native sort order, whole-file cell search and range copy. Broader throughput, allocation/GC and cross-platform qualification remain open.

@@ -20,6 +20,7 @@ export class LensBudget {
   private rendered = 0
   private grid = 0
   private search = 0
+  private copy = 0
   private transitioning = false
 
   constructor(
@@ -46,7 +47,7 @@ export class LensBudget {
   }
 
   snapshot() {
-    return { generation: this.generation, raw: this.raw, rendered: this.rendered, grid: this.grid, ...(this.search ? { search: this.search } : {}), retired: 2 * this.treeMax, total: this.held }
+    return { generation: this.generation, raw: this.raw, rendered: this.rendered, grid: this.grid, ...(this.search ? { search: this.search } : {}), ...(this.copy ? { copy: this.copy } : {}), retired: 2 * this.treeMax, total: this.held }
   }
 
   reserveRaw(generation: number, bytes: number): Promise<boolean> {
@@ -67,6 +68,11 @@ export class LensBudget {
     return this.change(generation, 'search', bytes)
   }
 
+  /** Transient copy buffers are charged independently and released when the copy job settles. */
+  reserveCopy(generation: number, bytes: number): Promise<boolean> {
+    return this.change(generation, 'copy', bytes)
+  }
+
   /** A retained tree keeps its image leases when the lens switch asks for its base allowance again. */
   ensureRendered(generation: number, bytes: number): Promise<boolean> {
     return this.change(generation, 'rendered-min', bytes)
@@ -82,7 +88,7 @@ export class LensBudget {
     this.transitioning = true
     this.epoch++
     this.serial = Promise.resolve()
-    const retiredTreeMax = Math.max(this.treeMax, this.rendered + this.grid + this.search)
+    const retiredTreeMax = Math.max(this.treeMax, this.rendered + this.grid + this.search + this.copy)
     return { generation: this.generation, epoch: this.epoch, raw, retiredTreeMax, bytes: raw + 2 * retiredTreeMax }
   }
 
@@ -103,6 +109,7 @@ export class LensBudget {
     this.rendered = 0
     this.grid = 0
     this.search = 0
+    this.copy = 0
     this.treeMax = plan.retiredTreeMax
     this.held = held
     this.serial = Promise.resolve()
@@ -114,7 +121,7 @@ export class LensBudget {
     this.epoch++
   }
 
-  private change(generation: number, share: 'raw' | 'rendered' | 'rendered-min' | 'rendered-add' | 'grid' | 'search', bytes: number): Promise<boolean> {
+  private change(generation: number, share: 'raw' | 'rendered' | 'rendered-min' | 'rendered-add' | 'grid' | 'search' | 'copy', bytes: number): Promise<boolean> {
     const epoch = this.epoch
     const changed = this.serial.then(async () => {
       if (this.transitioning || !this.current(generation) || epoch !== this.epoch) return false
@@ -122,13 +129,15 @@ export class LensBudget {
       const rendered = share === 'rendered' ? bytes : share === 'rendered-min' ? Math.max(this.rendered, bytes) : share === 'rendered-add' ? this.rendered + bytes : this.rendered
       const grid = share === 'grid' ? Math.max(this.grid, bytes) : this.grid
       const search = share === 'search' ? bytes : this.search
-      const total = raw + rendered + grid + search + 2 * this.treeMax
+      const copy = share === 'copy' ? bytes : this.copy
+      const total = raw + rendered + grid + search + copy + 2 * this.treeMax
       const granted = total === this.held || await this.core.call('reserve', this.view ? { view: this.view, bytes: total } : { doc: this.doc, gen: generation, bytes: total }).catch(() => false)
       if (!granted || this.transitioning || !this.current(generation) || epoch !== this.epoch) return false
       this.raw = raw
       this.rendered = rendered
       this.grid = grid
       this.search = search
+      this.copy = copy
       this.held = total
       return true
     })

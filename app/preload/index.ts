@@ -18,6 +18,26 @@ ipcRenderer.on('core-gone', (_event, { session }: { session: number }) => forwar
 // Spec §6.2's accessibility mode, the same way; the page takes it only from `event.source === window` too.
 ipcRenderer.on('a11y', (_event, on: boolean) => window.postMessage({ type: 'a11y', on }, window.location.origin))
 
+// One use of the narrow clipboard writer follows only a trusted copy shortcut on a Grid cell. Text controls and
+// arbitrary renderer calls cannot arm it; main still authenticates the app's exact main frame and byte bounds.
+let clipboardGesture = false
+let clipboardTokenSerial = 0
+let clipboardToken: string | undefined
+window.addEventListener('keydown', event => {
+  if (!event.isTrusted || event.isComposing || event.shiftKey || event.altKey || event.key.toLowerCase() !== 'c' || !(event.ctrlKey || event.metaKey) || !(event.target instanceof Element)) return
+  const target = event.target
+  if (target.closest('input, textarea, select, [contenteditable="true"], [role="textbox"]')) return
+  if (target.closest('[role="grid"][aria-label="CSV grid"]')) {
+    clipboardGesture = true
+    setTimeout(() => { clipboardGesture = false }, 0)
+  }
+}, { capture: true })
+window.addEventListener('click', event => {
+  if (!event.isTrusted || !(event.target instanceof Element) || !event.target.closest('.csv-context-menu [data-clipboard-copy="true"]')) return
+  clipboardGesture = true
+  setTimeout(() => { clipboardGesture = false }, 0)
+}, { capture: true })
+
 const typose: TyposeApi = {
   launchPath: () => ipcRenderer.invoke('launch-path'),
   launchPaths: () => ipcRenderer.invoke('launch-paths'),
@@ -29,6 +49,19 @@ const typose: TyposeApi = {
   openDialog: () => ipcRenderer.invoke('open-dialog'),
   folderDialog: () => ipcRenderer.invoke('folder-dialog'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  beginClipboardWrite: () => {
+    if (!clipboardGesture) return null
+    clipboardGesture = false
+    const token = `${++clipboardTokenSerial}:${crypto.randomUUID()}`
+    clipboardToken = token
+    return token
+  },
+  cancelClipboardWrite: (token) => { if (clipboardToken === token) clipboardToken = undefined },
+  writeClipboardText: (text, token) => {
+    if (clipboardToken !== token) return Promise.resolve(false)
+    clipboardToken = undefined
+    return ipcRenderer.invoke('write-clipboard', text)
+  },
   mark: (name, t) => ipcRenderer.send('mark', name, t),
   onShown: (cb) => void ipcRenderer.once('shown', () => cb()),
   onCommand: (cb) => {

@@ -186,7 +186,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     const owner = budget.current
     if (!owner) return
     const snapshot = owner.snapshot()
-    retiredRendered.current = Math.max(retiredRendered.current, snapshot.rendered + snapshot.grid + (snapshot.search ?? 0), owner.retiredTreeMax)
+    retiredRendered.current = Math.max(retiredRendered.current, snapshot.rendered + snapshot.grid + (snapshot.search ?? 0) + (snapshot.copy ?? 0), owner.retiredTreeMax)
     owner.invalidate()
   }
 
@@ -1086,7 +1086,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
               <option value="auto">Auto{detectedDelimiter ? ` (${detectedDelimiter})` : ''}</option><option value=",">Comma</option><option value={'\t'}>Tab</option><option value=";">Semicolon</option><option value="|">Pipe</option>
             </select></label>
             {card.gridOff ? <p>{card.gridOff}</p> : null}
-            <p>Grid preview · Find, sort and range copy are unavailable.</p>
+            <p>Read-only grid · decoded cell values.</p>
           </Dialog>
         </Popover>
       </DialogTrigger> : null}
