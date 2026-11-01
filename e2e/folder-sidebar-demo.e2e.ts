@@ -50,7 +50,8 @@ async function expandTreeItem(win: Awaited<ReturnType<typeof launch>>['win'], na
 
 async function showSidebar(win: Awaited<ReturnType<typeof launch>>['win']): Promise<void> {
   const show = win.getByRole('button', { name: 'Show sidebar', exact: true })
-  if (await show.count()) await show.click()
+  await expect(show).toBeVisible()
+  await show.click()
   await expect(win.getByRole('complementary', { name: 'Files sidebar' })).toBeVisible()
   await expect(win.getByRole('button', { name: /Add folder/ })).toBeVisible()
 }
