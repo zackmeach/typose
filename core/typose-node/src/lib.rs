@@ -15,6 +15,7 @@ use typose_core::hooks;
 use typose_core::image_resource::{self, Pending, Resources};
 use typose_core::limits::{self, RANGES};
 use typose_core::local::LocalRoute;
+use typose_core::local::folder;
 use typose_core::md::{self, Rendered};
 use typose_core::pages::{self, LinePiece};
 use typose_core::raw::Raw;
@@ -27,6 +28,7 @@ const FIRST_SCREEN_LINES: u64 = 256;
 pub enum Code {
     InvalidParams,
     NotFound,
+    NotDirectory,
     PermissionDenied,
     Refused,
     Binary,
@@ -43,6 +45,7 @@ impl AsRef<str> for Code {
         match self {
             Code::InvalidParams => "InvalidParams",
             Code::NotFound => "NotFound",
+            Code::NotDirectory => "NotDirectory",
             Code::PermissionDenied => "PermissionDenied",
             Code::Refused => "Refused",
             Code::Binary => "Binary",
@@ -543,6 +546,134 @@ pub struct SavedRoute {
     _wrapper: Reservation,
 }
 
+#[napi(object)]
+pub struct FolderEntry {
+    pub id: u32,
+    pub name: String,
+    pub kind: String,
+    pub hidden: bool,
+}
+#[napi(object)]
+pub struct FolderPage {
+    pub entries: Vec<FolderEntry>,
+    pub cursor: Option<u32>,
+}
+#[napi(object)]
+pub struct FolderContext {
+    pub root: String,
+    pub node: Option<String>,
+    pub label: String,
+    pub segments: Vec<String>,
+}
+
+/// No constructor: only an explicit selected-directory capture creates authority.
+#[napi]
+pub struct FolderRoot {
+    state: Arc<folder::Folder>,
+    // Empty JS wrappers remain paid after close, until NAPI finalizes them.
+    _wrapper: Reservation,
+}
+
+#[napi]
+impl FolderRoot {
+    #[napi(factory)]
+    pub fn capture(path: String, id: String) -> std::result::Result<Self, Error<Code>> {
+        if id.is_empty() || id.len() > 32 || !id.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(Error::new(Code::InvalidParams, "invalid root identity"));
+        }
+        let wrapper = Reservation::new(16 * 1024).map_err(|e| doc_error(DocError::Memory(e)))?;
+        let state = folder::Folder::capture(std::path::Path::new(&path), &id).map_err(|e| {
+            // Explicit CLI arrivals can then try manual-file policy, never after generic capability refusal.
+            #[cfg(windows)]
+            if matches!(&e,DocError::Io(io) if io.raw_os_error()==Some(267)) {
+                return Error::new(Code::NotDirectory, "the selected path is not a directory");
+            }
+            doc_error(e)
+        })?;
+        Ok(Self { state: Arc::new(state), _wrapper: wrapper })
+    }
+    #[napi(getter)]
+    pub fn label(&self) -> std::result::Result<String, Error<Code>> {
+        Ok(self.state.info().map_err(doc_error)?.0)
+    }
+    #[napi(getter)]
+    pub fn path(&self) -> std::result::Result<String, Error<Code>> {
+        Ok(self.state.info().map_err(doc_error)?.1)
+    }
+    #[napi(ts_return_type = "Promise<FolderPage>")]
+    pub fn list(
+        &self,
+        node: f64,
+        cursor: Option<f64>,
+        hidden: bool,
+        cancel: &Cancel,
+    ) -> std::result::Result<AsyncTask<ListFolder>, Error<Code>> {
+        let node = int("start", node)?;
+        if node >= folder::MAX_NODES as u64 {
+            return Err(Error::new(Code::InvalidParams, "invalid folder node"));
+        }
+        let cursor = cursor
+            .map(|x| {
+                int("id", x).and_then(|n| {
+                    u32::try_from(n).map_err(|_| Error::new(Code::InvalidParams, "invalid folder cursor"))
+                })
+            })
+            .transpose()?;
+        let charge = Reservation::new(folder::PAGE_WORK).map_err(|e| doc_error(DocError::Memory(e)))?;
+        Ok(AsyncTask::new(ListFolder {
+            state: self.state.clone(),
+            node: node as u32,
+            cursor,
+            hidden,
+            cancel: cancel.flag.clone(),
+            _charge: charge,
+        }))
+    }
+    #[napi]
+    pub fn open(&self, node: f64) -> std::result::Result<Doc, Error<Code>> {
+        let node = int("start", node)?;
+        if node >= folder::MAX_NODES as u64 {
+            return Err(Error::new(Code::InvalidParams, "invalid folder node"));
+        }
+        let raw = self.state.open(node as u32).map_err(doc_error)?;
+        Ok(Doc { images: None, raw: Some(Arc::new(raw)), built: Built::default() })
+    }
+    #[napi]
+    pub fn close(&self) -> bool {
+        self.state.close()
+    }
+}
+
+pub struct ListFolder {
+    state: Arc<folder::Folder>,
+    node: u32,
+    cursor: Option<u32>,
+    hidden: bool,
+    cancel: Arc<AtomicBool>,
+    _charge: Reservation,
+}
+impl Task for ListFolder {
+    type Output = std::result::Result<folder::Page, DocError>;
+    type JsValue = FolderPage;
+    fn compute(&mut self) -> Result<Self::Output> {
+        Ok(self.state.list(self.node, self.cursor, self.hidden, &|| self.cancel.load(Ordering::Relaxed)))
+    }
+    fn resolve(&mut self, env: Env, output: Self::Output) -> Result<FolderPage> {
+        let output = if self.cancel.load(Ordering::Relaxed) { Err(DocError::Cancelled) } else { output };
+        match output {
+            Ok(p) => Ok(FolderPage {
+                entries: p
+                    .entries
+                    .into_iter()
+                    .map(|e| FolderEntry { id: e.id, name: e.name, kind: e.kind.into(), hidden: e.hidden })
+                    .collect(),
+                cursor: p.cursor,
+            }),
+            Err(e) => Err(Error::from(JsError::from(doc_error(e)).into_unknown(env))),
+        }
+    }
+}
+
 #[napi]
 impl SavedRoute {
     #[napi]
@@ -590,6 +721,25 @@ impl Doc {
 
     fn raw(&self) -> std::result::Result<&Arc<Raw>, Error<Code>> {
         self.raw.as_ref().ok_or_else(|| Error::new(Code::NoDocument, "the document is closed"))
+    }
+
+    #[napi]
+    pub fn bind_folder(&mut self, root: &FolderRoot) -> std::result::Result<bool, Error<Code>> {
+        let raw = self.raw.as_mut().ok_or_else(|| Error::new(Code::NoDocument, "the document is closed"))?;
+        let raw = Arc::get_mut(raw)
+            .ok_or_else(|| Error::new(Code::Refused, "bind a folder only before document work starts"))?;
+        raw.bind_folder(&root.state).map_err(doc_error)
+    }
+
+    #[napi(getter)]
+    pub fn folder(&self) -> std::result::Result<Option<FolderContext>, Error<Code>> {
+        let raw = self.raw()?;
+        let Some((id, node, label, relative)) = raw.document().folder_scope() else { return Ok(None) };
+        // A maximally fragmented path also allocates one String/array slot per two path units.
+        let _temp =
+            Reservation::new((16 * pages::MAX_PATH_BYTES) as u64).map_err(|e| doc_error(DocError::Memory(e)))?;
+        let segments = relative.split('\\').map(str::to_owned).collect();
+        Ok(Some(FolderContext { root: id.into(), node: node.map(|n| n.to_string()), label: label.into(), segments }))
     }
 
     #[napi(getter)]
@@ -780,6 +930,15 @@ impl Doc {
     #[napi]
     pub fn reload(&mut self) -> std::result::Result<(), Error<Code>> {
         let next = self.raw()?.reload().map_err(doc_error)?;
+        self.clear_images();
+        self.raw = Some(Arc::new(next));
+        self.built = Built::default();
+        Ok(())
+    }
+
+    #[napi]
+    pub fn reload_in_folder(&mut self, root: &FolderRoot) -> std::result::Result<(), Error<Code>> {
+        let next = self.raw()?.reload_in_folder(Some(&root.state)).map_err(doc_error)?;
         self.clear_images();
         self.raw = Some(Arc::new(next));
         self.built = Built::default();

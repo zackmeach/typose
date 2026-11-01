@@ -67,8 +67,16 @@ impl Raw {
     /// freezes, so its index stops at its next block and its pages and tokens are refused. If the open fails
     /// (the file is gone, say), this generation stays as it was.
     pub fn reload(&self) -> Result<Raw, DocError> {
+        self.reload_in_folder(None)
+    }
+
+    pub fn reload_in_folder(&self, folder: Option<&crate::local::folder::Folder>) -> Result<Raw, DocError> {
         let _temp = Reservation::new(OPEN_TEMP).map_err(DocError::Memory)?;
-        let next = Self::from_document(self.doc.reopened()?)?;
+        let mut doc = self.doc.reopened()?;
+        if let Some(folder) = folder {
+            doc.bind_folder(folder)?;
+        }
+        let next = Self::from_document(doc)?;
         let _ = self.doc.freeze("reloaded".into());
         Ok(next)
     }
@@ -90,6 +98,10 @@ impl Raw {
 
     pub fn document(&self) -> &Document {
         &self.doc
+    }
+
+    pub fn bind_folder(&mut self, folder: &crate::local::folder::Folder) -> Result<bool, DocError> {
+        self.doc.bind_folder(folder)
     }
 
     /// Generation `generation` as Markdown blocks, from one verified read in Raw's encoding (`md::build`). The store's

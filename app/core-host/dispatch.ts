@@ -1,7 +1,8 @@
 // The core host's side of protocol v1. Every request is validated before anything acts on it (plan C4):
 // numbers against the core's own range table, methods by own property only, and no addon call on a refusal.
 import { randomUUID } from 'node:crypto'
-import type { Cancel, Doc, IndexProgress, Limits, SavedRoute, Page as CorePage } from 'typose-node'
+import { resolve } from 'node:path'
+import type { Cancel, Doc, IndexProgress, Limits, SavedRoute, FolderRoot as NativeFolderRoot, Page as CorePage } from 'typose-node'
 import {
   PROTOCOL,
   type Charges,
@@ -19,7 +20,10 @@ import {
   type Page,
   type ProgressEvent,
   type Response,
-  type SavedTicket
+  type SavedTicket,
+  type FolderRef,
+  type FolderRoot,
+  type FolderPage
 } from '../shared/protocol'
 import { isValid } from './numbers'
 import { boundedLink, decodedLocalTarget, localTarget } from './local-target'
@@ -31,6 +35,7 @@ export interface Addon {
   coreVersion(): string
   limits(): Limits
   openDoc(path: string): Doc
+  captureFolder?(path: string, id: string): NativeFolderRoot
   /** A new cancel flag, for one page read or one index job (plan C5, C6). */
   cancelFlag(): Cancel
   /** Plan C1: sets the renderer cache's reservation in the ledger; false if the ledger refused it. */
@@ -60,7 +65,7 @@ class Refusal extends Error {
 }
 
 /** The addon's own codes (`typose-node`'s `Code`), passed through; anything else thrown is `Internal`. */
-const ADDON_CODES = new Set<string>(['InvalidParams', 'NotFound', 'PermissionDenied', 'Refused', 'Binary', 'Frozen', 'Stale', 'Io', 'Cancelled', 'NoDocument', 'Memory'])
+const ADDON_CODES = new Set<string>(['InvalidParams', 'NotFound', 'NotDirectory', 'PermissionDenied', 'Refused', 'Binary', 'Frozen', 'Stale', 'Io', 'Cancelled', 'NoDocument', 'Memory'])
 
 type Params = Record<string, unknown>
 const isRecord = (v: unknown): v is Params => typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -82,11 +87,15 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   const jobs = new Map<number, Cancel>()
   /** Page reads in flight, by request id (plan C5). `cancelledAt` is the test-hooks build's. */
   type ReadEntry = { doc?: number; cancel: Cancel; retainOnLeave: boolean; cancelled: boolean; cancelledAt?: number;
-    candidate?: true; saved?: SavedRoute }
+    candidate?: true; saved?: SavedRoute; folder?: NativeFolderRoot }
   const reads = new Map<number, ReadEntry>()
   const saved = new Map<string, SavedRoute>()
   let savedPeak = 0
   let savedHostBytes = 0
+  const roots = new Map<string, { native: NativeFolderRoot; path: string }>()
+  let nextRoot = 1
+  let rootPeak = 0
+  let rootHostBytes = 0 // Map capacity remains paid until this host exits, including after removeRoot.
   /** The test-hooks build's account of cancels (plan C5's acceptance). */
   const cancels = { cancels: 0, cancelled: 0, cancelMs: 0 }
   /** The test-hooks build keeps closed documents referenced, so only `Doc.close()`, never GC, can release them (C6). */
@@ -96,6 +105,23 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     const doc = docs.get(id)
     if (!doc) throw new Refusal('NoDocument', `no document ${id}`)
     return doc
+  }
+  const folderRef = (value: unknown, field: string): FolderRef => {
+    if (!isRecord(value) || typeof value.root !== 'string' || !/^[1-9][0-9]{0,15}$/.test(value.root)
+      || typeof value.node !== 'string' || !/^(0|[1-9][0-9]{0,3})$/.test(value.node) || Number(value.node) >= 4096)
+      throw new Refusal('InvalidParams', `${field} must be an opaque folder reference`, field)
+    const s = int(value, 'session', `${field}.session`)
+    if (s !== session) throw new Refusal('Stale', 'the folder belongs to an earlier core session; add it again')
+    return { session: s, root: value.root, node: value.node }
+  }
+  const rootFor = (ref: FolderRef) => {
+    const root = roots.get(ref.root)
+    if (!root) throw new Refusal('Stale', 'the folder was removed; add it again')
+    return root
+  }
+  const bindManual = (doc: Doc): void => {
+    if (doc.localOnly || doc.folder || roots.size === 0) return
+    for (const root of [...roots.values()].sort((a, b) => b.path.length - a.path.length)) if (doc.bindFolder(root.native)) return
   }
   const savedTicket = (p: Params): SavedTicket => {
     if (!isRecord(p.ticket)) throw new Refusal('InvalidParams', 'ticket must be a saved-location ticket', 'ticket')
@@ -130,7 +156,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
    *  back. It's never a request: requests only take the reservation, and the takes only grow it. */
   let settled: { lens: string; bytes: number } | null = null
   const hold = (bytes: number): boolean => {
-    const total = bytes + workspaceBytes + savedHostBytes
+    const total = bytes + workspaceBytes + savedHostBytes + rootHostBytes
     if (!Number.isSafeInteger(total) || !addon.reserveCache(total)) return false
     held = bytes
     return true
@@ -217,7 +243,8 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   const describe = (id: number, doc: Doc, firstPage: CorePage, local?: LocalInfo): Omit<Opened, 'reserved'> => {
     const { generation: gen, size, encoding, lines, indexed, blank } = doc
     const format = doc.format as Opened['format'] // the core's two values
-    return { doc: id, gen, format, size, encoding, lines, indexed, blank, firstPage: stampPage(id, firstPage), ...local }
+    const folder = doc.folder ?? undefined
+    return { doc: id, gen, format, size, encoding, lines, indexed, blank, firstPage: stampPage(id, firstPage), ...local, ...(folder ? { folder } : {}) }
   }
   /** Read fallible metadata before starting a job; a failed start leaves no job registered. */
   const begin = (id: number, doc: Doc, firstPage: CorePage, local?: LocalInfo): Omit<Opened, 'reserved'> => {
@@ -244,13 +271,13 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
 
   /** Registration spans first-page wait through synchronous publication, not just the native read. */
   const candidate = async (req: number, pending: string, doc: Doc, count: number, local: LocalInfo,
-    valid: () => boolean = () => true, source?: number, route?: SavedRoute): Promise<Opened> => {
+    valid: () => boolean = () => true, source?: number, route?: SavedRoute, folder?: NativeFolderRoot): Promise<Opened> => {
     let entry: ReadEntry | undefined
     let published = false
     let registered: number | undefined
     let indexed: number | undefined
     try {
-      entry = { doc: source, cancel: addon.cancelFlag(), retainOnLeave: true, cancelled: false, candidate: true, saved: route }
+      entry = { doc: source, cancel: addon.cancelFlag(), retainOnLeave: true, cancelled: false, candidate: true, saved: route, folder }
       reads.set(req, entry)
       const firstPage = await doc.page(doc.generation, 0, count, entry.cancel)
       if (!valid()) throw new Refusal('Stale', 'the navigation source or saved location was replaced')
@@ -284,6 +311,74 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
 
   // Each handler checks all of its parameters before it calls the addon or changes state. `id` is the request's.
   const handlers: Record<string, (params: Params, id: number) => unknown> = {
+    addRoot: (p): FolderRoot => {
+      if (typeof p.path !== 'string' || p.path.length === 0 || p.path.length > 32_767 || p.path.includes('\0'))
+        throw new Refusal('InvalidParams', 'choose a folder path of at most 32,767 characters', 'path')
+      if (!addon.captureFolder) throw new Refusal('Unsupported', 'folder browsing is unavailable in this core')
+      if (roots.size >= 16) throw new Refusal('Refused', 'demo limit: remove a root before adding more than 16 folders')
+      const peak = Math.max(rootPeak, roots.size + 1)
+      // Path + label may be full UTF-16, alongside the Map entry and wrapper metadata/copies.
+      const bytes = 3 * ((64 << 10) + (2 * 32_767 + 2 * 255 + (16 << 10)) * peak)
+      if (!addon.reserveCache(held + workspaceBytes + savedHostBytes + bytes)) throw new Refusal('Memory', 'the folder table cannot grow')
+      const previous = rootHostBytes
+      rootHostBytes = bytes
+      let native: NativeFolderRoot | undefined
+      try {
+        const id = String(nextRoot++)
+        native = addon.captureFolder(p.path, id)
+        const label = native.label
+        const path = native.path
+        rootPeak = peak
+        roots.set(id, { native, path })
+        return { ref: { session, root: id, node: '0' }, label, path }
+      } catch (e) {
+        native?.close()
+        rootHostBytes = previous
+        hold(held)
+        throw e
+      }
+    },
+    listFolder: async (p, req): Promise<FolderPage> => {
+      const ref = folderRef(p.folder, 'folder')
+      if (p.hidden !== undefined && typeof p.hidden !== 'boolean') throw new Refusal('InvalidParams', 'hidden must be boolean', 'hidden')
+      if (p.cursor !== undefined && (typeof p.cursor !== 'string' || !/^[1-9][0-9]{0,9}$/.test(p.cursor) || Number(p.cursor) > 0xffff_ffff))
+        throw new Refusal('InvalidParams', 'cursor must be an opaque folder continuation', 'cursor')
+      const root = rootFor(ref)
+      const entry: ReadEntry = { cancel: addon.cancelFlag(), retainOnLeave: true, cancelled: false, folder: root.native }
+      reads.set(req, entry)
+      try {
+        const page = await root.native.list(Number(ref.node), p.cursor === undefined ? undefined : Number(p.cursor), p.hidden === true, entry.cancel)
+        if (entry.cancelled) throw new Refusal('Cancelled', 'the folder listing was cancelled')
+        if (roots.get(ref.root) !== root) throw new Refusal('Stale', 'the folder was removed while listing')
+        return { entries: page.entries.map((e) => ({ ref: { session, root: ref.root, node: String(e.id) }, name: e.name,
+          kind: e.kind as 'directory' | 'file' | 'unsupported', hidden: e.hidden })), ...(page.cursor === undefined || page.cursor === null ? {} : { cursor: String(page.cursor) }) }
+      } finally { if (reads.get(req) === entry) reads.delete(req) }
+    },
+    openChild: (p, req): Promise<Opened> => {
+      const ref = folderRef(p.entry, 'entry')
+      const [count, bytes] = [int(p, 'count'), int(p, 'bytes')]
+      const root = rootFor(ref)
+      reclaimInactive()
+      const pending = take(req, bytes)
+      let doc: Doc | undefined
+      try {
+        doc = root.native.open(Number(ref.node))
+        const local = localInfo(doc)
+        if (!local) throw new Refusal('Internal', 'a folder child returned manual authority')
+        return candidate(req, pending, doc, count, local, () => roots.get(ref.root) === root, undefined, undefined, root.native)
+      } catch (e) { doc?.close(); giveBack(pending); throw e }
+    },
+    removeRoot: (p): boolean => {
+      const ownerSession = int(p, 'session')
+      if (typeof p.root !== 'string' || !/^[1-9][0-9]{0,15}$/.test(p.root)) throw new Refusal('InvalidParams', 'root must be an opaque root identity', 'root')
+      if (ownerSession !== session) return false
+      const root = roots.get(p.root)
+      if (!root) return false
+      for (const entry of reads.values()) if (entry.folder === root.native) { entry.cancelled = true; entry.cancel.cancel() }
+      roots.delete(p.root)
+      root.native.close()
+      return true
+    },
     hello: (p): Hello => {
       if (int(p, 'protocol') !== PROTOCOL) throw new Refusal('Unsupported', `protocol ${String(p.protocol)}; this core speaks ${PROTOCOL}`)
       return { protocol: PROTOCOL, core: addon.coreVersion(), session, limits }
@@ -294,10 +389,13 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         throw new Refusal('InvalidParams', 'path must be a non-empty string of at most 32,767 characters, without NUL', 'path')
       reclaimInactive()
       const pending = take(req, bytes)
+      let doc: Doc | undefined
       try {
-        const doc = addon.openDoc(p.path)
+        doc = addon.openDoc(p.path)
+        bindManual(doc)
         return candidate(req, pending, doc, count, undefined)
       } catch (e) {
+        doc?.close()
         giveBack(pending)
         throw e
       }
@@ -372,7 +470,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       if (!doc.localOnly) return { kind: 'manual', path: doc.path }
       const peak = Math.max(savedPeak, saved.size + 1)
       const bytes = 3 * ((64 << 10) + (16 << 10) * peak)
-      const total = held + workspaceBytes + bytes
+      const total = held + workspaceBytes + bytes + rootHostBytes
       if (!Number.isSafeInteger(total) || !addon.reserveCache(total)) throw new Refusal('Memory', 'the saved-location table cannot grow')
       const previous = savedHostBytes
       savedHostBytes = bytes
@@ -540,7 +638,12 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       pendingViews.set(pending, view)
       try {
         const local = localInfo(doc) // a Memory refusal must precede Reload's generation change
-        doc.reload()
+        // A display path selects a candidate only; native binding proves membership before Reload commits.
+        const path = !doc.localOnly && !doc.folder && roots.size ? resolve(doc.path).toLocaleLowerCase('en-US') : undefined
+        const root = path && [...roots.values()].sort((a, b) => b.path.length - a.path.length)
+          .find((r) => path.startsWith(r.path.replace(/[\\/]+$/, '').toLocaleLowerCase('en-US') + '\\'))
+        if (root) doc.reloadInFolder(root.native)
+        else doc.reload()
         const gen = doc.generation
         view.gen = gen
         const firstPage = await read(req, id, (cancel) => doc.page(gen, 0, count, cancel), true)
@@ -596,7 +699,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     },
     reserveWorkspace: (p) => {
       const bytes = int(p, 'bytes')
-      const total = held + bytes + savedHostBytes
+      const total = held + bytes + savedHostBytes + rootHostBytes
       if (!Number.isSafeInteger(total) || !addon.reserveCache(total)) return false
       workspaceBytes = bytes
       return true

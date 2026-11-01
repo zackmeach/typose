@@ -309,6 +309,23 @@ impl Document {
         self.local_only
     }
 
+    pub fn folder_scope(&self) -> Option<(&str, Option<u32>, &str, &str)> {
+        let route = self.local.as_ref()?;
+        route
+            .folder_scope()
+            .map(|(id, label, _)| (id, route.folder_node(), label, route.folder_relative().expect("scoped route")))
+    }
+
+    /// Only a fresh manual open/reload can adopt an active root; the origin policy stays manual.
+    pub fn bind_folder(&mut self, folder: &crate::local::folder::Folder) -> Result<bool, DocError> {
+        if self.local_only || self.folder_scope().is_some() {
+            return Ok(false);
+        }
+        let Some(route) = folder.bind(&self.path, self.store.file())? else { return Ok(false) };
+        self.local = Some(route);
+        Ok(true)
+    }
+
     /// Retain authority, not this document's bytes/index. Manual opens never become derived locations.
     /// Saving an owned generation needs no filesystem access; reopen verifies the route's current bytes.
     pub fn saved_route(&self, generation: u32) -> Result<LocalRoute, DocError> {
@@ -394,7 +411,7 @@ impl Document {
 
     /// A fresh index handle must retain the derived document's local-only policy too.
     pub(crate) fn index_file(&self) -> Result<File, DocError> {
-        if self.local_only {
+        if self.local_only || self.folder_scope().is_some() {
             self.checked_local_file(self.generation)
         } else {
             self.store.reopen().map_err(|e| self.fail(StoreError::Io(e)))
@@ -436,21 +453,23 @@ impl Document {
     }
 
     pub(crate) fn reopened(&self) -> Result<Document, DocError> {
-        if self.local_only {
+        if self.local_only || self.folder_scope().is_some() {
             let route = self
                 .local
                 .as_ref()
                 .expect("derived documents retain their local route")
                 .try_clone()
                 .map_err(local_error)?;
-            Self::from_local(route, self.cache_chunks, self.generation + 1)
+            let mut next = Self::from_local(route, self.cache_chunks, self.generation + 1)?;
+            next.local_only = self.local_only;
+            Ok(next)
         } else {
             Self::open_with(&self.path, self.cache_chunks, self.generation + 1)
         }
     }
 
     fn check(&self) -> Result<(), DocError> {
-        if self.local_only {
+        if self.local_only || self.folder_scope().is_some() {
             return self.check_local_source(self.generation);
         }
         if let Some(why) = self.frozen() {

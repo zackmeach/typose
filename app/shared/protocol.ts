@@ -31,6 +31,7 @@ export type ErrorCode =
   | 'Unsupported'
   | 'NoDocument'
   | 'NotFound'
+  | 'NotDirectory'
   | 'PermissionDenied'
   | 'Refused'
   | 'Binary'
@@ -78,13 +79,27 @@ export interface Opened {
   /** Derived local navigation keeps its inherited capability for Reload and later links. */
   localOnly?: true
   path?: string
+  /** Native-proved folder scope; its breadcrumb and leading-slash link base are the same capability. */
+  folder?: { root: string; node?: string; label: string; segments: string[] }
 }
+
+export interface FolderRef { session: number; root: string; node: string }
+export interface FolderRoot { ref: FolderRef; label: string; path: string }
+export interface FolderEntry { ref: FolderRef; name: string; kind: 'directory' | 'file' | 'unsupported'; hidden: boolean }
+export interface FolderPage { entries: FolderEntry[]; cursor?: string }
 
 /** Session-only authority: display paths and caller flags can never reconstruct this ticket. */
 export interface SavedTicket { session: number; id: string }
 export type CapturedLocation = { kind: 'manual'; path: string } | { kind: 'derived'; ticket: SavedTicket }
 
 export interface Methods {
+  /** Explicit user-selected directory. Windows backend; at most 16 roots in this demo slice. */
+  addRoot: { params: { path: string }; result: FolderRoot }
+  /** Omit cursor to refresh. Bounded to 128 entries; caller cannot supply a filesystem path. */
+  listFolder: { params: { folder: FolderRef; cursor?: string; hidden?: boolean }; result: FolderPage }
+  openChild: { params: { entry: FolderRef; count: number; bytes: number }; result: Opened }
+  /** Detach browsing authority; already-open documents and saved locations retain their exact scope. */
+  removeRoot: { params: { root: string; session: number }; result: boolean }
   /** Decode a local image from this generation's held Markdown. Ref carries no path or URL. */
   prepareImage: { params: { doc: number; gen: number; src: string }; result: PreparedImage }
   /** A fixed aligned chunk of canonical PNG bytes, at most 256 KiB. No count. */
