@@ -100,6 +100,20 @@ impl Raw {
         &self.doc
     }
 
+    pub fn csv(
+        &self,
+        generation: u32,
+        revision: u32,
+        options: crate::csv::Options,
+    ) -> Result<crate::csv::Csv, DocError> {
+        crate::csv::Csv::new(&self.doc, generation, revision, options, self.index.read().unwrap().encoding)
+    }
+
+    pub fn line_offset(&self, generation: u32, line: u64) -> Result<Option<u64>, DocError> {
+        let index = self.index.read().unwrap();
+        self.doc.verified(generation, |store| crate::index::locate_line(store, &index, line))
+    }
+
     pub fn bind_folder(&mut self, folder: &crate::local::folder::Folder) -> Result<bool, DocError> {
         self.doc.bind_folder(folder)
     }

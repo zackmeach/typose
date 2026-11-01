@@ -21,6 +21,8 @@ use typose_core::pages::{self, LinePiece};
 use typose_core::raw::Raw;
 use typose_core::store::{self, cancellable};
 
+mod csv;
+
 /// Progress is throttled to 10 Hz, except while a first screen of lines is still filling (spec §3.4).
 const FIRST_SCREEN_LINES: u64 = 256;
 
@@ -636,7 +638,7 @@ impl FolderRoot {
             return Err(Error::new(Code::InvalidParams, "invalid folder node"));
         }
         let raw = self.state.open(node as u32).map_err(doc_error)?;
-        Ok(Doc { images: None, raw: Some(Arc::new(raw)), built: Built::default() })
+        Ok(Doc { images: None, raw: Some(Arc::new(raw)), built: Built::default(), csv: Arc::default() })
     }
     #[napi]
     pub fn close(&self) -> bool {
@@ -680,7 +682,7 @@ impl SavedRoute {
     pub fn open(&self) -> std::result::Result<Doc, Error<Code>> {
         let route = self.route.as_ref().ok_or_else(|| Error::new(Code::NoDocument, "the saved route was released"))?;
         let raw = Raw::open_saved(route).map_err(doc_error)?;
-        Ok(Doc { images: None, raw: Some(Arc::new(raw)), built: Built::default() })
+        Ok(Doc { images: None, raw: Some(Arc::new(raw)), built: Built::default(), csv: Arc::default() })
     }
 
     #[napi]
@@ -704,6 +706,7 @@ pub struct Doc {
     raw: Option<Arc<Raw>>,
     /// The current generation's Markdown build. Reload and close start a new one, and the old drops with its last task.
     built: Built,
+    csv: Arc<csv::Owner>,
 }
 
 #[napi]
@@ -716,7 +719,7 @@ impl Doc {
             return Err(Error::new(Code::InvalidParams, why));
         }
         let raw = Raw::open(std::path::Path::new(&path)).map_err(doc_error)?;
-        Ok(Doc { images: None, raw: Some(Arc::new(raw)), built: Built::default() })
+        Ok(Doc { images: None, raw: Some(Arc::new(raw)), built: Built::default(), csv: Arc::default() })
     }
 
     fn raw(&self) -> std::result::Result<&Arc<Raw>, Error<Code>> {
@@ -779,7 +782,15 @@ impl Doc {
     /// Spec §4.1: `markdown` for a `.md` or `.markdown` file, else `text`.
     #[napi(getter)]
     pub fn format(&self) -> std::result::Result<String, Error<Code>> {
-        Ok(if md::is_markdown(self.raw()?.document().path()) { "markdown" } else { "text" }.into())
+        let path = self.raw()?.document().path();
+        Ok(if md::is_markdown(path) {
+            "markdown"
+        } else if csv::supported(path) {
+            "csv"
+        } else {
+            "text"
+        }
+        .into())
     }
 
     /// Local-derived documents require an explicit manual selection after a core restart loses this capability.
@@ -922,7 +933,7 @@ impl Doc {
     pub fn open_local(&self, generation: f64, target: String) -> std::result::Result<Doc, Error<Code>> {
         let (raw, generation) = self.local_source(generation)?;
         let next = raw.open_local(generation, &target).map_err(doc_error)?;
-        Ok(Doc { images: None, raw: Some(Arc::new(next)), built: Built::default() })
+        Ok(Doc { images: None, raw: Some(Arc::new(next)), built: Built::default(), csv: Arc::default() })
     }
 
     /// Ctrl+R (spec §3.1): the same path at the next generation, which `startIndex` then indexes. Every page and
@@ -930,6 +941,8 @@ impl Doc {
     #[napi]
     pub fn reload(&mut self) -> std::result::Result<(), Error<Code>> {
         let next = self.raw()?.reload().map_err(doc_error)?;
+        self.csv.close();
+        self.csv = Arc::default();
         self.clear_images();
         self.raw = Some(Arc::new(next));
         self.built = Built::default();
@@ -939,6 +952,8 @@ impl Doc {
     #[napi]
     pub fn reload_in_folder(&mut self, root: &FolderRoot) -> std::result::Result<(), Error<Code>> {
         let next = self.raw()?.reload_in_folder(Some(&root.state)).map_err(doc_error)?;
+        self.csv.close();
+        self.csv = Arc::default();
         self.clear_images();
         self.raw = Some(Arc::new(next));
         self.built = Built::default();
@@ -949,6 +964,7 @@ impl Doc {
     /// stopped, which the core host cancels first. Every later call is `NoDocument`.
     #[napi]
     pub fn close(&mut self) {
+        self.csv.close();
         self.clear_images();
         self.raw = None;
         self.built = Built::default();
@@ -1189,8 +1205,9 @@ pub mod test_hooks {
         // The held Markdown build's reservation. Raw's itemization does not include it; the sum does.
         let rendered = doc.built.lock().unwrap().as_ref().map(|r| r.charged()).unwrap_or(0);
         let images = doc.images.as_ref().map(|resources| resources.charged()).unwrap_or(0);
+        let csv = doc.csv.charged();
         let [hashes, checkpoints, cache, metadata, total] =
-            [c.hashes, c.checkpoints, c.cache, c.metadata, c.total() + rendered + images].map(|n| n as f64);
+            [c.hashes, c.checkpoints, c.cache, c.metadata, c.total() + rendered + images + csv].map(|n| n as f64);
         Ok(Charges { hashes, checkpoints, cache, metadata, total, lines_stopped: raw.lines_stopped() })
     }
 
@@ -1215,6 +1232,7 @@ pub mod test_hooks {
 
 impl Drop for Doc {
     fn drop(&mut self) {
+        self.csv.close();
         self.clear_images();
     }
 }

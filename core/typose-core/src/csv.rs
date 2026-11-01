@@ -303,10 +303,20 @@ impl Csv {
         }
     }
     pub fn build(&self, doc: &Document, mut progress: impl FnMut(u64, u64, bool) -> bool) -> Result<(), DocError> {
+        let temp = Reservation::new(TEMP_BYTES).map_err(DocError::Memory)?;
+        self.build_reserved(doc, &mut progress, temp)
+    }
+
+    /// The NAPI candidate secures this allocation before replacing a usable configuration.
+    pub fn build_reserved(
+        &self,
+        doc: &Document,
+        mut progress: impl FnMut(u64, u64, bool) -> bool,
+        _temp: Reservation,
+    ) -> Result<(), DocError> {
         if self.locked {
             return Ok(());
         }
-        let _temp = Reservation::new(TEMP_BYTES).map_err(DocError::Memory)?;
         let mut scan = self.index.read().unwrap().checkpoints[0].clone();
         let mut next_cp = scan.pos + CP_BYTES;
         let mut out = [0u8; 4096];
@@ -734,8 +744,7 @@ fn sniff(sample: &[u8], whole: bool, encoding: &'static Encoding, forced: Option
                     if first {
                         let text = encoding.decode_without_bom_handling(&value).0;
                         let t = text.trim();
-                        header &= !t.is_empty()
-                            && !(t.parse::<f64>().is_ok() && t.bytes().any(|b| b.is_ascii_digit()))
+                        header &= !(t.is_empty() || t.parse::<f64>().is_ok() && t.bytes().any(|b| b.is_ascii_digit()))
                             && seen.insert(t.to_owned());
                         value.clear();
                     }

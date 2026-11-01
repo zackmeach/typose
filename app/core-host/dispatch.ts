@@ -2,12 +2,24 @@
 // numbers against the core's own range table, methods by own property only, and no addon call on a refusal.
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
-import type { Cancel, Doc, IndexProgress, Limits, SavedRoute, FolderRoot as NativeFolderRoot, Page as CorePage } from 'typose-node'
+import type {
+  Cancel, Doc, IndexProgress, Limits, SavedRoute, FolderRoot as NativeFolderRoot, Page as CorePage,
+  CsvInfo as NativeCsvInfo, CsvCellPiece as NativeCsvPiece, CsvPage as NativeCsvPage,
+} from 'typose-node'
 import {
   PROTOCOL,
   type Charges,
   type CapturedLocation,
   type CoreError,
+  type CsvCell,
+  type CsvCellPiece,
+  type CsvColumn,
+  type CsvColumnPage,
+  type CsvInfo,
+  type CsvLocated,
+  type CsvPage,
+  type CsvRef,
+  type CsvSource,
   type DebugStats,
   type ErrorCode,
   type Hello,
@@ -83,13 +95,181 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     if (!isValid(value, min, max)) throw new Refusal('InvalidParams', `${name} must be an integer in [${min}, ${max}]`, name)
     return value
   }
+  const csvRequestNumber = (value: unknown, field: string, min = 0, max = Number.MAX_SAFE_INTEGER): number => {
+    if (!isValid(value, min, max)) throw new Refusal('InvalidParams', `${field} must be a safe integer in [${min}, ${max}]`, field)
+    return value
+  }
+  const csvResultNumber = (value: unknown, field: string, min = 0, max = Number.MAX_SAFE_INTEGER): number => {
+    if (!isValid(value, min, max)) throw new Refusal('Internal', `the core returned an invalid CSV ${field}`)
+    return value
+  }
+  const csvFormat = (doc: Doc): boolean => doc.format === 'csv'
+  const csvOption = (value: unknown): { delimiter: string; header: number } => {
+    if (!isRecord(value)) throw new Refusal('InvalidParams', 'options must be a CSV options object', 'options')
+    const delimiters: Record<string, string> = { auto: 'auto', ',': ',', '\t': '\t', ';': ';', '|': '|' }
+    if (typeof value.delimiter !== 'string' || !Object.hasOwn(delimiters, value.delimiter))
+      throw new Refusal('InvalidParams', 'options.delimiter must be auto, comma, tab, semicolon, or pipe', 'options.delimiter')
+    const header = value.header === 'auto' ? 0 : value.header === true ? 1 : value.header === false ? -1 : undefined
+    if (header === undefined) throw new Refusal('InvalidParams', 'options.header must be auto or boolean', 'options.header')
+    return { delimiter: delimiters[value.delimiter], header }
+  }
+  const csvRef = (value: unknown): CsvRef => {
+    if (!isRecord(value)) throw new Refusal('InvalidParams', 'ref must be a CSV reference', 'ref')
+    const refSession = int(value, 'session', 'ref.session')
+    const doc = int(value, 'doc', 'ref.doc')
+    const gen = int(value, 'gen', 'ref.gen')
+    const revision = csvRequestNumber(value.revision, 'ref.revision', 1, 0xffff_ffff)
+    if (refSession !== session) throw new Refusal('Stale', 'the CSV reference belongs to another core session')
+    return { session: refSession, doc, gen, revision }
+  }
+  const csvForRef = (ref: CsvRef): Doc => {
+    const doc = getDoc(ref.doc)
+    if (doc.generation !== ref.gen) throw new Refusal('Stale', 'the CSV document generation was replaced')
+    if (!csvFormat(doc)) throw new Refusal('Stale', 'the document is no longer a CSV or TSV file')
+    const current = csvRevisions.get(ref.doc)
+    if (!current || current.generation !== ref.gen || current.revision !== ref.revision)
+      throw new Refusal('Stale', 'the CSV configuration was replaced')
+    return doc
+  }
+  const cancelCsvReads = (doc: number, except?: number): void => {
+    for (const [req, entry] of reads) if (req !== except && entry.doc === doc && entry.csv) {
+      entry.cancelled = true
+      entry.cancel.cancel()
+    }
+  }
+  const cancelCsvConfigurations = (doc: number): void => {
+    for (const entry of reads.values()) if (entry.doc === doc && entry.csvConfig) {
+      entry.cancelled = true
+      entry.cancel.cancel()
+    }
+  }
+  const invalidateCsv = (doc: number): void => {
+    cancelCsvReads(doc)
+    csvRevisions.delete(doc)
+    csvConfigurations.delete(doc)
+  }
+  const nextCsvConfig = (doc: number): number => {
+    if (!isValid(nextCsvConfiguration, 1, Number.MAX_SAFE_INTEGER)) throw new Refusal('Refused', 'CSV configuration identities are exhausted')
+    const id = nextCsvConfiguration++
+    csvConfigurations.set(doc, id)
+    return id
+  }
+  const currentCsvRead = (req: number, doc: Doc, id: number, gen: number, revision?: number, config?: number): void => {
+    const entry = reads.get(req)
+    if (!entry || entry.cancelled) throw new Refusal('Cancelled', 'the CSV request was cancelled')
+    if (docs.get(id) !== doc || doc.generation !== gen || docOwners.get(id) !== entry.surface)
+      throw new Refusal('Stale', 'the CSV document or surface was replaced')
+    if (config !== undefined && csvConfigurations.get(id) !== config)
+      throw new Refusal('Stale', 'the CSV configuration was replaced while reading')
+    if (revision !== undefined) {
+      const current = csvRevisions.get(id)
+      if (!current || current.generation !== gen || current.revision !== revision)
+        throw new Refusal('Stale', 'the CSV configuration was replaced while reading')
+    }
+  }
+  const csvRead = <T>(req: number, id: number, gen: number, revision: number, start: (cancel: Cancel) => Promise<T>): Promise<T> => {
+    const doc = getDoc(id)
+    return read(req, id, async (cancel) => {
+      const result = await start(cancel)
+      currentCsvRead(req, doc, id, gen, revision)
+      return result
+    }, false, true)
+  }
+  const nativeCsvSpan = (value: unknown): { start: number; end: number } => {
+    if (!isRecord(value)) throw new Refusal('Internal', 'the core returned an invalid CSV span')
+    const start = csvResultNumber(value.start, 'span start')
+    const end = csvResultNumber(value.end, 'span end')
+    if (end < start) throw new Refusal('Internal', 'the core returned a reversed CSV span')
+    return { start, end }
+  }
+  const stampCsvPiece = (value: NativeCsvPiece, ref: CsvRef): CsvCellPiece => {
+    const sourceRecord = csvResultNumber(value.sourceRecord, 'source record')
+    const column = csvResultNumber(value.column, 'column')
+    const span = nativeCsvSpan(value.span)
+    const pieceSpan = nativeCsvSpan(value.pieceSpan)
+    if (pieceSpan.start < span.start || pieceSpan.end > span.end || pieceSpan.end < pieceSpan.start)
+      throw new Refusal('Internal', 'the core returned a CSV piece outside its field span')
+    const next = value.next == null ? undefined : (() => {
+      if (!isRecord(value.next)) throw new Refusal('Internal', 'the core returned an invalid CSV continuation')
+      return {
+        ref,
+        sourceRecord: csvResultNumber(value.next.sourceRecord, 'continuation source record'),
+        column: csvResultNumber(value.next.column, 'continuation column'),
+        offset: csvResultNumber(value.next.offset, 'continuation offset')
+      }
+    })()
+    if (next && (next.sourceRecord !== sourceRecord || next.column !== column || next.offset <= pieceSpan.start || next.offset >= span.end))
+      throw new Refusal('Internal', 'the core returned an invalid CSV piece continuation')
+    return { kind: 'value', sourceRecord, column, span, pieceSpan, text: value.text, map: value.map,
+      replacements: csvResultNumber(value.replacements, 'replacement count'), ...(next ? { next } : {}) }
+  }
+  const stampCsvPage = (value: NativeCsvPage, ref: CsvRef, rowStart: number, rowCount: number, columnStart: number, columnCount: number): CsvPage => {
+    if (!Array.isArray(value.rows) || value.rows.length > 128 || typeof value.completeRect !== 'boolean' || typeof value.indexing !== 'boolean')
+      throw new Refusal('Internal', 'the core returned an invalid CSV page envelope')
+    let cellCount = 0
+    const rows = value.rows.map((row) => {
+      if (!Array.isArray(row.cells) || row.cells.length > columnCount) throw new Refusal('Internal', 'the core returned an invalid CSV row')
+      cellCount += row.cells.length
+      if (cellCount > 512) throw new Refusal('Internal', 'the core returned too many CSV cells')
+      const sourceRecord = csvResultNumber(row.sourceRecord, 'source record')
+      const cells: CsvCell[] = row.cells.map((cell) => {
+        if (!isRecord(cell)) throw new Refusal('Internal', 'the core returned an invalid CSV cell')
+        const column = csvResultNumber(cell.column, 'column')
+        if (column < columnStart || column >= columnStart + columnCount)
+          throw new Refusal('Internal', 'the core returned a CSV cell outside the requested rectangle')
+        if (cell.value == null) return { kind: 'missing', column }
+        if (!isRecord(cell.value)) throw new Refusal('Internal', 'the core returned an invalid CSV value cell')
+        const piece = stampCsvPiece(cell.value, ref)
+        if (piece.column !== column || piece.sourceRecord !== sourceRecord)
+          throw new Refusal('Internal', 'the core returned a CSV cell for the wrong row or column')
+        return piece
+      })
+      const complete = row.complete
+      if (typeof complete !== 'boolean') throw new Refusal('Internal', 'the core returned an invalid CSV row state')
+      const dataRow = csvResultNumber(row.dataRow, 'data row')
+      if (dataRow < rowStart || dataRow >= rowStart + rowCount)
+        throw new Refusal('Internal', 'the core returned a CSV row outside the requested rectangle')
+      return {
+        dataRow,
+        sourceRecord,
+        sourceLine: csvResultNumber(row.sourceLine, 'source line'),
+        span: nativeCsvSpan(row.span),
+        fieldCount: csvResultNumber(row.fieldCount, 'field count'),
+        cells,
+        complete
+      }
+    })
+    const nextRow = value.nextRow == null ? undefined : csvResultNumber(value.nextRow, 'next row')
+    const nextColumn = value.nextColumn == null ? undefined : csvResultNumber(value.nextColumn, 'next column')
+    return { ref, rows, completeRect: value.completeRect, indexing: value.indexing,
+      ...(nextRow === undefined ? {} : { nextRow }), ...(nextColumn === undefined ? {} : { nextColumn }) }
+  }
+  const stampCsvInfo = (value: NativeCsvInfo, id: number, gen: number): CsvInfo => {
+    const revision = csvResultNumber(value.revision, 'revision', 1, 0xffff_ffff)
+    if (!['indexing', 'ready', 'locked'].includes(value.status) || typeof value.delimiter !== 'string'
+      || ![',', '\t', ';', '|'].includes(value.delimiter) || typeof value.header !== 'boolean' || typeof value.encoding !== 'string'
+      || typeof value.done !== 'boolean' || typeof value.metadataDone !== 'boolean')
+      throw new Refusal('Internal', 'the core returned invalid CSV configuration metadata')
+    const reason = value.reason
+    if (reason != null && typeof reason !== 'string') throw new Refusal('Internal', 'the core returned an invalid CSV reason')
+    return {
+      ref: { session, doc: id, gen, revision }, status: value.status as CsvInfo['status'], ...(reason == null ? {} : { reason }),
+      delimiter: value.delimiter as CsvInfo['delimiter'], header: value.header, encoding: value.encoding,
+      sourceRecords: csvResultNumber(value.sourceRecords, 'source records'),
+      indexedBytes: csvResultNumber(value.indexedBytes, 'indexed bytes'), done: value.done,
+      expectedColumns: csvResultNumber(value.expectedColumns, 'expected columns'),
+      maxColumnsKnown: csvResultNumber(value.maxColumnsKnown, 'maximum known columns'), metadataDone: value.metadataDone
+    }
+  }
   const docs = new Map<number, Doc>()
   const docOwners = new Map<number, number>()
   /** Each document's index job (plan C6). */
   const jobs = new Map<number, Cancel>()
   /** Page reads in flight, by request id (plan C5). `cancelledAt` is the test-hooks build's. */
-  type ReadEntry = { doc?: number; cancel: Cancel; retainOnLeave: boolean; cancelled: boolean; cancelledAt?: number;
-    candidate?: true; saved?: SavedRoute; folder?: NativeFolderRoot; surface?: number }
+  type ReadEntry = {
+    doc?: number; cancel: Cancel; retainOnLeave: boolean; cancelled: boolean; cancelledAt?: number
+    candidate?: true; saved?: SavedRoute; folder?: NativeFolderRoot; surface?: number; csv?: true; csvConfig?: true
+  }
   const reads = new Map<number, ReadEntry>()
   const saved = new Map<string, SavedRoute>()
   let savedPeak = 0
@@ -98,6 +278,9 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   let nextRoot = 1
   let rootPeak = 0
   let rootHostBytes = 0 // Map capacity remains paid until this host exits, including after removeRoot.
+  const csvRevisions = new Map<number, { generation: number; revision: number }>()
+  const csvConfigurations = new Map<number, number>()
+  let nextCsvConfiguration = 1
   /** The test-hooks build's account of cancels (plan C5's acceptance). */
   const cancels = { cancels: 0, cancelled: 0, cancelMs: 0 }
   /** The test-hooks build keeps closed documents referenced, so only `Doc.close()`, never GC, can release them (C6). */
@@ -277,6 +460,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   const closeDoc = (id: number): boolean => {
     const doc = docs.get(id)
     if (!doc) return false
+    invalidateCsv(id)
     jobs.get(id)?.cancel()
     cancelReads(id)
     for (const pending of pendingViews.values()) if (pending.doc === id) pending.disposed = true
@@ -298,11 +482,11 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     return page as Page
   }
   /** Request `id`'s read of document `doc`, a page or a Markdown build, which `cancel` can stop while it runs (plan C5). */
-  const read = async <T>(id: number, doc: number, start: (cancel: Cancel) => Promise<T>, retainOnLeave = false): Promise<T> => {
+  const read = async <T>(id: number, doc: number, start: (cancel: Cancel) => Promise<T>, retainOnLeave = false, csv = false, csvConfig = false): Promise<T> => {
     if (reads.has(id)) throw new Refusal('InvalidParams', 'request id is already pending', 'id')
     const source = getDoc(doc)
     const gen = source.generation
-    const entry: ReadEntry = { doc, cancel: addon.cancelFlag(), retainOnLeave, cancelled: false, surface: docOwners.get(doc) }
+    const entry: ReadEntry = { doc, cancel: addon.cancelFlag(), retainOnLeave, cancelled: false, surface: docOwners.get(doc), ...(csv ? { csv: true as const } : {}), ...(csvConfig ? { csvConfig: true as const } : {}) }
     reads.set(id, entry)
     try {
       return await start(entry.cancel)
@@ -321,7 +505,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   const localInfo = (doc: Doc): LocalInfo => doc.localOnly ? { localOnly: true, path: doc.path } : undefined
   const describe = (id: number, doc: Doc, firstPage: CorePage, local?: LocalInfo): Omit<Opened, 'reserved'> => {
     const { generation: gen, size, encoding, lines, indexed, blank } = doc
-    const format = doc.format as Opened['format'] // the core's two values
+    const format = doc.format as Opened['format'] // the native document classifies markdown, CSV/TSV and text
     const folder = doc.folder ?? undefined
     return { doc: id, gen, format, size, encoding, lines, indexed, blank, firstPage: stampPage(id, firstPage), ...local, ...(folder ? { folder } : {}) }
   }
@@ -500,6 +684,107 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     hello: (p): Hello => {
       if (int(p, 'protocol') !== PROTOCOL) throw new Refusal('Unsupported', `protocol ${String(p.protocol)}; this core speaks ${PROTOCOL}`)
       return { protocol: PROTOCOL, core: addon.coreVersion(), session, limits }
+    },
+    csvConfigure: (p, req): Promise<CsvInfo> => {
+      const [id, gen] = [int(p, 'doc'), int(p, 'gen')]
+      const options = csvOption(p.options)
+      const surface = requestSurface(p)
+      const doc = ownedDoc(surface, id)
+      if (doc.generation !== gen) throw new Refusal('Stale', 'the CSV document generation was replaced')
+      if (!csvFormat(doc)) throw new Refusal('Unsupported', 'Grid is available for .csv and .tsv files')
+      cancelCsvConfigurations(id)
+      const configuration = nextCsvConfig(id)
+      return read(req, id, async (cancel) => {
+        const native = await doc.csvConfigure(gen, options.delimiter, options.header, cancel)
+        currentCsvRead(req, doc, id, gen, undefined, configuration)
+        const info = stampCsvInfo(native, id, gen)
+        const previous = csvRevisions.get(id)
+        if (!previous || previous.generation !== gen || previous.revision !== info.ref.revision) cancelCsvReads(id, req)
+        csvRevisions.set(id, { generation: gen, revision: info.ref.revision })
+        return info
+      }, false, true, true)
+    },
+    csvPage: (p, req): Promise<CsvPage> => {
+      const ref = csvRef(p.ref)
+      const rowStart = csvRequestNumber(p.rowStart, 'rowStart')
+      const rowCount = csvRequestNumber(p.rowCount, 'rowCount', 1, 128)
+      const columnStart = csvRequestNumber(p.columnStart, 'columnStart')
+      const columnCount = csvRequestNumber(p.columnCount, 'columnCount', 1, 128)
+      if (!Number.isSafeInteger(rowStart + rowCount) || !Number.isSafeInteger(columnStart + columnCount))
+        throw new Refusal('InvalidParams', 'the requested CSV rectangle exceeds the safe integer range', 'rowStart')
+      const doc = csvForRef(ref)
+      return csvRead(req, ref.doc, ref.gen, ref.revision, async (cancel) => {
+        const page = await doc.csvPage(ref.gen, ref.revision, rowStart, rowCount, columnStart, columnCount, cancel)
+        return stampCsvPage(page, ref, rowStart, rowCount, columnStart, columnCount)
+      })
+    },
+    csvPiece: (p, req): Promise<CsvCellPiece> => {
+      if (!isRecord(p.continuation)) throw new Refusal('InvalidParams', 'continuation must be a CSV piece token', 'continuation')
+      const ref = csvRef(p.continuation.ref)
+      const sourceRecord = csvRequestNumber(p.continuation.sourceRecord, 'continuation.sourceRecord')
+      const column = csvRequestNumber(p.continuation.column, 'continuation.column')
+      const offset = csvRequestNumber(p.continuation.offset, 'continuation.offset')
+      const doc = csvForRef(ref)
+      return csvRead(req, ref.doc, ref.gen, ref.revision, async (cancel) => {
+        const native = await doc.csvPiece(ref.gen, ref.revision, sourceRecord, column, offset, cancel)
+        const piece = stampCsvPiece(native, ref)
+        if (piece.sourceRecord !== sourceRecord || piece.column !== column || piece.pieceSpan.start !== offset)
+          throw new Refusal('Internal', 'the core returned a CSV piece for the wrong continuation')
+        return piece
+      })
+    },
+    csvColumns: (p, req): Promise<CsvColumnPage> => {
+      const ref = csvRef(p.ref)
+      const start = csvRequestNumber(p.start, 'start')
+      const count = csvRequestNumber(p.count, 'count', 1, 128)
+      if (!Number.isSafeInteger(start + count)) throw new Refusal('InvalidParams', 'the requested CSV column page exceeds the safe integer range', 'start')
+      const doc = csvForRef(ref)
+      return csvRead(req, ref.doc, ref.gen, ref.revision, async (cancel) => {
+        const result = await doc.csvColumns(ref.gen, ref.revision, start, count, cancel)
+        if (!Array.isArray(result.columns) || result.columns.length > count || typeof result.metadataDone !== 'boolean')
+          throw new Refusal('Internal', 'the core returned an invalid CSV column page')
+        const columns: CsvColumn[] = result.columns.map((column) => {
+          const type = column.type
+          if (!['text', 'number', 'date', 'boolean', 'url'].includes(type) || typeof column.name !== 'string'
+            || typeof column.nameMore !== 'boolean' || (column.pills != null && (!Array.isArray(column.pills) || column.pills.some((pill) => typeof pill !== 'string'))))
+            throw new Refusal('Internal', 'the core returned invalid CSV column metadata')
+          const index = csvResultNumber(column.column, 'column')
+          if (index < start || index >= start + count) throw new Refusal('Internal', 'the core returned a CSV column outside the requested page')
+          return { column: index, name: column.name, nameMore: column.nameMore, type: type as CsvColumn['type'],
+            widthUnits: csvResultNumber(column.widthUnits, 'column width'), ...(column.pills == null ? {} : { pills: column.pills }) }
+        })
+        const nextColumn = result.nextColumn == null ? undefined : csvResultNumber(result.nextColumn, 'next column')
+        return { ref, columns, metadataDone: result.metadataDone, ...(nextColumn === undefined ? {} : { nextColumn }) }
+      })
+    },
+    csvLocate: (p, req): Promise<CsvLocated> => {
+      const ref = csvRef(p.ref)
+      const hasLine = Object.hasOwn(p, 'rawLine')
+      const hasOffset = Object.hasOwn(p, 'sourceOffset')
+      if (hasLine === hasOffset) throw new Refusal('InvalidParams', 'supply exactly one of rawLine or sourceOffset', 'rawLine')
+      const rawLine = hasLine ? csvRequestNumber(p.rawLine, 'rawLine') : undefined
+      const sourceOffset = hasOffset ? csvRequestNumber(p.sourceOffset, 'sourceOffset') : undefined
+      const doc = csvForRef(ref)
+      return csvRead(req, ref.doc, ref.gen, ref.revision, async (cancel) => {
+        const result = await doc.csvLocate(ref.gen, ref.revision, rawLine, sourceOffset, cancel)
+        if (result.kind === 'pending') return { kind: 'pending' }
+        if (result.kind !== 'located') throw new Refusal('Internal', 'the core returned an invalid CSV location')
+        return { kind: 'located', dataRow: csvResultNumber(result.dataRow, 'data row'),
+          sourceRecord: csvResultNumber(result.sourceRecord, 'source record'), sourceLine: csvResultNumber(result.sourceLine, 'source line'),
+          span: nativeCsvSpan(result.span), ...(result.column == null ? {} : { column: csvResultNumber(result.column, 'column') }) }
+      })
+    },
+    csvSource: (p, req): Promise<CsvSource> => {
+      const ref = csvRef(p.ref)
+      const sourceRecord = csvRequestNumber(p.sourceRecord, 'sourceRecord')
+      const column = p.column === undefined ? undefined : csvRequestNumber(p.column, 'column')
+      const doc = csvForRef(ref)
+      return csvRead(req, ref.doc, ref.gen, ref.revision, async (cancel) => {
+        const result = await doc.csvSource(ref.gen, ref.revision, sourceRecord, column, cancel)
+        if (result.kind === 'pending') return { kind: 'pending' }
+        if (result.kind !== 'located') throw new Refusal('Internal', 'the core returned an invalid CSV source location')
+        return { kind: 'located', span: nativeCsvSpan(result.span), rawLine: csvResultNumber(result.rawLine, 'raw line') }
+      })
     },
     open: async (p, req): Promise<Opened> => {
       const [count, bytes] = [int(p, 'count'), int(p, 'bytes')]
@@ -757,6 +1042,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         if (root) doc.reloadInFolder(root.native)
         else doc.reload()
         const gen = doc.generation
+        invalidateCsv(id)
         pending.gen = gen
         const firstPage = await read(req, id, (cancel) => doc.page(gen, 0, count, cancel), true)
         if (!live(surface) || docs.get(id) !== doc || doc.generation !== gen) throw new Refusal('Stale', `generation ${gen} was replaced while it opened`)

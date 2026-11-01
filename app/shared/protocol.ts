@@ -2,7 +2,7 @@
 // `WireMap`, `Limits`) are defined in Rust and exported by napi-rs's typegen as `typose-node`'s index.d.ts, so
 // both sides typecheck against the core's own definitions. This file adds the envelope around them, and the
 // session the core host stamps into continuation tokens.
-import type { Continuation, Limits, MdBuild, MdPage, PageItem as CorePageItem } from 'typose-node'
+import type { Continuation, Limits, MdBuild, MdPage, WireMap, PageItem as CorePageItem } from 'typose-node'
 
 export type { Limits, MdBuild, MdItem, MdPage, WireMap } from 'typose-node'
 
@@ -65,7 +65,7 @@ export interface Opened {
   doc: number
   gen: number
   /** Spec §4.1, by the file's extension: `markdown` for `.md` and `.markdown`. */
-  format: 'markdown' | 'text'
+  format: 'markdown' | 'text' | 'csv'
   size: number
   encoding: string
   /** Lines the index has found so far; `firstPage` doesn't wait for it (Z37). */
@@ -88,6 +88,26 @@ export interface Opened {
 export interface SurfaceRef { session: number; id: number }
 export interface ViewRef { session: number; surface: number; id: number; doc: number; gen: number }
 
+export type CsvDelimiter = ',' | '\t' | ';' | '|'
+export interface CsvRef { session: number; doc: number; gen: number; revision: number }
+export interface CsvSpan { start: number; end: number }
+export interface CsvOptions { delimiter: 'auto' | CsvDelimiter; header: 'auto' | boolean }
+export interface CsvInfo {
+  ref: CsvRef; status: 'indexing' | 'ready' | 'locked'; reason?: string; delimiter: CsvDelimiter; header: boolean; encoding: string
+  sourceRecords: number; indexedBytes: number; done: boolean; expectedColumns: number; maxColumnsKnown: number; metadataDone: boolean
+}
+export interface CsvContinuation { ref: CsvRef; sourceRecord: number; column: number; offset: number }
+export interface CsvCellPiece {
+  kind: 'value'; sourceRecord: number; column: number; span: CsvSpan; pieceSpan: CsvSpan; text: string; map: WireMap; replacements: number; next?: CsvContinuation
+}
+export type CsvCell = CsvCellPiece | { kind: 'missing'; column: number }
+export interface CsvRow { dataRow: number; sourceRecord: number; sourceLine: number; span: CsvSpan; fieldCount: number; cells: CsvCell[]; complete: boolean }
+export interface CsvPage { ref: CsvRef; rows: CsvRow[]; completeRect: boolean; nextRow?: number; nextColumn?: number; indexing: boolean }
+export interface CsvColumn { column: number; name: string; nameMore: boolean; type: 'text' | 'number' | 'date' | 'boolean' | 'url'; widthUnits: number; pills?: string[] }
+export interface CsvColumnPage { ref: CsvRef; columns: CsvColumn[]; nextColumn?: number; metadataDone: boolean }
+export type CsvLocated = { kind: 'pending' } | { kind: 'located'; dataRow: number; sourceRecord: number; sourceLine: number; span: CsvSpan; column?: number }
+export type CsvSource = { kind: 'pending' } | { kind: 'located'; span: CsvSpan; rawLine: number }
+
 export interface FolderRef { session: number; root: string; node: string }
 export interface FolderRoot { ref: FolderRef; label: string; path: string }
 export interface FolderEntry { ref: FolderRef; name: string; kind: 'directory' | 'file' | 'unsupported'; hidden: boolean }
@@ -98,6 +118,12 @@ export interface SavedTicket { session: number; id: string }
 export type CapturedLocation = { kind: 'manual'; path: string } | { kind: 'derived'; ticket: SavedTicket }
 
 export interface Methods {
+  csvConfigure: { params: { surface?: SurfaceRef; doc: number; gen: number; options: CsvOptions }; result: CsvInfo }
+  csvPage: { params: { ref: CsvRef; rowStart: number; rowCount: number; columnStart: number; columnCount: number }; result: CsvPage }
+  csvPiece: { params: { continuation: CsvContinuation }; result: CsvCellPiece }
+  csvColumns: { params: { ref: CsvRef; start: number; count: number }; result: CsvColumnPage }
+  csvLocate: { params: { ref: CsvRef; rawLine: number } | { ref: CsvRef; sourceOffset: number }; result: CsvLocated }
+  csvSource: { params: { ref: CsvRef; sourceRecord: number; column?: number }; result: CsvSource }
   createSurface: { params: Record<string, never>; result: SurfaceRef }
   /** Close native owners after detached-tree retirement has been paid by the window workspace share. */
   releaseSurface: { params: { surface: SurfaceRef; retiredBytes: number }; result: boolean }
