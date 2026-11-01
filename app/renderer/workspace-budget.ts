@@ -3,11 +3,12 @@ interface WorkspaceCore {
 }
 
 /** Reuse Rendered's conservative text/node coefficients for the retained pill and metadata graph. */
-export function workspaceCharge(tabCount: number, pathUnits: number): number {
+export function workspaceCharge(tabCount: number, pathUnits: number, extraBytes = 0): number {
   if (!Number.isSafeInteger(tabCount) || tabCount < 0 || !Number.isSafeInteger(pathUnits) || pathUnits < 0) return Infinity
-  if (tabCount === 0) return pathUnits === 0 ? 0 : Infinity
+  if (!Number.isSafeInteger(extraBytes) || extraBytes < 0) return Infinity
+  if (tabCount === 0 && extraBytes === 0) return pathUnits === 0 ? 0 : Infinity
   // Sixteen nodes per pill include its controls, labels and collection bookkeeping; text also pays for store copies.
-  const bytes = (6 << 20) + 16 * 16_384 * tabCount + 128 * pathUnits
+  const bytes = (6 << 20) + 16 * 16_384 * tabCount + 128 * pathUnits + extraBytes
   return Number.isSafeInteger(bytes) ? bytes : Infinity
 }
 
@@ -28,11 +29,11 @@ export class WorkspaceBudget {
 
   snapshot() {
     // An intercepted/delayed response can make the last acknowledged amount older than the native amount.
-    return { session: this.session, held: this.held, peakBytes: this.peak, settled: this.sent === this.acknowledged }
+    return { session: this.session, held: this.held, peakBytes: Math.max(this.peak, this.requestedPeak), settled: this.sent === this.acknowledged }
   }
 
-  hold(tabCount: number, pathUnits: number): Promise<boolean> {
-    const charge = workspaceCharge(tabCount, pathUnits)
+  hold(tabCount: number, pathUnits: number, extraBytes = 0): Promise<boolean> {
+    const charge = workspaceCharge(tabCount, pathUnits, extraBytes)
     if (!Number.isFinite(charge) || !this.active) return Promise.resolve(false)
     if (charge === 0) return this.release()
     const epoch = this.epoch

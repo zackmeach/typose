@@ -219,7 +219,7 @@ export interface TyposeApi {
 }
 
 /** The menu's commands (brief §3.2's M1 subset): ☰ on Windows and Linux, the native menu on macOS. */
-export type Command = 'open' | 'reload' | 'close-tab' | 'exit'
+export type Command = 'open' | 'reload' | 'close-tab' | 'reopen-tab' | 'clear-closed' | 'exit'
 
 /** The renderer's startup marks (plan C8, §5). */
 export const STARTUP_MARKS = [

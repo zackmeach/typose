@@ -22,6 +22,8 @@ export function AppMenu({ run }: { run: (command: Command) => void }) {
           <MenuItem id="close-tab" className="menu-item">
             Close tab
           </MenuItem>
+          <MenuItem id="reopen-tab" className="menu-item">Reopen closed tab</MenuItem>
+          <MenuItem id="clear-closed" className="menu-item">Clear recently closed tabs</MenuItem>
           <MenuItem id="exit" className="menu-item">
             {LINUX ? 'Quit' : 'Exit'}
           </MenuItem>

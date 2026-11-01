@@ -1,6 +1,6 @@
 import { type RefObject, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { Button, Menu, MenuItem, MenuTrigger, Popover, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
-import type { Command, Limits, MdBuild, Opened } from '../shared/protocol'
+import type { CapturedLocation, Command, Limits, MdBuild, Opened } from '../shared/protocol'
 import { type Action, type Card, fileName, parentName, view } from './card'
 import { AppIcon, FileIcon } from './file-icon'
 import { type CoreClient, CoreCallError } from './core'
@@ -9,7 +9,7 @@ import { LensBudget, type ReloadReservation } from './lenses/lens-budget'
 import { ROW_HEIGHT, RawLens, viewportCap } from './lenses/raw'
 import { AppMenu, LINUX } from './menu'
 import { inputMark, markNow, markPainted } from './perf'
-import { WorkspaceStore, WorkspaceMetadataQueue, type SelectionTicket, type TabId, type WorkspaceTab } from './workspace'
+import { WorkspaceStore, WorkspaceMetadataQueue, type SavedLocation, type SelectionTicket, type TabId, type WorkspaceTab } from './workspace'
 import { FileTabs } from './file-tabs'
 import { WorkspaceBudget } from './workspace-budget'
 
@@ -73,6 +73,11 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   const [card, setCardState] = useState<Card>({ kind: 'connecting' })
   const [limits, setLimits] = useState<Limits | null>(null)
   const [workspaceNotice, setWorkspaceNotice] = useState('')
+  const closed = useRef<{ entry: SavedLocation; index: number }[]>([])
+  const navigating = useRef(false)
+  const [navigationBusy, setNavigationBusy] = useState(false)
+  const pendingHistoryBytes = useRef(0)
+  const recharged = useRef(false)
   const workspaceBudget = useRef<WorkspaceBudget | null>(null)
   const workspacePeak = useRef(0)
   const [metadataQueue] = useState(() => new WorkspaceMetadataQueue())
@@ -207,6 +212,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     // Plan C7: the card says the core stopped, and offers Reopen at the same line once a new core is up.
     // Without a lens on screen (a Reopen still opening, say), the line is the one the card was going back to.
     const offGone = core.onGone(() => {
+      recharged.current = false
       leave()
       if (workspaceBudget.current) workspacePeak.current = Math.max(workspacePeak.current, workspaceBudget.current.snapshot().peakBytes)
       workspaceBudget.current?.invalidate()
@@ -227,14 +233,17 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       setLimits(hello.limits)
       workspace.coreReady(hello.session)
       workspaceBudget.current = new WorkspaceBudget(core, hello.session, workspacePeak.current)
-      if (workspace.getSnapshot().tabs.length) void metadata((current) => chargeWorkspace(workspace.getSnapshot().tabs, current))
+      recharged.current = !workspace.getSnapshot().tabs.length && !closed.current.length
+      const recharge = recharged.current ? Promise.resolve(true) : metadata((current) => chargeWorkspace(workspace.getSnapshot().tabs, current))
       reloading.current.clear()
       activationFailed.current.clear()
       setCard((c) => (c.kind === 'gone' ? { ...c, ready: true } : c))
-      if (reconnect) {
-        const paths = waiting.current.splice(0)
-        void (async () => { for (const path of paths) await open(path) })()
-      }
+      void recharge.then(async (paid) => {
+        if (hello.session !== currentSession.current) return
+        recharged.current = !!paid
+        if (!paid) { setWorkspaceNotice("Memory budget is full · close a tab or clear recently closed tabs, then Retry"); return }
+        if (reconnect) for (const path of waiting.current.splice(0)) await open(path)
+      })
     })
     // Subscribed before any open, so no event is missed between the open reply and the lens mounting.
     const offProgress = core.onProgress((e) => {
@@ -254,6 +263,11 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     const onKey = (e: KeyboardEvent) => {
       const modified = e.ctrlKey || e.metaKey || e.shiftKey || e.altKey
       const command = MAC ? e.metaKey : e.ctrlKey
+      if (command && e.shiftKey && e.key.toLowerCase() === 't' && !e.altKey) {
+        e.preventDefault()
+        void reopenClosed()
+        return
+      }
       if (command && e.key.toLowerCase() === 'w' && !e.altKey && !e.shiftKey) {
         e.preventDefault()
         if (workspace.getSnapshot().selected) close()
@@ -444,7 +458,10 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     const ownerSession = currentSession.current
     if (!bank || !workspace.getSnapshot().ready || !current()) return false
     const pending = [...pendingWorkspace.current.values()]
-    const held = await bank.hold(tabs.length + pending.length, pathUnits(tabs) + pending.reduce((units, item) => units + item.units, 0))
+    const history = [...workspace.getSnapshot().tabs.flatMap(tab => tab.back ?? []), ...closed.current.map(item => item.entry)]
+    const units = history.reduce((sum, entry) => sum + entry.path.length + (entry.location.kind === 'manual' ? entry.location.path.length : entry.location.ticket.id.length), 0)
+    const extra = history.length * 16_384 + 128 * units + pendingHistoryBytes.current
+    const held = await bank.hold(tabs.length + pending.length, pathUnits(tabs) + pending.reduce((units, item) => units + item.units, 0), extra)
     if (!current() || bank !== workspaceBudget.current || ownerSession !== currentSession.current || !workspace.getSnapshot().ready) return false
     if (!held) setWorkspaceNotice("Can't open another tab: Typose's memory budget is full")
     else setWorkspaceNotice('')
@@ -455,7 +472,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   function releaseEmptyWorkspace(): void {
     window.requestAnimationFrame(() => {
       const bank = workspaceBudget.current
-      if (!bank || workspace.getSnapshot().tabs.length || metadataQueue.pending || pendingNative.current.size || pendingWorkspace.current.size) return
+      if (!bank || workspace.getSnapshot().tabs.length || closed.current.length || navigating.current || metadataQueue.pending || pendingNative.current.size || pendingWorkspace.current.size) return
       if (document.querySelector('.file-pill')) { releaseEmptyWorkspace(); return }
       void bank.release().then((released) => {
         if (released && bank === workspaceBudget.current && !workspace.getSnapshot().tabs.length) workspacePeak.current = 0
@@ -470,6 +487,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
 
   /** A selected retained document borrows its native identity. A stale activation must never close it. */
   async function selectTab(id: TabId, force = false): Promise<void> {
+    if (navigating.current && !force || !recharged.current) return
     const ready = workspace.getSnapshot().ready
     const selected = workspace.getSnapshot().selected
     const tab = workspace.tab(id)
@@ -516,6 +534,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       if (currentSession.current) setWorkspaceNotice('Queued until the core restarts: ' + fileName(path))
       return
     }
+    if (navigating.current || !recharged.current) { setWorkspaceNotice('Finish the current operation before opening another file'); return }
     const request = await metadata(async (current) => {
       const state = workspace.getSnapshot()
       const existing = workspace.find(manualKey(path))
@@ -586,7 +605,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   async function openLocal(source: Opened, target: string, resolvedPath: string): Promise<boolean> {
     const id = displayed.current
     const { card: c, limits: l } = latest.current
-    if (!id || c.kind !== 'open' || c.opened !== source || !l || reloading.current.has(id) || pendingWorkspace.current.has(id)) return false
+    if (!id || c.kind !== 'open' || c.opened !== source || !l || navigating.current || !recharged.current || reloading.current.has(id) || pendingWorkspace.current.has(id)) return false
     const tab = workspace.tab(id)
     const selection = workspace.selection()
     if (!tab || !selection) return false
@@ -596,11 +615,17 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     pendingWorkspace.current.set(id, pending)
     let plan: ReloadReservation | undefined
     let owner: LensBudget | null = null
+    let captured: CapturedLocation | undefined
+    navigating.current = true
+    setNavigationBusy(true)
+    pendingHistoryBytes.current = historyDraftBytes(l)
     try {
       // Count the pending path in every concurrent precharge, before any native holder changes.
       const paid = await metadata(async (current) => workspace.selected(selection) && latest.current.card.kind === 'open' &&
         latest.current.card.opened === source && await chargeWorkspace(workspace.getSnapshot().tabs, current) && current())
       if (!paid || !workspace.selected(selection) || latest.current.card.kind !== 'open' || latest.current.card.opened !== source) return false
+      captured = await core.call('captureLocation', { doc: source.doc, gen: source.gen })
+      if (!workspace.selected(selection)) return false
       const ticket = workspace.begin(id)
       if (!ticket) return false
       const rawBytes = floorBytes(l)
@@ -617,36 +642,153 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
           if (workspace.selected(selection)) {
             workspace.cancel(ticket)
             if (opened.path !== resolvedPath || key.length > keyBound.length) setWorkspaceNotice("Local file changed while opening; source kept")
-            void selectTab(id, true) // disposes the source before closing the temporary holder
+            // The single-flight guard keeps this source selected while its native holder is restored.
+            await core.call('activate', { doc: source.doc, gen: source.gen, count: firstCount(l), bytes: plan?.bytes ?? rawBytes }).catch(() => {})
           }
           if (sourceSession === currentSession.current) void core.call('close', { doc: opened.doc }).catch(() => {})
           return false
         }
         const next: Extract<Card, { kind: 'open' }> = { kind: 'open', path: resolvedPath, opened, lines: opened.lines,
           bytes: 0, indexed: opened.indexed, lens: 'raw' }
-        leave()
-        if (!workspace.complete(ticket, key, next)) {
+        const entry: SavedLocation = { location: captured, path: tab.path, anchor: lens.current?.topLine() ?? tab.anchor ?? 0, lens: picked.current }
+        if (!workspace.complete(ticket, key, next, { push: entry })) {
           if (sourceSession === currentSession.current) void core.call('close', { doc: opened.doc }).catch(() => {})
           return false
         }
+        leave()
+        captured = undefined
         restoreFocus.current = true
         show(id, opened, workspace.tab(id)!, rawBytes, undefined, retired)
         closeNative(tab)
         return true
       } catch (e) {
         workspace.cancel(ticket)
+        setWorkspaceNotice('Cannot open local file · ' + (e instanceof Error ? e.message : String(e)))
         if (workspace.selected(selection) && e instanceof CoreCallError && e.code === 'Frozen')
           setCard((d) => d.kind === 'open' && d.opened === source ? { ...d, frozen: d.frozen ?? e.message } : d)
         return false
       }
+    } catch (e) {
+      setWorkspaceNotice('Cannot open local file · ' + (e instanceof Error ? e.message : String(e)))
+      return false
     } finally {
+      if (captured) releaseLocation(captured)
       if (pendingWorkspace.current.get(id) === pending) pendingWorkspace.current.delete(id)
       if (plan) owner?.cancelTransition(plan)
+      pendingHistoryBytes.current = 0
+      navigating.current = false
+      setNavigationBusy(false)
       releaseEmptyWorkspace()
     }
   }
 
+  // The workspace's live + two retired graph allowance also pays the draft firstPage while source DOM stays mounted.
+  const historyDraftBytes = (l: Limits, page = true) => 16_384 + 128 * 32_767 + (page ? 2 * l.pageWireMax + 1024 * l.maxItems + (64 << 10) : 0)
+
+  function releaseLocation(location: CapturedLocation): void {
+    if (location.kind === 'derived' && location.ticket.session === currentSession.current)
+      void core.call('releaseSaved', { ticket: location.ticket }).catch(() => {})
+  }
+
+  function clearClosed(): void {
+    if (navigating.current) return
+    for (const item of closed.current) releaseLocation(item.entry.location)
+    closed.current = []
+    setWorkspaceNotice('Recently closed tabs cleared')
+    if (!recharged.current && workspace.getSnapshot().ready)
+      void metadata(current => chargeWorkspace(workspace.getSnapshot().tabs, current)).then(paid => { recharged.current = !!paid })
+    releaseEmptyWorkspace()
+  }
+
+  /** Open current verified bytes through the captured arm; display paths never reconstruct a derived route. */
+  async function restoreLocation(entry: SavedLocation, replace?: TabId, index?: number): Promise<boolean> {
+    const l = latest.current.limits
+    if (!l || navigating.current || !recharged.current || !workspace.getSnapshot().ready) return false
+    if (entry.location.kind === 'derived' && entry.location.ticket.session !== currentSession.current) {
+      setWorkspaceNotice('Cannot reopen this local file after the core restarted · select the file again using Open file…')
+      return false
+    }
+    navigating.current = true
+    setNavigationBusy(true)
+    pendingHistoryBytes.current = historyDraftBytes(l)
+    const ownerSession = currentSession.current
+    const source = replace ? workspace.tab(replace) : undefined
+    let candidate: Opened | undefined
+    let owner: LensBudget | null = null
+    let plan: ReloadReservation | undefined
+    try {
+      if (!await metadata(current => chargeWorkspace(replace ? workspace.getSnapshot().tabs :
+        [...workspace.getSnapshot().tabs, { key: 'saved:' + entry.path, path: entry.path }], current))) return false
+      const rawBytes = floorBytes(l)
+      owner = live.current ? budgetFor(live.current) : null
+      plan = owner?.reloadReservation(rawBytes)
+      const retired = Math.max(retiredRendered.current, plan?.retiredTreeMax ?? 0)
+      const existing = entry.location.kind === 'manual' ? workspace.find(manualKey(entry.location.path)) : undefined
+      if (existing && existing.id !== replace && existing.card.kind === 'open') {
+        const activated = await core.call('activate', { doc: existing.card.opened.doc, gen: existing.card.opened.gen,
+          count: firstCount(l), bytes: rawBytes + 2 * retired })
+        if (ownerSession !== currentSession.current) return false
+        leave()
+        workspace.select(existing.id, true)
+        restoreFocus.current = true
+        show(existing.id, activated, workspace.tab(existing.id)!, rawBytes, undefined, retired)
+        return true
+      }
+      candidate = entry.location.kind === 'manual'
+        ? await core.call('open', { path: entry.location.path, count: firstCount(l), bytes: rawBytes + 2 * retired })
+        : await core.call('openSaved', { ticket: entry.location.ticket, count: firstCount(l), bytes: rawBytes + 2 * retired })
+      if (ownerSession !== currentSession.current || replace && workspace.tab(replace)?.key !== source?.key) return false
+      const key = entry.location.kind === 'manual' ? manualKey(entry.location.path) : 'local:' + ownerSession + ':' + candidate.doc
+      const path = candidate.path ?? entry.path
+      const next: Extract<Card, { kind: 'open' }> = { kind: 'open', path, opened: candidate, lines: candidate.lines,
+        bytes: 0, indexed: candidate.indexed, atLine: entry.anchor, lens: 'raw' }
+      const ticket = replace ? workspace.begin(replace) : (() => {
+        const opened = workspace.beginOpen(key, path, index)
+        return opened.kind === 'open' ? opened.ticket : null
+      })()
+      if (!ticket) return false
+      if (!workspace.complete(ticket, key, next, { ...(replace ? { pop: true } : {}), restore: entry })) return false
+      leave()
+      const opened = candidate
+      candidate = undefined
+      restoreFocus.current = true
+      show(ticket.tab, opened, workspace.tab(ticket.tab)!, rawBytes, undefined, retired)
+      if (source) closeNative(source)
+      return true
+    } catch (e) {
+      setWorkspaceNotice((replace ? 'Cannot go Back · ' : 'Cannot reopen · ') + (e instanceof Error ? e.message : String(e)))
+      return false
+    } finally {
+      if (candidate && ownerSession === currentSession.current) void core.call('close', { doc: candidate.doc }).catch(() => {})
+      if (plan) owner?.cancelTransition(plan)
+      pendingHistoryBytes.current = 0
+      navigating.current = false
+      setNavigationBusy(false)
+      releaseEmptyWorkspace()
+    }
+  }
+
+  async function back(): Promise<void> {
+    const id = workspace.getSnapshot().selected
+    const entry = id ? workspace.tab(id)?.back?.at(-1) : undefined
+    if (!id || !entry) return
+    if (await restoreLocation(entry, id)) {
+      workspace.consumeBack(id, entry) // duplicate manual targets focus their existing tab instead of replacing this one
+      releaseLocation(entry.location)
+    }
+  }
+
+  async function reopenClosed(): Promise<void> {
+    const item = closed.current.at(-1)
+    if (!item) { setWorkspaceNotice('No recently closed tabs'); return }
+    if (await restoreLocation(item.entry, undefined, item.index)) {
+      if (closed.current.at(-1) === item) closed.current.pop()
+      releaseLocation(item.entry.location)
+    }
+  }
+
   async function reload(): Promise<void> {
+    if (navigating.current || !recharged.current) return
     const id = workspace.getSnapshot().selected
     const tab = id ? workspace.tab(id) : undefined
     const { card: c, limits: l } = latest.current
@@ -746,12 +888,44 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       if (workspace.getSnapshot().selected) close()
       else if (MAC) window.close()
     } else if (command === 'reload') void reload()
+    else if (command === 'reopen-tab') void reopenClosed()
+    else if (command === 'clear-closed') clearClosed()
     else if (command === 'exit') window.close()
   }
 
   /** Tab ownership closes native documents; changing the displayed card never does. */
-  function close(id = workspace.getSnapshot().selected): void {
-    if (!id) return
+  async function close(id = workspace.getSnapshot().selected): Promise<void> {
+    if (!id || navigating.current) return
+    const tab = workspace.tab(id)
+    if (!tab) return
+    navigating.current = true
+    setNavigationBusy(true)
+    const ownerSession = currentSession.current
+    let captured: CapturedLocation | undefined
+    try {
+      const l = latest.current.limits
+      if (l && tab.session === ownerSession && tab.card.kind === 'open') {
+        pendingHistoryBytes.current = historyDraftBytes(l, false)
+        if (await metadata(current => chargeWorkspace(workspace.getSnapshot().tabs, current))) {
+          captured = await core.call('captureLocation', { doc: tab.card.opened.doc, gen: tab.card.opened.gen })
+          if (ownerSession === currentSession.current && workspace.tab(id)) {
+            const selected = displayed.current === id
+            closed.current.push({ index: workspace.getSnapshot().tabs.findIndex(item => item.id === id), entry: {
+              location: captured, path: tab.path, anchor: selected ? lens.current?.topLine() ?? tab.anchor ?? 0 : tab.anchor ?? 0,
+              lens: selected ? picked.current : tab.preferredLens
+            } })
+            captured = undefined
+          }
+        } else setWorkspaceNotice('Tab closed · memory budget could not retain Reopen history')
+      }
+    } catch (e) {
+      setWorkspaceNotice('Tab closed · cannot retain Reopen history: ' + (e instanceof Error ? e.message : String(e)))
+    } finally {
+      if (captured) releaseLocation(captured)
+      pendingHistoryBytes.current = 0
+      navigating.current = false
+      setNavigationBusy(false)
+    }
     const selected = workspace.getSnapshot().selected === id
     if (selected) leave()
     const removed = workspace.close(id)
@@ -762,6 +936,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     }
     activationFailed.current.delete(id)
     closeNative(removed)
+    for (const entry of removed.back ?? []) releaseLocation(entry.location)
     if (selected) {
       const next = workspace.getSnapshot().selected
       display(null, { kind: 'empty' })
@@ -795,6 +970,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
 
   const header = (
     <div className="card-header">
+      <Button className="back-button" aria-label="Back" isDisabled={navigationBusy || !snapshot.ready || !snapshot.tabs.find(tab => tab.id === snapshot.selected)?.back?.length} onPress={() => void back()}><span title="Back">←</span></Button>
       <span className="card-identity" title={path}>
         {path ? <FileIcon path={path} markdown={openedNow?.format === 'markdown'} /> : null}
         <span className="card-breadcrumb">

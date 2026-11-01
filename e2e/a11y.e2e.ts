@@ -92,7 +92,7 @@ test('Raw is a named region whose text leaves out the gutter, and ☰ exposes me
     await expect(win.getByRole('menu')).toBeVisible()
     const open = await axTree(win)
     const [menu] = open.find('menu')
-    expect(open.under(menu).filter((n) => n.role?.value === 'menuitem').map((n) => n.name?.value)).toEqual(['Open file…', 'Reload', 'Close tab', EXIT])
+    expect(open.under(menu).filter((n) => n.role?.value === 'menuitem').map((n) => n.name?.value)).toEqual(['Open file…', 'Reload', 'Close tab', 'Reopen closed tab', 'Clear recently closed tabs', EXIT])
     await win.keyboard.press('Escape')
   }
 
@@ -107,7 +107,7 @@ test('Raw is a named region whose text leaves out the gutter, and ☰ exposes me
     await win.getByRole('button', { name: 'Menu', exact: true }).click()
     await expect(win.getByRole('menu')).toBeVisible()
     const menu = uiaNodes(await uiaTree(app)).find((n) => n.type === 'Menu')
-    expect(menu?.children?.filter((n) => n.type === 'MenuItem').map((n) => n.name)).toEqual(['Open file…', 'Reload', 'Close tab', EXIT])
+    expect(menu?.children?.filter((n) => n.type === 'MenuItem').map((n) => n.name)).toEqual(['Open file…', 'Reload', 'Close tab', 'Reopen closed tab', 'Clear recently closed tabs', EXIT])
     await win.keyboard.press('Escape')
   }
   expect(l.pageErrors).toEqual([])
@@ -324,7 +324,7 @@ test('at 200% zoom in the smallest window, the chrome and Raw stay reachable, an
     }
     await tabTo(win, '.menu-button')
     await win.keyboard.press('Enter')
-    await expect(win.getByRole('menuitem')).toHaveText(['Open file…', 'Reload', 'Close tab', EXIT])
+    await expect(win.getByRole('menuitem')).toHaveText(['Open file…', 'Reload', 'Close tab', 'Reopen closed tab', 'Clear recently closed tabs', EXIT])
     for (const item of await win.getByRole('menuitem').all()) expect(await item.evaluate((el) => el.getBoundingClientRect().right <= innerWidth && el.getBoundingClientRect().bottom <= innerHeight)).toBe(true)
     await win.keyboard.press('Escape')
   }

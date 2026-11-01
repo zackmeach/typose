@@ -1,8 +1,15 @@
 import type { Card } from './card'
-import type { Opened, ProgressEvent } from '../shared/protocol'
+import type { CapturedLocation, Opened, ProgressEvent } from '../shared/protocol'
 
 export type TabId = string
 export type LensChoice = 'raw' | 'rendered' | null
+/** A saved location owns scalar metadata and, for derived files, one native route ticket. */
+export interface SavedLocation {
+  readonly location: CapturedLocation
+  readonly path: string
+  readonly anchor: number
+  readonly lens: LensChoice
+}
 type OpenCard = Extract<Card, { kind: 'open' }>
 type FinishedCard = Extract<Card, { kind: 'open' | 'failed' }>
 
@@ -24,6 +31,7 @@ export interface WorkspaceTab {
   readonly anchor?: number
   /** Null retains Markdown's automatic first-lens choice; a user choice belongs to this tab. */
   readonly preferredLens: LensChoice
+  readonly back?: readonly SavedLocation[]
 }
 
 export interface WorkspaceSnapshot {
@@ -100,7 +108,7 @@ export class WorkspaceStore {
   tab(id: TabId): WorkspaceTab | undefined { return this.state.tabs.find((tab) => tab.id === id) }
   find(key: string): WorkspaceTab | undefined { return this.state.tabs.find((tab) => tab.key === key) }
 
-  beginOpen(key: string, path: string): OpenRequest {
+  beginOpen(key: string, path: string, index = this.state.tabs.length): OpenRequest {
     if (!this.state.ready) return { kind: 'unavailable' }
     const existing = this.find(key)
     if (existing) return { kind: 'existing', tab: existing.id, selection: this.select(existing.id)! }
@@ -109,7 +117,9 @@ export class WorkspaceStore {
       card: Object.freeze({ kind: 'opening', path, slow: false }), preferredLens: null })
     this.versions.set(id, 1)
     this.selectionVersion++
-    this.publish({ ...this.state, tabs: [...this.state.tabs, tab], selected: id })
+    const tabs = [...this.state.tabs]
+    tabs.splice(Math.max(0, Math.min(index, tabs.length)), 0, tab)
+    this.publish({ ...this.state, tabs, selected: id })
     return { kind: 'open', ticket: { tab: id, version: 1, session: this.state.session }, selection: this.selection()! }
   }
 
@@ -132,14 +142,22 @@ export class WorkspaceStore {
   }
 
   /** False means the caller still owns the returned native resource; the store never closes one. */
-  complete(ticket: TabTicket, key: string, card: FinishedCard): boolean {
+  complete(ticket: TabTicket, key: string, card: FinishedCard, navigation?: { push?: SavedLocation; pop?: boolean; restore?: SavedLocation }): boolean {
     if (!this.current(ticket)) return false
     const collision = this.find(key)
     this.versions.set(ticket.tab, ticket.version + 1)
     if (collision && collision.id !== ticket.tab) return false
     this.change(ticket.tab, (tab) => ({ ...tab, key, path: card.path, session: ticket.session, card: retain(card),
       anchor: card.kind === 'open' && card.atLine !== undefined ? card.atLine : tab.key === key ? tab.anchor : undefined,
-      preferredLens: tab.key === key ? tab.preferredLens : null }))
+      preferredLens: navigation?.restore ? navigation.restore.lens : tab.key === key ? tab.preferredLens : null,
+      ...(navigation ? { back: Object.freeze(navigation.push ? [...(tab.back ?? []), navigation.push] : navigation.pop ? (tab.back ?? []).slice(0, -1) : tab.back ?? []) } : {}) }))
+    return true
+  }
+
+  consumeBack(id: TabId, entry: SavedLocation): boolean {
+    const tab = this.tab(id)
+    if (tab?.back?.at(-1) !== entry) return false
+    this.change(id, tab => ({ ...tab, back: Object.freeze(tab.back!.slice(0, -1)) }))
     return true
   }
 

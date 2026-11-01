@@ -202,6 +202,10 @@ export class RawLens {
   /** The index is done. A last piece fetched before the index knew where its line ends says "More on this line":
    *  drop it, so it's fetched again and says how much more (brief §5.1). Its row shows the old text until then. */
   indexDone(): void {
+    if (this.atLine !== undefined) {
+      this.atLine = Math.min(this.atLine, Math.max(0, this.lineCount - 1))
+      this.setLineCount(this.lineCount)
+    }
     if (this.cache.drop((item) => item.more && !item.next && item.rest === undefined) > 0) this.want(this.list.visibleRange())
   }
 

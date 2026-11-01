@@ -183,6 +183,25 @@ body {
   flex: 1;
   min-width: 0;
 }
+.back-button {
+  flex: none;
+  width: 24px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+}
+.back-button[data-disabled] {
+  color: var(--text2);
+  opacity: 0.5;
+}
+.back-button[data-focus-visible] {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .file-icon {
   flex: none;
   color: var(--text2);

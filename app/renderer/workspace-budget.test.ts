@@ -118,7 +118,7 @@ it('core death invalidates old grants without a zero RPC into the next session',
   reply.resolve(true)
   expect(await holding).toBe(false)
   expect(calls).toHaveLength(1)
-  expect(bank.snapshot().peakBytes).toBe(0)
+  expect(bank.snapshot().peakBytes).toBe(workspaceCharge(1, 10)) // the interrupted request's retained graph must be recharged
 })
 
 it('refuses unsafe sizes before contacting the core', async () => {
@@ -127,4 +127,13 @@ it('refuses unsafe sizes before contacting the core', async () => {
   for (const [count, units] of [[-1, 0], [1.5, 0], [1, Infinity], [1, Number.MAX_SAFE_INTEGER], [0, 1]])
     expect(await bank.hold(count, units)).toBe(false)
   expect(calls).toBe(0)
+})
+
+it('retains charged history and pending page bytes after the last document closes', async () => {
+  const calls: number[] = []
+  const bank = new WorkspaceBudget({ call: async (_, p) => { calls.push(p.bytes); return true } }, 1)
+  expect(await bank.hold(0, 0, 8 << 20)).toBe(true)
+  expect(bank.snapshot().held).toBe(3 * ((6 << 20) + (8 << 20)))
+  expect(await bank.release()).toBe(true)
+  expect(calls.at(-1)).toBe(0)
 })

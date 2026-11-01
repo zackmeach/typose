@@ -206,6 +206,8 @@ function macMenu(win: BrowserWindow): Menu {
       { label: 'Open File…', click: run('open') },
       { label: 'Reload', click: run('reload') },
       { label: 'Close Tab', accelerator: 'Cmd+W', click: run('close-tab') },
+      { label: 'Reopen Closed Tab', accelerator: 'Cmd+Shift+T', click: run('reopen-tab') },
+      { label: 'Clear Recently Closed Tabs', click: run('clear-closed') },
       { role: 'close', accelerator: 'Shift+Cmd+W' }
     ] },
     { role: 'editMenu' },
