@@ -1,14 +1,15 @@
 import type { Card } from './card'
-import type { CapturedLocation, Opened, ProgressEvent } from '../shared/protocol'
+import type { CapturedLocation, CsvOptions, Opened, ProgressEvent } from '../shared/protocol'
 
 export type TabId = string
-export type LensChoice = 'raw' | 'rendered' | null
+export type LensChoice = 'raw' | 'rendered' | 'grid' | null
 /** A saved location owns scalar metadata and, for derived files, one native route ticket. */
 export interface SavedLocation {
   readonly location: CapturedLocation
   readonly path: string
   readonly anchor: number
   readonly lens: LensChoice
+  readonly csvOptions?: Readonly<CsvOptions>
 }
 type OpenCard = Extract<Card, { kind: 'open' }>
 type FinishedCard = Extract<Card, { kind: 'open' | 'failed' }>

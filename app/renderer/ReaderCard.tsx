@@ -1,12 +1,14 @@
 import { type RefObject, useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { Button, Menu, MenuItem, MenuTrigger, Popover, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
-import type { CapturedLocation, Hello, Limits, MdBuild, Methods, Opened, SurfaceRef, ViewRef } from '../shared/protocol'
+import { Button, Dialog, DialogTrigger, Menu, MenuItem, MenuTrigger, Popover, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
+import type { CapturedLocation, CsvInfo, CsvOptions, Hello, Limits, MdBuild, Methods, Opened, SurfaceRef, ViewRef } from '../shared/protocol'
 import { type Action, type Card, fileName, parentName, view } from './card'
 import { FileIcon } from './file-icon'
 import { type CoreClient, CoreCallError } from './core'
 import { RenderedLens, renderedCharge } from './lenses/rendered'
 import { LensBudget, type ReloadReservation } from './lenses/lens-budget'
 import { ROW_HEIGHT, RawLens, viewportCap } from './lenses/raw'
+import { GridLens } from './lenses/grid'
+import './grid.css'
 import { inputMark, markNow } from './perf'
 import { type SavedLocation, type SelectionTicket, type TabId, type WorkspaceStore, type WorkspaceTab } from './workspace'
 import { FileTabs } from './file-tabs'
@@ -19,6 +21,7 @@ const markOnce = (name: string) => performance.getEntriesByName(name).length ===
 
 /** Enough lines for the first screen and its overscan (Z37); the rest follow as pages. */
 const firstCount = (l: Limits) => Math.min(l.maxItems, 3 * Math.ceil(window.innerHeight / ROW_HEIGHT) + 1)
+const CSV_OPTIONS: CsvOptions = { delimiter: 'auto', header: 'auto' }
 
 const failed = (path: string, e: unknown): Extract<Card, { kind: 'failed' }> => ({
   kind: 'failed',
@@ -85,7 +88,9 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   const live = useRef<{ session: number; doc: number; gen: number; view?: ViewRef } | null>(null)
   const pendingActivation = useRef<{ session: number; doc: number; gen: number; operation: symbol; selection: SelectionTicket } | null>(null)
   const lens = useRef<ShownLens | null>(null)
-  const picked = useRef<'raw' | 'rendered' | null>(null)
+  const picked = useRef<'raw' | 'rendered' | 'grid' | null>(null)
+  const [csvChanging, setCsvChanging] = useState(false)
+  const csvChangingNow = useRef(false)
   const jumpTo = useRef<number | undefined>(undefined)
   const place = useRef<{ session: number; doc: number; line: number } | undefined>(undefined)
   const hadFocus = useRef(false)
@@ -143,7 +148,8 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   const retireBudget = () => {
     const owner = budget.current
     if (!owner) return
-    retiredRendered.current = Math.max(retiredRendered.current, owner.snapshot().rendered, owner.retiredTreeMax)
+    const snapshot = owner.snapshot()
+    retiredRendered.current = Math.max(retiredRendered.current, snapshot.rendered + snapshot.grid, owner.retiredTreeMax)
     owner.invalidate()
   }
 
@@ -315,6 +321,44 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     }
   }, [openedNow, core])
 
+  useEffect(() => {
+    if (!openedNow || openedNow.format !== 'csv' || openedNow.blank) return
+    const opened = openedNow, ac = new AbortController()
+    let alive = true
+    const options = latest.current.card.kind === 'open' ? latest.current.card.csvOptions ?? CSV_OPTIONS : CSV_OPTIONS
+    void core.call('csvConfigure', { surface: surface.current ?? undefined, doc: opened.doc, gen: opened.gen, options }, ac.signal).then(info => {
+      if (!alive) return
+      const go = info.status !== 'locked' && (picked.current === 'grid' || picked.current !== 'raw' && !lens.current?.readerMoved())
+      setCard(c => c.kind === 'open' && c.opened === opened ? { ...c, csv: info, csvOptions: options,
+        gridOff: info.status === 'locked' ? info.reason || 'Grid is unavailable' : undefined, lens: go ? 'grid' : 'raw' } : c)
+    }, error => {
+      if (alive) setCard(c => c.kind === 'open' && c.opened === opened ? { ...c, gridOff: String(error), lens: 'raw' } : c)
+    })
+    return () => { alive = false; ac.abort() }
+  }, [openedNow, core])
+
+  async function configureCsv(options: CsvOptions): Promise<void> {
+    const c = latest.current.card
+    if (c.kind !== 'open' || c.opened.format !== 'csv' || csvChangingNow.current) return
+    csvChangingNow.current = true
+    setCsvChanging(true)
+    const before = lens.current
+    before?.yieldReservation()
+    let changed = false
+    try {
+      const info = await core.call('csvConfigure', { surface: surface.current ?? undefined, doc: c.opened.doc, gen: c.opened.gen, options })
+      changed = latest.current.card.kind === 'open' && latest.current.card.opened === c.opened
+      setCard(d => d.kind === 'open' && d.opened === c.opened ? { ...d, csv: info, csvOptions: options,
+        gridOff: info.status === 'locked' ? info.reason || 'Grid is unavailable' : undefined,
+        lens: info.status === 'locked' ? 'raw' : d.lens } : d)
+    } catch (error) { setWorkspaceNotice('Cannot change CSV options · ' + String(error)) }
+    finally {
+      if (lens.current === before && (!changed || latest.current.card.kind === 'open' && latest.current.card.lens === 'raw')) before?.resumeReservation()
+      csvChangingNow.current = false
+      setCsvChanging(false)
+    }
+  }
+
   /**
    * Reserve Rendered's charge on the one lens holder (plan §2.2) before any block is appended. Refused, the caller
    * keeps Raw. `stale` when this document was replaced while the call was out.
@@ -343,7 +387,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
 
   /** The switch. Rendered before its build exists is remembered; the effect mounts it when the build fits. */
   function onLens(key: string | number): void {
-    if (key !== 'raw' && key !== 'rendered') return
+    if (key !== 'raw' && key !== 'rendered' && key !== 'grid') return
     const c = latest.current.card
     if (c.kind !== 'open' || (c.lens ?? 'raw') === key) return
     picked.current = key
@@ -351,6 +395,11 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     if (id) workspace.remember(id, lens.current?.topLine() ?? 0, key)
     if (key === 'raw') {
       setCard((d) => (d.kind === 'open' && d.opened === c.opened ? { ...d, lens: 'raw' } : d))
+      return
+    }
+    if (key === 'grid') {
+      if (!c.csv || c.gridOff) return
+      setCard(d => d.kind === 'open' && d.opened === c.opened ? { ...d, lens: 'grid' } : d)
       return
     }
     if (c.renderedOff || !c.build) return
@@ -546,7 +595,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         }
         const next: Extract<Card, { kind: 'open' }> = { kind: 'open', path: resolvedPath, opened, lines: opened.lines,
           bytes: 0, indexed: opened.indexed, lens: 'raw' }
-        const entry: SavedLocation = { location: captured, path: tab.path, anchor: lens.current?.topLine() ?? tab.anchor ?? 0, lens: picked.current }
+        const entry: SavedLocation = { location: captured, path: tab.path, anchor: lens.current?.topLine() ?? tab.anchor ?? 0, lens: picked.current, csvOptions: tab.card.kind === 'open' ? tab.card.csvOptions : undefined }
         if (!workspace.complete(ticket, key, next, { push: entry })) {
           if (sourceSession === currentSession.current) void core.call('close', { surface: surface.current!, doc: opened.doc }).catch(() => {})
           return false
@@ -627,6 +676,8 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         if (ownerSession !== currentSession.current || closing.current) { deactivateInactive({ session: ownerSession, ...activated }); return false }
         leave()
         workspace.select(existing.id, true)
+        workspace.remember(existing.id, entry.anchor, entry.lens)
+        workspace.updateDocument({ session: ownerSession, doc: activated.doc, gen: activated.gen }, stored => ({ ...stored, csvOptions: entry.csvOptions }))
         restoreFocus.current = true
         show(existing.id, activated, workspace.tab(existing.id)!, rawBytes, undefined, retired)
         return true
@@ -638,7 +689,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       const key = entry.location.kind === 'manual' ? manualKey(entry.location.path) : 'local:' + ownerSession + ':' + candidate.doc
       const path = candidate.path ?? entry.path
       const next: Extract<Card, { kind: 'open' }> = { kind: 'open', path, opened: candidate, lines: candidate.lines,
-        bytes: 0, indexed: candidate.indexed, atLine: entry.anchor, lens: 'raw' }
+        bytes: 0, indexed: candidate.indexed, atLine: entry.anchor, lens: 'raw', csvOptions: entry.csvOptions }
       const ticket = replace ? workspace.begin(replace) : (() => {
         const opened = workspace.beginOpen(key, path, index)
         return opened.kind === 'open' ? opened.ticket : null
@@ -711,7 +762,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     try {
       const opened = await ownerCall('reload', { doc: source.opened.doc, count: firstCount(l), bytes: plan?.bytes ?? rawBytes + 2 * retiredRendered.current })
       const next: Extract<Card, { kind: 'open' }> = { kind: 'open', path: source.path, opened, lines: opened.lines, bytes: 0,
-        indexed: opened.indexed, atLine, lens: 'raw' }
+        indexed: opened.indexed, atLine, lens: 'raw', csvOptions: source.csvOptions }
       if (!workspace.complete(ticket, tab.key, next)) { deactivateInactive({ session: ticket.session, ...opened }); return } // borrowed document, release only its unpublished view
       if (workspace.selected(selection)) show(id, opened, workspace.tab(id)!, rawBytes, plan)
       else if (workspace.getSnapshot().selected === id) void selectTab(id)
@@ -849,7 +900,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
             const selected = displayed.current === id
             closed.current.push({ cardId: idCard, index: workspace.getSnapshot().tabs.findIndex(item => item.id === id), entry: {
               location: captured, path: tab.path, anchor: selected ? lens.current?.topLine() ?? tab.anchor ?? 0 : tab.anchor ?? 0,
-              lens: selected ? picked.current : tab.preferredLens
+              lens: selected ? picked.current : tab.preferredLens, csvOptions: tab.card.csvOptions
             } })
             captured = undefined
           }
@@ -898,6 +949,9 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   const frozen = card.kind === 'open' ? card.frozen : undefined
   const breadcrumbParent = openedNow?.folder ? [openedNow.folder.label, ...openedNow.folder.segments.slice(0, -1)].join(' / ') : path ? parentName(path) : ''
 
+  const secondaryLens = shown.lenses?.grid ? 'grid' : 'rendered'
+  const detectedDelimiter = card.kind === 'open' && card.csv ? { ',': 'Comma', '\t': 'Tab', ';': 'Semicolon', '|': 'Pipe' }[card.csv.delimiter] : undefined
+
   const header = (
     <div className="card-header">
       <Button className="back-button" aria-label="Back" isDisabled={navigationBusy || !snapshot.ready || !snapshot.tabs.find(tab => tab.id === snapshot.selected)?.back?.length} onPress={() => void back()}><span title="Back">←</span></Button>
@@ -911,10 +965,10 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       {shown.lenses ? (
         <>
         <TabList aria-label="Lens" className="lens-switch">
-          <Tab id="rendered" className="lens-tab" isDisabled={!!shown.lenses.renderedOff}>
+          <Tab id={secondaryLens} className="lens-tab" isDisabled={!!(shown.lenses.grid ? shown.lenses.gridOff : shown.lenses.renderedOff)}>
             {/* `Tab` doesn't take a DOM `title`. The span carries the reason, which is the tooltip (Z71, Z34). */}
-            <span className="lens-tab-tip" title={shown.lenses.renderedOff}>
-              Rendered
+            <span className="lens-tab-tip" title={shown.lenses.grid ? shown.lenses.gridOff : shown.lenses.renderedOff}>
+              {shown.lenses.grid ? 'Grid' : 'Rendered'}
             </span>
           </Tab>
           <Tab id="raw" className="lens-tab">
@@ -922,13 +976,13 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
           </Tab>
         </TabList>
         <MenuTrigger>
-          <Button className="lens-dropdown" aria-label={`Lens: ${shown.lenses.showing === 'rendered' ? 'Rendered' : 'Raw'}`}>
-            {shown.lenses.showing === 'rendered' ? 'Rendered' : 'Raw'} <span aria-hidden="true">⌄</span>
+          <Button className="lens-dropdown" aria-label={`Lens: ${shown.lenses.showing === 'grid' ? 'Grid' : shown.lenses.showing === 'rendered' ? 'Rendered' : 'Raw'}`}>
+            {shown.lenses.showing === 'grid' ? 'Grid' : shown.lenses.showing === 'rendered' ? 'Rendered' : 'Raw'} <span aria-hidden="true">⌄</span>
           </Button>
           <Popover className="menu-popover" placement="bottom end">
-            <Menu className="menu" aria-label="Lens" onAction={onLens} disabledKeys={shown.lenses.renderedOff ? ['rendered'] : []}>
-              <MenuItem id="rendered" className="menu-item" textValue="Rendered">
-                Rendered{shown.lenses.renderedOff ? <span className="lens-unavailable"> · {shown.lenses.renderedOff}</span> : null}
+            <Menu className="menu" aria-label="Lens" onAction={onLens} disabledKeys={shown.lenses.gridOff ? ['grid'] : shown.lenses.renderedOff ? ['rendered'] : []}>
+              <MenuItem id={shown.lenses.grid ? 'grid' : 'rendered'} className="menu-item" textValue={shown.lenses.grid ? 'Grid' : 'Rendered'}>
+                {shown.lenses.grid ? 'Grid' : 'Rendered'}{shown.lenses.gridOff || shown.lenses.renderedOff ? <span className="lens-unavailable"> · {shown.lenses.gridOff || shown.lenses.renderedOff}</span> : null}
               </MenuItem>
               <MenuItem id="raw" className="menu-item">Raw</MenuItem>
             </Menu>
@@ -936,6 +990,20 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         </MenuTrigger>
         </>
       ) : null}
+      {card.kind === 'open' && card.opened.format === 'csv' ? <DialogTrigger>
+        <Button className="csv-info-button" aria-label="File info">ⓘ</Button>
+        <Popover className="csv-info-popover" placement="bottom end">
+          <Dialog aria-label="CSV file info">
+            <p>{card.csv ? `${Math.max(0, card.csv.sourceRecords - (card.csv.header ? 1 : 0))} rows${card.csv.done ? '' : '…'} · ${card.csv.expectedColumns} columns · ${card.csv.encoding}` : 'Preparing CSV…'}</p>
+            <label><input type="checkbox" checked={card.csv?.header ?? false} disabled={csvChanging || !card.csv} onChange={event => void configureCsv({ ...(card.csvOptions ?? CSV_OPTIONS), header: event.target.checked })} /> First row is header</label>
+            <label>Delimiter <select aria-label="Delimiter" value={card.csvOptions?.delimiter ?? 'auto'} disabled={csvChanging} onChange={event => void configureCsv({ ...(card.csvOptions ?? CSV_OPTIONS), delimiter: event.target.value as CsvOptions['delimiter'] })}>
+              <option value="auto">Auto{detectedDelimiter ? ` (${detectedDelimiter})` : ''}</option><option value=",">Comma</option><option value={'\t'}>Tab</option><option value=";">Semicolon</option><option value="|">Pipe</option>
+            </select></label>
+            {card.gridOff ? <p>{card.gridOff}</p> : null}
+            <p>Grid preview · Find, sort and range copy are unavailable.</p>
+          </Dialog>
+        </Popover>
+      </DialogTrigger> : null}
       <span className="card-status" title={shown.status} tabIndex={shown.status ? 0 : undefined}>{shown.status}</span>
       <span className="card-status-tooltip" aria-hidden="true">{shown.status}</span>
       <Button className="close-card-button" aria-label="Close card" onPress={onCloseCard}>×</Button>
@@ -996,6 +1064,15 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         onOpenLocal={(target, path) => openLocal(card.opened, target, path)}
         onDisposed={disposedView}
       />
+    ) : fontLayoutReady && card.kind === 'open' && limits && 'grid' in shown.body && card.csv ? (
+      <LensHost core={core} session={session} budget={budgetFor(card.opened)} retained={rendered} lens={lens}
+        jumpTo={jumpTo} place={place} hadFocus={hadFocus} restoreFocus={restoreFocus} atLine={card.atLine}
+        opened={card.opened} name={fileName(card.path)} lines={card.lines} indexed={card.indexed} limits={limits}
+        frozen={frozen !== undefined} mode="grid" csv={card.csv} csvOptions={card.csvOptions ?? CSV_OPTIONS}
+        onCsvInfo={info => setCard(c => c.kind === 'open' && c.opened === card.opened && c.csv?.ref.revision === info.ref.revision ? { ...c, csv: info } : c)}
+        onFrozen={why => setCard(c => c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c)}
+        onShowRaw={line => { jumpTo.current = line; onLens('raw') }}
+        onOpenLocal={(target, path) => openLocal(card.opened, target, path)} onDisposed={disposedView} />
     ) : fontLayoutReady && card.kind === 'open' && limits && 'rendered' in shown.body && card.build ? (
       <LensHost
         core={core}
@@ -1041,7 +1118,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         try {
           if (!await metadata(current => chargeWorkspace(workspace.getSnapshot().tabs, current))) return null
           const location = await core.call('captureLocation', { doc: c.opened.doc, gen: c.opened.gen })
-          return { location, path: c.path, anchor: lens.current?.topLine() ?? 0, lens: picked.current }
+          return { location, path: c.path, anchor: lens.current?.topLine() ?? 0, lens: picked.current, csvOptions: c.csvOptions }
         } finally { pendingHistoryBytes.current = 0 }
       },
       restore: entry => restoreLocation(entry),
@@ -1104,8 +1181,8 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
                 {progress}
                 {banner}
                 <div className="card-body">
-                  <TabPanel id="rendered" className="lens-panel">
-                    {shown.lenses.showing === 'rendered' ? body : null}
+                  <TabPanel id={secondaryLens} className="lens-panel">
+                    {shown.lenses.showing === secondaryLens ? body : null}
                   </TabPanel>
                   <TabPanel id="raw" className="lens-panel">
                     {shown.lenses.showing === 'raw' ? body : null}
@@ -1174,7 +1251,10 @@ interface LensHostProps {
   indexed: boolean
   limits: Limits
   frozen: boolean
-  mode: 'raw' | 'rendered'
+  mode: 'raw' | 'rendered' | 'grid'
+  csv?: CsvInfo
+  csvOptions?: CsvOptions
+  onCsvInfo?(info: CsvInfo): void
   build?: MdBuild
   onFrozen(why: string): void
   onShowRaw(line: number): void
@@ -1183,7 +1263,7 @@ interface LensHostProps {
 }
 
 /** Mounts Raw or Rendered into the card body. A switch or Reload of this document keeps the previous lens's top line. */
-function LensHost({ core, session, budget, retained, lens, jumpTo, place, hadFocus, restoreFocus, atLine, opened, name, lines, indexed, limits, frozen, mode, build, onFrozen, onShowRaw, onOpenLocal, onDisposed }: LensHostProps) {
+function LensHost({ core, session, budget, retained, lens, jumpTo, place, hadFocus, restoreFocus, atLine, opened, name, lines, indexed, limits, frozen, mode, build, csv, csvOptions, onCsvInfo, onFrozen, onShowRaw, onOpenLocal, onDisposed }: LensHostProps) {
   const host = useRef<HTMLDivElement>(null)
   const onFrozenNow = useRef(onFrozen)
   onFrozenNow.current = onFrozen
@@ -1193,6 +1273,8 @@ function LensHost({ core, session, budget, retained, lens, jumpTo, place, hadFoc
   onOpenLocalNow.current = onOpenLocal
   const onDisposedNow = useRef(onDisposed)
   onDisposedNow.current = onDisposed
+  const onCsvInfoNow = useRef(onCsvInfo)
+  onCsvInfoNow.current = onCsvInfo
   useEffect(() => {
     // `place` outlives the document. Use it only for the document that saved it, so a second file opens at `atLine`
     // (or the top). Clear it only after that check: Reload is the same document, and its line has to survive.
@@ -1202,7 +1284,11 @@ function LensHost({ core, session, budget, retained, lens, jumpTo, place, hadFoc
     jumpTo.current = undefined
     const onFrozenHere = (why: string) => onFrozenNow.current(why)
     let view: ShownLens
-    if (mode === 'rendered' && build) {
+    if (mode === 'grid' && csv) {
+      view = new GridLens(host.current!, core, opened, csv, limits, { atLine: at, options: csvOptions ?? CSV_OPTIONS,
+        onFrozen: onFrozenHere, budget, onInfo: info => onCsvInfoNow.current?.(info),
+        onShowRaw: line => onShowRawNow.current(line) })
+    } else if (mode === 'rendered' && build) {
       const kept = retained.current
       if (kept?.session === session && kept.doc === opened.doc && kept.gen === opened.gen) {
         view = kept.view
@@ -1232,7 +1318,7 @@ function LensHost({ core, session, budget, retained, lens, jumpTo, place, hadFoc
       else view.dispose(false)
       onDisposedNow.current(opened)
     }
-  }, [core, session, budget, retained, opened, name, limits, lens, atLine, mode, build, jumpTo, place, hadFocus, restoreFocus])
+  }, [core, session, budget, retained, opened, name, limits, lens, atLine, mode, build, csv?.ref.revision, csvOptions, jumpTo, place, hadFocus, restoreFocus])
   useEffect(() => lens.current?.setLineCount(lines), [lines])
   useEffect(() => {
     if (indexed) lens.current?.indexDone()
@@ -1240,5 +1326,5 @@ function LensHost({ core, session, budget, retained, lens, jumpTo, place, hadFoc
   useEffect(() => {
     if (frozen) lens.current?.freeze()
   }, [frozen])
-  return <div className={mode === 'rendered' ? 'rendered-host' : 'raw-host'} ref={host} data-gen={opened.gen} data-lens={mode} />
+  return <div className={mode === 'grid' ? 'grid-host' : mode === 'rendered' ? 'rendered-host' : 'raw-host'} ref={host} data-gen={opened.gen} data-lens={mode} />
 }

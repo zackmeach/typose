@@ -69,7 +69,7 @@ it('a generation change bypasses an old pending response without letting it alte
   expect(calls).toEqual([{ doc: 1, gen: 1, bytes: 40 }, { doc: 1, gen: 2, bytes: 50 }])
   old.resolve(true)
   expect(await earlier).toBe(false)
-  expect(budget.snapshot()).toEqual({ generation: 2, raw: 15, rendered: 35, retired: 0, total: 50 })
+  expect(budget.snapshot()).toEqual({ generation: 2, raw: 15, rendered: 35, grid: 0, retired: 0, total: 50 })
   expect(await budget.reserveRaw(1, 900)).toBe(false)
   expect(budget.adopt(3, 1000, plan)).toBe(false)
 })
@@ -104,7 +104,7 @@ it('repeated Reload keeps Raw and the maximum retired tree separate, with bounde
     expect(budget.rawReserved).toBe(10)
     await budget.reserveRendered(gen, 100)
     expect(budget.retiredTreeMax).toBe(100)
-    expect(budget.snapshot()).toEqual({ generation: gen, raw: 10, rendered: 100, retired: 200, total: 310 })
+    expect(budget.snapshot()).toEqual({ generation: gen, raw: 10, rendered: 100, grid: 0, retired: 200, total: 310 })
   }
   budget.invalidate()
   expect(await budget.reserveRaw(6, 50)).toBe(false)
@@ -113,7 +113,7 @@ it('repeated Reload keeps Raw and the maximum retired tree separate, with bounde
 it('a replacement carries the maximum Rendered allowance separately from Raw through resize and Reload', async () => {
   const totals: number[] = []
   const budget = new LensBudget({ call: async (_, p) => { totals.push(p.bytes); return true } }, 2, 1, 1, 10, 210, 100)
-  expect(budget.snapshot()).toEqual({ generation: 1, raw: 10, rendered: 0, retired: 200, total: 210 })
+  expect(budget.snapshot()).toEqual({ generation: 1, raw: 10, rendered: 0, grid: 0, retired: 200, total: 210 })
   await budget.reserveRaw(1, 5)
   await budget.reserveRendered(1, 30)
   const plan = budget.reloadReservation(10)
@@ -121,5 +121,25 @@ it('a replacement carries the maximum Rendered allowance separately from Raw thr
   expect(budget.adopt(2, 235, plan)).toBe(true)
   await budget.reserveRaw(2, 5)
   expect(totals).toEqual([205, 235, 205])
-  expect(budget.snapshot()).toEqual({ generation: 2, raw: 5, rendered: 0, retired: 200, total: 205 })
+  expect(budget.snapshot()).toEqual({ generation: 2, raw: 5, rendered: 0, grid: 0, retired: 200, total: 205 })
+})
+
+it('Grid peak stays paid through Raw switches and a refused Reload, then enters retirement on adoption', async () => {
+  const totals: number[] = []
+  const budget = new LensBudget({ call: async (_, p) => { totals.push(p.bytes); return true } }, 1, 4, 1, 10, 10)
+  await budget.reserveGrid(1, 80)
+  await budget.reserveRaw(1, 15)
+  await budget.reserveGrid(1, 20)
+  expect(budget.snapshot()).toMatchObject({ raw: 15, grid: 80, total: 95 })
+  const refused = budget.reloadReservation(20)
+  expect(refused.bytes).toBe(180)
+  budget.cancelTransition(refused)
+  expect(budget.snapshot()).toMatchObject({ grid: 80, total: 95 })
+  await budget.reserveRaw(1, 10)
+  const next = budget.reloadReservation(20)
+  expect(budget.adopt(2, next.bytes, next)).toBe(true)
+  expect(budget.snapshot()).toMatchObject({ raw: 20, grid: 0, retired: 160, total: 180 })
+  await budget.reserveGrid(2, 60)
+  expect(budget.snapshot()).toMatchObject({ raw: 20, grid: 60, retired: 160, total: 240 })
+  expect(totals).toEqual([90, 95, 90, 240])
 })
