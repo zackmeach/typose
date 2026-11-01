@@ -57,6 +57,8 @@ const cancelFlag = () => {
   return flag as unknown as Cancel
 }
 const addon: Addon = { coreVersion: () => '0.0.0', limits, openDoc, cancelFlag, reserveCache }
+/** Default surface's table is separate from live/pending view bytes; capacity stays paid at its peak. */
+const paid = (bytes: number, views = 1, pending = 1) => bytes + 3 * ((64 << 10) + 4096 + 1024 * (views + pending))
 const range = (field: string) => limits().ranges.find((r) => r.field === field)!
 
 let dispatch: (data: unknown) => Promise<Response>
@@ -498,7 +500,7 @@ describe('local document navigation', () => {
     expect(await call('openLocal', { ...params, bytes: 500 })).toMatchObject({ error: { code: 'Memory' } })
     expect(openLocal).not.toHaveBeenCalled()
     expect(await call('reserve', { doc: 1, gen: 1, bytes: 200 })).toMatchObject({ result: true })
-    expect(reserved()).toEqual([300, 500, 200])
+    expect(reserved()).toEqual([paid(300), paid(800), paid(200)]) // source remains mounted beside the pending target
   })
 
   it('returns the old reservation when native open fails, without consuming a document id', async () => {
@@ -507,7 +509,7 @@ describe('local document navigation', () => {
     expect(await call('openLocal', { ...params, bytes: 500 })).toMatchObject({ error: { code: 'NotFound' } })
     expect(close).not.toHaveBeenCalled()
     expect(await call('reserve', { doc: 1, gen: 1, bytes: 200 })).toMatchObject({ result: true })
-    expect(reserved()).toEqual([300, 500, 300, 200])
+    expect(reserved()).toEqual([paid(300), paid(800), paid(300), paid(200)])
     expect(await call('openLocal', params)).toMatchObject({ result: { doc: 2 } })
   })
 
@@ -525,7 +527,7 @@ describe('local document navigation', () => {
     expect(startIndex).not.toHaveBeenCalled()
     expect(await call('close', { doc: 2 })).toMatchObject({ result: false })
     expect(await call('reserve', { doc: 1, gen: 1, bytes: 200 })).toMatchObject({ result: true })
-    expect(reserved()).toEqual([300, 500, 300, 200])
+    expect(reserved()).toEqual([paid(300), paid(800), paid(300), paid(200)])
     expect(await call('openLocal', params)).toMatchObject({ result: { doc: 2 } })
   })
 
@@ -546,7 +548,7 @@ describe('local document navigation', () => {
     expect(page).not.toHaveBeenCalled()
     expect(startIndex).not.toHaveBeenCalled()
     expect(await call('reserve', { doc: 2, gen: 1, bytes: 200 })).toMatchObject({ result: true })
-    expect(reserved()).toEqual([500, 300, 200])
+    expect(reserved()).toEqual([paid(800, 2), paid(300, 2), paid(200, 2)])
   })
 
   it('cancels and deletes an index job whose start throws before registering a target', async () => {
@@ -558,7 +560,7 @@ describe('local document navigation', () => {
     expect(close).toHaveBeenCalledOnce()
     expect(await call('close', { doc: 2 })).toMatchObject({ result: false })
     expect(await call('reserve', { doc: 1, gen: 1, bytes: 200 })).toMatchObject({ result: true })
-    expect(reserved()).toEqual([300, 500, 300, 200])
+    expect(reserved()).toEqual([paid(300), paid(800), paid(300), paid(200)])
     expect(await call('openLocal', params)).toMatchObject({ result: { doc: 3 } })
     expect(failedJob.cancel).toHaveBeenCalledOnce() // no stale job left under the reused id
   })
@@ -570,7 +572,7 @@ describe('local document navigation', () => {
     expect(close).toHaveBeenCalledOnce()
     expect(startIndex).not.toHaveBeenCalled()
     expect(await call('reserve', { doc: 1, gen: 1, bytes: 200 })).toMatchObject({ result: true })
-    expect(reserved()).toEqual([300, 500, 300, 200])
+    expect(reserved()).toEqual([paid(300), paid(800), paid(300), paid(200)])
   })
 
   it('does not cancel source reads when the target freezes', async () => {
@@ -603,7 +605,7 @@ describe('local document navigation', () => {
     firstPage.fail(nativeError('Io'))
     expect(await opening).toMatchObject({ error: { code: 'Io' } })
     expect(await call('reserve', { doc: 2, gen: 1, bytes: 600 })).toMatchObject({ result: true })
-    expect(reserved()).toEqual([500, 700, 600])
+    expect(reserved()).toEqual([paid(500), paid(1200, 1, 2), paid(1200, 2, 2), paid(700, 2, 2), paid(600, 2, 2)])
   })
 
   for (const change of ['reload', 'close']) {
@@ -682,6 +684,7 @@ describe('retained tab activation', () => {
     openDoc.mockReturnValueOnce(a.native).mockReturnValueOnce(b.native)
     expect(await call('open', { path: 'a.txt', count: 1, bytes: 100 })).toMatchObject({ result: { doc: 1 } })
     const aJob = flags.at(-1)!
+    await call('deactivate', { doc: 1, gen: 1 }) // this fixture models one mounted card switching A to B
     expect(await call('open', { path: 'b.txt', count: 1, bytes: 200 })).toMatchObject({ result: { doc: 2 } })
     const bJob = flags.at(-1)!
     vi.clearAllMocks()
@@ -703,7 +706,7 @@ describe('retained tab activation', () => {
       expect(previousFlag.cancel).toHaveBeenCalledOnce()
       for (const spy of [a.cache, a.index, b.index, a.reload, b.reload, a.close, b.close, aJob.cancel, bJob.cancel, openDoc])
         expect(spy).not.toHaveBeenCalled()
-      expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([100])
+      expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([paid(100)])
       expect(leaving).toMatchObject({ result: true })
       expect(await call('reserve', { doc: 2, gen: 1, bytes: 300 })).toMatchObject({ result: false })
       previous.fail(cancelled())
@@ -728,7 +731,7 @@ describe('retained tab activation', () => {
       expect(leaving).toMatchObject({ result: true })
       expect(opening).toMatchObject({ error: { code: 'NotFound' } })
       expect([a.data.cacheActive, b.data.cacheActive]).toEqual([false, false])
-      expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([100, 600, 100])
+      expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([paid(100), paid(600), paid(100)])
       for (const spy of [a.close, b.close, bJob.cancel]) expect(spy).not.toHaveBeenCalled()
     })
 
@@ -742,7 +745,7 @@ describe('retained tab activation', () => {
       expect([a.data.cacheActive, b.data.cacheActive]).toEqual([false, false])
       expect(leaving).toMatchObject({ result: true })
       expect(activating).toMatchObject({ error: { code: 'Memory' } })
-      expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([100, 600, 100])
+      expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([paid(100), paid(600), paid(100)])
       expect(await call('reserve', { doc: 2, gen: 1, bytes: 150 })).toMatchObject({ result: false })
       expect(b.close).not.toHaveBeenCalled()
     })
@@ -771,12 +774,12 @@ describe('retained tab activation', () => {
       expect(b.data.cacheActive).toBe(false)
       expect(leaving).toMatchObject({ result: true })
       expect(targetFlag.cancel).not.toHaveBeenCalled()
-      expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([600])
+      expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([paid(800), paid(600)]) // source detach releases its own 200
       delayed.end()
       expect(await activating).toMatchObject({ result: { doc: 1, reserved: 500 } })
       expect([a.data.cacheActive, b.data.cacheActive]).toEqual([true, false])
       expect(await call('reserve', { doc: 1, gen: 1, bytes: 300 })).toMatchObject({ result: true })
-      expect(reserveCache.mock.calls.at(-1)).toEqual([400])
+      expect(reserveCache.mock.calls.at(-1)).toEqual([paid(400)])
     })
 
     it('forgets a disposed fallback without releasing newer pending bytes, then keeps only workspace if that activation fails', async () => {
@@ -788,10 +791,10 @@ describe('retained tab activation', () => {
       const leaving = await call('deactivate', { doc: 2, gen: 1 })
       expect(b.data.cacheActive).toBe(false)
       expect(leaving).toMatchObject({ result: true })
-      expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([600])
+      expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([paid(800), paid(600)])
       delayed.fail(Object.assign(new Error('first page failed'), { code: 'Io' }))
       expect(await activating).toMatchObject({ error: { code: 'Io' } })
-      expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([600, 100])
+      expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([paid(800), paid(600), paid(100)])
       expect(await call('reserve', { doc: 2, gen: 1, bytes: 150 })).toMatchObject({ result: false })
       expect(b.close).not.toHaveBeenCalled()
     })
@@ -806,10 +809,10 @@ describe('retained tab activation', () => {
       const leaving = await call('deactivate', { doc: 2, gen: 1 })
       expect(target.data.cacheActive).toBe(true)
       expect(target.cache).not.toHaveBeenCalled()
-      expect(reserveCache).not.toHaveBeenCalled()
+      expect(reserveCache).toHaveBeenLastCalledWith(paid(600, 2)) // only the old source's 200-byte lease was released
       expect(leaving).toMatchObject({ result: true })
       expect(await call('reserve', { doc: 3, gen: 1, bytes: 300 })).toMatchObject({ result: true })
-      expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([400])
+      expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([paid(600, 2), paid(400, 2)])
       for (const spy of [a.close, b.close, target.close, bJob.cancel]) expect(spy).not.toHaveBeenCalled()
     })
   })
@@ -825,6 +828,7 @@ describe('retained tab activation', () => {
       const c = fixture()
       openDoc.mockReturnValueOnce(c.native)
       expect(await call('open', { path: 'c.txt', count: 1, bytes: 300 })).toMatchObject({ result: { doc: 3 } })
+      await call('deactivate', { doc: 1, gen: 1 }) // the single-card fixture commits C after detaching A
       delayed.end()
       expect(await reloading).toMatchObject({ result: { doc: 2, gen: 2, reserved: 0 } })
       expect(pendingFlag.cancel).not.toHaveBeenCalled()
@@ -839,6 +843,7 @@ describe('retained tab activation', () => {
       const reloading = dispatch({ id: 98, method: 'reload', params: { doc: 2, count: 1, bytes: 500 } })
       const pendingFlag = flags.at(-1)!
       expect(await call('activate', { doc: 1, gen: 1, count: 1, bytes: 300 })).toMatchObject({ result: { doc: 1 } })
+      await call('deactivate', { doc: 2, gen: 1 }) // handoff alone no longer disposes a mounted source
       delayed.end()
       expect(await reloading).toMatchObject({ result: { doc: 2, gen: 2 } })
       expect(pendingFlag.cancel).not.toHaveBeenCalled()
@@ -924,7 +929,7 @@ describe('retained tab activation', () => {
       delayed.end() // completion won the native cancellation race
       expect(await activating).toMatchObject({ error: { code: 'Stale' } })
       expect([a.data.cacheActive, b.data.cacheActive]).toEqual([false, true])
-      expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([600, 300])
+      expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([paid(800), paid(300)])
       for (const spy of [a.index, b.index, a.close, b.close, aJob.cancel, bJob.cancel]) expect(spy).not.toHaveBeenCalled()
       expect(await call('reserve', { doc: 1, gen: 1, bytes: 300 })).toMatchObject({ result: false })
       expect(await call('reserve', { doc: 2, gen: 1, bytes: 150 })).toMatchObject({ result: true })
@@ -944,7 +949,7 @@ describe('retained tab activation', () => {
       expect(leaving).toMatchObject({ result: true })
       expect(b.data.cacheActive).toBe(false)
       expect(b.cache).toHaveBeenCalledWith(2, false)
-      expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([600, 100])
+      expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([paid(800), paid(600), paid(100)])
       for (const spy of [a.close, b.close, b.index, bJob.cancel]) expect(spy).not.toHaveBeenCalled()
     })
 
@@ -961,7 +966,7 @@ describe('retained tab activation', () => {
       expect([a.data.cacheActive, b.data.cacheActive]).toEqual([false, false])
       expect(b.index).toHaveBeenCalledOnce()
       expect(b.cache).not.toHaveBeenCalledWith(2, true)
-      expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([600, 100])
+      expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([paid(800), paid(600), paid(100)])
       expect(await call('reserve', { doc: 2, gen: 2, bytes: 300 })).toMatchObject({ result: false })
       expect(await call('activate', { doc: 2, gen: 2, count: 1, bytes: 200 })).toMatchObject({ result: { doc: 2, gen: 2, reserved: 200 } })
       expect(b.index).toHaveBeenCalledOnce()
@@ -980,24 +985,25 @@ describe('retained tab activation', () => {
       delayed.end()
       expect(await reloading).toMatchObject({ result: { doc: 2, gen: 2, reserved: 0 } })
       expect(leaving).toMatchObject({ result: true })
-      expect(reserveCache).toHaveBeenCalledTimes(beforeReply)
+      expect(reserveCache).toHaveBeenCalledTimes(beforeReply + 1) // release only the finished Reload's pending 500
       expect([a.data.cacheActive, b.data.cacheActive]).toEqual([true, false])
       expect(await call('reserve', { doc: 1, gen: 1, bytes: 250 })).toMatchObject({ result: true })
-      expect(reserveCache.mock.calls.at(-1)).toEqual([350])
+      expect(reserveCache.mock.calls.at(-1)).toEqual([paid(350, 1, 2)])
       expect(b.index).toHaveBeenCalledOnce()
       expect(b.close).not.toHaveBeenCalled()
     })
 
-    it('refuses a disposal of an old generation after the newer generation has already settled', async () => {
+    it('detaches an old generation lease without deactivating the newer settled generation', async () => {
       const { a, b } = await tabs()
       await call('reserveWorkspace', { bytes: 100 })
       expect(await call('reload', { doc: 2, count: 1, bytes: 500 })).toMatchObject({ result: { doc: 2, gen: 2 } })
       vi.clearAllMocks()
-      expect(await call('deactivate', { doc: 2, gen: 1 })).toMatchObject({ error: { code: 'Stale' } })
-      for (const spy of [a.cache, b.cache, reserveCache, a.close, b.close]) expect(spy).not.toHaveBeenCalled()
+      expect(await call('deactivate', { doc: 2, gen: 1 })).toMatchObject({ result: true })
+      for (const spy of [a.cache, b.cache, a.close, b.close]) expect(spy).not.toHaveBeenCalled()
+      expect(reserveCache).toHaveBeenLastCalledWith(paid(600, 2))
       expect(b.data.cacheActive).toBe(true)
       expect(await call('reserve', { doc: 2, gen: 2, bytes: 300 })).toMatchObject({ result: true })
-      expect(reserveCache.mock.calls.at(-1)).toEqual([400])
+      expect(reserveCache.mock.calls.at(-1)).toEqual([paid(400, 2)])
     })
 
     it('does not deactivate the same target when a newer activation wins before its disposed activation answers', async () => {
@@ -1011,7 +1017,7 @@ describe('retained tab activation', () => {
       expect(await first).toMatchObject({ error: { code: 'Stale' } })
       expect(a.data.cacheActive).toBe(true)
       expect(a.cache).toHaveBeenCalledTimes(cacheCalls)
-      expect(reserveCache).toHaveBeenCalledTimes(reserveCalls)
+      expect(reserveCache).toHaveBeenCalledTimes(reserveCalls + 1) // stale pending bytes unwind separately
       expect(await call('reserve', { doc: 1, gen: 1, bytes: 250 })).toMatchObject({ result: true })
     })
 
@@ -1026,7 +1032,7 @@ describe('retained tab activation', () => {
       expect(await reloading).toMatchObject({ result: { doc: 2, gen: 2, reserved: 0 } })
       expect(b.data.cacheActive).toBe(true)
       expect(b.cache).toHaveBeenCalledTimes(cacheCalls)
-      expect(reserveCache).toHaveBeenCalledTimes(reserveCalls)
+      expect(reserveCache).toHaveBeenCalledTimes(reserveCalls + 1)
       expect(b.index).toHaveBeenCalledOnce()
       expect(await call('reserve', { doc: 2, gen: 2, bytes: 250 })).toMatchObject({ result: true })
     })
@@ -1038,6 +1044,7 @@ describe('retained tab activation', () => {
       result: { doc: 1, gen: 1, reserved: 500, firstPage: { items: [{ next: { session: 7, doc: 1 } }] } }
     })
     expect(a.page).toHaveBeenCalledWith(1, 0, 3, expect.anything())
+    await call('deactivate', { doc: 2, gen: 1 })
     for (const spy of [openDoc, a.index, b.index, a.reload, b.reload, a.close, b.close, aJob.cancel, bJob.cancel])
       expect(spy).not.toHaveBeenCalled()
     expect([a.data.cacheActive, b.data.cacheActive]).toEqual([true, false])
@@ -1061,7 +1068,7 @@ describe('retained tab activation', () => {
     expect([a.data.cacheActive, b.data.cacheActive]).toEqual([false, true])
     expect(b.cache).not.toHaveBeenCalled()
     expect(await call('reserve', { doc: 2, gen: 1, bytes: 150 })).toMatchObject({ result: true })
-    expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([500, 150])
+    expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([paid(700), paid(150)])
   })
 
   it('gives back a failed first-page reservation and never closes either retained tab', async () => {
@@ -1072,7 +1079,7 @@ describe('retained tab activation', () => {
     expect(a.close).not.toHaveBeenCalled()
     expect(b.close).not.toHaveBeenCalled()
     expect(await call('reserve', { doc: 2, gen: 1, bytes: 150 })).toMatchObject({ result: true })
-    expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([500, 200, 150])
+    expect(reserveCache.mock.calls.map(([bytes]) => bytes)).toEqual([paid(700), paid(200), paid(150)])
   })
 
   it('gives back a metadata refusal without indexing or losing the retained tab', async () => {
@@ -1091,6 +1098,7 @@ describe('retained tab activation', () => {
     const reading = dispatch({ id: 70, method: 'page', params: { doc: 2, gen: 1, lens: 'raw', start: 9, count: 1 } })
     const previousFlag = flags.at(-1)!
     expect(await call('activate', { doc: 1, gen: 1, count: 1, bytes: 200 })).toMatchObject({ result: { doc: 1 } })
+    await call('deactivate', { doc: 2, gen: 1 })
     expect(previousFlag.cancel).toHaveBeenCalledOnce()
     expect(aJob.cancel).not.toHaveBeenCalled()
     expect(bJob.cancel).not.toHaveBeenCalled()
@@ -1115,6 +1123,7 @@ describe('retained tab activation', () => {
   it('keeps the newest A selection when slow B answers after A to B to A', async () => {
     const { a, b } = await tabs()
     await call('activate', { doc: 1, gen: 1, count: 1, bytes: 200 })
+    await call('deactivate', { doc: 2, gen: 1 })
     vi.clearAllMocks()
     const delayed = holdPage(b)
     const activating = dispatch({ id: 80, method: 'activate', params: { doc: 2, gen: 1, count: 1, bytes: 500 } })
@@ -1172,7 +1181,7 @@ describe("the renderer cache's reservation (plan C1)", () => {
     expect(await call('open', { path: 'b.txt', count: 1, bytes: 100 })).toMatchObject({ result: { doc: 2, reserved: 100 } })
     expect(await call('close', { doc: 2 })).toMatchObject({ result: true })
     expect(await call('reserveWorkspace', { bytes: 0 })).toMatchObject({ result: true })
-    expect(reserved()).toEqual([200, 300, 200, 0])
+    expect(reserved()).toEqual([paid(200), paid(300), paid(300, 2), paid(200, 2), paid(0, 2)])
   })
 
   it('updates the workspace share only after its combined reservation succeeds', async () => {
@@ -1182,7 +1191,7 @@ describe("the renderer cache's reservation (plan C1)", () => {
     expect(await call('reserveWorkspace', { bytes: 200 })).toMatchObject({ result: false })
     expect(await call('reserve', { doc: 1, gen: 1, bytes: 60 })).toMatchObject({ result: true })
     expect(await call('close', { doc: 1 })).toMatchObject({ result: true })
-    expect(reserved()).toEqual([100, 150, 250, 160, 100])
+    expect(reserved()).toEqual([100, 150, 250, 160, 100].map(bytes => paid(bytes)))
   })
 
   it('preserves the workspace share and retained documents after a failed new-tab open disposes its view', async () => {
@@ -1192,17 +1201,17 @@ describe("the renderer cache's reservation (plan C1)", () => {
     openDoc.mockImplementationOnce(() => { throw Object.assign(new Error('missing'), { code: 'NotFound' }) })
     expect(await call('open', { path: 'gone.txt', count: 1, bytes: 500 })).toMatchObject({ error: { code: 'NotFound' } })
     expect(close).not.toHaveBeenCalled()
-    expect(reserved()).toEqual([100, 400, 100, 600, 100])
+    expect(reserved()).toEqual([100, 400, 100, 600, 100].map(bytes => paid(bytes)))
     expect(await call('activate', { doc: 1, gen: 1, count: 1, bytes: 200 })).toMatchObject({ result: { doc: 1, reserved: 200 } })
-    expect(reserved().at(-1)).toBe(300)
+    expect(reserved().at(-1)).toBe(paid(300))
   })
 
   it('refuses an unsafe combined sum without calling the native reservation or changing either share', async () => {
-    expect(await call('reserve', { doc: 1, gen: 1, bytes: Number.MAX_SAFE_INTEGER })).toMatchObject({ result: true })
+    expect(await call('reserve', { doc: 1, gen: 1, bytes: Number.MAX_SAFE_INTEGER - paid(0) })).toMatchObject({ result: true })
     expect(await call('reserveWorkspace', { bytes: 1 })).toMatchObject({ result: false })
     expect(reserved()).toEqual([Number.MAX_SAFE_INTEGER])
     expect(await call('close', { doc: 1 })).toMatchObject({ result: true })
-    expect(reserved()).toEqual([Number.MAX_SAFE_INTEGER, 0])
+    expect(reserved()).toEqual([Number.MAX_SAFE_INTEGER, paid(0)])
   })
 
   it('keeps the latest workspace share when an activation gives back its previous view reservation', async () => {
@@ -1213,9 +1222,9 @@ describe("the renderer cache's reservation (plan C1)", () => {
     expect(await call('reserveWorkspace', { bytes: 200 })).toMatchObject({ result: true })
     first.fail(Object.assign(new Error('read failed'), { code: 'Io' }))
     expect(await activating).toMatchObject({ error: { code: 'Io' } })
-    expect(reserved()).toEqual([300, 400, 600, 700, 500])
+    expect(reserved()).toEqual([300, 400, 900, 1000, 500].map(bytes => paid(bytes)))
     expect(await call('reserve', { doc: 1, gen: 1, bytes: 250 })).toMatchObject({ result: true })
-    expect(reserved().at(-1)).toBe(450)
+    expect(reserved().at(-1)).toBe(paid(450))
   })
 
   it("an open takes its view's cap up front; refused, the open is Memory and nothing changes", async () => {
@@ -1224,19 +1233,19 @@ describe("the renderer cache's reservation (plan C1)", () => {
     expect(await call('open', { path: 'b.txt', count: 1, bytes: 900 })).toMatchObject({ error: { code: 'Memory' } })
     expect(openDoc).not.toHaveBeenCalled()
     expect(await call('reserve', { doc: 1, gen: 1, bytes: 400 })).toMatchObject({ result: true }) // still document 1's lens's
-    expect(await call('open', { path: 'b.txt', count: 1, bytes: 100 })).toMatchObject({ result: { doc: 2, reserved: 400 } }) // the larger
-    expect(reserved()).toEqual([500, 900, 400, 400])
+    expect(await call('open', { path: 'b.txt', count: 1, bytes: 100 })).toMatchObject({ result: { doc: 2, reserved: 100 } })
+    expect(reserved()).toEqual([paid(500), paid(1400), paid(400), paid(500), paid(500, 2)])
   })
 
-  it('is held for one lens: the replaced lens is refused, Reload keeps it for the next generation, close releases it', async () => {
+  it('pays source and Reload leases until detach or document close, with replies reporting only their own lease', async () => {
     expect(await call('open', { path: 'b.txt', count: 1, bytes: 100 })).toMatchObject({ result: { doc: 2, reserved: 100 } })
     expect(await call('reserve', { doc: 1, gen: 1, bytes: 0 })).toMatchObject({ result: false }) // document 1's lens is going
     expect(await call('reserve', { doc: 2, gen: 1, bytes: 300 })).toMatchObject({ result: true })
-    expect(await call('reload', { doc: 2, count: 1, bytes: 100 })).toMatchObject({ result: { doc: 2, reserved: 300 } })
+    expect(await call('reload', { doc: 2, count: 1, bytes: 100 })).toMatchObject({ result: { doc: 2, reserved: 100 } })
     expect(await call('close', { doc: 1 })).toMatchObject({ result: true }) // not the lens's document: nothing released
     expect(await call('close', { doc: 2 })).toMatchObject({ result: true })
     expect(await call('reserve', { doc: 2, gen: 1, bytes: 300 })).toMatchObject({ result: false })
-    expect(reserved()).toEqual([100, 300, 300, 0])
+    expect(reserved()).toEqual([paid(100), paid(100, 2), paid(300, 2), paid(400, 2), paid(400, 3), paid(400, 3), paid(0, 3)])
   })
 
   it('an open that fails after taking it releases it, unless a newer one has taken it since', async () => {
@@ -1250,7 +1259,7 @@ describe("the renderer cache's reservation (plan C1)", () => {
     read.fail(Object.assign(new Error('frozen: changed while reading'), { code: 'Frozen' }))
     expect(await first).toMatchObject({ error: { code: 'Frozen' } })
     expect(await call('reserve', { doc: 2, gen: 1, bytes: 300 })).toMatchObject({ result: true }) // still document 2's lens's
-    expect(reserved()).toEqual([100, 0, 200, 300, 300])
+    expect(reserved()).toEqual([paid(100), paid(0), paid(200), paid(500, 1, 2), paid(500, 2, 2), paid(300, 2, 2), paid(300, 2, 2)])
   })
 
   it("a Reload that fails gives it back to the lens it would have replaced, with that lens's bytes (Z34: Raw stays)", async () => {
@@ -1263,7 +1272,7 @@ describe("the renderer cache's reservation (plan C1)", () => {
     reserveCache.mockReturnValueOnce(false) // refused up front: nothing changes
     expect(await call('reload', { doc: 1, count: 1, bytes: 900 })).toMatchObject({ error: { code: 'Memory' } })
     expect(await call('reserve', { doc: 1, gen: 1, bytes: 100 })).toMatchObject({ result: true })
-    expect(reserved()).toEqual([300, 500, 300, 200, 900, 100])
+    expect(reserved()).toEqual([300, 800, 300, 200, 1100, 100].map(bytes => paid(bytes)))
   })
 
   it('a failed Reload of a document not on screen gives it back to the lens that is', async () => {
@@ -1273,7 +1282,7 @@ describe("the renderer cache's reservation (plan C1)", () => {
     })
     expect(await call('reload', { doc: 1, count: 1, bytes: 100 })).toMatchObject({ error: { code: 'Memory' } })
     expect(await call('reserve', { doc: 2, gen: 1, bytes: 200 })).toMatchObject({ result: true }) // document 2's lens's still
-    expect(reserved()).toEqual([300, 300, 200])
+    expect(reserved()).toEqual([paid(300), paid(300, 2), paid(400, 2), paid(300, 2), paid(200, 2)])
   })
 
   /** Two Reloads of `id` whose first pages wait: the first ends Stale, then the second fails (`Frozen`, say). */
@@ -1299,7 +1308,7 @@ describe("the renderer cache's reservation (plan C1)", () => {
     await overlapping(1)
     expect(await call('reserve', { doc: 1, gen: 1, bytes: 200 })).toMatchObject({ result: true })
     expect(await call('close', { doc: 1 })).toMatchObject({ result: true })
-    expect(reserved()).toEqual([300, 300, 300, 200, 0])
+    expect(reserved()).toEqual([paid(300), paid(400), paid(500, 1, 2), paid(400, 1, 2), paid(300, 1, 2), paid(200, 1, 2), paid(0, 1, 2)])
   })
 
   it('…the same with a second document open, its read keeping theirs waiting (G1)', async () => {
@@ -1313,7 +1322,7 @@ describe("the renderer cache's reservation (plan C1)", () => {
     expect(await call('close', { doc: 2 })).toMatchObject({ result: true })
     other.end({ items: [item()] })
     expect(await reading).toHaveProperty('result')
-    expect(reserved()).toEqual([0, 300, 300, 300, 200, 0])
+    expect(reserved()).toEqual([paid(0, 0), paid(0), paid(300), paid(300, 2), paid(400, 2), paid(500, 2, 2), paid(400, 2, 2), paid(300, 2, 2), paid(200, 2, 2), paid(0, 2, 2)])
   })
 
   it('a Reload whose document closed meanwhile releases it', async () => {
@@ -1323,7 +1332,7 @@ describe("the renderer cache's reservation (plan C1)", () => {
     expect(await call('close', { doc: 1 })).toMatchObject({ result: true })
     read.end({ items: [item()] })
     expect(await reloading).toMatchObject({ error: { code: 'Stale' } })
-    expect(reserved()).toEqual([300, 300, 0])
+    expect(reserved()).toEqual([paid(300), paid(400), paid(100), paid(0)])
   })
 })
 

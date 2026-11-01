@@ -7,6 +7,8 @@ import { type Addon, makeDispatcher } from './dispatch'
 
 const nativeError = (code: string) => Object.assign(new Error(code), { code })
 const first = { items: [] } as Page
+// One compatibility surface, one live view and one candidate slot retain their paid table capacity.
+const surfaceTable = 3 * ((64 << 10) + 4096 + 2 * 1024)
 function deferred() {
   let resolve!: (page: Page) => void
   let reject!: (error: unknown) => void
@@ -63,7 +65,7 @@ describe('saved-location authority and accounting', () => {
     await s.call('reserveWorkspace', { bytes: 200 })
     const saved = ticket(await s.call('captureLocation', { doc: 1, gen: 1 }))
     const hostBytes = 3 * ((64 << 10) + (16 << 10))
-    expect(s.reserveCache).toHaveBeenLastCalledWith(hostBytes + 300)
+    expect(s.reserveCache).toHaveBeenLastCalledWith(surfaceTable + hostBytes + 300)
     await s.call('close', { doc: 1 })
     expect(await s.call('openSaved', { ticket: saved, count: 1, bytes: 100 })).toMatchObject({ result: { doc: 2, localOnly: true, path: r.target.path } })
     await s.call('close', { doc: 2 })
@@ -74,7 +76,7 @@ describe('saved-location authority and accounting', () => {
     expect(await s.call('releaseSaved', { ticket: saved })).toMatchObject({ result: true })
     expect(await s.call('releaseSaved', { ticket: saved })).toMatchObject({ result: false })
     await s.call('reserveWorkspace', { bytes: 0 })
-    expect(s.reserveCache).toHaveBeenLastCalledWith(hostBytes)
+    expect(s.reserveCache).toHaveBeenLastCalledWith(surfaceTable + hostBytes)
     expect(r.resource.release).toHaveBeenCalledOnce()
     expect(await s.call('openSaved', { ticket: saved, count: 1, bytes: 100 })).toMatchObject({ error: { code: 'Stale' } })
   })
@@ -116,7 +118,7 @@ describe('saved-location authority and accounting', () => {
     expect(s.source.saveRoute).not.toHaveBeenCalled()
     s.source.saveRoute.mockImplementationOnce(() => { throw nativeError('Memory') })
     expect(await s.call('captureLocation', { doc: 1, gen: 1 })).toMatchObject({ error: { code: 'Memory' } })
-    expect(s.reserveCache).toHaveBeenLastCalledWith(100)
+    expect(s.reserveCache).toHaveBeenLastCalledWith(surfaceTable + 100)
     expect(await s.call('reserve', { doc: 1, gen: 1, bytes: 90 })).toMatchObject({ result: true })
     expect(s.source.close).not.toHaveBeenCalled()
   })
@@ -163,7 +165,7 @@ describe('registered candidate first pages', () => {
     expect(target.close).toHaveBeenCalledOnce()
     expect(target.startIndex).not.toHaveBeenCalled()
     expect(s.source.close).not.toHaveBeenCalled()
-    expect(s.reserveCache).toHaveBeenLastCalledWith(100)
+    expect(s.reserveCache).toHaveBeenLastCalledWith(surfaceTable + 100)
     expect(await s.call('reserve', { doc: 1, gen: 1, bytes: 90 })).toMatchObject({ result: true })
   })
 
@@ -186,11 +188,11 @@ describe('registered candidate first pages', () => {
     await s.call('reserveWorkspace', { bytes: 200 })
     s.openDoc.mockImplementationOnce(() => { throw nativeError('NotFound') })
     expect(await s.call('open', { path: 'missing.txt', count: 1, bytes: 900 })).toMatchObject({ error: { code: 'NotFound' } })
-    expect(s.reserveCache).toHaveBeenLastCalledWith(300)
+    expect(s.reserveCache).toHaveBeenLastCalledWith(surfaceTable + 300)
     expect(s.source.close).not.toHaveBeenCalled()
     expect(await s.call('page', { doc: 1, gen: 1, lens: 'raw', start: 0, count: 1 })).toMatchObject({ result: first })
     expect(await s.call('reserve', { doc: 1, gen: 1, bytes: 90 })).toMatchObject({ result: true })
-    expect(s.reserveCache).toHaveBeenLastCalledWith(290)
+    expect(s.reserveCache).toHaveBeenLastCalledWith(surfaceTable + 290)
   })
 
   for (const kind of ['open', 'openLocal', 'openSaved'] as const) {

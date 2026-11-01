@@ -76,12 +76,17 @@ export interface Opened {
   firstPage: Page
   /** Plan C1: what the ledger holds for this lens's page cache. A disposed background Reload returns zero. */
   reserved: number
+  /** Exact activation lease. Absent for an inactive fresh-open completion. */
+  view?: ViewRef
   /** Derived local navigation keeps its inherited capability for Reload and later links. */
   localOnly?: true
   path?: string
   /** Native-proved folder scope; its breadcrumb and leading-slash link base are the same capability. */
   folder?: { root: string; node?: string; label: string; segments: string[] }
 }
+
+export interface SurfaceRef { session: number; id: number }
+export interface ViewRef { session: number; surface: number; id: number; doc: number; gen: number }
 
 export interface FolderRef { session: number; root: string; node: string }
 export interface FolderRoot { ref: FolderRef; label: string; path: string }
@@ -93,11 +98,16 @@ export interface SavedTicket { session: number; id: string }
 export type CapturedLocation = { kind: 'manual'; path: string } | { kind: 'derived'; ticket: SavedTicket }
 
 export interface Methods {
+  createSurface: { params: Record<string, never>; result: SurfaceRef }
+  /** Close native owners after detached-tree retirement has been paid by the window workspace share. */
+  releaseSurface: { params: { surface: SurfaceRef; retiredBytes: number }; result: boolean }
+  /** Move a quiescent tab document; never reopen it or restart its index. */
+  transferDoc: { params: { from: SurfaceRef; to: SurfaceRef; doc: number; gen: number }; result: boolean }
   /** Explicit user-selected directory. Windows backend; at most 16 roots in this demo slice. */
   addRoot: { params: { path: string }; result: FolderRoot }
   /** Omit cursor to refresh. Bounded to 128 entries; caller cannot supply a filesystem path. */
   listFolder: { params: { folder: FolderRef; cursor?: string; hidden?: boolean }; result: FolderPage }
-  openChild: { params: { entry: FolderRef; count: number; bytes: number }; result: Opened }
+  openChild: { params: { surface?: SurfaceRef; entry: FolderRef; count: number; bytes: number }; result: Opened }
   /** Detach browsing authority; already-open documents and saved locations retain their exact scope. */
   removeRoot: { params: { root: string; session: number }; result: boolean }
   /** Decode a local image from this generation's held Markdown. Ref carries no path or URL. */
@@ -108,11 +118,11 @@ export interface Methods {
   releaseImage: { params: { doc: number; gen: number; ref: ImageRef }; result: boolean }
   hello: { params: { protocol: number }; result: Hello }
   /** `bytes`: the lens's viewport-only cache cap, reserved with the document's floor (plan C1); refused, `Memory`. */
-  open: { params: { path: string; count: number; bytes: number }; result: Opened }
+  open: { params: { surface?: SurfaceRef; path: string; count: number; bytes: number }; result: Opened }
   /** First screen of a retained document, without reopening or restarting its index. One renderer lens is active. */
-  activate: { params: { doc: number; gen: number; count: number; bytes: number }; result: Opened }
+  activate: { params: { surface?: SurfaceRef; doc: number; gen: number; count: number; bytes: number }; result: Opened }
   /** Dispose a current view or Reload's exact old settled view, retaining the document/index. Pending activation cannot hand it back. */
-  deactivate: { params: { doc: number; gen: number }; result: boolean }
+  deactivate: { params: { view: ViewRef } | { doc: number; gen: number }; result: boolean }
   /** A window of lines of generation `gen`, or the one piece a continuation token names (plan C3). Rendered: a window of
    *  blocks of the generation's Markdown build (`render`). Cancellable. */
   page: {
@@ -128,23 +138,23 @@ export interface Methods {
   /** This generation's held Markdown links: fragments, external URLs, or capability-checked local paths. */
   resolve: { params: { doc: number; gen: number; href: string }; result: LinkTarget }
   /** Open a decoded local target through the source document's inherited capability. Failure keeps its lens. */
-  openLocal: { params: { doc: number; gen: number; target: string; count: number; bytes: number }; result: Opened }
+  openLocal: { params: { surface?: SurfaceRef; doc: number; gen: number; target: string; count: number; bytes: number }; result: Opened }
   /** Capture only from an owned generation. Manual paths retain manual-open policy; derived locations retain routes. */
   captureLocation: { params: { doc: number; gen: number }; result: CapturedLocation }
   /** Non-consuming reopen through saved derived authority; never a manual display-path fallback. */
-  openSaved: { params: { ticket: SavedTicket; count: number; bytes: number }; result: Opened }
+  openSaved: { params: { surface?: SurfaceRef; ticket: SavedTicket; count: number; bytes: number }; result: Opened }
   /** Releases route authority and cancels unpublished reopens; repeated/old-session cleanup is harmless. */
   releaseSaved: { params: { ticket: SavedTicket }; result: boolean }
   /** Ctrl+R (spec §3.1): the document's next generation, opened again, with its first page. `bytes` as for `open`. */
-  reload: { params: { doc: number; count: number; bytes: number }; result: Opened }
+  reload: { params: { surface?: SurfaceRef; doc: number; count: number; bytes: number }; result: Opened }
   /** Plan C6: cancels the document's index and page reads, and releases it. */
-  close: { params: { doc: number }; result: boolean }
+  close: { params: { surface?: SurfaceRef; doc: number }; result: boolean }
   /** Plan C5: cancels request `id`'s page read. True if it was still running: it then rejects with `Cancelled`. */
   cancel: { params: { id: number }; result: boolean }
   /** Plan C1: sets the ledger's reservation for the page cache of the lens showing generation `gen` of `doc` to
    *  `bytes`. False when the ledger refuses the growth, which leaves the reservation as it was, and for a lens an open
    *  or Reload has replaced. */
-  reserve: { params: { doc: number; gen: number; bytes: number }; result: boolean }
+  reserve: { params: { view: ViewRef; bytes: number } | { doc: number; gen: number; bytes: number }; result: boolean }
   /** Persistent tab UI and scalar metadata, separate from the active lens, in the same native reservation. */
   reserveWorkspace: { params: { bytes: number }; result: boolean }
   /** The test-hooks build only (plan m8): what's alive in the core host. Elsewhere it's `UnknownMethod`. */
@@ -175,6 +185,7 @@ export interface DebugStats {
    *  `{ resetHigh: true }`, the ledger's high-water mark starts again from what's charged; `{ limit }` sets its limit. */
   heap: { rss: number; heapUsed: number; external: number; arrayBuffers: number }
   saved: { tickets: number; routeBytes: number; wrappers: number; wrapperBytes: number; hostBytes: number; peakEntries: number; candidates: number }
+  surfaces?: { count: number; views: number; pending: number; bytes: number; hostBytes: number; workspaceBytes: number }
 }
 
 /** What one document holds charged (plan C1): its floor and what's grown since. */
@@ -235,7 +246,7 @@ export interface TyposeApi {
 }
 
 /** The menu's commands (brief §3.2's M1 subset): ☰ on Windows and Linux, the native menu on macOS. */
-export type Command = 'open' | 'open-folder' | 'toggle-sidebar' | 'refresh-folders' | 'reload' | 'close-tab' | 'reopen-tab' | 'clear-closed' | 'exit'
+export type Command = 'open' | 'open-folder' | 'toggle-sidebar' | 'refresh-folders' | 'split-right' | 'close-card' | 'move-tab-right' | 'reload' | 'close-tab' | 'reopen-tab' | 'clear-closed' | 'exit'
 
 /** The renderer's startup marks (plan C8, §5). */
 export const STARTUP_MARKS = [

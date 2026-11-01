@@ -23,7 +23,9 @@ import {
   type SavedTicket,
   type FolderRef,
   type FolderRoot,
-  type FolderPage
+  type FolderPage,
+  type SurfaceRef,
+  type ViewRef
 } from '../shared/protocol'
 import { isValid } from './numbers'
 import { boundedLink, decodedLocalTarget, localTarget } from './local-target'
@@ -82,12 +84,12 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     return value
   }
   const docs = new Map<number, Doc>()
-  let activeDoc: number | null = null
+  const docOwners = new Map<number, number>()
   /** Each document's index job (plan C6). */
   const jobs = new Map<number, Cancel>()
   /** Page reads in flight, by request id (plan C5). `cancelledAt` is the test-hooks build's. */
   type ReadEntry = { doc?: number; cancel: Cancel; retainOnLeave: boolean; cancelled: boolean; cancelledAt?: number;
-    candidate?: true; saved?: SavedRoute; folder?: NativeFolderRoot }
+    candidate?: true; saved?: SavedRoute; folder?: NativeFolderRoot; surface?: number }
   const reads = new Map<number, ReadEntry>()
   const saved = new Map<string, SavedRoute>()
   let savedPeak = 0
@@ -140,78 +142,155 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     return { session, doc: id, gen, id: resource }
   }
 
-  /**
-   * Plan C1: the renderer cache's reservation. One renderer talks to a core host and shows one lens at a time, so it's
-   * held for one lens: `doc:gen`. An open or Reload takes it at its first step for the lens it opens (`#id` while it's
-   * under way), with at least that lens's viewport-only cap, `bytes`: part of the open's floor. The renderer unmounts the
-   * lens it replaces one commit before an open's reply, and in the commit that mounts a Reload's new lens, so it holds
-   * the larger of the two, not their sum, and what the replaced lens asks for is refused.
-   */
-  let holder: string | null = null
-  let held = 0
+  type Lease = { ref: ViewRef; bytes: number }
+  type SurfaceState = { ref: SurfaceRef; alive: boolean; views: Map<number, Lease>; current?: number; latest?: Pending }
+  type Pending = { request: number; surface: SurfaceState; bytes: number; doc?: number; gen?: number; disposed: boolean; previousView?: number; kind?: 'activate' | 'reload' }
+  // Surface zero is an isolated compatibility owner. Explicit documents never accept its doc/gen-only cleanup.
+  const surfaces = new Map<number, SurfaceState>([[0, { ref: { session, id: 0 }, alive: true, views: new Map() }]])
+  const pendingViews = new Map<number, Pending>()
+  let nextSurface = 1
+  let nextView = 1
+  let surfacePeak = 0
+  let viewPeak = 0
+  let pendingPeak = 0
+  let surfaceHostBytes = 0
   let workspaceBytes = 0
-  /** Known retained targets can be disposed while their first page is still running. */
-  const pendingViews = new Map<string, { doc: number; gen: number; disposed: boolean }>()
-  /** The lens the reservation was last handed to, and its bytes since; null once released. A failed Reload gives it
-   *  back. It's never a request: requests only take the reservation, and the takes only grow it. */
-  let settled: { lens: string; bytes: number } | null = null
-  const hold = (bytes: number): boolean => {
-    const total = bytes + workspaceBytes + savedHostBytes + rootHostBytes
-    if (!Number.isSafeInteger(total) || !addon.reserveCache(total)) return false
-    held = bytes
+  const viewBytes = (): number => {
+    let bytes = 0
+    for (const surface of surfaces.values()) for (const lease of surface.views.values()) bytes += lease.bytes
+    for (const pending of pendingViews.values()) bytes += pending.bytes
+    return bytes
+  }
+  const account = (bytes = viewBytes(), hostBytes = surfaceHostBytes): boolean => {
+    const total = bytes + workspaceBytes + savedHostBytes + rootHostBytes + hostBytes
+    return Number.isSafeInteger(total) && addon.reserveCache(total)
+  }
+  const surfaceRef = (value: unknown): SurfaceState => {
+    if (!isRecord(value)) throw new Refusal('InvalidParams', 'surface must be a surface reference', 'surface')
+    const ownerSession = int(value, 'session', 'surface.session')
+    const id = int(value, 'id', 'surface.id')
+    const surface = ownerSession === session ? surfaces.get(id) : undefined
+    if (!surface?.alive) throw new Refusal('Stale', 'the card surface was closed or belongs to another session')
+    return surface
+  }
+  const requestSurface = (p: Params): SurfaceState => p.surface === undefined ? surfaces.get(0)! : surfaceRef(p.surface)
+  const ownedDoc = (surface: SurfaceState, id: number): Doc => {
+    const doc = getDoc(id)
+    if (docOwners.get(id) !== surface.ref.id) throw new Refusal('Stale', 'the document belongs to another card surface')
+    return doc
+  }
+  const live = (surface: SurfaceState): boolean => surface.alive && surfaces.get(surface.ref.id) === surface
+  const viewed = (id: number, generation?: number): boolean => {
+    for (const surface of surfaces.values()) for (const lease of surface.views.values())
+      if (lease.ref.doc === id && (generation === undefined || lease.ref.gen === generation)) return true
+    return false
+  }
+  const currentLease = (surface: SurfaceState): Lease | undefined => surface.current === undefined ? undefined : surface.views.get(surface.current)
+  const reserveTable = (surfaceCount: number, views: number, pending: number, bytes = viewBytes()): boolean => {
+    const nextSurfaces = Math.max(surfacePeak, surfaceCount), nextViews = Math.max(viewPeak, views), nextPending = Math.max(pendingPeak, pending)
+    const hostBytes = 3 * ((64 << 10) + 4096 * nextSurfaces + 1024 * (nextViews + nextPending))
+    if ((hostBytes !== surfaceHostBytes || bytes !== viewBytes()) && !account(bytes, hostBytes)) return false
+    surfacePeak = nextSurfaces; viewPeak = nextViews; pendingPeak = nextPending; surfaceHostBytes = hostBytes
     return true
   }
-  /** Request `req` takes the reservation for the lens it opens; refused, it's `Memory` and nothing has changed. */
-  const take = (req: number, bytes: number): string => {
-    if (reads.has(req) || pendingViews.has(`#${req}`)) throw new Refusal('InvalidParams', 'request id is already pending', 'id')
-    if (!hold(Math.max(held, bytes))) throw new Refusal('Memory', `the memory budget can't hold the view's ${bytes} bytes`)
-    return (holder = `#${req}`)
+  const leaseCount = (): number => [...surfaces.values()].reduce((n, s) => n + s.views.size, 0)
+  const take = (req: number, bytes: number, surface: SurfaceState): Pending => {
+    if (reads.has(req) || pendingViews.has(req)) throw new Refusal('InvalidParams', 'request id is already pending', 'id')
+    if (!reserveTable(surfaces.size, leaseCount(), pendingViews.size + 1, viewBytes() + bytes))
+      throw new Refusal('Memory', `the memory budget cannot hold the pending view's ${bytes} bytes`)
+    const pending: Pending = { request: req, surface, bytes, disposed: false, previousView: surface.current }
+    pendingViews.set(req, pending)
+    const previous = surface.latest
+    if (previous?.kind === 'activate') {
+      previous.disposed = true
+      const entry = reads.get(previous.request)
+      if (entry) { entry.cancelled = true; entry.cancel.cancel() }
+    }
+    surface.latest = pending
+    return pending
   }
-  /** The open or Reload holding the reservation as `key` hands it on: to its lens, `doc:gen`, or, failed, to nobody. */
-  const settle = (key: string, lens: string | null): void => {
-    if (holder !== key) return // a newer one has taken it
-    holder = lens
-    settled = lens === null ? null : { lens, bytes: held }
-    if (lens === null) hold(0)
+  const giveBack = (pending: Pending, transferred = false): void => {
+    if (pendingViews.get(pending.request) !== pending) return
+    pendingViews.delete(pending.request)
+    if (pending.surface.latest === pending) pending.surface.latest = undefined
+    if (!transferred) account()
   }
-  /** A failed Reload, holding the reservation as `key`, gives it back to the last lens it was handed to, which is still
-   *  mounted, whatever document it shows. Never more than it holds, so this can't be refused. */
-  const giveBack = (key: string): void => {
-    if (holder !== key) return // a newer one has taken it
-    holder = settled?.lens ?? null
-    if ((settled?.bytes ?? 0) !== held) hold(settled?.bytes ?? 0)
-  }
-  /** Close and freeze cancel all reads. Leaving a view retains Reload's first page for its new metadata/index. */
+  /** Leaving a view retains Reload's first page for its new metadata/index. */
   const cancelReads = (doc: number, leaving = false) => {
     for (const read of reads.values()) if (read.doc === doc && (!leaving || !read.retainOnLeave)) {
       read.cancelled = true
       read.cancel.cancel()
     }
   }
-  /** Inactive tabs keep their document/index, but only the native cache floor. Late reads cannot regrow it. */
   const reclaimInactive = (): void => {
-    for (const [id, doc] of docs) if (id !== activeDoc) {
+    for (const [id, doc] of docs) if (!viewed(id, doc.generation) && ![...pendingViews.values()].some((pending) => pending.doc === id)) {
       doc.setCacheActive(doc.generation, false)
       cancelReads(id, true)
     }
   }
-  /** Only the winning reservation changes the active tab. A slower fresh open may still become an inactive tab. */
-  const handoff = (pending: string, id: number, doc: Doc, gen: number): void => {
-    if (holder !== pending) {
-      if (activeDoc !== id) doc.setCacheActive(gen, false)
-      return
+  const handoff = (pending: Pending, id: number, doc: Doc, gen: number): Pick<Opened, 'reserved' | 'view'> => {
+    const surface = pending.surface
+    if (!live(surface) || pending.disposed || surface.latest !== pending) {
+      giveBack(pending)
+      if (!viewed(id, gen)) doc.setCacheActive(gen, false)
+      return { reserved: 0 }
     }
+    if (!isValid(nextView, 1, ranges.get('id')!.max)) throw new Refusal('Refused', 'view identities are exhausted')
+    if (!reserveTable(surfaces.size, leaseCount() + 1, pendingViews.size)) throw new Refusal('Memory', 'the view lease table cannot grow')
     doc.setCacheActive(gen, true)
-    if (activeDoc !== null) {
-      if (activeDoc !== id) {
-        const previous = docs.get(activeDoc)
-        if (previous) previous.setCacheActive(previous.generation, false)
-      }
-      cancelReads(activeDoc, true) // suspend viewport/build/image work, never a retained Reload or index job
-    }
-    activeDoc = id
-    settle(pending, id + ':' + gen)
+    const ref: ViewRef = { session, surface: surface.ref.id, id: nextView++, doc: id, gen }
+    surface.views.set(ref.id, { ref, bytes: pending.bytes })
+    surface.current = ref.id
+    giveBack(pending, true) // the previous view remains paid until its exact lease is detached
+    return { reserved: pending.bytes, view: ref }
   }
+  const requestedLease = (p: Params, deactivate = false): { surface: SurfaceState; lease: Lease } | undefined => {
+    if (p.view !== undefined) {
+      if (!isRecord(p.view)) throw new Refusal('InvalidParams', 'view must be an activation lease', 'view')
+      const ownerSession = int(p.view, 'session', 'view.session')
+      const surfaceId = int({ start: p.view.surface }, 'start', 'view.surface')
+      const id = int(p.view, 'id', 'view.id'), doc = int(p.view, 'doc', 'view.doc'), gen = int(p.view, 'gen', 'view.gen')
+      const surface = ownerSession === session ? surfaces.get(surfaceId) : undefined
+      const lease = surface?.alive ? surface.views.get(id) : undefined
+      return surface && lease && lease.ref.doc === doc && lease.ref.gen === gen ? { surface, lease } : undefined
+    }
+    const id = int(p, 'doc'), gen = int(p, 'gen')
+    const doc = deactivate ? getDoc(id) : undefined
+    if (docOwners.get(id) !== 0) return undefined
+    const surface = surfaces.get(0)!
+    const lease = deactivate ? [...surface.views.values()].find((l) => l.ref.doc === id && l.ref.gen === gen) : currentLease(surface)
+    if (!lease || lease.ref.doc !== id || lease.ref.gen !== gen) {
+      if (doc && doc.generation !== gen) throw new Refusal('Stale', 'the tab generation was replaced')
+      return undefined
+    }
+    return { surface, lease }
+  }
+  const detach = (surface: SurfaceState, lease: Lease): void => {
+    surface.views.delete(lease.ref.id)
+    if (surface.current === lease.ref.id) surface.current = undefined
+    for (const pending of pendingViews.values()) if (pending.surface === surface && pending.doc === lease.ref.doc
+      && (pending.gen === lease.ref.gen || pending.previousView === lease.ref.id)) pending.disposed = true
+    const doc = docs.get(lease.ref.doc)
+    if (doc && !viewed(lease.ref.doc, doc.generation)) { doc.setCacheActive(doc.generation, false); cancelReads(lease.ref.doc, true) }
+    account()
+  }
+  const closeDoc = (id: number): boolean => {
+    const doc = docs.get(id)
+    if (!doc) return false
+    jobs.get(id)?.cancel()
+    cancelReads(id)
+    for (const pending of pendingViews.values()) if (pending.doc === id) pending.disposed = true
+    for (const surface of surfaces.values()) for (const lease of surface.views.values()) if (lease.ref.doc === id) {
+      surface.views.delete(lease.ref.id)
+      if (surface.current === lease.ref.id) surface.current = undefined
+    }
+    doc.close()
+    if (__TEST_HOOKS__) closed.push(doc)
+    jobs.delete(id); docOwners.delete(id); docs.delete(id)
+    account()
+    return true
+  }
+
   // Continuation tokens leave with this session and their document in them, and are refused for any other
   // (plan C3; C7: every token carries `{session, doc, gen}`).
   const stampPage = (doc: number, page: CorePage): Page => {
@@ -223,7 +302,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     if (reads.has(id)) throw new Refusal('InvalidParams', 'request id is already pending', 'id')
     const source = getDoc(doc)
     const gen = source.generation
-    const entry: ReadEntry = { doc, cancel: addon.cancelFlag(), retainOnLeave, cancelled: false }
+    const entry: ReadEntry = { doc, cancel: addon.cancelFlag(), retainOnLeave, cancelled: false, surface: docOwners.get(doc) }
     reads.set(id, entry)
     try {
       return await start(entry.cancel)
@@ -270,31 +349,32 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   }
 
   /** Registration spans first-page wait through synchronous publication, not just the native read. */
-  const candidate = async (req: number, pending: string, doc: Doc, count: number, local: LocalInfo,
+  const candidate = async (req: number, pending: Pending, doc: Doc, count: number, local: LocalInfo,
     valid: () => boolean = () => true, source?: number, route?: SavedRoute, folder?: NativeFolderRoot): Promise<Opened> => {
     let entry: ReadEntry | undefined
     let published = false
     let registered: number | undefined
     let indexed: number | undefined
     try {
-      entry = { doc: source, cancel: addon.cancelFlag(), retainOnLeave: true, cancelled: false, candidate: true, saved: route, folder }
+      entry = { doc: source, cancel: addon.cancelFlag(), retainOnLeave: true, cancelled: false, candidate: true, saved: route, folder, surface: pending.surface.ref.id }
       reads.set(req, entry)
       const firstPage = await doc.page(doc.generation, 0, count, entry.cancel)
-      if (!valid()) throw new Refusal('Stale', 'the navigation source or saved location was replaced')
+      if (!live(pending.surface) || !valid()) throw new Refusal('Stale', 'the surface, navigation source or saved location was replaced')
       if (entry.cancelled) throw new Refusal('Cancelled', 'the navigation was cancelled')
       const id = nextDoc++ // a partially started index must never alias a later document's id/generation
       indexed = id
       const opened = begin(id, doc, firstPage, local)
       docs.set(id, doc)
+      docOwners.set(id, pending.surface.ref.id)
       registered = id
-      handoff(pending, id, doc, opened.gen) // another holder may win; a fresh background tab remains valid
+      const reservation = handoff(pending, id, doc, opened.gen)
       published = true
-      return { ...opened, reserved: held }
+      return { ...opened, ...reservation }
     } catch (e) {
       if (!published) {
         // begin can start an index before a later registration/handoff failure.
         if (indexed !== undefined) { jobs.get(indexed)?.cancel(); jobs.delete(indexed) }
-        if (registered !== undefined) docs.delete(registered)
+        if (registered !== undefined) { docs.delete(registered); docOwners.delete(registered) }
         doc.close()
       }
       giveBack(pending)
@@ -311,6 +391,43 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
 
   // Each handler checks all of its parameters before it calls the addon or changes state. `id` is the request's.
   const handlers: Record<string, (params: Params, id: number) => unknown> = {
+    createSurface: (): SurfaceRef => {
+      if (!isValid(nextSurface, 1, ranges.get('id')!.max)) throw new Refusal('Refused', 'surface identities are exhausted')
+      if (!reserveTable(surfaces.size + 1, leaseCount(), pendingViews.size)) throw new Refusal('Memory', 'the surface table cannot grow')
+      const ref = { session, id: nextSurface++ }
+      surfaces.set(ref.id, { ref, alive: true, views: new Map() })
+      return ref
+    },
+    releaseSurface: (p): boolean => {
+      const retired = int({ bytes: p.retiredBytes }, 'bytes', 'retiredBytes')
+      if (!isRecord(p.surface)) throw new Refusal('InvalidParams', 'surface must be a surface reference', 'surface')
+      const ownerSession = int(p.surface, 'session', 'surface.session'), id = int(p.surface, 'id', 'surface.id')
+      const surface = ownerSession === session ? surfaces.get(id) : undefined
+      if (!surface?.alive) return false
+      const liveBytes = [...surface.views.values()].reduce((bytes, lease) => bytes + lease.bytes, 0)
+      if (retired < liveBytes) throw new Refusal('Memory', 'the closing card retirement declaration does not cover its remaining views')
+      if (workspaceBytes < retired) throw new Refusal('Memory', 'precharge the window retirement allowance before closing this card')
+      surface.alive = false
+      for (const pending of pendingViews.values()) if (pending.surface === surface) pending.disposed = true
+      for (const entry of reads.values()) if (entry.surface === id) { entry.cancelled = true; entry.cancel.cancel() }
+      for (const [doc, owner] of docOwners) if (owner === id) closeDoc(doc)
+      surface.views.clear()
+      surfaces.delete(id)
+      account()
+      return true
+    },
+    transferDoc: (p): boolean => {
+      const from = surfaceRef(p.from), to = surfaceRef(p.to)
+      const id = int(p, 'doc'), gen = int(p, 'gen')
+      const doc = ownedDoc(from, id)
+      if (doc.generation !== gen) throw new Refusal('Stale', 'the document generation was replaced before moving')
+      if (from === to) return true
+      if (viewed(id) || [...pendingViews.values()].some((pending) => pending.doc === id)
+        || [...reads.values()].some((entry) => entry.doc === id && !entry.cancelled))
+        throw new Refusal('Refused', 'detach this document and finish its pending work before moving it')
+      docOwners.set(id, to.ref.id)
+      return true
+    },
     addRoot: (p): FolderRoot => {
       if (typeof p.path !== 'string' || p.path.length === 0 || p.path.length > 32_767 || p.path.includes('\0'))
         throw new Refusal('InvalidParams', 'choose a folder path of at most 32,767 characters', 'path')
@@ -319,7 +436,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const peak = Math.max(rootPeak, roots.size + 1)
       // Path + label may be full UTF-16, alongside the Map entry and wrapper metadata/copies.
       const bytes = 3 * ((64 << 10) + (2 * 32_767 + 2 * 255 + (16 << 10)) * peak)
-      if (!addon.reserveCache(held + workspaceBytes + savedHostBytes + bytes)) throw new Refusal('Memory', 'the folder table cannot grow')
+      if (!addon.reserveCache(viewBytes() + workspaceBytes + savedHostBytes + bytes + surfaceHostBytes)) throw new Refusal('Memory', 'the folder table cannot grow')
       const previous = rootHostBytes
       rootHostBytes = bytes
       let native: NativeFolderRoot | undefined
@@ -334,7 +451,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       } catch (e) {
         native?.close()
         rootHostBytes = previous
-        hold(held)
+        account()
         throw e
       }
     },
@@ -358,8 +475,9 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const ref = folderRef(p.entry, 'entry')
       const [count, bytes] = [int(p, 'count'), int(p, 'bytes')]
       const root = rootFor(ref)
+      const surface = requestSurface(p)
       reclaimInactive()
-      const pending = take(req, bytes)
+      const pending = take(req, bytes, surface)
       let doc: Doc | undefined
       try {
         doc = root.native.open(Number(ref.node))
@@ -387,8 +505,9 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const [count, bytes] = [int(p, 'count'), int(p, 'bytes')]
       if (typeof p.path !== 'string' || p.path.length === 0 || p.path.length > 32_767 || p.path.includes('\0'))
         throw new Refusal('InvalidParams', 'path must be a non-empty string of at most 32,767 characters, without NUL', 'path')
+      const surface = requestSurface(p)
       reclaimInactive()
-      const pending = take(req, bytes)
+      const pending = take(req, bytes, surface)
       let doc: Doc | undefined
       try {
         doc = addon.openDoc(p.path)
@@ -402,54 +521,47 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     },
     activate: async (p, req): Promise<Opened> => {
       const [id, gen, count, bytes] = [int(p, 'doc'), int(p, 'gen'), int(p, 'count'), int(p, 'bytes')]
-      const doc = getDoc(id)
+      const surface = requestSurface(p)
+      const doc = ownedDoc(surface, id)
       if (doc.generation !== gen) throw new Refusal('Stale', 'the tab generation was replaced')
       reclaimInactive()
-      const pending = take(req, bytes)
-      const view = { doc: id, gen, disposed: false }
-      pendingViews.set(pending, view)
+      const pending = take(req, bytes, surface)
+      pending.doc = id; pending.gen = gen; pending.kind = 'activate'
       try {
         const local = localInfo(doc)
         const firstPage = await read(req, id, (cancel) => doc.page(gen, 0, count, cancel))
-        if (docs.get(id) !== doc || doc.generation !== gen || holder !== pending || view.disposed)
+        if (!live(surface) || docs.get(id) !== doc || doc.generation !== gen || surface.latest !== pending || pending.disposed)
           throw new Refusal('Stale', 'the tab activation was replaced while it opened')
         const opened = describe(id, doc, firstPage, local)
-        handoff(pending, id, doc, gen)
-        return { ...opened, reserved: held }
+        return { ...opened, ...handoff(pending, id, doc, gen) }
       } catch (e) {
         giveBack(pending)
         throw e // the retained document is still owned by its tab, including a failed or stale activation
-      } finally {
-        if (pendingViews.get(pending) === view) pendingViews.delete(pending)
       }
     },
     deactivate: (p): boolean => {
-      const [id, gen] = [int(p, 'doc'), int(p, 'gen')]
-      const doc = getDoc(id)
-      const lens = id + ':' + gen
-      const current = doc.generation
-      const previous = settled?.lens === lens
-      // Reload advances the native generation before its old displayed view is disposed.
-      if (current !== gen && !previous) throw new Refusal('Stale', 'the tab generation was replaced')
-      doc.setCacheActive(current, false)
-      cancelReads(id, true)
-      if (activeDoc === id) activeDoc = null
-      for (const view of pendingViews.values()) if (view.doc === id && (view.gen === gen || previous)) view.disposed = true
-      if (holder === lens) settle(lens, null)
-      // A pending request keeps its bytes, but its failure cannot restore a view the renderer already disposed.
-      if (settled?.lens === lens) settled = null
+      const owned = requestedLease(p, true)
+      if (!owned) {
+        if (p.view !== undefined || docOwners.get(p.doc as number) !== 0) return false
+        const id = int(p, 'doc'), gen = int(p, 'gen')
+        for (const pending of pendingViews.values()) if (pending.surface.ref.id === 0 && pending.doc === id && pending.gen === gen) pending.disposed = true
+        if (!viewed(id)) { getDoc(id).setCacheActive(gen, false); cancelReads(id, true) }
+        return true
+      }
+      detach(owned.surface, owned.lease)
       return true
     },
     openLocal: async (p, req): Promise<Opened> => {
       const [id, gen, count, bytes] = [int(p, 'doc'), int(p, 'gen'), int(p, 'count'), int(p, 'bytes')]
       if (typeof p.target !== 'string' || !decodedLocalTarget(p.target, true))
         throw new Refusal('InvalidParams', 'target must be a safe decoded local path of at most 32 KiB', 'target')
+      const surface = requestSurface(p)
       const source = getDoc(id)
       if (source.generation !== gen) throw new Refusal('Stale', `generation ${gen} was replaced`)
       if (/^[\\/]/.test(p.target) && !source.folder)
         throw new Refusal('InvalidParams', 'root-relative links require a source in a selected folder', 'target')
       reclaimInactive()
-      const pending = take(req, bytes)
+      const pending = take(req, bytes, surface)
       let doc: Doc | undefined
       try {
         doc = source.openLocal(gen, p.target)
@@ -472,7 +584,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       if (!doc.localOnly) return { kind: 'manual', path: doc.path }
       const peak = Math.max(savedPeak, saved.size + 1)
       const bytes = 3 * ((64 << 10) + (16 << 10) * peak)
-      const total = held + workspaceBytes + bytes + rootHostBytes
+      const total = viewBytes() + workspaceBytes + bytes + rootHostBytes + surfaceHostBytes
       if (!Number.isSafeInteger(total) || !addon.reserveCache(total)) throw new Refusal('Memory', 'the saved-location table cannot grow')
       const previous = savedHostBytes
       savedHostBytes = bytes
@@ -489,7 +601,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         return { kind: 'derived', ticket: { session, id } }
       } catch (e) {
         route?.release()
-        if (!attempted) { savedHostBytes = previous; hold(held) }
+        if (!attempted) { savedHostBytes = previous; account() }
         throw e
       }
     },
@@ -498,8 +610,9 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const [count, bytes] = [int(p, 'count'), int(p, 'bytes')]
       const route = ticket.session === session ? saved.get(ticket.id) : undefined
       if (!route) throw new Refusal('Stale', 'the saved location is unavailable; select the file manually again')
+      const surface = requestSurface(p)
       reclaimInactive()
-      const pending = take(req, bytes)
+      const pending = take(req, bytes, surface)
       let doc: Doc | undefined
       try {
         doc = route.open()
@@ -626,18 +739,15 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         return { kind: 'external', url: url.href }
       } catch { return { kind: 'inert' } }
     },
-    // A failed reload (the file is gone, say) leaves the document at its old generation, and gives the renderer cache's
-    // reservation back to the lens it was last handed to (`settled`), whichever document that lens is showing. A reload
-    // that another Reload, or close, overtakes while its first page is read is Stale, and starts nothing: the newer one
-    // indexes.
+    // Reload owns only this surface's pending share. Other live views remain paid and active throughout it.
     reload: async (p, req): Promise<Opened> => {
       const [id, count, bytes] = [int(p, 'doc'), int(p, 'count'), int(p, 'bytes')]
-      const doc = getDoc(id)
+      const surface = requestSurface(p)
+      const doc = ownedDoc(surface, id)
       const previous = doc.generation
       reclaimInactive()
-      const pending = take(req, bytes)
-      const view = { doc: id, gen: previous, disposed: false }
-      pendingViews.set(pending, view)
+      const pending = take(req, bytes, surface)
+      pending.doc = id; pending.gen = previous; pending.kind = 'reload'
       try {
         const local = localInfo(doc) // a Memory refusal must precede Reload's generation change
         // A display path selects a candidate only; native binding proves membership before Reload commits.
@@ -647,23 +757,19 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         if (root) doc.reloadInFolder(root.native)
         else doc.reload()
         const gen = doc.generation
-        view.gen = gen
+        pending.gen = gen
         const firstPage = await read(req, id, (cancel) => doc.page(gen, 0, count, cancel), true)
-        if (docs.get(id) !== doc || doc.generation !== gen) throw new Refusal('Stale', `generation ${gen} was replaced while it opened`)
+        if (!live(surface) || docs.get(id) !== doc || doc.generation !== gen) throw new Refusal('Stale', `generation ${gen} was replaced while it opened`)
         const opened = begin(id, doc, firstPage, local)
-        if (view.disposed) {
-          if (activeDoc !== id) doc.setCacheActive(gen, false)
+        if (pending.disposed) {
+          if (!viewed(id, gen)) doc.setCacheActive(gen, false)
           giveBack(pending)
           return { ...opened, reserved: 0 }
         }
-        handoff(pending, id, doc, gen)
-        return { ...opened, reserved: held }
+        return { ...opened, ...handoff(pending, id, doc, gen) }
       } catch (e) {
-        if (docs.get(id) === doc) giveBack(pending)
-        else settle(pending, null) // closed meanwhile: its lens is gone
+        giveBack(pending)
         throw e
-      } finally {
-        if (pendingViews.get(pending) === view) pendingViews.delete(pending)
       }
     },
     // Plan C6: the index job and the page reads stop, and the document's handle closes once they have.
@@ -671,15 +777,8 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const id = int(p, 'doc')
       const doc = docs.get(id)
       if (!doc) return false
-      jobs.get(id)?.cancel()
-      cancelReads(id)
-      doc.close()
-      if (activeDoc === id) activeDoc = null
-      if (__TEST_HOOKS__) closed.push(doc)
-      jobs.delete(id)
-      if (holder?.startsWith(`${id}:`)) settle(holder, null) // its lens is gone
-      if (settled?.lens.startsWith(`${id}:`)) settled = null
-      return docs.delete(id)
+      ownedDoc(requestSurface(p), id)
+      return closeDoc(id)
     },
     cancel: (p) => {
       const running = reads.get(int(p, 'id'))
@@ -694,14 +793,15 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     },
     // Plan C1: the renderer's page cache, reserved in the ledger before the cache may grow into it.
     reserve: (p) => {
-      const [doc, gen, bytes] = [int(p, 'doc'), int(p, 'gen'), int(p, 'bytes')]
-      if (holder !== `${doc}:${gen}` || !hold(bytes)) return false
-      settled = { lens: holder, bytes }
+      const bytes = int(p, 'bytes')
+      const owned = requestedLease(p)
+      if (!owned || !account(viewBytes() - owned.lease.bytes + bytes)) return false
+      owned.lease.bytes = bytes
       return true
     },
     reserveWorkspace: (p) => {
       const bytes = int(p, 'bytes')
-      const total = held + bytes + savedHostBytes + rootHostBytes
+      const total = viewBytes() + bytes + savedHostBytes + rootHostBytes + surfaceHostBytes
       if (!Number.isSafeInteger(total) || !addon.reserveCache(total)) return false
       workspaceBytes = bytes
       return true
@@ -716,6 +816,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
             for (const [id, doc] of docs) charges[id] = addon.docCharges!(doc)
             const { rss, heapUsed, external, arrayBuffers } = process.memoryUsage()
             return { ...addon.debugStats!(), docs: docs.size, ...cancels, charges, heap: { rss, heapUsed, external, arrayBuffers },
+              surfaces: { count: surfaces.size - 1, views: leaseCount(), pending: pendingViews.size, bytes: viewBytes(), hostBytes: surfaceHostBytes, workspaceBytes },
               saved: { tickets: saved.size, routeBytes: [...saved.values()].reduce((sum, route) => sum + (addon.savedRouteBytes?.(route) ?? 0), 0),
                 ...(addon.savedStats?.() ?? { wrappers: 0, wrapperBytes: 0 }), hostBytes: savedHostBytes, peakEntries: savedPeak,
                 candidates: [...reads.values()].filter((entry) => entry.candidate).length } }
@@ -736,7 +837,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     if (typeof method !== 'string' || !Object.hasOwn(handlers, method))
       return fail(id, { code: 'UnknownMethod', message: `unknown method ${String(method).slice(0, 64)}` })
     if (!isRecord(data.params)) return fail(id, { code: 'InvalidParams', message: 'params must be an object', field: 'params' })
-    if (reads.has(id) || pendingViews.has(`#${id}`))
+    if (reads.has(id) || pendingViews.has(id))
       return fail(id, { code: 'InvalidParams', message: 'request id is already pending', field: 'id' })
     try {
       return { id, session, result: await handlers[method](data.params, id) }
