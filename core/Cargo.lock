@@ -149,6 +149,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "csv-core"
+version = "0.1.13"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "ctor"
 version = "1.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1125,6 +1132,7 @@ name = "typose-core"
 version = "0.0.0"
 dependencies = [
  "ammonia",
+ "csv-core",
  "encoding_rs",
  "fdeflate",
  "gif",

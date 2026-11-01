@@ -6,6 +6,7 @@
 
 pub mod budget;
 pub mod bytemap;
+pub mod csv;
 pub mod doc;
 pub mod encoding;
 #[cfg(feature = "test-hooks")]
