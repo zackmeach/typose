@@ -37,6 +37,14 @@ function makeFolderFixture(): string {
   return root
 }
 
+function makeCsvFolderFixture(): string {
+  mkdirSync(FIXTURES, { recursive: true })
+  const root = mkdtempSync(join(FIXTURES, 'folder-csv-'))
+  writeFileSync(join(root, 'launch-plan.md'), '# Launch plan\n\nOpen [tasks.csv](tasks.csv) from the tree or this link.\n')
+  writeFileSync(join(root, 'tasks.csv'), 'id,title\r\n001,Write the brief\r\n002,Review the draft\r\n')
+  return root
+}
+
 async function activateTreeItem(win: Awaited<ReturnType<typeof launch>>['win'], name: string): Promise<void> {
   const item = win.getByRole('treeitem', { name, exact: true })
   await item.focus()
@@ -56,6 +64,47 @@ async function showSidebar(win: Awaited<ReturnType<typeof launch>>['win']): Prom
   await expect(win.getByRole('complementary', { name: 'Files sidebar' })).toBeVisible()
   await expect(win.getByRole('button', { name: /Add folder/ })).toBeVisible()
 }
+
+test('folder tree opens CSV from Markdown after a link preview was promoted and its side card closed', async () => {
+  test.skip(process.platform !== 'win32', 'local capability backend is currently Windows-only')
+  const root = makeCsvFolderFixture()
+  let l: Awaited<ReturnType<typeof launch>> | undefined
+  try {
+    l = await launch({ hooks: true })
+    const { win } = l
+    await showSidebar(win)
+    await stubFolderDialog(l.app, root)
+    await win.getByRole('button', { name: /Add folder/ }).click()
+    await expect(win.getByRole('treeitem', { name: basename(root), exact: true })).toBeVisible()
+    await expandTreeItem(win, basename(root))
+    await activateTreeItem(win, 'launch-plan.md')
+    await markdownReady(win)
+
+    const source = win.locator('.reader-card').first()
+    const link = source.getByRole('link', { name: 'tasks.csv', exact: true })
+    await link.click()
+    const preview = win.getByRole('dialog', { name: 'Link preview', exact: true })
+    await expect(preview.getByRole('grid', { name: 'CSV grid', exact: true })).toHaveAttribute('data-ready', '1', { timeout: 30_000 })
+    await preview.getByRole('button', { name: 'Open to side', exact: true }).click()
+    const side = win.getByRole('region', { name: 'Reader card 2', exact: true })
+    await expect(side.locator('.card-name')).toHaveText('tasks.csv')
+    await side.getByRole('button', { name: 'Close card', exact: true }).click()
+    await expect(win.locator('.reader-card')).toHaveCount(1)
+
+    const tasksItem = win.getByRole('treeitem', { name: 'tasks.csv', exact: true })
+    await expect(tasksItem).toBeVisible()
+    await tasksItem.locator('.folder-row').click()
+    const card = win.locator('.reader-card').first()
+    await expect(card.locator('.card-name')).toHaveText('tasks.csv')
+    const grid = card.getByRole('grid', { name: 'CSV grid', exact: true })
+    await expect(grid).toHaveAttribute('data-ready', '1', { timeout: 30_000 })
+    await expect(grid.getByRole('gridcell').filter({ hasText: 'Write the brief' })).toBeVisible()
+    expect(l.pageErrors).toEqual([])
+  } finally {
+    if (l) await finish(l)
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 test('folder tree opens a nested Markdown link and Back restores the source place', async () => {
   test.skip(process.platform !== 'win32', 'local capability backend is currently Windows-only')

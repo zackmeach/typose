@@ -1230,7 +1230,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         {card.kind === 'open' ? (
           <>
             {shown.lenses ? (
-              <Tabs className="card-tabs" selectedKey={shown.lenses.showing} onSelectionChange={onLens}>
+              <Tabs key={secondaryLens} className="card-tabs" selectedKey={shown.lenses.showing} onSelectionChange={onLens}>
                 {header}
                 {progress}
                 {banner}

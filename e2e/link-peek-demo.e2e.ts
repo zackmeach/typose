@@ -178,9 +178,14 @@ test('production package opens a relative tasks.csv as a Grid peek and to the si
   try {
     live = await launchPackaged({ cdp: true, file: source })
     const win = live.page!
+    const rendererErrors: string[] = []
+    let rendererCrashed = false
+    win.on('pageerror', error => rendererErrors.push(error.message))
+    win.on('console', message => { if (message.type() === 'error') rendererErrors.push(message.text()) })
+    win.on('crash', () => { rendererCrashed = true })
     const card = win.locator('.reader-card').first()
     await renderedReady(card)
-    const { dialog, source: sourceSnapshot } = await openPreview(win, card)
+    const { dialog, link, source: sourceSnapshot } = await openPreview(win, card)
     const previewGrid = dialog.getByRole('grid', { name: 'CSV grid', exact: true })
     await expect(previewGrid).toHaveAttribute('data-ready', '1', { timeout: 30_000 })
     await expect(previewGrid.getByRole('gridcell').filter({ hasText: 'Write the brief' })).toBeVisible()
@@ -199,6 +204,16 @@ test('production package opens a relative tasks.csv as a Grid peek and to the si
     await expect(win.locator('.reader-card')).toHaveCount(1)
     await expect(card.locator('.card-name')).toHaveText('source.md')
     await expectSourceStable(card, sourceSnapshot)
+
+    // Reusing the open Markdown document through a modifier-click promotes its relative CSV into a tab.
+    // This used to throw in React Aria's Document collection and leave the window blank.
+    await link.click({ modifiers: [process.platform === 'darwin' ? 'Meta' : 'Control'] })
+    await expect(card.locator('.card-name')).toHaveText('tasks.csv')
+    const tabGrid = card.getByRole('grid', { name: 'CSV grid', exact: true })
+    await expect(tabGrid).toHaveAttribute('data-ready', '1', { timeout: 30_000 })
+    await expect(tabGrid.getByRole('gridcell').filter({ hasText: 'Write the brief' })).toBeVisible()
+    expect(rendererErrors).toEqual([])
+    expect(rendererCrashed).toBe(false)
     const exit = await closePackaged(live)
     expect(exit).toEqual({ code: 0, signal: null })
     expect(unrequested(live, exit)).toEqual([])
