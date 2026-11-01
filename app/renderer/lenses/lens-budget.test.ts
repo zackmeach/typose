@@ -54,10 +54,12 @@ it('simultaneous image leases add, survive lens switches, and enter the retired 
 
 it('a generation change bypasses an old pending response without letting it alter new shares', async () => {
   const old = pending()
-  const calls: { gen: number; bytes: number }[] = []
+  const calls: { doc: number; gen: number; bytes: number }[] = []
   const budget = new LensBudget({ call: (_, p) => {
-    calls.push(p)
-    return p.gen === 1 ? old.promise : Promise.resolve(true)
+    const gen = 'view' in p ? p.view.gen : p.gen
+    const doc = 'view' in p ? p.view.doc : p.doc
+    calls.push({ doc, gen, bytes: p.bytes })
+    return gen === 1 ? old.promise : Promise.resolve(true)
   } }, 4, 1, 1, 10, 10)
   const earlier = budget.reserveRendered(1, 30)
   await Promise.resolve()

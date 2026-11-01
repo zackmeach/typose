@@ -100,6 +100,8 @@ export class WorkspaceStore {
   private nextTab = 1
   private selectionVersion = 0
 
+  constructor(private readonly prefix = 'tab') {}
+
   readonly getSnapshot = (): WorkspaceSnapshot => this.state
   readonly subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener)
@@ -113,7 +115,7 @@ export class WorkspaceStore {
     if (!this.state.ready) return { kind: 'unavailable' }
     const existing = this.find(key)
     if (existing) return { kind: 'existing', tab: existing.id, selection: this.select(existing.id)! }
-    const id = `tab-${this.nextTab++}`
+    const id = `${this.prefix}-${this.nextTab++}`
     const tab: WorkspaceTab = Object.freeze({ id, key, path, session: this.state.session,
       card: Object.freeze({ kind: 'opening', path, slow: false }), preferredLens: null })
     this.versions.set(id, 1)
@@ -160,6 +162,33 @@ export class WorkspaceStore {
     if (tab?.back?.at(-1) !== entry) return false
     this.change(id, tab => ({ ...tab, back: Object.freeze(tab.back!.slice(0, -1)) }))
     return true
+  }
+
+  invalidateWork(): void {
+    for (const id of this.versions.keys()) this.versions.set(id, this.versions.get(id)! + 1)
+    this.selectionVersion++
+  }
+
+  /** Transfer metadata only; the caller separately transfers native ownership while views are detached. */
+  takeTabs(ids = this.state.tabs.map(tab => tab.id)): readonly WorkspaceTab[] {
+    const wanted = new Set(ids)
+    const moved = this.state.tabs.filter(tab => wanted.has(tab.id))
+    const tabs = this.state.tabs.filter(tab => !wanted.has(tab.id))
+    for (const tab of moved) this.versions.delete(tab.id)
+    this.selectionVersion++
+    this.publish({ ...this.state, tabs, selected: tabs.some(tab => tab.id === this.state.selected) ? this.state.selected : tabs[0]?.id ?? null })
+    return moved
+  }
+
+  adoptTabs(incoming: readonly WorkspaceTab[]): void {
+    const keys = new Set(this.state.tabs.map(tab => tab.key))
+    const tabs = incoming.map(tab => {
+      const key = keys.has(tab.key) ? 'moved:' + tab.id + ':' + tab.key : tab.key
+      keys.add(key)
+      this.versions.set(tab.id, 1)
+      return Object.freeze({ ...tab, key })
+    })
+    this.publish({ ...this.state, tabs: [...this.state.tabs, ...tabs], selected: this.state.selected ?? tabs[0]?.id ?? null })
   }
 
   /** Abandon a failed handoff while retaining its source tab. */

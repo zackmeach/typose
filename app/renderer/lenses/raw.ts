@@ -233,7 +233,7 @@ export class RawLens {
     // taken the reservation for the next lens, the core ignores this.
     const { doc, gen } = this.opened
     if (this.options.budget) void this.options.budget.reserveRaw(gen, 0)
-    else void this.core.call('reserve', { doc, gen, bytes: 0 }).catch(() => {})
+    else void this.core.call('reserve', this.opened.view ? { view: this.opened.view, bytes: 0 } : { doc, gen, bytes: 0 }).catch(() => {})
   }
 
   private rowCount(): number {
@@ -371,7 +371,7 @@ export class RawLens {
       const held = cap <= this.reserved
       const granted = held || (this.options.budget
         ? await this.options.budget.reserveRaw(gen, cap)
-        : await this.core.call('reserve', { doc, gen, bytes: cap }).catch(() => false))
+        : await this.core.call('reserve', this.opened.view ? { view: this.opened.view, bytes: cap } : { doc, gen, bytes: cap }).catch(() => false))
       if (n !== this.sizings || this.stopped || this.yielded) return // disposed, or Rendered took the reservation
       if (!granted) continue
       const shrunk = held && cap < this.reserved
@@ -381,7 +381,7 @@ export class RawLens {
       // Shrink locally before releasing the allowance: even a delayed reserve response must not leave mounted
       // rows or cache entries claiming the old cap after the core has lowered its reservation.
       if (held && this.options.budget) await this.options.budget.reserveRaw(gen, cap)
-      else if (shrunk) void this.core.call('reserve', { doc, gen, bytes: cap }).catch(() => {})
+      else if (shrunk) void this.core.call('reserve', this.opened.view ? { view: this.opened.view, bytes: cap } : { doc, gen, bytes: cap }).catch(() => {})
       break
     }
     this.reservedOnce = true

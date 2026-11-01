@@ -1,6 +1,8 @@
 /** One document's share of the core's renderer reservation. Raw and retained Rendered trees coexist. */
+import type { ViewRef } from '../../shared/protocol'
+
 interface ReserveCore {
-  call(method: 'reserve', params: { doc: number; gen: number; bytes: number }): Promise<boolean>
+  call(method: 'reserve', params: { view: ViewRef; bytes: number } | { doc: number; gen: number; bytes: number }): Promise<boolean>
 }
 
 export interface ReloadReservation {
@@ -25,7 +27,8 @@ export class LensBudget {
     private generation: number,
     private raw: number,
     private held: number,
-    private treeMax = 0
+    private treeMax = 0,
+    private view?: ViewRef
   ) {}
 
   current(generation: number): boolean {
@@ -78,11 +81,12 @@ export class LensBudget {
   }
 
   /** The core's Reload already reserved `held`. Older queued work cannot update this generation's shares. */
-  adopt(generation: number, held: number, plan: ReloadReservation): boolean {
+  adopt(generation: number, held: number, plan: ReloadReservation, view?: ViewRef): boolean {
     if (!this.current(plan.generation) || plan.epoch !== this.epoch || generation <= this.generation) return false
     this.epoch++
     this.transitioning = false
     this.generation = generation
+    this.view = view
     this.raw = plan.raw
     this.rendered = 0
     this.treeMax = plan.retiredTreeMax
@@ -103,7 +107,7 @@ export class LensBudget {
       const raw = share === 'raw' ? bytes : this.raw
       const rendered = share === 'rendered' ? bytes : share === 'rendered-min' ? Math.max(this.rendered, bytes) : share === 'rendered-add' ? this.rendered + bytes : this.rendered
       const total = raw + rendered + 2 * this.treeMax
-      const granted = total === this.held || await this.core.call('reserve', { doc: this.doc, gen: generation, bytes: total }).catch(() => false)
+      const granted = total === this.held || await this.core.call('reserve', this.view ? { view: this.view, bytes: total } : { doc: this.doc, gen: generation, bytes: total }).catch(() => false)
       if (!granted || this.transitioning || !this.current(generation) || epoch !== this.epoch) return false
       this.raw = raw
       this.rendered = rendered

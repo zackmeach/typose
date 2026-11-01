@@ -6,11 +6,12 @@ import type { TabId, WorkspaceTab } from './workspace'
 import './file-tabs.css'
 
 /** Permanent files on the canvas; the selected card alone owns a document lens. */
-export function FileTabs({ tabs, selected, onSelect, onClose }: {
+export function FileTabs({ tabs, selected, onSelect, onClose, panelId = 'file-card' }: {
   tabs: readonly WorkspaceTab[]
   selected: TabId | null
   onSelect(id: TabId): void
   onClose(id: TabId): void
+  panelId?: string
 }) {
   const row = useRef<HTMLDivElement>(null)
   const [overflow, setOverflow] = useState(false)
@@ -46,7 +47,7 @@ export function FileTabs({ tabs, selected, onSelect, onClose }: {
         {tabs.map((tab, index) => (
           <div className="file-pill" data-selected={tab.id === selected || undefined} key={tab.id}>
             <button type="button" className="file-tab" role="tab" id={`file-${tab.id}`}
-              aria-controls={tab.id === selected ? 'file-card' : undefined} aria-labelledby={`file-label-${tab.id}`}
+              aria-controls={tab.id === selected ? panelId : undefined} aria-labelledby={`file-label-${tab.id}`}
               aria-selected={tab.id === selected} tabIndex={tab.id === selected ? 0 : -1} title={tab.path}
               onClick={() => onSelect(tab.id)} onKeyDown={(event) => {
                 if (event.key === 'Delete') {
