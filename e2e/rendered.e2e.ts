@@ -279,7 +279,7 @@ test('a delayed old Rendered reservation response does not block a replacement f
     core.call = async (method, params, signal) => {
       // Hold the answer, after the core has acted. Only a request issued after A's render answer is eligible, so an
       // earlier Raw sizing request can't be mistaken for Rendered's reservation, whatever its charge formula is.
-      const delay = method === 'reserve' && params.doc === aDoc && aRendered && !delayed
+      const delay = method === 'reserve' && (params.view as { doc?: number } | undefined)?.doc === aDoc && aRendered && !delayed
       if (delay) delayed = true
       const result = await call(method, params, signal)
       if (method === 'open') {

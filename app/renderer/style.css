@@ -199,7 +199,7 @@ body {
   align-items: center;
   gap: 8px;
   flex: 1;
-  min-width: 0;
+  min-width: calc(10ch + 24px);
 }
 .back-button {
   flex: none;
@@ -241,7 +241,7 @@ body {
 }
 .card-name {
   flex: 0 1 auto;
-  min-width: min(10ch, 100%);
+  min-width: 10ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

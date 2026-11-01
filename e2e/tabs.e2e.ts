@@ -10,6 +10,11 @@ const open = (l: Awaited<ReturnType<typeof launch>>, path: string) => l.app.eval
 const rendered = (win: Page) => expect(win.locator('.md-scroller')).toHaveAttribute('data-ready', '1')
 const tab = (win: Page, name: string) => win.getByRole('tab', { name, exact: true })
 
+async function documentAndWorkspaceCache(win: Page): Promise<number> {
+  const stats = await debugStats(win)
+  return stats.ledger.rendererCache - stats.surfaces!.hostBytes - stats.saved.hostBytes
+}
+
 test('a refused workspace precharge preserves the empty card and retries once there is room', async () => {
   const file = fixture('tabs-workspace-refused.txt', 'Retry works\n')
   const l = await launch({ hooks: true })
@@ -18,7 +23,7 @@ test('a refused workspace precharge preserves the empty card and retries once th
   const { ledger } = await debugStats(win)
   await debugStats(win, { limit: ledger.used + 1 })
   await open(l, file)
-  await expect(win.locator('.banner')).toHaveText("Can't open another tab: Typose's memory budget is full")
+  await expect(win.locator('.banner')).toHaveText("Cannot open the view · Typose's memory budget is full")
   await expect(win.locator('.file-tab')).toHaveCount(0)
   expect(await debugStats(win)).toMatchObject({ docs: 0, handles: 0, jobs: 0, ledger: { used: ledger.used, rendererCache: ledger.rendererCache } })
   await debugStats(win, { limit: ledger.limit })
@@ -305,7 +310,7 @@ test('leaving a pending activation for a failed tab does not leave a hidden acti
   await waitOpen(win)
   await open(l, missing)
   await expect(win.locator('.card-message p')).toContainText('File not found')
-  const workspace = (await debugStats(win)).ledger.rendererCache
+  const workspace = await documentAndWorkspaceCache(win)
   await win.evaluate(() => {
     const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core
     const call = core.call.bind(core)
@@ -321,9 +326,9 @@ test('leaving a pending activation for a failed tab does not leave a hidden acti
   await expect.poll(() => win.evaluate(() => typeof (window as unknown as { pendingTabRelease?: () => void }).pendingTabRelease)).toBe('function')
   await win.getByRole('tab', { name: /tabs-pending-missing-/ }).click()
   await expect(win.locator('.card-message p')).toContainText('File not found')
-  await expect.poll(async () => (await debugStats(win)).ledger.rendererCache).toBe(workspace)
+  await expect.poll(() => documentAndWorkspaceCache(win)).toBe(workspace)
   await win.evaluate(() => (window as unknown as { pendingTabRelease: () => void }).pendingTabRelease())
-  await expect.poll(async () => (await debugStats(win)).ledger.rendererCache).toBe(workspace)
+  await expect.poll(() => documentAndWorkspaceCache(win)).toBe(workspace)
   await closeTabs(win)
   expect(l.pageErrors).toEqual([])
   await finish(l)
@@ -355,7 +360,7 @@ test('a fresh open completed behind a failed tab retains its document without a 
   await win.evaluate(() => (window as unknown as { backgroundRelease: () => void }).backgroundRelease())
   await expect(win.locator('.card-message p')).toContainText('File not found')
   const units = [a, missing, b].reduce((n, path) => n + 2 * path.length + 'manual:'.length, 0)
-  await expect.poll(async () => (await debugStats(win)).ledger.rendererCache).toBe(3 * workspaceCharge(3, units))
+  await expect.poll(() => documentAndWorkspaceCache(win)).toBe(3 * workspaceCharge(3, units))
   expect((await debugStats(win)).docs).toBe(2)
   await closeTabs(win)
   expect(l.pageErrors).toEqual([])
@@ -371,7 +376,7 @@ for (const stage of ['native read', 'reply'] as const) test('leaving during Relo
   await waitIndexed(win)
   await open(l, missing)
   await expect(win.locator('.card-message p')).toContainText('File not found')
-  const workspace = (await debugStats(win)).ledger.rendererCache
+  const workspace = await documentAndWorkspaceCache(win)
   await tab(win, 'tabs-reload-' + stage + '.txt').click()
   await waitOpen(win)
   await win.evaluate((stage) => {
@@ -395,7 +400,7 @@ for (const stage of ['native read', 'reply'] as const) test('leaving during Relo
   await win.getByRole('tab', { name: /tabs-reload-missing-/ }).click()
   if (stage === 'reply') await win.evaluate(() => (window as unknown as { reloadRelease: () => void }).reloadRelease())
   await expect.poll(() => win.evaluate(() => !!(window as unknown as { reloadFinished: boolean }).reloadFinished)).toBe(true)
-  await expect.poll(async () => (await debugStats(win)).ledger.rendererCache).toBe(workspace)
+  await expect.poll(() => documentAndWorkspaceCache(win)).toBe(workspace)
   await tab(win, 'tabs-reload-' + stage + '.txt').click()
   await waitOpen(win)
   await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '2')
