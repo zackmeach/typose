@@ -184,6 +184,7 @@ fn reject_namespace(text: &str) -> Result<(), LocalError> {
     Ok(())
 }
 
+#[cfg(windows)]
 fn absolute_drive(text: &str) -> Result<u8, LocalError> {
     bounded(text)?;
     reject_namespace(text)?;
@@ -537,8 +538,9 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn unsupported_platform_does_not_claim_local_file_support() {
-        let file = File::open(file!()).unwrap();
-        assert!(matches!(LocalRoute::capture(Path::new(file!()), &file), Err(LocalError::Refused(_))));
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/local.rs");
+        let file = File::open(&path).unwrap();
+        assert!(matches!(LocalRoute::capture(&path, &file), Err(LocalError::Refused(_))));
     }
 
     #[cfg(windows)]

@@ -6,6 +6,8 @@ import { type TestHooks, debugStats, finish, fixture, launch, test, waitOpen, wa
 import { mib, processMemory } from './memory'
 
 const CEILING = 8 << 20
+// Qualify full overlap with a declared synthetic hooks budget; default-budget refusal is tested separately.
+const QUALIFICATION_BUDGET = 8 * 2 ** 30
 
 /** These cases qualify replacement/empty intervals; explicitly close the now-inactive permanent tab. */
 async function closeInactive(win: Awaited<ReturnType<typeof launch>>['win']): Promise<void> {
@@ -65,6 +67,10 @@ for (const sampleCase of CASES)
     const samples: { stage: string; private?: number; reserved: number }[] = []
     try {
       await expect(win.locator('.open-button')).toBeVisible()
+      const originalLimit = (await debugStats(win)).ledger.limit
+      const qualification = await debugStats(win, { limit: QUALIFICATION_BUDGET })
+      expect(qualification.ledger.limit).toBe(QUALIFICATION_BUDGET)
+      console.log(`Rendered overlap: default native limit ${originalLimit} bytes; synthetic qualification limit ${qualification.ledger.limit} bytes`)
       const cdp = await win.context().newCDPSession(win)
       // The sole GC: no document or Rendered tree exists yet. Nothing is collected during the measured interval.
       await cdp.send('HeapProfiler.collectGarbage')
