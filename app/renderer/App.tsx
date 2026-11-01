@@ -183,21 +183,34 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   async function charge(owner: WorkspaceStore | null, override: readonly Pick<WorkspaceTab, 'key' | 'path'>[] | null, current: () => boolean): Promise<boolean> {
     const bank = workspaceBudget.current, session = currentSession.current
     if (!bank || !current()) return false
-    const actual = workspace.getSnapshot().tabs
-    const tabs = owner ? allGroups.current.flatMap(group => group.workspace === owner ? override ?? [] : group.workspace.getSnapshot().tabs) : override ?? actual
-    const entries = [...actual.flatMap(tab => tab.back ?? []), ...closed.current.map(item => item.entry)]
-    const text = entries.reduce((sum, entry) => sum + entry.path.length + (entry.location.kind === 'manual' ? entry.location.path.length : entry.location.ticket.id.length), 0)
-    const folderBytes = actual.reduce((bytes, tab) => {
-      const folder = tab.card.kind === 'open' ? tab.card.opened.folder : undefined
-      return bytes + (folder ? 16_384 + 128 * (folder.label.length + folder.root.length + (folder.node?.length ?? 0) + folder.segments.reduce((sum, segment) => sum + segment.length, 0)) + 256 * folder.segments.length : 0)
-    }, 0)
-    const pending = [...pendingWorkspace.current.values()]
-    const extra = entries.length * 16_384 + 128 * text + folderBytes + foldersCharge(folders.current) +
-      [...pendingFolders.current.values()].reduce((sum, bytes) => sum + bytes, 0) + [...pendingHistory.current.values()].reduce((sum, bytes) => sum + bytes, 0) +
-      Math.max(0, allGroups.current.length - 1) * (32 * 16_384) + retiredPeak.current + pendingSplit.current
-    const paid = await bank.hold(tabs.length + pending.length, tabs.reduce((sum, tab) => sum + tab.key.length + tab.path.length, 0) + pending.reduce((sum, item) => sum + item.units, 0), extra)
+    const snapshot = () => {
+      const actual = workspace.getSnapshot().tabs
+      const tabs = owner ? allGroups.current.flatMap(group => group.workspace === owner ? override ?? [] : group.workspace.getSnapshot().tabs) : override ?? actual
+      const entries = [...actual.flatMap(tab => tab.back ?? []), ...closed.current.map(item => item.entry)]
+      const text = entries.reduce((sum, entry) => sum + entry.path.length + (entry.location.kind === 'manual' ? entry.location.path.length : entry.location.ticket.id.length), 0)
+      const folderBytes = actual.reduce((bytes, tab) => {
+        const folder = tab.card.kind === 'open' ? tab.card.opened.folder : undefined
+        return bytes + (folder ? 16_384 + 128 * (folder.label.length + folder.root.length + (folder.node?.length ?? 0) + folder.segments.reduce((sum, segment) => sum + segment.length, 0)) + 256 * folder.segments.length : 0)
+      }, 0)
+      const pending = [...pendingWorkspace.current.values()]
+      const extra = entries.length * 16_384 + 128 * text + folderBytes + foldersCharge(folders.current) +
+        [...pendingFolders.current.values()].reduce((sum, bytes) => sum + bytes, 0) + [...pendingHistory.current.values()].reduce((sum, bytes) => sum + bytes, 0) +
+        Math.max(0, allGroups.current.length - 1) * (32 * 16_384) + retiredPeak.current + pendingSplit.current
+      return { tabCount: tabs.length + pending.length,
+        pathUnits: tabs.reduce((sum, tab) => sum + tab.key.length + tab.path.length, 0) + pending.reduce((sum, item) => sum + item.units, 0), extra }
+    }
+    let target = snapshot()
+    const requestEpoch = bank.reservationEpoch
+    let paid = await bank.hold(target.tabCount, target.pathUnits, target.extra)
+    // A last-card close may retire a stale precharge and reset the shared reservation epoch. Only that cancellation
+    // earns one retry, and the retry recomputes the aggregate window charge after the close has committed.
+    if (!paid && bank === workspaceBudget.current && session === currentSession.current && current() && bank.reservationEpoch !== requestEpoch) {
+      target = snapshot()
+      paid = await bank.hold(target.tabCount, target.pathUnits, target.extra)
+    }
     if (bank !== workspaceBudget.current || session !== currentSession.current || !current()) return false
     if (!paid) setWorkspaceNotice("Cannot open the view · Typose's memory budget is full")
+    else setWorkspaceNotice(message => message === "Cannot open the view · Typose's memory budget is full" ? '' : message)
     return paid
   }
   function chargeWorkspace(tabs: readonly Pick<WorkspaceTab, 'key' | 'path'>[], current: () => boolean): Promise<boolean> { return charge(null, tabs, current) }

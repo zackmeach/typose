@@ -50,25 +50,33 @@ export interface DocumentRef { readonly session: number; readonly doc: number; r
 
 /** Controller work can wait for native grants; closing the last tab starts a new queue without waiting for them. */
 export class WorkspaceMetadataQueue {
-  private epoch = 0
-  private serial = Promise.resolve()
-  private pendingCount = 0
+  private readonly lanes = new Map<string, { epoch: number; serial: Promise<void>; pending: number }>()
 
-  get pending(): number { return this.pendingCount }
+  get pending(): number { return [...this.lanes.values()].reduce((sum, lane) => sum + lane.pending, 0) }
+  pendingFor(owner: string): number { return this.lanes.get(owner)?.pending ?? 0 }
 
   run<T>(work: (current: () => boolean) => Promise<T>, valid: () => boolean): Promise<T | null> {
-    const epoch = this.epoch
-    this.pendingCount++
-    const current = () => epoch === this.epoch && valid()
-    const result = this.serial.then(() => current() ? work(current) : null).then((value) => current() ? value : null)
-      .finally(() => { this.pendingCount-- })
-    this.serial = result.then(() => {}, () => {})
+    return this.runFor('window', work, valid)
+  }
+
+  runFor<T>(owner: string, work: (current: () => boolean) => Promise<T>, valid: () => boolean): Promise<T | null> {
+    let lane = this.lanes.get(owner)
+    if (!lane) { lane = { epoch: 0, serial: Promise.resolve(), pending: 0 }; this.lanes.set(owner, lane) }
+    const epoch = lane.epoch
+    lane.pending++
+    const current = () => lane!.epoch === epoch && valid()
+    const result = lane.serial.then(() => current() ? work(current) : null).then((value) => current() ? value : null)
+      .finally(() => {
+        lane!.pending--
+        if (lane!.pending === 0 && this.lanes.get(owner) === lane) this.lanes.delete(owner)
+      })
+    lane.serial = result.then(() => {}, () => {})
     return result
   }
 
-  invalidate(): void {
-    this.epoch++
-    this.serial = Promise.resolve()
+  invalidate(owner?: string): void {
+    const targets = owner === undefined ? [...this.lanes.values()] : [this.lanes.get(owner)].filter((lane): lane is NonNullable<typeof lane> => !!lane)
+    for (const lane of targets) { lane.epoch++; lane.serial = Promise.resolve() }
   }
 }
 

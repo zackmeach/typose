@@ -8,6 +8,15 @@
 .csv-cell:focus { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--surface-raised); }
 .csv-cell.csv-selected { background: color-mix(in srgb, var(--accent) 16%, var(--surface)); }
 .csv-cell.csv-find-current { outline: 2px solid var(--accent); outline-offset: -2px; }
+.csv-cell.csv-number { text-align: right; font-variant-numeric: tabular-nums; }
+.csv-type-icon { display: inline-block; width: 18px; color: var(--text2); font-family: var(--font-mono); font-size: 11px; }
+.csv-value-pill { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; padding: 0 6px; border-radius: 4px; line-height: 20px; background: var(--surface-raised); }
+.csv-value-pill[data-tint='0'] { background: color-mix(in srgb, #6d9cdd 20%, var(--surface)); }
+.csv-value-pill[data-tint='1'] { background: color-mix(in srgb, #b28ed4 20%, var(--surface)); }
+.csv-value-pill[data-tint='2'] { background: color-mix(in srgb, #83b99a 20%, var(--surface)); }
+.csv-value-pill[data-tint='3'] { background: color-mix(in srgb, #c9ac71 20%, var(--surface)); }
+.csv-value-pill[data-tint='4'] { background: color-mix(in srgb, #d58e93 20%, var(--surface)); }
+.csv-value-pill[data-tint='5'] { background: color-mix(in srgb, #72b6bc 20%, var(--surface)); }
 .csv-heading[data-sort='asc']::after { content: ' ↑'; color: var(--accent); }
 .csv-heading[data-sort='desc']::after { content: ' ↓'; color: var(--accent); }
 .csv-heading { cursor: pointer; }
@@ -18,6 +27,7 @@
 .csv-gutter { position: sticky; left: 0; width: 52px; height: 28px; padding: 0 10px; box-sizing: border-box; text-align: right; color: var(--text2); background: var(--surface); border-right: 1px solid var(--border); z-index: 2; }
 .csv-missing::after { content: '—'; color: var(--text2); }
 .csv-extra { text-decoration: underline dotted; }
+.csv-problem { color: var(--warning, #d8ad60); }
 .csv-status { position: absolute; right: 12px; bottom: 4px; max-width: calc(100% - 24px); padding: 2px 6px; background: var(--surface); color: var(--text2); font: 11px/16px var(--font-ui); pointer-events: none; }
 .csv-status:empty { display: none; }
 .csv-find-excerpt { position: absolute; left: 12px; bottom: 4px; z-index: 4; max-width: min(70%, 760px); max-height: 56px; overflow: auto; padding: 4px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); font: 12px/18px var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }

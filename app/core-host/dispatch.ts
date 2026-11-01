@@ -53,7 +53,7 @@ import {
 } from '../shared/protocol'
 import { isValid } from './numbers'
 import { boundedLink, decodedLocalTarget, localTarget } from './local-target'
-import { structuredChildren, structuredInfo } from './structured-validation'
+import { structuredChildren, structuredColumns, structuredInfo, structuredRows } from './structured-validation'
 import { findNumber, findProgress, sourceHit, sourceHits, csvFindHit, csvFindHits } from './find-validation'
 
 declare const __TEST_HOOKS__: boolean
@@ -267,13 +267,21 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       throw new Refusal('Internal', 'the core returned invalid CSV configuration metadata')
     const reason = value.reason
     if (reason != null && typeof reason !== 'string') throw new Refusal('Internal', 'the core returned an invalid CSV reason')
+    const rawProblems = (value as NativeCsvInfo & { problems?: unknown }).problems
+    if (rawProblems != null && (!Array.isArray(rawProblems) || rawProblems.length > 2)) throw new Refusal('Internal', 'the core returned invalid CSV problems')
+    const problems = (rawProblems as unknown[] | undefined ?? []).map(problem => {
+      if (!isRecord(problem) || !['ragged', 'decoding'].includes(String(problem.kind))) throw new Refusal('Internal', 'the core returned invalid CSV problem metadata')
+      return { kind: String(problem.kind), count: csvResultNumber(problem.count, 'problem count', 1), first: nativeCsvSpan(problem.first),
+        ...(problem.sourceRecord == null ? {} : { sourceRecord: csvResultNumber(problem.sourceRecord, 'problem record') }),
+        ...(problem.sourceLine == null ? {} : { sourceLine: csvResultNumber(problem.sourceLine, 'problem line') }) }
+    })
     return {
       ref: { session, doc: id, gen, revision }, status: value.status as CsvInfo['status'], ...(reason == null ? {} : { reason }),
       delimiter: value.delimiter as CsvInfo['delimiter'], header: value.header, encoding: value.encoding,
       sourceRecords: csvResultNumber(value.sourceRecords, 'source records'),
       indexedBytes: csvResultNumber(value.indexedBytes, 'indexed bytes'), done: value.done,
       expectedColumns: csvResultNumber(value.expectedColumns, 'expected columns'),
-      maxColumnsKnown: csvResultNumber(value.maxColumnsKnown, 'maximum known columns'), metadataDone: value.metadataDone
+      maxColumnsKnown: csvResultNumber(value.maxColumnsKnown, 'maximum known columns'), metadataDone: value.metadataDone, problems
     }
   }
   const docs = new Map<number, Doc>()
@@ -342,9 +350,9 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     return { session, doc: id, gen, id: resource }
   }
 
-  type Lease = { ref: ViewRef; bytes: number; sourceFind?: number; csvFind?: { id: number; order: CsvOrderRef }; structured?: StructuredRef }
+  type Lease = { ref: ViewRef; bytes: number; activationId?: string; sourceFind?: number; csvFind?: { id: number; order: CsvOrderRef }; structured?: StructuredRef }
   type SurfaceState = { ref: SurfaceRef; alive: boolean; views: Map<number, Lease>; current?: number; latest?: Pending }
-  type Pending = { request: number; surface: SurfaceState; bytes: number; doc?: number; gen?: number; disposed: boolean; previousView?: number; kind?: 'activate' | 'reload' }
+  type Pending = { request: number; surface: SurfaceState; bytes: number; activationId?: string; doc?: number; gen?: number; disposed: boolean; previousView?: number; kind?: 'activate' | 'reload' }
   // Surface zero is an isolated compatibility owner. Explicit documents never accept its doc/gen-only cleanup.
   const surfaces = new Map<number, SurfaceState>([[0, { ref: { session, id: 0 }, alive: true, views: new Map() }]])
   const pendingViews = new Map<number, Pending>()
@@ -441,7 +449,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     const ref: ViewRef = { session, surface: surface.ref.id, id: nextView++, doc: id, gen }
     const previous = currentLease(surface)
     if (previous) { closeSourceFind(previous); closeCsvInteractions(previous) }
-    surface.views.set(ref.id, { ref, bytes: pending.bytes })
+    surface.views.set(ref.id, { ref, bytes: pending.bytes, ...(pending.activationId ? { activationId: pending.activationId } : {}) })
     surface.current = ref.id
     giveBack(pending, true) // the previous view remains paid until its exact lease is detached
     return { reserved: pending.bytes, view: ref }
@@ -752,11 +760,31 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const container = csvRequestNumber(p.container, 'container', 0, 0xffff_ffff)
       const start = csvRequestNumber(p.start, 'start')
       const count = csvRequestNumber(p.count, 'count', 1, 128)
-      if (p.record !== undefined) throw new Refusal('Refused', 'The record Tree is not available')
+      const record = p.record === undefined ? undefined : csvRequestNumber(p.record, 'record')
       return read(req, ref.doc, async (cancel) => {
-        const page = await doc.structuredChildren(ref.gen, ref.revision, container, start, count, cancel)
+        const page = await doc.structuredChildren(ref.gen, ref.revision, container, start, count, cancel, record)
         if (structuredReference(ref).lease !== lease) throw new Refusal('Stale', 'the structured index was replaced while reading')
         return structuredChildren(page, doc.size)
+      })
+    },
+    structuredRows: (p, req) => {
+      const { ref, lease, doc } = structuredReference(p.ref)
+      const start = csvRequestNumber(p.start, 'start')
+      const count = csvRequestNumber(p.count, 'count', 1, 128)
+      return read(req, ref.doc, async (cancel) => {
+        const page = await doc.structuredRows(ref.gen, ref.revision, start, count, cancel)
+        if (structuredReference(ref).lease !== lease) throw new Refusal('Stale', 'the structured view was replaced while reading records')
+        return structuredRows(page, doc.size)
+      })
+    },
+    structuredColumns: (p, req) => {
+      const { ref, lease, doc } = structuredReference(p.ref)
+      const start = csvRequestNumber(p.start, 'start')
+      const count = csvRequestNumber(p.count, 'count', 1, 128)
+      return read(req, ref.doc, async (cancel) => {
+        const page = await doc.structuredColumns(ref.gen, ref.revision, start, count, cancel)
+        if (structuredReference(ref).lease !== lease) throw new Refusal('Stale', 'the structured view was replaced while reading columns')
+        return structuredColumns(page, doc.size)
       })
     },
     sourceBytes: (p,req):Promise<Uint8Array> => {
@@ -1193,12 +1221,14 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     },
     activate: async (p, req): Promise<Opened> => {
       const [id, gen, count, bytes] = [int(p, 'doc'), int(p, 'gen'), int(p, 'count'), int(p, 'bytes')]
+      if (p.activationId !== undefined && (typeof p.activationId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(p.activationId)))
+        throw new Refusal('InvalidParams', 'activationId must be a canonical UUID v4', 'activationId')
       const surface = requestSurface(p)
       const doc = ownedDoc(surface, id)
       if (doc.generation !== gen) throw new Refusal('Stale', 'the tab generation was replaced')
       reclaimInactive()
       const pending = take(req, bytes, surface)
-      pending.doc = id; pending.gen = gen; pending.kind = 'activate'
+      pending.doc = id; pending.gen = gen; pending.kind = 'activate'; if (typeof p.activationId === 'string') pending.activationId = p.activationId
       try {
         const local = localInfo(doc)
         const firstPage = await read(req, id, (cancel) => doc.page(gen, 0, count, cancel))
@@ -1221,6 +1251,19 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         return true
       }
       detach(owned.surface, owned.lease)
+      return true
+    },
+    deactivateActivation: (p): boolean => {
+      if (typeof p.activationId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(p.activationId))
+        throw new Refusal('InvalidParams', 'activationId must be a canonical UUID v4', 'activationId')
+      const surface = surfaceRef(p.surface)
+      const lease = currentLease(surface)
+      if (lease?.activationId === p.activationId) { detach(surface, lease); return true }
+      const pending = surface.latest
+      if (pending?.kind !== 'activate' || pending.activationId !== p.activationId) return false
+      pending.disposed = true
+      const entry = reads.get(pending.request)
+      if (entry) { entry.cancelled = true; entry.cancel.cancel() }
       return true
     },
     openLocal: async (p, req): Promise<Opened> => {

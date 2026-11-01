@@ -9,6 +9,7 @@ import { extendSelection, nextGridSort, selectCell, type GridSelection, type Gri
 import { GridCopyJob, type GridCopyJob as GridCopyJobType } from './grid-copy'
 import { PRINT_LINES_PER_PAGE, type PrintPayload, type PrintPlan } from '../print'
 import { utf8ByteLength } from './grid-interactions'
+import { GridColumns } from './grid-columns'
 
 const ROW = 28
 const HEADER = 28
@@ -49,6 +50,7 @@ export class GridLens {
   private readonly cells = new Map<string, GridCellPreview>()
   private readonly rows = new Map<number, CachedRow>()
   private readonly columns = new Map<number, CsvColumn>()
+  private readonly columnLayout = new GridColumns()
   private readonly mounted = new Map<string, HTMLDivElement>()
   private readonly rowElements = new Map<number, HTMLDivElement>()
   private readonly headerElements = new Map<number, HTMLDivElement>()
@@ -195,7 +197,7 @@ export class GridLens {
 
   private gridBytes(): number {
     const rows = Math.ceil(Math.max(0, this.host.clientHeight - HEADER) / ROW) + 2
-    const columns = Math.ceil(Math.max(0, this.host.clientWidth - GUTTER) / WIDTH) + 2
+    const columns = Math.ceil(Math.max(0, this.host.clientWidth - GUTTER) / 72) + 2
     const cells = Math.min(MAX_CELLS, rows * columns + 1)
     return (24 << 20) + CACHE_BYTES + cells * (16_384 + TEXT_UNITS * (320 + 960)) +
       (this.inspectorPeak ? (64 << 10) * (320 + 960) + 16_384 : 0)
@@ -363,7 +365,9 @@ export class GridLens {
 
   private layout(schedule = true): void {
     if (!this.paid || this.disposed) return
-    const width = GUTTER + WIDTH * this.columnCount
+    if (this.columnCount > 100_000) { this.message('Grid exceeds the supported column extent · open in Raw'); return }
+    this.columnLayout.resize(this.columnCount)
+    const width = GUTTER + this.columnLayout.left(this.columnCount)
     // 5,000 columns fit native X; a still wider unsupported extent is visibly refused.
     if (!Number.isSafeInteger(width) || width > 16_000_000) { this.message('Grid is unavailable at this width · open in Raw'); return }
     this.state.setTotal(this.rowCount * ROW)
@@ -372,8 +376,8 @@ export class GridLens {
     this.element.setAttribute('aria-rowcount', String(this.info.done ? this.rowCount + 1 : -1))
     this.element.setAttribute('aria-colcount', String(this.columnCount + 1))
     const rows = visibleRows(this.state.top, this.state.geometry.viewport, ROW, this.rowCount, 1)
-    const firstColumn = Math.max(0, Math.floor((this.element.scrollLeft - GUTTER) / WIDTH))
-    const lastColumn = Math.min(this.columnCount, Math.ceil((this.element.scrollLeft + this.element.clientWidth - GUTTER) / WIDTH) + 1)
+    const firstColumn = this.columnLayout.at(Math.max(0, this.element.scrollLeft - GUTTER))
+    const lastColumn = Math.min(this.columnCount, this.columnLayout.at(this.element.scrollLeft + this.element.clientWidth - GUTTER) + 2)
     if ((rows.last - rows.first) * (lastColumn - firstColumn) + 1 > MAX_CELLS) { this.message('Grid viewport is too large for its cell budget · open in Raw'); return }
     this.range = { firstRow: rows.first, lastRow: rows.last, firstColumn, lastColumn }
     for (const [key, node] of this.mounted) {
@@ -421,13 +425,17 @@ export class GridLens {
       node.setAttribute('aria-colindex', String(column + 2))
       const meta = this.columns.get(column)
       const name = meta?.name || `Column ${column + 1}`
-      if (node.textContent !== name) node.textContent = name
+      if (node.dataset.type !== meta?.type || node.dataset.name !== name) {
+        const icon = make('span', 'csv-type-icon'); icon.setAttribute('aria-hidden', 'true')
+        icon.textContent = ({ text: 'T', number: '#', date: '◷', boolean: '◐', url: '↗' } as const)[meta?.type ?? 'text']
+        node.replaceChildren(icon, document.createTextNode(name)); node.dataset.type = meta?.type ?? 'text'; node.dataset.name = name
+      }
       node.setAttribute('aria-label', name)
       const sort = this.sortColumn === column ? this.sortDirection : 'none'
       node.setAttribute('aria-sort', sort === 'asc' ? 'ascending' : sort === 'desc' ? 'descending' : 'none')
       node.dataset.sort = sort
-      node.title = meta?.nameMore ? `${name}… · header continues in Raw` : name
-      node.style.left = `${GUTTER + column * WIDTH}px`; node.style.width = `${WIDTH}px`
+      node.title = `${meta?.type ?? 'text'} · ${meta?.nameMore ? `${name}… · header continues in Raw` : name}`
+      node.style.left = `${GUTTER + this.columnLayout.left(column)}px`; node.style.width = `${this.columnLayout.width(column)}px`
       node.classList.toggle('csv-selected', this.selection.kind === 'column' && this.selection.anchor.column === column)
       node.setAttribute('aria-selected', String(this.selection.kind === 'column' && this.selection.anchor.column === column))
     }
@@ -526,10 +534,12 @@ export class GridLens {
     const number = parent.firstElementChild as HTMLDivElement
     number.textContent = String((meta?.sourceRecord ?? row + (this.info.header ? 1 : 0)) - (this.info.header ? 1 : 0) + 1)
     number.title = meta ? `Source record ${meta.sourceRecord + 1} · physical line ${meta.sourceLine + 1}` : 'Indexing…'
+    const ragged = !!meta && meta.fieldCount !== this.info.expectedColumns
+    number.classList.toggle('csv-problem', ragged)
+    if (ragged) { number.textContent += ' !'; number.title += ` · Ragged row: ${meta!.fieldCount} fields; expected ${this.info.expectedColumns}` }
     let node = this.mounted.get(key)
     if (!node) {
       node = make('div', 'csv-cell'); node.setAttribute('role', 'gridcell'); node.setAttribute('aria-colindex', String(column + 2))
-      node.style.left = `${GUTTER + column * WIDTH}px`; node.style.width = `${WIDTH}px`
       node.addEventListener('focus', () => { this.active = { row, column }; this.focusWanted = false; this.layout() })
       node.addEventListener('click', event => {
         if (event.detail !== 0) return // pointer selection is handled once at pointerdown, before the drag range
@@ -539,6 +549,7 @@ export class GridLens {
       parent.append(node); this.mounted.set(key, node)
     }
     node.tabIndex = row === this.active.row && column === this.active.column ? 0 : -1
+    node.style.left = `${GUTTER + this.columnLayout.left(column)}px`; node.style.width = `${this.columnLayout.width(column)}px`
     node.dataset.row = String(row); node.dataset.column = String(column)
     const selected = row >= bounds.firstRow && row < bounds.lastRow && column >= bounds.firstColumn && column < bounds.lastColumn
     const currentFind = this.findCell?.row === row && this.findCell.column === column
@@ -551,7 +562,13 @@ export class GridLens {
     node.classList.toggle('csv-missing', value?.kind === 'missing')
     node.classList.toggle('csv-extra', !!meta && column >= this.info.expectedColumns)
     const text = !value ? '…' : value.kind === 'missing' ? '' : value.text
+    const columnMeta = this.columns.get(column)
+    node.classList.toggle('csv-number', columnMeta?.type === 'number')
     node.textContent = text.slice(0, TEXT_UNITS)
+    if (columnMeta?.pills && text !== '' && text !== '—') {
+      const pill = make('span', 'csv-value-pill'), tint = columnMeta.pills.indexOf(text)
+      pill.dataset.tint = tint < 0 ? 'neutral' : String(tint); pill.textContent = text.slice(0, TEXT_UNITS); node.replaceChildren(pill)
+    }
     const partial = value?.kind === 'value' && value.partial
     node.title = value?.kind === 'missing' ? 'Missing cell' : partial ? `${text.slice(0, TEXT_UNITS)}… · more text; press Enter to inspect` : text
     node.setAttribute('aria-label', value?.kind === 'missing' ? 'Missing cell' : partial ? `${text.slice(0, TEXT_UNITS)} · more text available` : text || 'Empty cell')
@@ -811,8 +828,8 @@ export class GridLens {
       if (result.hit) {
         this.cancelCopy()
         this.element.scrollTop = this.state.moveTo(result.hit.dataRow * ROW)
-        const left = GUTTER + result.hit.column * WIDTH
-        if (left < this.element.scrollLeft + GUTTER || left + WIDTH > this.element.scrollLeft + this.element.clientWidth)
+        const left = GUTTER + this.columnLayout.left(result.hit.column)
+        if (left < this.element.scrollLeft + GUTTER || left + this.columnLayout.width(result.hit.column) > this.element.scrollLeft + this.element.clientWidth)
           this.element.scrollLeft = Math.max(0, left - GUTTER)
         this.layout()
       }
@@ -970,6 +987,7 @@ export class GridLens {
         const fresh = await this.core.call('csvConfigure', { surface: this.opened.view ? { session: this.opened.view.session, id: this.opened.view.surface } : undefined,
           doc: ref.doc, gen: ref.gen, options: this.options.options }, this.abort.signal)
         if (!this.valid(ref) || !sameRef(fresh.ref, ref)) return
+        if (fresh.metadataDone && !this.info.metadataDone) this.columns.clear()
         this.info = fresh; this.options.onInfo(fresh)
         if (fresh.status === 'locked') { this.message(fresh.reason || 'Grid is unavailable · open in Raw'); return }
         if (this.atRow !== undefined && (this.rowCount > this.atRow || fresh.done)) this.placeAtRow()
@@ -990,8 +1008,13 @@ export class GridLens {
           const metadata = await this.core.call('csvColumns', { ref, start, count }, this.abort.signal)
           if (!this.valid(ref) || !sameRef(metadata.ref, ref)) return
           for (const key of this.columns.keys()) if (key < start || key >= start + count) this.columns.delete(key)
-          for (const column of metadata.columns) this.columns.set(column.column, { ...column, name: preview(column.name), pills: undefined })
-          this.paintHeaders()
+          const anchor = this.columnLayout.at(this.element.scrollLeft), within = this.element.scrollLeft - this.columnLayout.left(anchor)
+          for (const column of metadata.columns) {
+            this.columns.set(column.column, { ...column, name: preview(column.name), pills: column.pills?.slice(0, 6).map(preview) })
+            this.columnLayout.update(column.column, column.widthUnits)
+          }
+          this.columnLayout.resize(this.columnCount); this.element.scrollLeft = this.columnLayout.left(anchor) + within
+          this.layout(false)
         }
         let missing = this.missing()
         while (missing && this.valid(ref)) {
@@ -1081,7 +1104,7 @@ export class GridLens {
     const top = row * ROW, bottom = top + ROW
     if (top < this.state.top) this.apply(this.state.moveTo(top))
     else if (bottom > this.state.top + this.state.geometry.viewport) this.apply(this.state.moveTo(bottom - this.state.geometry.viewport))
-    const left = GUTTER + column * WIDTH, right = left + WIDTH
+    const left = GUTTER + this.columnLayout.left(column), right = left + this.columnLayout.width(column)
     if (left < this.element.scrollLeft + GUTTER) this.element.scrollLeft = left - GUTTER
     else if (right > this.element.scrollLeft + this.element.clientWidth) this.element.scrollLeft = right - this.element.clientWidth
     this.layout()

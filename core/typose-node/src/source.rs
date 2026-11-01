@@ -79,10 +79,17 @@ pub struct SourceLineRange {
 }
 
 #[napi(object)]
-pub struct SourceLocation { pub line: f64 }
+pub struct SourceLocation {
+    pub line: f64,
+}
 pub struct Location {
-    raw: Arc<Raw>, generation: u32, offset: u64, cancel: Arc<AtomicBool>, slot: Option<Slot>,
-    #[cfg(feature="test-hooks")] _task: hooks::Live,
+    raw: Arc<Raw>,
+    generation: u32,
+    offset: u64,
+    cancel: Arc<AtomicBool>,
+    slot: Option<Slot>,
+    #[cfg(feature = "test-hooks")]
+    _task: hooks::Live,
 }
 impl Task for Location {
     type Output = std::result::Result<SourceLocation, DocError>;
@@ -90,13 +97,26 @@ impl Task for Location {
     fn compute(&mut self) -> Result<Self::Output> {
         let flag = self.cancel.clone();
         Ok(cancellable(&flag, || {
-            self.slot = Some(budget::slot(Work::Page, &store::cancelled).map_err(|e| match e { NoSlot::Cancelled => DocError::Cancelled, NoSlot::Budget(e) => DocError::Memory(e) })?);
-            let line = self.raw.source_line_at(self.generation, self.offset)?.ok_or_else(|| DocError::Refused("The requested source position is not indexed yet".into()))?;
+            self.slot = Some(budget::slot(Work::Page, &store::cancelled).map_err(|e| match e {
+                NoSlot::Cancelled => DocError::Cancelled,
+                NoSlot::Budget(e) => DocError::Memory(e),
+            })?);
+            let line = self
+                .raw
+                .source_line_at(self.generation, self.offset)?
+                .ok_or_else(|| DocError::Refused("The requested source position is not indexed yet".into()))?;
             Ok(SourceLocation { line: line as f64 })
         }))
     }
     fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        output.and_then(|location| { if self.cancel.load(Ordering::Relaxed) { return Err(DocError::Cancelled); } self.raw.document().verified(self.generation, |_| Ok(()))?; Ok(location) })
+        output
+            .and_then(|location| {
+                if self.cancel.load(Ordering::Relaxed) {
+                    return Err(DocError::Cancelled);
+                }
+                self.raw.document().verified(self.generation, |_| Ok(()))?;
+                Ok(location)
+            })
             .map_err(|e| Error::from(JsError::from(doc_error(e)).into_unknown(env)))
     }
 }
@@ -196,13 +216,28 @@ impl Task for Verify {
 }
 #[napi]
 impl Doc {
-    #[napi(ts_return_type="Promise<SourceLocation>")]
-    pub fn source_line_at(&self, generation: f64, offset: f64, cancel: &Cancel) -> std::result::Result<AsyncTask<Location>, Error<Code>> {
+    #[napi(ts_return_type = "Promise<SourceLocation>")]
+    pub fn source_line_at(
+        &self,
+        generation: f64,
+        offset: f64,
+        cancel: &Cancel,
+    ) -> std::result::Result<AsyncTask<Location>, Error<Code>> {
         let generation = int("gen", generation)? as u32;
         let offset = int("offset", offset)?;
         let raw = self.raw()?;
-        if offset > raw.document().len() { return Err(Error::new(Code::InvalidParams, "source position is outside the document")); }
-        Ok(AsyncTask::new(Location { raw: raw.clone(), generation, offset, cancel: cancel.flag.clone(), slot: None, #[cfg(feature="test-hooks")] _task: hooks::Live::new(&hooks::TASKS) }))
+        if offset > raw.document().len() {
+            return Err(Error::new(Code::InvalidParams, "source position is outside the document"));
+        }
+        Ok(AsyncTask::new(Location {
+            raw: raw.clone(),
+            generation,
+            offset,
+            cancel: cancel.flag.clone(),
+            slot: None,
+            #[cfg(feature = "test-hooks")]
+            _task: hooks::Live::new(&hooks::TASKS),
+        }))
     }
     #[napi(ts_return_type = "Promise<SourceLineRange>")]
     pub fn source_line_range(

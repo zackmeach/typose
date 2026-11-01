@@ -174,11 +174,13 @@ test('Electron’s default menu is gone: Force Reload and its other accelerators
       return { devTools: w.webContents.isDevToolsOpened(), zoom: w.webContents.getZoomFactor(), fullScreen: w.isFullScreen() }
     })
   ).toEqual({ devTools: false, zoom: 1, fullScreen: false })
-  // Select All stays: the page's own editing key on Windows and Linux. (Copy is the same key table's, untested here:
-  // it would write this desktop's clipboard.)
+  // Select All and Copy use the document source, including text outside the mounted viewport.
+  await app.evaluate(({ clipboard }) => {
+    clipboard.writeText = async value => { (globalThis as { acceleratorCopy?: string }).acceleratorCopy = value }
+  })
   await pressAsOS(l, 'A', ['control'])
-  expect(await win.evaluate(() => getSelection()!.toString())).toContain('line 0')
-  await win.evaluate(() => getSelection()!.removeAllRanges())
+  await pressAsOS(l, 'C', ['control'])
+  await expect.poll(() => app.evaluate(() => (globalThis as { acceleratorCopy?: string }).acceleratorCopy)).toBe(lines.join('\n'))
   // Ctrl+R is the page's own Reload (PR 4): the document's next generation, in the same page.
   await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '1')
   await pressAsOS(l, 'R', ['control'])

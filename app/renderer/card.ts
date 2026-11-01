@@ -33,6 +33,7 @@ export type Card =
       lens?: LensName
       structured?: StructuredInfo
       structuredOff?: string
+      transcriptOff?: string
       csv?: CsvInfo
       csvOptions?: CsvOptions
       gridOff?: string
@@ -108,6 +109,8 @@ export function view(card: DisplayCard): CardView {
       if (opened.format === 'csv' && card.csv) status = `${Math.max(0, card.csv.sourceRecords - (card.csv.header ? 1 : 0)).toLocaleString('en')} rows${card.csv.done ? '' : '…'} · ${card.csv.encoding}`
       const showing = card.lens ?? 'raw'
       const markdown = opened.format === 'markdown' && !opened.blank
+      const parseProblem = card.structured?.problems.find(problem => problem.kind === 'parse')
+      const parseFailure = card.structuredOff && !card.structured?.root && parseProblem
       return {
         status,
         progress: card.indexed || frozen ? null : opened.size > 0 ? card.bytes / opened.size : 0,
@@ -115,13 +118,13 @@ export function view(card: DisplayCard): CardView {
           ? { text: "Can't reload: Typose's memory budget is full", action: 'Retry (Ctrl+R)' }
           : frozen
             ? { text: 'Changed on disk', action: 'Reload (Ctrl+R)' }
-            : null,
+            : parseFailure ? { text: `Couldn’t parse as ${opened.format.toUpperCase()} · showing Raw · ${parseProblem.line ? `line ${parseProblem.line}${parseProblem.column ? `, col ${parseProblem.column}` : ''}` : `byte ${parseProblem.first.start}`}`, action: 'View problem in Raw' } : null,
         body: opened.blank ? { message: 'Empty file', actions: [] } : showing === 'rendered' ? { rendered: true } : showing === 'grid' ? { grid: true } : showing !== 'raw' ? { structured: true } : { raw: true },
         lenses: markdown ? { showing, renderedOff: card.renderedOff ? RENDERED_OFF[card.renderedOff] : undefined } :
           opened.format === 'csv' && !opened.blank ? { showing, grid: true, gridOff: card.gridOff } :
           ['json', 'jsonl', 'yaml'].includes(opened.format) && !opened.blank ? { showing, structured: opened.format === 'jsonl' ? [
-            ...(card.structured?.transcript ? [{ id: 'transcript' as const, label: 'Transcript', off: card.structuredOff }] : []),
-            { id: 'rows', label: 'Rows', off: card.structuredOff }, { id: 'table', label: 'Table', off: card.structuredOff }
+            ...(card.structured?.transcript ? [{ id: 'transcript' as const, label: 'Transcript', off: card.transcriptOff ?? card.structuredOff }] : []),
+            { id: 'rows', label: 'Rows', off: card.structuredOff }, { id: 'table', label: 'Table', off: card.structuredOff ?? card.structured?.tableOff }
           ] : [{ id: 'tree', label: 'Tree', off: card.structuredOff ?? (!card.structured ? 'Preparing Tree…' : undefined) }] } : null
       }
     }

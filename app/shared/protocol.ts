@@ -103,11 +103,13 @@ export interface ViewRef { session: number; surface: number; id: number; doc: nu
 export interface StructuredRef { session: number; doc: number; gen: number; revision: number }
 export interface SourceSpan { start: number; end: number }
 export interface StructuredProblem { kind: string; count: number; message: string; first: SourceSpan; line?: number; column?: number }
-export interface StructuredNode { ordinal: number; kind: 'object' | 'array' | 'string' | 'number' | 'boolean' | 'null' | 'alias' | 'comment'; span: SourceSpan; key?: string; keySpan?: SourceSpan; text: string; more: boolean; container?: number; children?: number; duplicate?: boolean }
-export interface StructuredInfo { ref: StructuredRef; format: 'json' | 'jsonl' | 'yaml'; status: 'ready' | 'partial' | 'indexing' | 'locked'; reason?: string; parsedAs?: 'json' | 'jsonc'; root?: StructuredNode; rows?: number; parsed?: number; failed?: number; blank?: number; done: boolean; problems: StructuredProblem[]; transcript?: { adapter: 'claude-code-v1' | 'openai-chat-v1'; confidence: number; mode?: 'messages' | 'dataset' } }
+export interface StructuredNode { ordinal: number; kind: 'object' | 'array' | 'string' | 'number' | 'boolean' | 'null' | 'alias' | 'comment'; span: SourceSpan; key?: string; keySpan?: SourceSpan; keyMore?: boolean; text: string; more: boolean; container?: number; children?: number; duplicate?: boolean }
+export interface StructuredInfo { ref: StructuredRef; format: 'json' | 'jsonl' | 'yaml'; status: 'ready' | 'partial' | 'indexing' | 'locked'; reason?: string; parsedAs?: 'json' | 'jsonc'; root?: StructuredNode; rows?: number; parsed?: number; failed?: number; blank?: number; columns?: number; tableOff?: string; schema?: string; done: boolean; problems: StructuredProblem[]; transcript?: { adapter: 'claude-code-v1' | 'openai-chat-v1'; confidence: number; mode?: 'messages' | 'dataset' } }
 export interface StructuredChildren { nodes: StructuredNode[]; next?: number }
 export interface StructuredRow { line: number; span: SourceSpan; status: 'valid' | 'failed'; timestamp?: string; type?: string; summary: string; root?: StructuredNode; problem?: string; more: boolean }
 export interface StructuredRows { rows: StructuredRow[]; nextLine?: number; done: boolean }
+export interface StructuredColumn { id: number; key: string; span?: SourceSpan }
+export interface StructuredColumns { columns: StructuredColumn[]; next?: number; total: number; done: boolean }
 
 export interface SourceFindRef { view: ViewRef; id: number }
 export interface SourceFindInfo { ref: SourceFindRef; count: number; scannedBytes: number; complete: boolean }
@@ -129,6 +131,7 @@ export interface CsvOptions { delimiter: 'auto' | CsvDelimiter; header: 'auto' |
 export interface CsvInfo {
   ref: CsvRef; status: 'indexing' | 'ready' | 'locked'; reason?: string; delimiter: CsvDelimiter; header: boolean; encoding: string
   sourceRecords: number; indexedBytes: number; done: boolean; expectedColumns: number; maxColumnsKnown: number; metadataDone: boolean
+  problems?: { kind: string; count: number; first: CsvSpan; sourceRecord?: number; sourceLine?: number }[]
 }
 export interface CsvContinuation { ref: CsvRef; sourceRecord: number; column: number; offset: number }
 export interface CsvCellPiece {
@@ -160,6 +163,7 @@ export interface Methods {
   structuredBuild: { params: { view: ViewRef }; result: StructuredInfo }
   structuredChildren: { params: { ref: StructuredRef; record?: number; container: number; start: number; count: number }; result: StructuredChildren }
   structuredRows: { params: { ref: StructuredRef; start: number; count: number }; result: StructuredRows }
+  structuredColumns: { params: { ref: StructuredRef; start: number; count: number }; result: StructuredColumns }
   sourceFindStart: { params: { view: ViewRef; query: string; matchCase: boolean }; result: SourceFindInfo }
   sourceFindScan: { params: { ref: SourceFindRef }; result: SourceFindPage }
   sourceFindSeek: { params: { ref: SourceFindRef; from?: number; direction: 'next' | 'previous' }; result: SourceFindSeek }
@@ -202,9 +206,11 @@ export interface Methods {
   /** `bytes`: the lens's viewport-only cache cap, reserved with the document's floor (plan C1); refused, `Memory`. */
   open: { params: { surface?: SurfaceRef; path: string; count: number; bytes: number }; result: Opened }
   /** First screen of a retained document, without reopening or restarting its index. One renderer lens is active. */
-  activate: { params: { surface?: SurfaceRef; doc: number; gen: number; count: number; bytes: number }; result: Opened }
+  activate: { params: { surface?: SurfaceRef; activationId?: string; doc: number; gen: number; count: number; bytes: number }; result: Opened }
   /** Dispose a current view or Reload's exact old settled view, retaining the document/index. Pending activation cannot hand it back. */
   deactivate: { params: { view: ViewRef } | { doc: number; gen: number }; result: boolean }
+  /** Revoke only the exact activation token, including after its lease committed but before the caller received it. */
+  deactivateActivation: { params: { surface: SurfaceRef; activationId: string }; result: boolean }
   /** A window of lines of generation `gen`, or the one piece a continuation token names (plan C3). Rendered: a window of
    *  blocks of the generation's Markdown build (`render`). Cancellable. */
   page: {

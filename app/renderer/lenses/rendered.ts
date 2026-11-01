@@ -109,7 +109,7 @@ export class RenderedLens {
         this.copyAll = true
         this.cancelCopy()
         this.copyStatus.textContent = 'All source text selected · press Ctrl+C to copy'
-      } else if (!((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c')) {
+      } else if (!['Control', 'Meta', 'Shift', 'Alt'].includes(event.key) && !((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c')) {
         this.copyAll = false
         this.cancelCopy()
       }
@@ -129,7 +129,8 @@ export class RenderedLens {
         retiredReserved: this.options.budget?.snapshot().retired ?? 0,
         totalReserved: this.options.budget?.snapshot().total ?? this.reserved,
         blocks: this.blocks,
-        appended: this.column.childElementCount
+        appended: this.column.childElementCount,
+        copyAll: this.copyAll
       })
     this.schedule()
   }

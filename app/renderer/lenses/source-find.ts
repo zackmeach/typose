@@ -120,7 +120,7 @@ export class SourceFind implements FindController {
       if (!this.query.text || !this.paid || this.destroyed) return
       const ranges: Range[] = []
       const viewport = this.scroller.getBoundingClientRect()
-      for (const element of this.scroller.querySelectorAll<HTMLElement>('.vl-row .text')) {
+      for (const element of this.scroller.querySelectorAll<HTMLElement>('.vl-row .text, .tree-row .text, .jsonl-row .text, .transcript-text')) {
         const box = element.getBoundingClientRect()
         if (box.bottom < viewport.top || box.top > viewport.bottom) continue
         const node = element.firstChild

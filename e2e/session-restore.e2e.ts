@@ -2,7 +2,7 @@ import { expect } from '@playwright/test'
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { FIXTURES, finish, fixture, launch, test } from './app'
+import { FIXTURES, finish, fixture, launch, stubOpenDialog, test } from './app'
 import { emptySession } from '../app/shared/session'
 
 test('actual restart preserves cards, selected tabs, lenses and anchors, and keeps missing locations visible', async () => {
@@ -40,6 +40,12 @@ test('actual restart preserves cards, selected tabs, lenses and anchors, and kee
   await expect(restored.nth(1)).toContainText('File not found at ' + csv)
   await expect(restored.nth(1).getByRole('button', { name: 'Locate…', exact: true })).toBeVisible()
   await expect(restored.nth(1).getByRole('button', { name: 'Close', exact: true })).toBeVisible()
+  const replacement = fixture('session-located.csv', 'name,value\nFound again,27\n')
+  await stubOpenDialog(resumed.app, replacement)
+  await restored.nth(1).getByRole('button', { name: 'Locate…', exact: true }).click()
+  await expect(restored.nth(1).getByRole('tab', { name: 'session-located.csv', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await expect(restored.nth(1).getByText('Found again', { exact: true })).toBeInViewport()
+  await expect(restored.nth(1).getByRole('tab', { name: 'session-grid.csv', exact: true })).toHaveCount(0)
   expect(resumed.pageErrors).toEqual([])
   expect(await finish(resumed)).toEqual({ code: 0, signal: null })
 })

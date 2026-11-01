@@ -288,9 +288,11 @@ body {
 }
 @container (max-width: 400px) {
   .card-header {
-    padding: 0 12px;
-    gap: 8px;
+    padding: 0 8px;
+    gap: 4px;
   }
+  .card-header .back-button, .card-header .close-card-button { width: 20px; }
+  .card-header .csv-info-button { width: 24px; padding: 0; }
   .card-status {
     max-width: 5ch;
   }

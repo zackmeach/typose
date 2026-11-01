@@ -12,7 +12,7 @@ test('Print range UI, strict host document validation, and physical page cap', a
   const file = fixture('print-rich.md', '# Print fixture\n\n## Heading\n\nA **bold** paragraph.\n\n- one\n- two\n\n```ts\nconst value = 1\n```\n\n| A | B |\n| - | - |\n| 1 | 2 |\n')
   const netlog = join(FIXTURES, 'print-host.netlog.json')
   const l = await launch({ file, netlog, hooks: true, env: { TYPOSE_TEST_PRINT: '1' } })
-  await waitOpen(l.win)
+  await expect(l.win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 60_000 })
   await waitIndexed(l.win)
   const card = l.win.getByRole('region', { name: 'Reader card 1' })
   await l.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('command', 'print'))
@@ -28,6 +28,14 @@ test('Print range UI, strict host document validation, and physical page cap', a
     { tag: 'img', src: 'https://example.invalid/image.png' }
   ], 1, false))
   expect(invalid).toMatchObject({ kind: 'refused' })
+  expect(await l.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)).toBe(before)
+
+  const cyclic = await l.win.evaluate(async () => {
+    const node: { tag: string; src: string; children?: unknown[] } = { tag: 'img', src: 'data:image/png;base64,AA==' }
+    node.children = [node]
+    return (window as unknown as PrintApi).typose.printDocument('cyclic', [node], 1, false)
+  })
+  expect(cyclic).toMatchObject({ kind: 'refused' })
   expect(await l.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)).toBe(before)
 
   const valid = await l.win.evaluate(async () => (window as unknown as PrintApi).typose.printDocument('safe', [
@@ -59,8 +67,25 @@ test('Escape cancels the print sheet before any document is built', async () => 
   await l.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('command', 'print'))
   const sheet = card.getByRole('dialog', { name: 'Print print-cancel.txt' })
   await expect(sheet).toBeVisible()
-  await sheet.getByRole('button', { name: 'Close' }).focus()
+  await expect(sheet.getByRole('button', { name: 'Close' })).toBeFocused()
   await l.win.keyboard.press('Escape')
   await expect(sheet).toHaveCount(0)
   expect(l.pageErrors).toEqual([])
+})
+
+test('print refuses a source that changes after its Markdown plan was built', async () => {
+  const path = fixture('print-source-change.md', '# Stable source\n\nThe original content.\n')
+  const l = await launch({ file: path, hooks: true, env: { TYPOSE_TEST_PRINT: '1' } })
+  await expect(l.win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 60_000 })
+  await waitIndexed(l.win)
+  fixture('print-source-change.md', '# Changed source\n\nThe bytes changed before print verification.\n')
+  const card = l.win.getByRole('region', { name: 'Reader card 1' })
+  await l.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('command', 'print'))
+  const sheet = card.getByRole('dialog', { name: 'Print print-source-change.md' })
+  await expect(sheet).toBeVisible()
+  await sheet.getByRole('button', { name: 'Continue to print…' }).click()
+  await expect(card.getByRole('status').filter({ hasText: /Print failed · frozen: changed on disk/ })).toBeVisible()
+  expect(await l.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)).toBe(1)
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
 })

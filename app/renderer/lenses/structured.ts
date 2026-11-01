@@ -1,9 +1,10 @@
 import { MAX_PRINT_BYTES, MAX_PRINT_PAGES, type Opened, type SourceSpan, type StructuredNode, type StructuredRow } from '../../shared/protocol'
-import type { CoreClient } from '../core'
+import { CoreCallError, type CoreClient } from '../core'
 import { SourceFind } from './source-find'
 import type { LensBudget } from './lens-budget'
 import type { StructuredSource } from './structured-source'
 import { copySourceSpan } from './source-copy'
+import { SourceCopyQueue } from './source-copy-queue'
 import { PRINT_LINES_PER_PAGE, type PrintPayload, type PrintPlan } from '../print'
 
 export type StructuredMode = 'tree' | 'rows' | 'table' | 'transcript'
@@ -34,10 +35,11 @@ export class StructuredLens {
   private history: number[] = []
   private serial = 0
   private mounted = 0
-  private copyJob?: AbortController
+  private readonly copies = new SourceCopyQueue(token => window.typose.cancelClipboardWrite(token))
   private context?: HTMLElement
   private readonly unsubscribe?: () => void
   private readonly toggles = new WeakMap<HTMLButtonElement, () => Promise<void>>()
+  private columnStart = 0
 
   constructor(host: HTMLElement, private readonly core: CoreClient, private readonly opened: Opened,
     private readonly source: StructuredSource, private readonly mode: StructuredMode, private readonly options: Options) {
@@ -68,22 +70,23 @@ export class StructuredLens {
   private error(error: unknown): void {
     if (this.stopped) return
     this.options.notice(String(error)); this.content.append(el('p', String(error), 'structured-problem'))
-    if (String(error).includes('Frozen')) this.options.onFrozen(String(error))
+    if (error instanceof CoreCallError && error.code === 'Frozen') this.options.onFrozen(error.message)
   }
   private select(node: HTMLElement, span: SourceSpan, tree?: StructuredNode, path = '$'): void {
+    this.copies.cancel()
     this.element.querySelector('[aria-selected="true"]')?.setAttribute('aria-selected', 'false')
     node.setAttribute('aria-selected', 'true'); this.selected = span; this.selectedNode = tree; this.selectedPath = path
   }
   private async treeNode(node: StructuredNode, depth: number, path: string, record?: number, automatic = 0): Promise<HTMLElement> {
     this.mounted++
-    const wrapper = el('div', undefined, 'tree-entry'), row = el('div', undefined, `tree-row vl-row ${node.duplicate ? 'structured-problem' : ''}`)
+    const wrapper = el('div', undefined, 'tree-entry'), row = el('div', undefined, `tree-row ${node.duplicate ? 'structured-problem' : ''}`)
     wrapper.dataset.start = String(node.keySpan?.start ?? node.span.start); wrapper.dataset.end = String(node.span.end); wrapper.dataset.children = String(node.children ?? 0)
     row.setAttribute('role', 'treeitem'); row.setAttribute('aria-level', String(depth + 1)); row.setAttribute('aria-selected', 'false'); row.tabIndex = 0
     const children = el('div', undefined, 'tree-children')
     const fold = el('button', node.container !== undefined ? '›' : ' ', 'tree-fold')
     fold.type = 'button'; fold.disabled = node.container === undefined || depth >= 100
     fold.setAttribute('aria-label', `Expand ${node.key ?? path}`)
-    if (node.key !== undefined) row.append(fold, el('span', node.key + ': ', 'tree-key text'))
+    if (node.key !== undefined) row.append(fold, el('span', node.key + (node.keyMore ? ' … (key preview; Copy key for full source)' : '') + ': ', 'tree-key text'))
     else row.append(fold)
     const summary = node.kind === 'object' ? `{ ${node.children ?? '…'} items }` : node.kind === 'array' ? `[ ${node.children ?? '…'} items ]` : node.text
     row.append(el('span', summary + (node.more ? ' … (preview; copy value for full source)' : ''), `text tree-${node.kind}`))
@@ -143,7 +146,7 @@ export class StructuredLens {
     nav.append(el('span', `Source lines ${result.rows[0] ? result.rows[0].line + 1 : start + 1}–${result.rows.at(-1) ? result.rows.at(-1)!.line + 1 : start + 1}${result.done ? '' : ' · indexing…'}`)); pageBody.append(nav); this.content.replaceChildren(pageBody)
   }
   private row(record: StructuredRow): HTMLElement {
-    const wrapper = el('div', undefined, 'jsonl-entry'), line = el('div', undefined, `jsonl-row vl-row ${record.status === 'failed' ? 'structured-problem' : ''}`)
+    const wrapper = el('div', undefined, 'jsonl-entry'), line = el('div', undefined, `jsonl-row ${record.status === 'failed' ? 'structured-problem' : ''}`)
     line.tabIndex = 0; line.setAttribute('role', 'row'); line.setAttribute('aria-selected', 'false'); wrapper.dataset.line = String(record.line)
     const expand = el('button', record.status === 'failed' ? '!' : '›'); expand.disabled = !record.root; expand.setAttribute('aria-label', `Expand row ${record.line + 1}`)
     line.append(expand, el('span', String(record.line + 1), 'jsonl-number'), el('time', record.timestamp ?? ''), el('span', record.type ?? '', 'jsonl-type'), el('span', record.summary + (record.more ? ' … (preview; copy record for full source)' : ''), 'text'))
@@ -161,18 +164,30 @@ export class StructuredLens {
     if (record.more) { const copy = el('button', `Copy record · ${(record.span.end - record.span.start).toLocaleString()} source bytes`); copy.onclick = () => { void this.copySpan(record.span) }; wrapper.append(copy) }
     wrapper.prepend(line); return wrapper
   }
-  private async fields(row: StructuredRow): Promise<StructuredNode[]> {
+  private async fields(row: StructuredRow, charge?: { bytes: number }): Promise<StructuredNode[]> {
     if (row.root?.container === undefined) return []
     const fields: StructuredNode[] = []; let start: number | undefined = 0
-    while (start !== undefined && fields.length < 1000) {
-      const page = await this.source.children(row.root.container, start, row.line); fields.push(...page.nodes); start = page.next
+    while (start !== undefined) {
+      const page = await this.source.children(row.root.container, start, row.line)
+      if (charge) {
+        charge.bytes += page.nodes.reduce((sum, node) => sum + 384 + (node.key?.length ?? 0) * 2 + node.text.length * 2, 0)
+        if (charge.bytes > 8 << 20) throw new Error('Table source page exceeds its 8 MiB metadata limit · use Rows to inspect or copy the complete record')
+      }
+      fields.push(...page.nodes); start = page.next
     }
     return fields
   }
   private async table(rows: StructuredRow[], parent: HTMLElement): Promise<void> {
-    const projections = await Promise.all(rows.map(async row => ({ row, fields: await this.fields(row) })))
+    if (this.source.info.tableOff) throw new Error(this.source.info.tableOff)
+    const metadata = await this.core.call('structuredColumns', { ref: this.source.info.ref, start: this.columnStart, count: 50 }, this.abort.signal)
+    const projections: { row: StructuredRow; fields: StructuredNode[] }[] = [], charge = { bytes: 0 }
+    for (const row of rows) projections.push({ row, fields: await this.fields(row, charge) })
     if (this.stopped) return
-    const keys = [...new Set(projections.flatMap(entry => entry.fields.map(node => node.key ?? String(node.ordinal))))].slice(0, 100)
+    const keys = metadata.columns.map(column => column.key)
+    const columns = el('div', undefined, 'structured-pagination')
+    if (this.columnStart > 0) { const previous = el('button', 'Previous columns'); previous.onclick = () => { this.columnStart = Math.max(0, this.columnStart - 50); void this.page(this.line).catch(error => this.error(error)) }; columns.append(previous) }
+    if (metadata.next !== undefined) { const next = el('button', 'Next columns'); next.onclick = () => { this.columnStart = metadata.next!; void this.page(this.line).catch(error => this.error(error)) }; columns.append(next) }
+    columns.append(el('span', `Columns ${metadata.columns.length ? this.columnStart + 1 : 0}–${this.columnStart + metadata.columns.length} of ${metadata.total}${metadata.done ? '' : ' · discovering keys…'}`)); parent.append(columns)
     const table = el('table', undefined, 'jsonl-table'), head = el('thead'), header = el('tr')
     header.append(el('th', 'Line')); for (const key of keys) header.append(el('th', key)); header.append(el('th', '…other keys')); head.append(header); table.append(head)
     const body = el('tbody')
@@ -183,11 +198,11 @@ export class StructuredLens {
         line.append(el('td', values.map(node => node.text + (node.more ? ' … (preview)' : '')).join(' · ')))
       }
       const other = fields.filter(node => !keys.includes(node.key ?? String(node.ordinal)))
-      const details = el('td', row.status === 'failed' ? `! ${row.summary}` : other.map(node => `${node.key}: ${node.text}`).join(', '))
+      const details = el('td', row.status === 'failed' ? `! ${row.summary}` : other.map(node => `${node.key}: ${node.text}${node.more ? ' … (preview)' : ''}`).join(', '))
       if (row.status === 'failed') details.className = 'structured-problem'
       const inspect = el('button', 'Inspect record'); inspect.onclick = () => { const tree = this.row(row); details.append(tree); inspect.remove() }; details.append(inspect); line.append(details); body.append(line)
     }
-    table.append(body); parent.append(el('p', 'Columns reflect this source page · Inspect record shows every field.'), table)
+    table.append(body); parent.append(el('p', metadata.done ? 'Source column union · Inspect record shows every field.' : 'Columns grow as indexing discovers keys · …other keys preserves fields outside this column window.'), table)
   }
   private async transcript(rows: StructuredRow[], parent: HTMLElement): Promise<void> {
     const failed = rows.filter(row => row.status === 'failed')
@@ -274,9 +289,8 @@ export class StructuredLens {
   private async copySpan(span: SourceSpan): Promise<boolean> {
     const view = this.opened.view, owner = this.options.budget
     if (!view || !owner || this.stopped) return false
-    this.copyJob?.abort(); const job = new AbortController(); this.copyJob = job; const token = crypto.randomUUID()
-    try { return await copySourceSpan({ valid: () => !this.stopped && this.copyJob === job, reserve: bytes => owner.reserveCopy(this.opened.gen, bytes), read: (start, count, signal) => this.core.call('sourceBytes', { view, start, count }, signal), verify: signal => this.core.call('sourceVerify', { view, ...span }, signal), confirm: async bytes => window.confirm(`Copy ${bytes.toLocaleString()} bytes?`), write: text => window.typose.writeClipboardText(text, token), cancelWrite: () => window.typose.cancelClipboardWrite(token), status: this.options.notice }, span.start, span.end, this.opened.encoding, job.signal) }
-    catch (error) { this.error(error); return false } finally { await owner.reserveCopy(this.opened.gen, 0) }
+    try { return await this.copies.run((current, signal, token) => copySourceSpan({ valid: () => current() && !this.stopped && owner.current(this.opened.gen), reserve: bytes => owner.reserveCopy(this.opened.gen, bytes), read: (start, count, check) => this.core.call('sourceBytes', { view, start, count }, check), verify: check => this.core.call('sourceVerify', { view, ...span }, check), confirm: async bytes => window.confirm(`Copy ${bytes.toLocaleString()} bytes?`), write: text => window.typose.writeClipboardText(text, token), cancelWrite: () => window.typose.cancelClipboardWrite(token), status: this.options.notice }, span.start, span.end, this.opened.encoding, signal), async () => { await owner.reserveCopy(this.opened.gen, 0) }) }
+    catch (error) { this.error(error); return false }
   }
   private reveal(line: number, offset?: number): void {
     this.line = line
@@ -301,10 +315,10 @@ export class StructuredLens {
   focus(): void { this.element.focus() }
   setLineCount(lines: number): void { this.lines = lines }
   indexDone(): void { this.indexed = true }
-  freeze(): void { this.stopped = true; this.abort.abort(); this.copyJob?.abort(); this.find.freeze('source changed') }
-  yieldReservation(): void { this.copyJob?.abort() }
+  freeze(): void { this.stopped = true; this.abort.abort(); this.copies.cancel(); this.find.freeze('source changed') }
+  yieldReservation(): void { this.copies.cancel() }
   resumeReservation(): void {}
-  dispose(): void { this.stopped = true; this.unsubscribe?.(); this.abort.abort(); this.copyJob?.abort(); this.find.destroy(); this.context?.remove(); this.element.remove() }
+  dispose(): void { this.stopped = true; this.unsubscribe?.(); this.abort.abort(); this.copies.cancel(); this.find.destroy(); this.context?.remove(); this.element.remove() }
   printPlan(): PrintPlan { const pages = Math.ceil(this.lines / PRINT_LINES_PER_PAGE); return { unit: 'line', total: this.lines, current: this.line, indexed: this.indexed, totalPages: pages, allFits: pages <= MAX_PRINT_PAGES && this.opened.size <= MAX_PRINT_BYTES } }
   async printRange(start: number, end: number, signal: AbortSignal): Promise<PrintPayload> {
     const view = this.opened.view, owner = this.options.budget

@@ -73,6 +73,15 @@ pub struct CsvInfo {
     pub expected_columns: f64,
     pub max_columns_known: f64,
     pub metadata_done: bool,
+    pub problems: Vec<CsvProblem>,
+}
+#[napi(object)]
+pub struct CsvProblem {
+    pub kind: String,
+    pub count: f64,
+    pub first: CsvSpan,
+    pub source_record: Option<f64>,
+    pub source_line: Option<f64>,
 }
 #[napi(object)]
 pub struct CsvContinuation {
@@ -195,7 +204,19 @@ fn info(state: &State) -> CsvInfo {
         done: index.done,
         expected_columns: index.expected_columns as f64,
         max_columns_known: index.max_columns as f64,
-        metadata_done: false,
+        metadata_done: index.metadata.done,
+        problems: index
+            .metadata
+            .problems
+            .iter()
+            .map(|problem| CsvProblem {
+                kind: problem.kind.into(),
+                count: problem.count as f64,
+                first: CsvSpan { start: problem.first.start as f64, end: problem.first.end as f64 },
+                source_record: problem.record.map(|record| record as f64),
+                source_line: problem.record.map(|_| problem.line as f64),
+            })
+            .collect(),
     }
 }
 fn stale(revision: u32) -> DocError {
@@ -452,7 +473,10 @@ impl Query for ColumnsQuery {
     type Output = CsvColumnPage;
     type JsValue = CsvColumnPage;
     fn run(&self, c: &Context) -> std::result::Result<Self::Output, DocError> {
-        let width = c.state.csv.index.read().unwrap().expected_columns;
+        let (width, metadata_done) = {
+            let index = c.state.csv.index.read().unwrap();
+            (index.max_columns, index.metadata.done)
+        };
         let mut columns = Vec::with_capacity(self.count);
         for column in self.start..self.start.saturating_add(self.count as u64).min(width) {
             if store::cancelled() {
@@ -476,17 +500,22 @@ impl Query for ColumnsQuery {
             };
             let width_units =
                 name.lines().map(|line| line.encode_utf16().count()).max().unwrap_or(0).clamp(12, 60) as f64;
+            let sampled = c.state.csv.index.read().unwrap().metadata.columns.get(column as usize).cloned();
             columns.push(CsvColumn {
                 column: column as f64,
                 name,
                 name_more,
-                kind: "text".into(),
-                width_units,
-                pills: None,
+                kind: sampled
+                    .as_ref()
+                    .map(|column| column.kind.clone())
+                    .filter(|kind| !kind.is_empty())
+                    .unwrap_or_else(|| "text".into()),
+                width_units: sampled.as_ref().map_or(width_units, |column| width_units.max(column.width_units as f64)),
+                pills: sampled.and_then(|column| column.pills),
             });
         }
         let next = self.start + columns.len() as u64;
-        Ok(CsvColumnPage { columns, next_column: (next < width).then_some(next as f64), metadata_done: false })
+        Ok(CsvColumnPage { columns, next_column: (next < width).then_some(next as f64), metadata_done })
     }
     fn convert(&self, p: Self::Output) -> CsvColumnPage {
         p

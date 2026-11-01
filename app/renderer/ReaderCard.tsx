@@ -101,7 +101,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   const reloading = useRef(new Set<TabId>())
   const activationFailed = useRef(new Set<TabId>())
   const live = useRef<{ session: number; doc: number; gen: number; view?: ViewRef } | null>(null)
-  const pendingActivation = useRef<{ session: number; doc: number; gen: number; operation: symbol; selection: SelectionTicket } | null>(null)
+  const pendingActivation = useRef<{ session: number; doc: number; gen: number; activationId: string; operation: symbol; selection: SelectionTicket } | null>(null)
   const lens = useRef<ShownLens | null>(null)
   const [findController, setFindController] = useState<FindController | undefined>(undefined)
   const [findOpen, setFindOpen] = useState(false)
@@ -161,8 +161,8 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     lens.current?.focus()
   }
   function copyAction(): Promise<boolean> {
-    const action = lens.current?.copy
-    if (action) return action()
+    const active = lens.current
+    if (active?.copy) return active.copy()
     shared.notice('Copy is unavailable in this view')
     return Promise.resolve(false)
   }
@@ -182,6 +182,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     printAbort.current = null
     setPrintBusy(false)
     setPrintOpen(false)
+    requestAnimationFrame(() => lens.current?.focus())
   }
   function selectedPrintRange(plan: PrintPlan): { start: number; end: number; pages: number } | null {
     let start = 0, end = plan.total
@@ -288,13 +289,14 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     const owner = budget.current
     if (!owner) return
     const snapshot = owner.snapshot()
-    retiredRendered.current = Math.max(retiredRendered.current, snapshot.rendered + snapshot.grid + (snapshot.search ?? 0) + (snapshot.copy ?? 0), owner.retiredTreeMax)
+    retiredRendered.current = Math.max(retiredRendered.current, snapshot.rendered + snapshot.grid + (snapshot.search ?? 0) + (snapshot.copy ?? 0) + (snapshot.model ?? 0), owner.retiredTreeMax)
     owner.invalidate()
   }
 
   /** Freeze image grants before snapshotting the retired tree; inactive tabs retain no lens DOM. */
   function leave(): void {
-    const native = live.current ?? pendingActivation.current // replacement metadata may already name a different document
+    const native = live.current
+    const pending = pendingActivation.current
     hadFocus.current = lens.current?.element.contains(document.activeElement) ?? false
     const id = displayed.current
     if (id) {
@@ -310,7 +312,9 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     lens.current = null
     live.current = null
     holding.current = null
-    if (native && 'view' in native && native.view && native.session === currentSession.current)
+    if (pending && pending.session === currentSession.current && surface.current)
+      void core.call('deactivateActivation', { surface: surface.current, activationId: pending.activationId }).catch(() => false)
+    if (native?.view && native.session === currentSession.current)
       void core.call('deactivate', { view: native.view }).catch(() => {})
   }
 
@@ -487,16 +491,16 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         if (!active) return
         const info = source.info
         const off = info.status === 'locked' ? info.reason ?? 'Structured view unavailable' : !info.root && info.format !== 'jsonl' ? 'Couldn’t parse · showing Raw' : undefined
-        const preferred: LensName = info.format === 'jsonl' ? info.transcript ? 'transcript' : 'rows' : 'tree'
+        const preferred: LensName = info.format === 'jsonl' ? 'rows' : 'tree'
         const current = latest.current.card
         const already = current.kind === 'open' && current.opened === opened && ['tree', 'rows', 'table', 'transcript'].includes(current.lens ?? '')
         const go = !off && picked.current !== 'raw' && (already || picked.current !== null || !lens.current?.readerMoved())
         const chosen = ['tree', 'rows', 'table', 'transcript'].includes(picked.current ?? '') ? picked.current! : already && lens.current?.readerMoved() ? current.lens! : preferred
-        setCard(c => c.kind === 'open' && c.opened === opened ? { ...c, structured: info, structuredOff: off, lens: go ? chosen : 'raw' } : c)
+        setCard(c => c.kind === 'open' && c.opened === opened ? { ...c, structured: info, structuredOff: off, transcriptOff: info.transcript ? 'Transcript graph is not available in this checkpoint · use Rows' : undefined, lens: go && chosen !== 'transcript' ? chosen : 'raw' } : c)
       }
       update(); unsubscribe = source.subscribe?.(update)
     }).catch(error => {
-      if (active) setCard(c => c.kind === 'open' && c.opened === opened ? { ...c, structuredOff: String(error), lens: 'raw' } : c)
+      if (active) setCard(c => c.kind === 'open' && c.opened === opened ? { ...c, structuredOff: String(error), lens: 'raw', ...(error instanceof CoreCallError && error.code === 'Frozen' ? { frozen: error.message } : {}) } : c)
     })
     return () => { active = false; unsubscribe?.(); ac.abort(); prepared?.dispose(); if (structuredSource.current === prepared) structuredSource.current = null }
   }, [openedNow, core])
@@ -567,7 +571,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       return
     }
     if (key === 'tree' || key === 'rows' || key === 'table' || key === 'transcript') {
-      if (!c.structured || c.structuredOff || key === 'transcript' && !c.structured.transcript) return
+      if (!c.structured || c.structuredOff || key === 'transcript' && (!c.structured.transcript || c.transcriptOff) || key === 'table' && c.structured.tableOff) return
       setCard(d => d.kind === 'open' && d.opened === c.opened ? { ...d, lens: key } : d)
       return
     }
@@ -585,7 +589,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   const manualKey = (path: string) => 'manual:' + path
   function metadata<T>(run: (current: () => boolean) => Promise<T>): Promise<T | null> {
     const ownerSession = currentSession.current
-    return metadataQueue.run(run, () => !closing.current && ownerSession === currentSession.current && workspace.getSnapshot().ready)
+    return metadataQueue.runFor(id, run, () => !closing.current && ownerSession === currentSession.current && workspace.getSnapshot().ready)
       .finally(() => releaseEmptyWorkspace())
   }
   function chargeWorkspace(tabs: readonly Pick<WorkspaceTab, 'key' | 'path'>[], current: () => boolean): Promise<boolean> {
@@ -619,12 +623,15 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     const operation = Symbol()
     pendingNative.current.add(operation)
     try {
-      pendingActivation.current = { session: tab.session, doc: tab.card.opened.doc, gen: tab.card.opened.gen, operation, selection }
-      const opened = await ownerCall('activate', { doc: tab.card.opened.doc, gen: tab.card.opened.gen,
+      const activationId = crypto.randomUUID()
+      pendingActivation.current = { session: tab.session, doc: tab.card.opened.doc, gen: tab.card.opened.gen, activationId, operation, selection }
+      const opened = await ownerCall('activate', { activationId, doc: tab.card.opened.doc, gen: tab.card.opened.gen,
         count: firstCount(l), bytes: rawBytes + 2 * retired })
-      if (!workspace.selected(selection)) { deactivateInactive({ session: tab.session, ...opened }); return }
+      if (!workspace.selected(selection)) { void core.call('deactivateActivation', { surface: surface.current!, activationId }).catch(() => false); return }
       const current = workspace.tab(id)
-      if (current?.card.kind !== 'open' || current.card.opened.doc !== opened.doc || current.card.opened.gen !== opened.gen) { deactivateInactive({ session: tab.session, ...opened }); return }
+      if (current?.card.kind !== 'open' || current.card.opened.doc !== opened.doc || current.card.opened.gen !== opened.gen) {
+        void core.call('deactivateActivation', { surface: surface.current!, activationId }).catch(() => false); return
+      }
       show(id, opened, current, rawBytes, undefined, retired)
     } catch (e) {
       if (!workspace.selected(selection) || e instanceof CoreCallError && e.code === 'CoreGone') return
@@ -756,8 +763,9 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
             workspace.cancel(ticket)
             if (opened.path !== resolvedPath || key.length > keyBound.length) setWorkspaceNotice("Local file changed while opening; source kept")
             // The single-flight guard keeps this source selected while its native holder is restored.
-            const restored = await ownerCall('activate', { doc: source.doc, gen: source.gen, count: firstCount(l), bytes: plan?.bytes ?? rawBytes }).catch(() => null)
-            if (restored) deactivateInactive({ session: sourceSession, ...restored })
+            const activationId = crypto.randomUUID()
+            const restored = await ownerCall('activate', { activationId, doc: source.doc, gen: source.gen, count: firstCount(l), bytes: plan?.bytes ?? rawBytes }).catch(() => null)
+            if (restored) void core.call('deactivateActivation', { surface: surface.current!, activationId }).catch(() => false)
           }
           if (sourceSession === currentSession.current) void core.call('close', { surface: surface.current!, doc: opened.doc }).catch(() => {})
           return false
@@ -898,9 +906,10 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       const retired = Math.max(retiredRendered.current, plan?.retiredTreeMax ?? 0)
       const existing = entry.location.kind === 'manual' ? workspace.find(manualKey(entry.location.path)) : undefined
       if (existing && existing.id !== replace && existing.card.kind === 'open') {
-        const activated = await ownerCall('activate', { doc: existing.card.opened.doc, gen: existing.card.opened.gen,
+        const activationId = crypto.randomUUID()
+        const activated = await ownerCall('activate', { activationId, doc: existing.card.opened.doc, gen: existing.card.opened.gen,
           count: firstCount(l), bytes: rawBytes + 2 * retired })
-        if (ownerSession !== currentSession.current || closing.current) { deactivateInactive({ session: ownerSession, ...activated }); return false }
+        if (ownerSession !== currentSession.current || closing.current) { void core.call('deactivateActivation', { surface: surface.current!, activationId }).catch(() => false); return false }
         leave()
         workspace.select(existing.id, true)
         workspace.remember(existing.id, entry.anchor, entry.lens)
@@ -1094,13 +1103,13 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     }
   }
 
-  async function pick(): Promise<void> {
+  async function pick(locate = false): Promise<void> {
     const chosen = await window.typose.openDialog()
     if (!chosen) return
     const tab = workspace.getSnapshot().selected
     const c = latest.current.card
     // Recovery replaces the unusable slot but obtains new manual authority from the real dialog.
-    await open(chosen, undefined, tab && (c.kind === 'gone' || c.kind === 'failed') && c.localOnly ? tab : undefined)
+    await open(chosen, undefined, tab && (c.kind === 'gone' || c.kind === 'failed') && (locate || c.localOnly) ? tab : undefined)
   }
 
   function openNamed(path: string): void {
@@ -1114,13 +1123,19 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     const tab = workspace.tab(id)
     if (!tab) return
     const idCard = shared.groups.current.find(group => group.workspace === workspace)!.id
+    const closingLastTab = workspace.getSnapshot().tabs.length === 1
+    const abandonPendingHistory = closingLastTab && metadataQueue.pendingFor(idCard) > 0
+    if (abandonPendingHistory) {
+      metadataQueue.invalidate(idCard)
+      shared.budget.current?.cancelPending()
+    }
     navigating.current = true
     setNavigationBusy(true)
     const ownerSession = currentSession.current
     let captured: CapturedLocation | undefined
     try {
       const l = latest.current.limits
-      if (l && tab.session === ownerSession && tab.card.kind === 'open') {
+      if (l && tab.session === ownerSession && tab.card.kind === 'open' && !abandonPendingHistory) {
         pendingHistoryBytes.current = historyDraftBytes(l, false)
         if (await metadata(current => chargeWorkspace(workspace.getSnapshot().tabs, current))) {
           captured = await core.call('captureLocation', { doc: tab.card.opened.doc, gen: tab.card.opened.gen })
@@ -1133,7 +1148,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
             captured = undefined
           }
         } else setWorkspaceNotice('Tab closed · memory budget could not retain Reopen history')
-      }
+      } else if (abandonPendingHistory) setWorkspaceNotice('Tab closed · Reopen history was not retained while pending work was cancelled')
     } catch (e) {
       setWorkspaceNotice('Tab closed · cannot retain Reopen history: ' + (e instanceof Error ? e.message : String(e)))
     } finally {
@@ -1165,7 +1180,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   }
   const actions: Record<Action, () => void> = {
     'Open file…': () => void pick(),
-    'Locate…': () => void pick(),
+    'Locate…': () => void pick(true),
     Retry: () => void reload(),
     Reload: () => void reload(),
     Close: () => close(),
@@ -1208,7 +1223,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         </>
       ) : null}
       {card.kind === 'open' && card.opened.format === 'csv' ? <DialogTrigger>
-        <Button className="csv-info-button" aria-label="File info">ⓘ</Button>
+        <Button className="csv-info-button" aria-label="File info">ⓘ{card.csv?.problems?.length ? <span className="structured-problem" aria-label="File has problems"> ●</span> : null}</Button>
         <Popover className="csv-info-popover" placement="bottom end">
           <Dialog aria-label="CSV file info">
             <p>{card.csv ? `${Math.max(0, card.csv.sourceRecords - (card.csv.header ? 1 : 0))} rows${card.csv.done ? '' : '…'} · ${card.csv.expectedColumns} columns · ${card.csv.encoding}` : 'Preparing CSV…'}</p>
@@ -1217,6 +1232,10 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
               <option value="auto">Auto{detectedDelimiter ? ` (${detectedDelimiter})` : ''}</option><option value=",">Comma</option><option value={'\t'}>Tab</option><option value=";">Semicolon</option><option value="|">Pipe</option>
             </select></label>
             {card.gridOff ? <p>{card.gridOff}</p> : null}
+            <div className="structured-problem-list">{card.csv?.problems?.map(problem => <details key={problem.kind}><summary>{problem.kind === 'ragged' ? 'Ragged rows' : 'Undecodable sequences'}: {problem.count.toLocaleString()}</summary><button type="button" onClick={() => {
+              if (problem.sourceLine !== undefined) { jumpTo.current = problem.sourceLine; onLens('raw') }
+              else if (card.opened.view) void core.call('sourceLineAt', { view: card.opened.view, offset: problem.first.start }).then(result => { jumpTo.current = result.line; onLens('raw') }).catch(error => shared.notice(String(error)))
+            }}>First at {problem.sourceRecord !== undefined ? `source record ${problem.sourceRecord + 1}` : `byte ${problem.first.start}`} · View in Raw</button></details>)}</div>
             <p>Read-only grid · decoded cell values.</p>
           </Dialog>
         </Popover>
@@ -1247,6 +1266,12 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       <Button
         className="banner-button"
         onPress={() => {
+          if (shown.banner?.action === 'View problem in Raw' && card.kind === 'open') {
+            const problem = card.structured?.problems.find(problem => problem.kind === 'parse')
+            if (problem?.line) lens.current?.goTo(problem.line)
+            else if (problem && card.opened.view) void core.call('sourceLineAt', { view: card.opened.view, offset: problem.first.start }).then(result => lens.current?.goTo(result.line + 1)).catch(error => shared.notice(String(error)))
+            return
+          }
           restoreFocus.current = true // the click focuses the button; show() would then drop the scroller's focus
           void reload()
         }}
@@ -1555,7 +1580,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
             {pages > 50 ? <label className="print-confirm"><input type="checkbox" checked={printConfirmed} onChange={event => setPrintConfirmed(event.target.checked)} /> Confirm print job of {pages} pages</label> : null}
             {printBusy ? <p role="status">Preparing print document… Press Escape to cancel.</p> : null}
             <div className="print-actions">
-              <button type="button" onClick={closePrint}>{printBusy ? 'Cancel' : 'Close'}</button>
+              <button type="button" autoFocus onClick={closePrint}>{printBusy ? 'Cancel' : 'Close'}</button>
               <button type="submit" disabled={printBusy || !printPlan.indexed || !range || pages > 50 && !printConfirmed}>Continue to print…</button>
             </div>
           </form>

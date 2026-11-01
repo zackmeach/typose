@@ -59,4 +59,10 @@ describe('YAML 1.2 CST projection', () => {
   it('refuses structural depth beyond the bounded projection', () => {
     expect(() => yamlModel('['.repeat(110) + '0' + ']'.repeat(110))).toThrow(/structural limit/)
   })
+  it('labels bounded key and comment previews while preserving complete source spans', () => {
+    const source = 'k'.repeat(5000) + ': 1 #' + 'c'.repeat(5000) + '\n'
+    const model = yamlModel(source), node = children(model)[0]!
+    expect(node.key).toHaveLength(4096); expect(node.keyMore).toBe(true); expect(node.keySpan?.end).toBe(5000)
+    expect(node.text).toHaveLength(4096); expect(node.more).toBe(true)
+  })
 })

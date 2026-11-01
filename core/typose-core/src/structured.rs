@@ -12,9 +12,18 @@ pub struct JsonTree {
 }
 impl JsonTree {
     pub fn build(doc: &Document, generation: u32, cancel: &AtomicBool) -> Result<Self, DocError> {
+        Self::build_range(doc, generation, 0..doc.len(), true, cancel)
+    }
+    pub fn build_range(
+        doc: &Document,
+        generation: u32,
+        range: std::ops::Range<u64>,
+        jsonc: bool,
+        cancel: &AtomicBool,
+    ) -> Result<Self, DocError> {
         let _temp = Reservation::new(TEMP_BYTES).map_err(DocError::Memory)?;
-        let index =
-            doc.verified(generation, |store| json::scan(store, 0..doc.len(), &ScanOptions::default(), cancel))?;
+        let options = ScanOptions { jsonc, ..ScanOptions::default() };
+        let index = doc.verified(generation, |store| json::scan(store, range, &options, cancel))?;
         if let Some(error) = index.error {
             match error.kind {
                 json::ErrorKind::Memory(e) => return Err(DocError::Memory(e)),

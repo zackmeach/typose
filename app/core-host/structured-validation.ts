@@ -1,4 +1,4 @@
-import type { SourceSpan, StructuredChildren, StructuredInfo, StructuredNode, StructuredProblem, StructuredRef } from '../shared/protocol'
+import type { SourceSpan, StructuredChildren, StructuredColumns, StructuredInfo, StructuredNode, StructuredProblem, StructuredRef, StructuredRows, StructuredRow } from '../shared/protocol'
 
 type RecordValue = Record<string, unknown>
 const record = (value: unknown): value is RecordValue => typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -32,6 +32,7 @@ export function structuredNode(value: unknown, size: number): StructuredNode {
   }
   if (value.key != null) result.key = text(value.key, 4096)
   if (value.keySpan != null) result.keySpan = structuredSpan(value.keySpan, size)
+  if (typeof value.keyMore === 'boolean') result.keyMore = value.keyMore
   if (value.container != null) result.container = number(value.container, 0xffff_ffff)
   if (value.children != null) result.children = number(value.children)
   return result
@@ -56,7 +57,9 @@ export function structuredInfo(value: unknown, base: Omit<StructuredRef, 'revisi
     info.parsedAs = value.parsedAs
   }
   if (value.root != null) info.root = structuredNode(value.root, size)
-  for (const key of ['rows', 'parsed', 'failed', 'blank'] as const) if (value[key] != null) info[key] = number(value[key])
+  for (const key of ['rows', 'parsed', 'failed', 'blank', 'columns'] as const) if (value[key] != null) info[key] = number(value[key])
+  if (value.tableOff != null) info.tableOff = text(value.tableOff, 2048)
+  if (value.schema != null) info.schema = text(value.schema, 64)
   return info
 }
 
@@ -64,4 +67,27 @@ export function structuredChildren(value: unknown, size: number): StructuredChil
   if (!record(value) || !Array.isArray(value.nodes) || value.nodes.length > 128) invalid('child page')
   const nodes = value.nodes.map((node) => structuredNode(node, size))
   return { nodes, ...(value.next == null ? {} : { next: number(value.next) }) }
+}
+
+export function structuredRows(value: unknown, size: number): StructuredRows {
+  if (!record(value) || !Array.isArray(value.rows) || value.rows.length > 128 || typeof value.done !== 'boolean') invalid('record page')
+  const rows: StructuredRow[] = value.rows.map((row: unknown) => {
+    if (!record(row) || row.status !== 'valid' && row.status !== 'failed' || typeof row.more !== 'boolean') invalid('record')
+    return { line: number(row.line), span: structuredSpan(row.span, size), status: row.status,
+      summary: text(row.summary, 8192), more: row.more,
+      ...(row.timestamp == null ? {} : { timestamp: text(row.timestamp, 4096) }),
+      ...(row.type == null ? {} : { type: text(row.type, 4096) }),
+      ...(row.root == null ? {} : { root: structuredNode(row.root, size) }),
+      ...(row.problem == null ? {} : { problem: text(row.problem, 2048) }) }
+  })
+  return { rows, done: value.done, ...(value.nextLine == null ? {} : { nextLine: number(value.nextLine) }) }
+}
+
+export function structuredColumns(value: unknown, size: number): StructuredColumns {
+  if (!record(value) || !Array.isArray(value.columns) || value.columns.length > 128 || typeof value.done !== 'boolean') invalid('column page')
+  const columns = value.columns.map((column: unknown) => {
+    if (!record(column)) invalid('column')
+    return { id: number(column.id), key: text(column.key, 4096), ...(column.span == null ? {} : { span: structuredSpan(column.span, size) }) }
+  })
+  return { columns, total: number(value.total), done: value.done, ...(value.next == null ? {} : { next: number(value.next) }) }
 }

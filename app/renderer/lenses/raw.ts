@@ -146,7 +146,7 @@ export class RawLens {
         event.preventDefault()
         this.copyAll = true
         this.cancelCopy()
-      } else if (event.key !== 'c' || !(event.ctrlKey || event.metaKey)) this.copyAll = false
+      } else if (!['Control', 'Meta', 'Shift', 'Alt'].includes(event.key) && !((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c')) this.copyAll = false
     }, { capture: true })
     for (const type of ['pointerdown', 'wheel'] as const) this.list.element.addEventListener(type, () => { this.copyAll = false; this.cancelCopy() }, { passive: true })
     document.addEventListener('selectionchange', this.selectionChanged)

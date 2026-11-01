@@ -1,7 +1,7 @@
 //! Generation-owned span indexes and bounded structured pages.
 use super::*;
 use std::sync::atomic::{AtomicU32, AtomicU64};
-use typose_core::{json, structured as core_structured};
+use typose_core::{json, jsonl, structured as core_structured};
 
 pub(super) fn format(path: &std::path::Path) -> Option<&'static str> {
     match path.extension().and_then(|s| s.to_str()).map(str::to_ascii_lowercase).as_deref() {
@@ -16,6 +16,8 @@ pub struct Entry {
     revision: u32,
     format: &'static str,
     tree: Option<core_structured::JsonTree>,
+    jsonl: Option<Arc<jsonl::Index>>,
+    cancel: Arc<AtomicBool>,
 }
 #[derive(Default)]
 pub(super) struct Owner {
@@ -29,12 +31,19 @@ impl Owner {
     pub(super) fn close(&self) {
         self.closed.store(true, Ordering::Relaxed);
         self.epoch.fetch_add(1, Ordering::Relaxed);
-        if let Some(flag) = self.pending.lock().unwrap().take() { flag.store(true, Ordering::Relaxed); }
-        self.state.lock().unwrap().take();
+        if let Some(flag) = self.pending.lock().unwrap().take() {
+            flag.store(true, Ordering::Relaxed);
+        }
+        if let Some(entry) = self.state.lock().unwrap().take() {
+            entry.cancel.store(true, Ordering::Relaxed);
+        }
     }
     #[cfg(feature = "test-hooks")]
     pub(super) fn charged(&self) -> u64 {
-        self.state.lock().unwrap().as_ref().and_then(|e| e.tree.as_ref()).map_or(0, |t| t.charged())
+        self.state.lock().unwrap().as_ref().map_or(0, |entry| {
+            entry.tree.as_ref().map_or(0, |tree| tree.charged())
+                + entry.jsonl.as_ref().map_or(0, |index| index.charged())
+        })
     }
     fn current(&self, entry: &Arc<Entry>) -> bool {
         !self.closed.load(Ordering::Relaxed)
@@ -53,6 +62,7 @@ pub struct StructuredNode {
     pub span: StructuredSpan,
     pub key: Option<String>,
     pub key_span: Option<StructuredSpan>,
+    pub key_more: bool,
     pub text: String,
     pub more: bool,
     pub container: Option<u32>,
@@ -82,6 +92,9 @@ pub struct StructuredInfo {
     pub blank: Option<f64>,
     pub done: bool,
     pub problems: Vec<StructuredProblem>,
+    pub columns: Option<f64>,
+    pub table_off: Option<String>,
+    pub schema: Option<String>,
 }
 #[napi(object)]
 pub struct StructuredChildren {
@@ -103,10 +116,8 @@ fn node(
     let children = container.and_then(|id| index.containers.get(id as usize)).map(|c| c.children as f64);
     let key = child
         .key
-        .map(|s| {
-            raw.document()
-                .read(generation, s.start, s.end.min(s.start + 1024))
-                .map(|bytes| raw.source_encoding().decode_without_bom_handling(&bytes).0.into_owned())
+        .map(|key| {
+            raw.document().verified(generation, |store| jsonl::read_string_encoding(store, key, raw.source_encoding()))
         })
         .transpose()?;
     let is_container = container.is_some();
@@ -136,6 +147,7 @@ fn node(
         span: span(child.value),
         key,
         key_span: child.key.map(span),
+        key_more: child.key.is_some_and(|key| key.end - key.start > 4096),
         text: slice.text,
         more: !is_container && (used as u64) < child.value.end - child.value.start,
         container,
@@ -157,6 +169,9 @@ fn describe(raw: &Raw, entry: &Entry) -> std::result::Result<StructuredInfo, Doc
         blank: None,
         done: entry.format != "jsonl",
         problems: Vec::new(),
+        columns: None,
+        table_off: None,
+        schema: None,
     };
     if let Some(tree) = &entry.tree {
         let index = &tree.index;
@@ -220,13 +235,49 @@ fn describe(raw: &Raw, entry: &Entry) -> std::result::Result<StructuredInfo, Doc
                 column: None,
             });
         }
-    } else if entry.format == "json" {
+    } else if entry.format == "json" || entry.format == "jsonl" && entry.jsonl.is_none() {
         info.status = "locked".into();
-        info.reason = Some("Tree is unavailable for UTF-16; Raw remains available".into());
+        info.done = true;
+        info.reason = Some("Structured views are unavailable for UTF-16; Raw remains available".into());
     }
     if entry.format == "yaml" && raw.document().len() > 8 << 20 {
         info.status = "locked".into();
         info.reason = Some("YAML Tree is available up to 8 MiB".into());
+    }
+    if let Some(index) = &entry.jsonl {
+        let progress = index.progress.read().unwrap().clone();
+        info.rows = Some((progress.lines - progress.blank) as f64);
+        info.parsed = Some(progress.parsed as f64);
+        info.failed = Some(progress.failed as f64);
+        info.blank = Some(progress.blank as f64);
+        info.done = progress.done;
+        info.status = if progress.done { "ready" } else { "indexing" }.into();
+        info.columns = Some(index.column_count() as f64);
+        info.table_off = progress.table_off;
+        info.schema = Some(
+            if progress.claude >= 3 {
+                "claude-code-v1"
+            } else if progress.openai_messages + progress.openai_dataset >= 3 {
+                "openai-chat-v1"
+            } else {
+                "generic"
+            }
+            .into(),
+        );
+        if let Some((line, first)) = progress.first_failed {
+            info.problems.push(StructuredProblem {
+                kind: "parse".into(),
+                count: progress.failed as f64,
+                message: "Lines could not be parsed as JSON".into(),
+                first: span(first),
+                line: Some((line + 1) as f64),
+                column: None,
+            });
+        }
+        if let Some(error) = progress.error {
+            info.status = "partial".into();
+            info.reason = Some(error);
+        }
     }
     Ok(info)
 }
@@ -239,6 +290,8 @@ pub struct Build {
     format: &'static str,
     cancel: Arc<AtomicBool>,
     slot: Option<Slot>,
+    existing: Option<Arc<Entry>>,
+    index_temp: Option<Reservation>,
     _charge: Reservation,
     #[cfg(feature = "test-hooks")]
     _task: hooks::Live,
@@ -249,6 +302,9 @@ impl Task for Build {
     fn compute(&mut self) -> Result<Self::Output> {
         let flag = self.cancel.clone();
         Ok(cancellable(&flag, || {
+            if let Some(entry) = &self.existing {
+                return Ok((entry.clone(), describe(&self.raw, entry)?));
+            }
             self.slot = Some(budget::slot(Work::Index, &store::cancelled).map_err(|e| match e {
                 NoSlot::Cancelled => DocError::Cancelled,
                 NoSlot::Budget(e) => DocError::Memory(e),
@@ -259,8 +315,20 @@ impl Task for Build {
             } else {
                 None
             };
-            let entry =
-                Arc::new(Entry { generation: self.generation, revision: self.revision, format: self.format, tree });
+            let jsonl = if self.format == "jsonl" && !utf16 {
+                self.index_temp = Some(Reservation::new(core_structured::TEMP_BYTES).map_err(DocError::Memory)?);
+                Some(Arc::new(jsonl::Index::with_encoding(self.raw.source_encoding())?))
+            } else {
+                None
+            };
+            let entry = Arc::new(Entry {
+                generation: self.generation,
+                revision: self.revision,
+                format: self.format,
+                tree,
+                jsonl,
+                cancel: Arc::new(AtomicBool::new(false)),
+            });
             let info = describe(&self.raw, &entry)?;
             Ok((entry, info))
         }))
@@ -274,6 +342,37 @@ impl Task for Build {
                 return Err(DocError::Stale { current: 0, asked: self.revision });
             }
             self.raw.document().verified(self.generation, |_| Ok(()))?;
+            if self.existing.is_some() {
+                if !self.owner.current(&entry) {
+                    return Err(DocError::Stale { current: 0, asked: self.revision });
+                }
+                return Ok(info);
+            }
+            if let Some(index) = &entry.jsonl {
+                let index = index.clone();
+                let raw = self.raw.clone();
+                let flag = entry.cancel.clone();
+                let slot = self.slot.take().expect("JSONL candidate owns an index slot");
+                let temp = self.index_temp.take().expect("JSONL candidate owns its temporary reservation");
+                let generation = self.generation;
+                #[cfg(feature = "test-hooks")]
+                let job = hooks::Live::new(&hooks::JOBS);
+                std::thread::Builder::new()
+                    .name("typose-jsonl".into())
+                    .spawn(move || {
+                        let _slot = slot;
+                        #[cfg(feature = "test-hooks")]
+                        let _job = job;
+                        let result =
+                            cancellable(&flag, || index.build_reserved(raw.document(), generation, &flag, temp));
+                        if let Err(error) = result {
+                            if !matches!(error, DocError::Cancelled) {
+                                index.progress.write().unwrap().error = Some(error.to_string());
+                            }
+                        }
+                    })
+                    .map_err(DocError::Io)?;
+            }
             self.owner.state.lock().unwrap().replace(entry);
             Ok(info)
         });
@@ -287,6 +386,7 @@ pub struct Children {
     container: u32,
     start: u64,
     count: usize,
+    record: Option<u64>,
     cancel: Arc<AtomicBool>,
     slot: Option<Slot>,
     _charge: Reservation,
@@ -303,11 +403,27 @@ impl Task for Children {
                 NoSlot::Cancelled => DocError::Cancelled,
                 NoSlot::Budget(e) => DocError::Memory(e),
             })?);
-            let tree = self
-                .entry
-                .tree
-                .as_ref()
-                .ok_or_else(|| DocError::Invalid("This structured document has no JSON Tree".into()))?;
+            let record_tree;
+            let tree = if let Some(record) = self.record {
+                if self.entry.format != "jsonl" {
+                    return Err(DocError::Invalid("Record scope is only valid for JSONL".into()));
+                }
+                let range = record_range(&self.raw, self.entry.generation, record)?
+                    .ok_or_else(|| DocError::Invalid("JSONL record is outside the document".into()))?;
+                record_tree = core_structured::JsonTree::build_range(
+                    self.raw.document(),
+                    self.entry.generation,
+                    range.start..range.end,
+                    false,
+                    &flag,
+                )?;
+                &record_tree
+            } else {
+                self.entry
+                    .tree
+                    .as_ref()
+                    .ok_or_else(|| DocError::Invalid("This structured document has no JSON Tree".into()))?
+            };
             let children = tree.children(
                 self.raw.document(),
                 self.entry.generation,
@@ -364,14 +480,33 @@ impl Doc {
         let format = format(raw.document().path())
             .ok_or_else(|| Error::new(Code::Refused, "No structured lens for this format"))?;
         let charge = Reservation::new(core_structured::TEMP_BYTES).map_err(|e| doc_error(DocError::Memory(e)))?;
-        let revision = self
+        let existing = self
             .structured
-            .next
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
-            .map_err(|_| Error::new(Code::Refused, "structured identities exhausted"))?
-            + 1;
-        let epoch = self.structured.epoch.fetch_add(1, Ordering::Relaxed) + 1;
-        if let Some(flag) = self.structured.pending.lock().unwrap().replace(cancel.flag.clone()) { flag.store(true, Ordering::Relaxed); }
+            .state
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|entry| entry.generation == generation && entry.format == format)
+            .cloned();
+        let revision = if let Some(entry) = &existing {
+            entry.revision
+        } else {
+            self.structured
+                .next
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+                .map_err(|_| Error::new(Code::Refused, "structured identities exhausted"))?
+                + 1
+        };
+        let epoch = if existing.is_some() {
+            self.structured.epoch.load(Ordering::Relaxed)
+        } else {
+            self.structured.epoch.fetch_add(1, Ordering::Relaxed) + 1
+        };
+        if existing.is_none() {
+            if let Some(flag) = self.structured.pending.lock().unwrap().replace(cancel.flag.clone()) {
+                flag.store(true, Ordering::Relaxed);
+            }
+        }
         Ok(AsyncTask::new(Build {
             raw: raw.clone(),
             owner: self.structured.clone(),
@@ -381,6 +516,8 @@ impl Doc {
             format,
             cancel: cancel.flag.clone(),
             slot: None,
+            existing,
+            index_temp: None,
             _charge: charge,
             #[cfg(feature = "test-hooks")]
             _task: hooks::Live::new(&hooks::TASKS),
@@ -395,6 +532,7 @@ impl Doc {
         start: f64,
         count: f64,
         cancel: &Cancel,
+        record: Option<f64>,
     ) -> std::result::Result<AsyncTask<Children>, Error<Code>> {
         let generation = int("gen", generation)? as u32;
         let revision = int("gen", revision)? as u32;
@@ -423,8 +561,357 @@ impl Doc {
             container,
             start,
             count,
+            record: record.map(|line| int("line", line)).transpose()?,
             cancel: cancel.flag.clone(),
             slot: None,
+            _charge: charge,
+            #[cfg(feature = "test-hooks")]
+            _task: hooks::Live::new(&hooks::TASKS),
+        }))
+    }
+}
+
+fn record_range(raw: &Raw, generation: u32, line: u64) -> std::result::Result<Option<json::Span>, DocError> {
+    let start = if line == 0 {
+        0
+    } else {
+        let Some(start) = raw.line_offset(generation, line)? else {
+            return Ok(None);
+        };
+        start
+    };
+    if start >= raw.document().len() {
+        return Ok(None);
+    }
+    let end = if let Some(end) = raw.line_offset(generation, line + 1)? {
+        end
+    } else if raw.lines_known().1 {
+        raw.document().len()
+    } else {
+        return Err(DocError::Refused("The record end is not indexed yet".into()));
+    };
+    Ok(Some(json::Span { start, end }))
+}
+
+#[napi(object)]
+pub struct StructuredRow {
+    pub line: f64,
+    pub span: StructuredSpan,
+    pub status: String,
+    pub timestamp: Option<String>,
+    pub r#type: Option<String>,
+    pub summary: String,
+    pub root: Option<StructuredNode>,
+    pub problem: Option<String>,
+    pub more: bool,
+}
+#[napi(object)]
+pub struct StructuredRows {
+    pub rows: Vec<StructuredRow>,
+    pub next_line: Option<f64>,
+    pub done: bool,
+}
+#[napi(object)]
+pub struct StructuredColumn {
+    pub id: f64,
+    pub key: String,
+    pub span: StructuredSpan,
+}
+#[napi(object)]
+pub struct StructuredColumns {
+    pub columns: Vec<StructuredColumn>,
+    pub next: Option<f64>,
+    pub total: f64,
+    pub done: bool,
+}
+
+fn row(
+    raw: &Raw,
+    generation: u32,
+    line: u64,
+    range: json::Span,
+    flag: &AtomicBool,
+) -> std::result::Result<Option<StructuredRow>, DocError> {
+    let tree = core_structured::JsonTree::build_range(raw.document(), generation, range.start..range.end, false, flag)?;
+    if tree.index.root.is_none() && tree.index.error.is_none() {
+        return Ok(None);
+    }
+    let bytes = raw.document().read(generation, range.start, range.end.min(range.start + 4096))?;
+    let mut result = StructuredRow {
+        line: line as f64,
+        span: span(range),
+        status: if tree.index.error.is_some() { "failed" } else { "valid" }.into(),
+        timestamp: None,
+        r#type: None,
+        summary: raw.source_encoding().decode_without_bom_handling(&bytes).0.trim().into(),
+        root: None,
+        problem: None,
+        more: range.end - range.start > 4096,
+    };
+    if let Some(error) = tree.index.error {
+        result.problem = Some(
+            match error.kind {
+                json::ErrorKind::Syntax(message) => message,
+                json::ErrorKind::TooDeep => "Nesting limit reached",
+                _ => "Record parsing stopped",
+            }
+            .into(),
+        );
+    }
+    if let Some((kind, value)) = tree.index.root {
+        if value.end > 0 {
+            let container = matches!(kind, json::Kind::Object | json::Kind::Array).then_some(0);
+            result.root = Some(node(
+                raw,
+                generation,
+                &tree.index,
+                0,
+                json::Child { key: None, value, kind, container, text: Vec::new() },
+                false,
+            )?);
+        }
+        if kind == json::Kind::Object && tree.index.error.is_none() {
+            let mut summary_found = false;
+            raw.document().verified(generation, |store| {
+                jsonl::visit_members(store, &tree.index, 0, |child| {
+                    let Some(key) = child.key.filter(|key| key.end - key.start <= 4096) else {
+                        return Ok(true);
+                    };
+                    let key = jsonl::read_string_encoding(store, key, raw.source_encoding())?;
+                    if result.timestamp.is_none()
+                        && matches!(key.as_str(), "ts" | "time" | "timestamp" | "created_at")
+                        && matches!(child.kind, json::Kind::String | json::Kind::Number)
+                    {
+                        result.timestamp =
+                            Some(jsonl::read_string_encoding(store, child.value, raw.source_encoding())?);
+                    }
+                    if result.r#type.is_none()
+                        && matches!(key.as_str(), "type" | "role" | "level" | "event")
+                        && child.kind == json::Kind::String
+                    {
+                        result.r#type = Some(jsonl::read_string_encoding(store, child.value, raw.source_encoding())?);
+                    }
+                    if !summary_found
+                        && matches!(key.as_str(), "message" | "msg" | "text" | "content" | "summary")
+                        && child.kind == json::Kind::String
+                    {
+                        result.summary = jsonl::read_string_encoding(store, child.value, raw.source_encoding())?;
+                        result.more = child.value.end - child.value.start > 4096;
+                        summary_found = true;
+                    }
+                    Ok(!(summary_found && result.timestamp.is_some() && result.r#type.is_some()))
+                })
+            })?;
+        }
+    }
+    Ok(Some(result))
+}
+fn check_read(raw: &Raw, owner: &Owner, entry: &Arc<Entry>, flag: &AtomicBool) -> std::result::Result<(), DocError> {
+    if flag.load(Ordering::Relaxed) {
+        return Err(DocError::Cancelled);
+    }
+    if !owner.current(entry) {
+        return Err(DocError::Stale { current: 0, asked: entry.revision });
+    }
+    raw.document().verified(entry.generation, |_| Ok(()))
+}
+pub struct Rows {
+    raw: Arc<Raw>,
+    owner: Arc<Owner>,
+    entry: Arc<Entry>,
+    start: u64,
+    count: usize,
+    cancel: Arc<AtomicBool>,
+    slot: Option<Slot>,
+    _charge: Reservation,
+    #[cfg(feature = "test-hooks")]
+    _task: hooks::Live,
+}
+impl Task for Rows {
+    type Output = std::result::Result<StructuredRows, DocError>;
+    type JsValue = StructuredRows;
+    fn compute(&mut self) -> Result<Self::Output> {
+        let flag = self.cancel.clone();
+        Ok(cancellable(&flag, || {
+            self.slot = Some(budget::slot(Work::Page, &store::cancelled).map_err(|e| match e {
+                NoSlot::Cancelled => DocError::Cancelled,
+                NoSlot::Budget(e) => DocError::Memory(e),
+            })?);
+            check_read(&self.raw, &self.owner, &self.entry, &flag)?;
+            if self.entry.format != "jsonl" || self.entry.jsonl.is_none() {
+                return Err(DocError::Refused("Rows are unavailable for this document".into()));
+            }
+            let (mut at, mut scanned, mut source_bytes, mut wire) = (self.start, 0, 0, 1024);
+            let mut rows = Vec::with_capacity(self.count);
+            let mut done = false;
+            while rows.len() < self.count && scanned < 512 && source_bytes < 4 << 20 {
+                if store::cancelled() {
+                    return Err(DocError::Cancelled);
+                }
+                let range = match record_range(&self.raw, self.entry.generation, at) {
+                    Ok(Some(range)) => range,
+                    Ok(None) => {
+                        done = self.raw.lines_known().1;
+                        break;
+                    }
+                    Err(DocError::Refused(_)) => break,
+                    Err(error) => return Err(error),
+                };
+                source_bytes += range.end - range.start;
+                scanned += 1;
+                if let Some(value) = row(&self.raw, self.entry.generation, at, range, &flag)? {
+                    let cost = 1024
+                        + 6 * (value.summary.encode_utf16().count()
+                            + value.root.as_ref().map_or(0, |n| n.text.encode_utf16().count())
+                            + value.timestamp.as_ref().map_or(0, |s| s.encode_utf16().count())
+                            + value.r#type.as_ref().map_or(0, |s| s.encode_utf16().count()));
+                    if wire + cost > 256 << 10 {
+                        break;
+                    }
+                    wire += cost;
+                    rows.push(value);
+                }
+                at += 1;
+                if range.end == self.raw.document().len() {
+                    done = true;
+                    break;
+                }
+            }
+            Ok(StructuredRows { rows, next_line: (!done).then_some(at as f64), done })
+        }))
+    }
+    fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        output
+            .and_then(|page| {
+                check_read(&self.raw, &self.owner, &self.entry, &self.cancel)?;
+                Ok(page)
+            })
+            .map_err(|e| Error::from(JsError::from(doc_error(e)).into_unknown(env)))
+    }
+}
+pub struct Columns {
+    raw: Arc<Raw>,
+    owner: Arc<Owner>,
+    entry: Arc<Entry>,
+    start: usize,
+    count: usize,
+    cancel: Arc<AtomicBool>,
+    _charge: Reservation,
+    #[cfg(feature = "test-hooks")]
+    _task: hooks::Live,
+}
+impl Task for Columns {
+    type Output = std::result::Result<StructuredColumns, DocError>;
+    type JsValue = StructuredColumns;
+    fn compute(&mut self) -> Result<Self::Output> {
+        let result = (|| {
+            check_read(&self.raw, &self.owner, &self.entry, &self.cancel)?;
+            let index =
+                self.entry.jsonl.as_ref().ok_or_else(|| DocError::Refused("No JSONL columns are available".into()))?;
+            let mut columns = Vec::with_capacity(self.count);
+            let mut wire = 1024;
+            for (offset, column) in index.columns(self.start, self.count).into_iter().enumerate() {
+                let cost = 512 + 6 * column.key.encode_utf16().count();
+                if wire + cost > 256 << 10 {
+                    break;
+                }
+                wire += cost;
+                columns.push(StructuredColumn {
+                    id: (self.start + offset) as f64,
+                    key: column.key,
+                    span: span(column.span),
+                });
+            }
+            let total = index.column_count();
+            let next = self.start + columns.len();
+            let done = index.progress.read().unwrap().done;
+            Ok(StructuredColumns { columns, next: (next < total).then_some(next as f64), total: total as f64, done })
+        })();
+        Ok(result)
+    }
+    fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        output
+            .and_then(|page| {
+                check_read(&self.raw, &self.owner, &self.entry, &self.cancel)?;
+                Ok(page)
+            })
+            .map_err(|e| Error::from(JsError::from(doc_error(e)).into_unknown(env)))
+    }
+}
+#[napi]
+impl Doc {
+    fn structured_entry(
+        &self,
+        generation: f64,
+        revision: f64,
+    ) -> std::result::Result<(Arc<Raw>, Arc<Entry>), Error<Code>> {
+        let generation = int("gen", generation)? as u32;
+        let revision = int("gen", revision)? as u32;
+        let raw = self.raw()?.clone();
+        let entry = self
+            .structured
+            .state
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|e| e.generation == generation && e.revision == revision)
+            .cloned()
+            .ok_or_else(|| Error::new(Code::Stale, "Structured index was replaced"))?;
+        Ok((raw, entry))
+    }
+    #[napi(ts_return_type = "Promise<StructuredRows>")]
+    pub fn structured_rows(
+        &self,
+        generation: f64,
+        revision: f64,
+        start: f64,
+        count: f64,
+        cancel: &Cancel,
+    ) -> std::result::Result<AsyncTask<Rows>, Error<Code>> {
+        let (raw, entry) = self.structured_entry(generation, revision)?;
+        let start = int("line", start)?;
+        let count = int("count", count)? as usize;
+        if count > 128 {
+            return Err(Error::new(Code::InvalidParams, "Rows count exceeds 128"));
+        }
+        let charge = Reservation::new(core_structured::TEMP_BYTES).map_err(|e| doc_error(DocError::Memory(e)))?;
+        Ok(AsyncTask::new(Rows {
+            raw,
+            owner: self.structured.clone(),
+            entry,
+            start,
+            count,
+            cancel: cancel.flag.clone(),
+            slot: None,
+            _charge: charge,
+            #[cfg(feature = "test-hooks")]
+            _task: hooks::Live::new(&hooks::TASKS),
+        }))
+    }
+    #[napi(ts_return_type = "Promise<StructuredColumns>")]
+    pub fn structured_columns(
+        &self,
+        generation: f64,
+        revision: f64,
+        start: f64,
+        count: f64,
+        cancel: &Cancel,
+    ) -> std::result::Result<AsyncTask<Columns>, Error<Code>> {
+        let (raw, entry) = self.structured_entry(generation, revision)?;
+        let start = usize::try_from(int("start", start)?)
+            .map_err(|_| Error::new(Code::InvalidParams, "Column start exceeds platform range"))?;
+        let count = int("count", count)? as usize;
+        if count > 128 {
+            return Err(Error::new(Code::InvalidParams, "Column count exceeds 128"));
+        }
+        let charge = Reservation::new(core_structured::TEMP_BYTES).map_err(|e| doc_error(DocError::Memory(e)))?;
+        Ok(AsyncTask::new(Columns {
+            raw,
+            owner: self.structured.clone(),
+            entry,
+            start,
+            count,
+            cancel: cancel.flag.clone(),
             _charge: charge,
             #[cfg(feature = "test-hooks")]
             _task: hooks::Live::new(&hooks::TASKS),

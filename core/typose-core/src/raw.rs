@@ -118,12 +118,17 @@ impl Raw {
         self.index.read().unwrap().encoding
     }
     pub fn source_line_at(&self, generation: u32, offset: u64) -> Result<Option<u64>, DocError> {
-        if offset == 0 { return self.doc.verified(generation, |_| Ok(Some(0))); }
+        if offset == 0 {
+            return self.doc.verified(generation, |_| Ok(Some(0)));
+        }
         let index = self.index.read().unwrap();
-        if offset > index.indexed_bytes { return Ok(None); }
+        if offset > index.indexed_bytes {
+            return Ok(None);
+        }
         let at = index.checkpoints.partition_point(|cp| cp.offset <= offset).saturating_sub(1);
         let cp = index.checkpoints.get(at);
-        let start = if crate::encoding::newline_and_cr(index.encoding).0.len() == 2 { cp.offset & !1 } else { cp.offset };
+        let start =
+            if crate::encoding::newline_and_cr(index.encoding).0.len() == 2 { cp.offset & !1 } else { cp.offset };
         self.doc.verified(generation, |store| {
             let bytes = store.read(start, offset)?;
             Ok(Some(cp.line + crate::encoding::newline_ends(index.encoding, start, &bytes).count() as u64))

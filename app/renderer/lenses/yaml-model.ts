@@ -1,4 +1,4 @@
-import { Composer, Parser, isAlias, isMap, isScalar, isSeq, type Document, type Node } from 'yaml'
+import { Composer, Lexer, Parser, isAlias, isMap, isScalar, isSeq, type Document, type Node } from 'yaml'
 import type { StructuredChildren, StructuredInfo, StructuredNode, StructuredProblem } from '../../shared/protocol'
 
 export const YAML_MAX_BYTES = 8 << 20
@@ -22,16 +22,30 @@ export function yamlModel(source: string, encoding = 'utf-8', bom = 0) {
   const parents = new Map<StructuredNode, StructuredNode>()
   const problems: StructuredProblem[] = []
   let serial = 0, count = 0
+  const lineStarts = [0]
+  for (let at = 0; at < source.length; at++) if (source.charCodeAt(at) === 10) lineStarts.push(at + 1)
   const span = (start: number, end: number) => ({ start: offsets[Math.min(start, source.length)]!, end: offsets[Math.min(end, source.length)]! })
   const problem = (kind: string, message: string, start: number, end: number) => {
-    const line = source.slice(0, start).split('\n').length
+    const existing = problems.find(problem => problem.kind === kind)
+    if (existing) { existing.count++; return }
+    let low = 0, high = lineStarts.length
+    while (low < high) { const mid = (low + high) >>> 1; if (lineStarts[mid]! <= start) low = mid + 1; else high = mid }
+    const line = low
     problems.push({ kind, count: 1, message, first: span(start, end), line })
   }
   // Adapted from the spike's CST token walk: regex cannot distinguish block scalars from comments.
   const comments: { offset: number; source: string }[] = [], tags: { offset: number; source: string }[] = []
   const documents: Document.Parsed[] = []
   const composer = new Composer({ version: '1.2', schema: 'core', keepSourceTokens: true, uniqueKeys: false, strict: true })
-  for (const cst of new Parser().parse(source)) {
+  function* boundedCst() {
+    const parser = new Parser(); let tokens = 0
+    for (const token of new Lexer().lex(source)) {
+      if (++tokens > 400_000) throw new Error('YAML Tree structural limit exceeded (400,000 CST tokens)')
+      yield* parser.next(token)
+    }
+    yield* parser.end()
+  }
+  for (const cst of boundedCst()) {
     const stack: unknown[] = [cst]
     while (stack.length) {
       const token = stack.pop()
@@ -44,6 +58,7 @@ export function yamlModel(source: string, encoding = 'utf-8', bom = 0) {
     documents.push(...composer.next(cst))
   }
   documents.push(...composer.end())
+  tags.sort((a, b) => a.offset - b.offset)
   function node(value: Node | null, ordinal: number, depth: number, key?: Node | null): StructuredNode {
     if (++count > MAX_NODES || depth > MAX_DEPTH) throw new Error('YAML Tree structural limit exceeded (100,000 nodes / 100 levels)')
     const range = value?.range ?? [key?.range?.[1] ?? 0, key?.range?.[1] ?? 0]
@@ -52,10 +67,12 @@ export function yamlModel(source: string, encoding = 'utf-8', bom = 0) {
     const kind = isMap(value) ? 'object' : isSeq(value) ? 'array' : isAlias(value) ? 'alias' : isScalar(value) ? value.value === null ? 'null' : typeof value.value === 'boolean' ? 'boolean' : typeof value.value === 'number' || typeof value.value === 'bigint' ? 'number' : 'string' : 'null'
     const item: StructuredNode = { ordinal, kind, span: span(start, end), text: text.slice(0, 4096), more: text.length > 4096 }
     if (value) projected.set(value, item)
-    if (key?.range) { item.key = source.slice(key.range[0], key.range[1]); item.keySpan = span(key.range[0], key.range[1]) }
+    if (key?.range) { const text = source.slice(key.range[0], key.range[1]); item.key = text.slice(0, 4096); item.keyMore = text.length > 4096; item.keySpan = span(key.range[0], key.range[1]) }
     if (value?.tag) {
-      const tag = tags.filter(token => token.offset < start && !source.slice(token.offset + token.source.length, start).includes('\n')).at(-1)
-      if (tag) item.text = `${tag.source} ${item.text}`
+      let low = 0, high = tags.length
+      while (low < high) { const mid = (low + high) >>> 1; if (tags[mid]!.offset < start) low = mid + 1; else high = mid }
+      const tag = tags[low - 1]
+      if (tag && !source.slice(tag.offset + tag.source.length, start).includes('\n')) item.text = `${tag.source} ${item.text}`
     }
     if (value && 'anchor' in value && value.anchor) anchors.set(value.anchor, value)
     if (isMap(value) || isSeq(value)) {
@@ -101,9 +118,9 @@ export function yamlModel(source: string, encoding = 'utf-8', bom = 0) {
     const fullLine = source.slice(lineStart, comment.offset).trim() === ''
     if (!fullLine) {
       const owner = preceding(endings, offsets[comment.offset]!, true)
-      if (owner) { owner.text += ` ${comment.source}`; continue }
+      if (owner) { const text = `${owner.text} ${comment.source}`; owner.text = text.slice(0, 4096); owner.more ||= text.length > 4096; continue }
     }
-    const entry: StructuredNode = { ordinal: 0, kind: 'comment', span: span(comment.offset, comment.offset + comment.source.length), text: comment.source, more: false }
+    const entry: StructuredNode = { ordinal: 0, kind: 'comment', span: span(comment.offset, comment.offset + comment.source.length), text: comment.source.slice(0, 4096), more: comment.source.length > 4096 }
     let owner = preceding(values, entry.span.start, false)
     while (owner && (owner.container === undefined || owner.kind === 'alias' || owner.span.end < entry.span.end)) owner = parents.get(owner)
     if (owner) { const children = containers.get(owner.container!)!; children.push(entry); children.sort((a, b) => a.span.start - b.span.start); owner.children = children.length }
