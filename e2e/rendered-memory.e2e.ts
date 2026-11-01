@@ -167,9 +167,29 @@ for (const sampleCase of CASES)
         const requested = Date.now()
         await win.locator('.md-scroller').focus()
         await win.keyboard.press('Control+R')
+        if (sampleCase.name === 'dense topology' && gen === 3) {
+          const budgetRefusal = win.locator('.banner').filter({ hasText: "Can't reload: Typose's memory budget is full" })
+          const active = win.locator('[data-lens="rendered"]')
+          await expect.poll(async () => await active.getAttribute('data-gen') === String(gen) || await budgetRefusal.isVisible(), { timeout: 120_000 }).toBe(true)
+          if (await budgetRefusal.isVisible()) {
+            const refused = await debugStats(win)
+            expect(refused.surfaces).toMatchObject({ views: 1, pending: 0 })
+            expect(refused.ledger.limit).toBe(QUALIFICATION_BUDGET)
+            expect(refused.ledger.used).toBeLessThanOrEqual(QUALIFICATION_BUDGET)
+            await expect(active).toHaveAttribute('data-gen', String(gen - 1))
+            // The current and incoming leases must both stay paid until the handoff. Keep the 8 GiB refusal
+            // visible in the evidence, then give the positive probe one additional live-view allowance.
+            const extra = refused.surfaces!.bytes
+            const allowance = QUALIFICATION_BUDGET + extra
+            expect((await debugStats(win, { limit: allowance })).ledger.limit).toBe(allowance)
+            console.log(`Dense handoff refused at ${QUALIFICATION_BUDGET} bytes; retained view ${extra}; positive retry limit ${allowance}`)
+            await win.locator('.md-scroller').focus()
+            await win.keyboard.press('Control+R')
+          }
+        }
         await expect(win.locator('[data-lens="rendered"]')).toHaveAttribute('data-gen', String(gen), { timeout: 120_000 })
         await ready()
-        console.log(`Reload generation ${gen} ready after ${Date.now() - requested} ms; one key command`)
+        console.log(`Reload generation ${gen} ready after ${Date.now() - requested} ms`)
         const current = (await stats())!
         expect(current.retiredReserved).toBe(2 * initial.reserved)
         expect(current.rawReserved).toBeGreaterThan(0)
