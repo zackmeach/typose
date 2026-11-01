@@ -23,6 +23,8 @@ use typose_core::store::{self, cancellable};
 
 mod csv;
 mod find;
+mod source;
+mod structured;
 
 /// Progress is throttled to 10 Hz, except while a first screen of lines is still filling (spec §3.4).
 const FIRST_SCREEN_LINES: u64 = 256;
@@ -603,6 +605,10 @@ impl FolderRoot {
     pub fn path(&self) -> std::result::Result<String, Error<Code>> {
         Ok(self.state.info().map_err(doc_error)?.1)
     }
+    #[napi(getter)]
+    pub fn identity(&self) -> std::result::Result<String, Error<Code>> {
+        self.state.identity().map_err(doc_error)
+    }
     #[napi(ts_return_type = "Promise<FolderPage>")]
     pub fn list(
         &self,
@@ -645,6 +651,7 @@ impl FolderRoot {
             built: Built::default(),
             csv: Arc::default(),
             find: Arc::default(),
+            structured: Arc::default(),
         })
     }
     #[napi]
@@ -695,6 +702,7 @@ impl SavedRoute {
             built: Built::default(),
             csv: Arc::default(),
             find: Arc::default(),
+            structured: Arc::default(),
         })
     }
 
@@ -721,6 +729,7 @@ pub struct Doc {
     built: Built,
     csv: Arc<csv::Owner>,
     find: Arc<find::Owner>,
+    structured: Arc<structured::Owner>,
 }
 
 #[napi]
@@ -739,6 +748,7 @@ impl Doc {
             built: Built::default(),
             csv: Arc::default(),
             find: Arc::default(),
+            structured: Arc::default(),
         })
     }
 
@@ -807,6 +817,8 @@ impl Doc {
             "markdown"
         } else if csv::supported(path) {
             "csv"
+        } else if let Some(format) = structured::format(path) {
+            format
         } else {
             "text"
         }
@@ -959,6 +971,7 @@ impl Doc {
             built: Built::default(),
             csv: Arc::default(),
             find: Arc::default(),
+            structured: Arc::default(),
         })
     }
 
@@ -968,6 +981,8 @@ impl Doc {
     pub fn reload(&mut self) -> std::result::Result<(), Error<Code>> {
         let next = self.raw()?.reload().map_err(doc_error)?;
         self.csv.close();
+        self.structured.close();
+        self.structured = Arc::default();
         self.find.close();
         self.csv = Arc::default();
         self.clear_images();
@@ -980,6 +995,8 @@ impl Doc {
     pub fn reload_in_folder(&mut self, root: &FolderRoot) -> std::result::Result<(), Error<Code>> {
         let next = self.raw()?.reload_in_folder(Some(&root.state)).map_err(doc_error)?;
         self.csv.close();
+        self.structured.close();
+        self.structured = Arc::default();
         self.find.close();
         self.csv = Arc::default();
         self.clear_images();
@@ -993,6 +1010,7 @@ impl Doc {
     #[napi]
     pub fn close(&mut self) {
         self.csv.close();
+        self.structured.close();
         self.find.close();
         self.clear_images();
         self.raw = None;
@@ -1236,8 +1254,9 @@ pub mod test_hooks {
         let images = doc.images.as_ref().map(|resources| resources.charged()).unwrap_or(0);
         let csv = doc.csv.charged();
         let find = doc.find.charged();
+        let structured = doc.structured.charged();
         let [hashes, checkpoints, cache, metadata, total] =
-            [c.hashes, c.checkpoints, c.cache, c.metadata, c.total() + rendered + images + csv + find]
+            [c.hashes, c.checkpoints, c.cache, c.metadata, c.total() + rendered + images + csv + find + structured]
                 .map(|n| n as f64);
         Ok(Charges { hashes, checkpoints, cache, metadata, total, lines_stopped: raw.lines_stopped() })
     }
@@ -1264,6 +1283,7 @@ pub mod test_hooks {
 impl Drop for Doc {
     fn drop(&mut self) {
         self.csv.close();
+        self.structured.close();
         self.find.close();
         self.clear_images();
     }

@@ -1,0 +1,27 @@
+.structured-host { height:100%; min-height:0; overflow:hidden; }
+.structured-view { height:100%; overflow:auto; position:relative; font-family:var(--font-mono,monospace); font-size:var(--size-mono,13px); line-height:1.55; }
+.structured-content { min-width:max-content; padding:8px 12px; }
+.tree-row { display:flex; align-items:baseline; min-height:26px; white-space:pre; cursor:default; }
+.tree-row[aria-selected=true], .jsonl-row[aria-selected=true], .jsonl-table tr[aria-selected=true] { background:var(--surface-raised,#29292d); outline:1px solid var(--accent,#a3a3ef); }
+.tree-children { margin-left:18px; padding-left:8px; border-left:1px solid var(--guide,#434348); }
+.tree-fold { width:20px; background:none; border:none; color:inherit; padding:0; cursor:pointer; flex:none; }
+.tree-fold:disabled { opacity:.35; cursor:default; }
+.tree-string { color:var(--data-string,#80bc92); }
+.tree-number { color:var(--data-number,#d9bc75); }
+.tree-boolean { color:var(--data-boolean,#bc9ade); }
+.tree-null,.tree-comment { color:var(--text-secondary,#aaa); }
+.tree-comment { font-style:italic; }
+.structured-problem { color:var(--warning,#d8ad60); }
+.jsonl-row { display:flex; gap:12px; align-items:baseline; min-height:32px; border-bottom:1px solid var(--hairline,#29292d); white-space:pre-wrap; }
+.jsonl-row .text { white-space:pre-wrap; max-width:120ch; overflow-wrap:anywhere; }
+.jsonl-number { color:var(--text-secondary,#aaa); min-width:4ch; }
+.jsonl-type { background:var(--surface-raised,#29292d); border-radius:4px; padding:0 5px; }
+.jsonl-table { border-collapse:collapse; }
+.jsonl-table th,.jsonl-table td { text-align:left; border-bottom:1px solid var(--hairline,#29292d); padding:6px 12px; max-width:70ch; white-space:pre-wrap; overflow-wrap:anywhere; }
+.structured-pagination { display:flex; gap:16px; padding:14px 0; align-items:center; }
+.structured-context { position:fixed; z-index:50; display:flex; flex-direction:column; background:var(--surface,#202023); border:1px solid var(--border,#454549); padding:4px; }
+.transcript-turn,.transcript-conversation { max-width:70ch; min-width:35ch; margin:0 auto; padding:16px 0; border-bottom:1px solid var(--hairline,#29292d); }
+.transcript-turn h3 { font:inherit; font-weight:600; margin:0 0 8px; }
+.transcript-text { font:inherit; white-space:pre-wrap; overflow-wrap:anywhere; margin:0 0 10px; }
+.session-event { color:var(--text-secondary,#aaa); }
+.structured-problem-list { max-height:320px; overflow:auto; }

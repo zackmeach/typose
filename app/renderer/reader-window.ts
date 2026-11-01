@@ -4,6 +4,7 @@ import type { CoreClient } from './core'
 import type { RootView } from './folders'
 import type { SavedLocation, TabId, WorkspaceMetadataQueue, WorkspaceStore, WorkspaceTab } from './workspace'
 import type { WorkspaceBudget } from './workspace-budget'
+import type { SessionCard } from '../shared/session'
 
 export interface ReaderGroup { id: string; workspace: WorkspaceStore; weight: number }
 export interface ClosedLocation { entry: SavedLocation; index: number; cardId: string }
@@ -22,6 +23,12 @@ export interface ReaderHandle {
   clearClosed(): void
   cycle(step: number): void
   find(action: 'open' | 'next' | 'previous' | 'close'): boolean
+  goTo(): void
+  copy(): Promise<boolean>
+  print(): void
+  captureSession(): Promise<SessionCard | null>
+  restoreSession(card: SessionCard): Promise<void>
+  selectTab(id: string): Promise<void>
   capture(): Promise<SavedLocation | null>
   restore(entry: SavedLocation): Promise<boolean>
   detach(closing: boolean): Promise<number>

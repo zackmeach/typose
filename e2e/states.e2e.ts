@@ -104,7 +104,7 @@ test('a same-size write freezes the document with nothing new shown; Ctrl+R relo
 test("the opening line's sweep holds still under reduced motion (brief §6.6, §9)", async () => {
   const l = await launch()
   const { win } = l
-  await expect(win.locator('.open-button')).toBeVisible()
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   // The indeterminate line shows only during a slow open, so the same element is mounted here to read its styles.
   const animations = () =>
     win.evaluate(() => {

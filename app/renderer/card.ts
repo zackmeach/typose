@@ -1,4 +1,6 @@
-import type { CsvInfo, CsvOptions, ErrorCode, MdBuild, Opened } from '../shared/protocol'
+import type { CsvInfo, CsvOptions, ErrorCode, MdBuild, Opened, StructuredInfo } from '../shared/protocol'
+
+export type LensName = 'raw' | 'rendered' | 'grid' | 'tree' | 'rows' | 'table' | 'transcript'
 
 /** Why Rendered stays off, in the switch's tooltip (plan §2.2, Z71, Z34). */
 export const RENDERED_OFF = {
@@ -28,7 +30,9 @@ export type Card =
       refused?: true
       atLine?: number
       /** What's showing. Markdown opens in Raw, then Rendered once its build fits (plan §2.2). */
-      lens?: 'raw' | 'rendered' | 'grid'
+      lens?: LensName
+      structured?: StructuredInfo
+      structuredOff?: string
       csv?: CsvInfo
       csvOptions?: CsvOptions
       gridOff?: string
@@ -62,9 +66,9 @@ export interface CardView {
   /** A banner under the header, and its button's label. The button reloads, as Ctrl+R does. */
   banner: { text: string; action: string } | null
   /** The Raw lens, the Rendered lens, or a message with its actions. */
-  body: { raw: true } | { rendered: true } | { grid: true } | { message: string; actions: Action[] }
+  body: { raw: true } | { rendered: true } | { grid: true } | { structured: true } | { message: string; actions: Action[] }
   /** Markdown's Raw/Rendered switch. `renderedOff` is the disabled tab's tooltip. Null when the file has no switch. */
-  lenses: null | { showing: 'raw' | 'rendered' | 'grid'; renderedOff?: string; grid?: true; gridOff?: string }
+  lenses: null | { showing: LensName; renderedOff?: string; grid?: true; gridOff?: string; structured?: { id: LensName; label: string; off?: string }[] }
 }
 
 export const fileName = (path: string): string => path.split(/[\\/]/).pop() || path
@@ -112,9 +116,13 @@ export function view(card: DisplayCard): CardView {
           : frozen
             ? { text: 'Changed on disk', action: 'Reload (Ctrl+R)' }
             : null,
-        body: opened.blank ? { message: 'Empty file', actions: [] } : showing === 'rendered' ? { rendered: true } : showing === 'grid' ? { grid: true } : { raw: true },
+        body: opened.blank ? { message: 'Empty file', actions: [] } : showing === 'rendered' ? { rendered: true } : showing === 'grid' ? { grid: true } : showing !== 'raw' ? { structured: true } : { raw: true },
         lenses: markdown ? { showing, renderedOff: card.renderedOff ? RENDERED_OFF[card.renderedOff] : undefined } :
-          opened.format === 'csv' && !opened.blank ? { showing, grid: true, gridOff: card.gridOff } : null
+          opened.format === 'csv' && !opened.blank ? { showing, grid: true, gridOff: card.gridOff } :
+          ['json', 'jsonl', 'yaml'].includes(opened.format) && !opened.blank ? { showing, structured: opened.format === 'jsonl' ? [
+            ...(card.structured?.transcript ? [{ id: 'transcript' as const, label: 'Transcript', off: card.structuredOff }] : []),
+            { id: 'rows', label: 'Rows', off: card.structuredOff }, { id: 'table', label: 'Table', off: card.structuredOff }
+          ] : [{ id: 'tree', label: 'Tree', off: card.structuredOff ?? (!card.structured ? 'Preparing Tree…' : undefined) }] } : null
       }
     }
     case 'failed':

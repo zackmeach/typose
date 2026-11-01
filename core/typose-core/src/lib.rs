@@ -15,6 +15,8 @@ pub mod hooks;
 pub mod image_resource;
 pub mod images;
 pub mod index;
+pub mod json;
+pub mod jsonl;
 pub mod limits;
 pub mod local;
 pub mod md;
@@ -22,6 +24,7 @@ pub mod pages;
 pub mod raw;
 pub mod sanitize;
 pub mod store;
+pub mod structured;
 
 #[cfg(test)]
 mod big_offsets;

@@ -26,7 +26,7 @@ export class SourceFind implements FindController {
 
   constructor(private readonly host: HTMLElement, private readonly scroller: HTMLElement,
     private readonly core: CoreClient, private readonly opened: Opened, private readonly budget: LensBudget | undefined,
-    private readonly revealLine: (line: number) => void, private readonly onFrozen: (reason: string) => void) {
+    private readonly revealLine: (line: number, hit?: SourceHit) => void, private readonly onFrozen: (reason: string) => void) {
     this.excerpt = document.createElement('div')
     this.excerpt.className = 'raw-find-excerpt'
     this.excerpt.setAttribute('aria-label', 'Source match')
@@ -102,7 +102,7 @@ export class SourceFind implements FindController {
   private show(hit: SourceHit, ordinal: number | null): void {
     if (hit.text.length > 8192 || hit.matchStart < 0 || hit.matchEnd > hit.text.length || hit.matchEnd <= hit.matchStart) throw new Error('Invalid source match excerpt')
     this.hit = hit; this.ordinal = ordinal
-    this.revealLine(hit.line)
+    this.revealLine(hit.line, hit)
     const label = document.createElement('small')
     label.textContent = `Source match · line ${hit.line + 1} · byte ${hit.start}`
     const mark = document.createElement('mark')

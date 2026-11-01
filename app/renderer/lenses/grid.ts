@@ -1,4 +1,4 @@
-import type { CsvCellPiece, CsvColumn, CsvFindHit, CsvFindRef, CsvInfo, CsvOptions, CsvOrderRef, CsvRef, CsvRow, Limits, Opened } from '../../shared/protocol'
+import { MAX_PRINT_BYTES, MAX_PRINT_PAGES, type CsvCellPiece, type CsvColumn, type CsvFindHit, type CsvFindRef, type CsvInfo, type CsvOptions, type CsvOrderRef, type CsvRef, type CsvRow, type Limits, type Opened, type PrintNode } from '../../shared/protocol'
 import { type CoreClient, CoreCallError } from '../core'
 import { EMPTY_FIND, FindSignal, type FindController, type FindQuery } from '../find'
 import { ScrollState, isLogical, spacerHeight, visibleRows, wheelPixels } from '../virtual/scrollmath'
@@ -7,6 +7,8 @@ import { viewportCap } from './page-cache'
 import { GRID_TEXT_UNITS as TEXT_UNITS, MAX_GRID_CELLS as MAX_CELLS, gridCellPreview, gridTextPreview as preview, nextGridCell, type GridCellPreview, type GridRange } from './grid-cache'
 import { extendSelection, nextGridSort, selectCell, type GridSelection, type GridSort, selectionBounds } from './grid-interactions'
 import { GridCopyJob, type GridCopyJob as GridCopyJobType } from './grid-copy'
+import { PRINT_LINES_PER_PAGE, type PrintPayload, type PrintPlan } from '../print'
+import { utf8ByteLength } from './grid-interactions'
 
 const ROW = 28
 const HEADER = 28
@@ -90,6 +92,7 @@ export class GridLens {
   private reserved: number
   private timer: ReturnType<typeof setTimeout> | undefined
   private atLine: number | undefined
+  private atRow: number | undefined
   private shownLine: number
   private messageHoldUntil = 0
   private inspector: HTMLDivElement | null = null
@@ -201,6 +204,88 @@ export class GridLens {
   topLine(): number { this.rememberLine(); return this.atLine ?? this.shownLine }
   readerMoved(): boolean { return this.moved }
   focus(): void { this.focusWanted = true; this.layout(); if (!this.mounted.has(cellKey(this.active.row, this.active.column))) this.element.focus() }
+  goTo(rowNumber: number): void {
+    if (!Number.isSafeInteger(rowNumber) || rowNumber < 1) return
+    this.atRow = rowNumber - 1
+    this.moved = true
+    if (this.rowCount > this.atRow || this.info.done) this.placeAtRow()
+    this.request()
+  }
+
+  printPlan(): PrintPlan {
+    const pages = Math.ceil(this.rowCount / PRINT_LINES_PER_PAGE)
+    return { unit: 'row', total: this.rowCount, current: this.active.row, indexed: this.info.done, totalPages: pages,
+      allFits: this.info.done && pages <= MAX_PRINT_PAGES && this.opened.size <= MAX_PRINT_BYTES && this.rowCount * this.columnCount <= 30_000 }
+  }
+
+  async printRange(start: number, end: number, signal: AbortSignal): Promise<PrintPayload> {
+    const ref = this.info.ref, order = this.order, owner = this.options.budget, generation = this.opened.gen
+    const current = () => !signal.aborted && !this.stopped && !this.yielded && !this.disposed && this.info.done && !!order &&
+      this.valid(ref) && this.order?.id === order.id && owner?.current(generation) !== false
+    if (!owner || !order || !current() || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start || end > this.rowCount ||
+      (end - start) * this.columnCount > 30_000) throw new Error('The Grid print range is unavailable or too large')
+    if (!await owner.reserveCopy(generation, 512 << 10)) throw new Error('Print is unavailable · the memory budget is full')
+    let retained = true
+    try {
+      const children: PrintNode[] = []
+      let bytes = 0, cells = 0
+      const cellText = async (sourceRecord: number, column: number): Promise<string> => {
+        let cell = await this.core.call('csvCell', { ref, sourceRecord, column }, signal)
+        if (!current()) throw new Error('The Grid print job was cancelled or the source changed')
+        if (cell.kind === 'missing') return ''
+        const parts: string[] = []
+        while (true) {
+          bytes += utf8ByteLength(cell.text)
+          cells++
+          if (bytes > MAX_PRINT_BYTES || cells > 30_000 || !await owner.reserveCopy(generation, (512 << 10) + bytes * 4 + cells * 96))
+            throw new Error('The selected Grid range exceeds the bounded print budget')
+          parts.push(cell.text)
+          if (!cell.next) break
+          cell = await this.core.call('csvPiece', { continuation: cell.next }, signal)
+          if (!current()) throw new Error('The Grid print job was cancelled or the source changed')
+        }
+        return parts.join('')
+      }
+      if (this.info.header) {
+        const header: PrintNode[] = []
+        for (let column = 0; column < this.columnCount; column++) header.push({ tag: 'th', children: [{ text: await cellText(0, column) }] })
+        children.push({ tag: 'thead', children: [{ tag: 'tr', children: header }] })
+      }
+      const rows: PrintNode[] = []
+      for (let first = start; first < end; first += 64) {
+        const count = Math.min(64, end - first)
+        const page = await this.page(ref, first, count, 0, 1, signal, order)
+        if (!current() || !sameRef(page.ref, ref)) throw new Error('The Grid print order changed')
+        const records = new Map(page.rows.map(row => [row.dataRow, row.sourceRecord]))
+        for (let row = first; row < first + count; row++) {
+          let sourceRecord = records.get(row)
+          if (sourceRecord === undefined) {
+            const exact = await this.page(ref, row, 1, 0, 1, signal, order)
+            if (!current() || !sameRef(exact.ref, ref)) throw new Error('The Grid print order changed')
+            sourceRecord = exact.rows.find(item => item.dataRow === row)?.sourceRecord
+          }
+          if (sourceRecord === undefined) throw new Error('A selected CSV row is unavailable for print')
+          const cells: PrintNode[] = []
+          for (let column = 0; column < this.columnCount; column++) cells.push({ tag: 'td', children: [{ text: await cellText(sourceRecord, column) }] })
+          rows.push({ tag: 'tr', children: cells })
+        }
+      }
+      children.push({ tag: 'tbody', children: rows })
+      const blocks: PrintNode[] = [{ tag: 'table', children }]
+      const serialized = JSON.stringify(blocks)
+      const serializedBytes = utf8ByteLength(serialized)
+      if (!current() || serializedBytes > MAX_PRINT_BYTES || !await owner.reserveCopy(generation, (512 << 10) + bytes * 4 + serializedBytes * 2 + cells * 96))
+        throw new Error('The selected Grid range exceeds the bounded print budget')
+      retained = false
+      let released = false
+      return {
+        blocks, pages: Math.ceil((end - start) / PRINT_LINES_PER_PAGE),
+        verify: async checkSignal => !checkSignal.aborted && current() && !!this.opened.view && await this.core.call('sourceVerify', { view: this.opened.view, start: 0, end: this.opened.size }, checkSignal),
+        release: async () => { if (released) return; released = true; await owner.reserveCopy(generation, 0) }
+      }
+    } finally { if (retained) await owner.reserveCopy(generation, 0) }
+  }
+  copy(): Promise<boolean> { return this.copySelection() }
   setLineCount(_lines: number): void { this.request() }
   indexDone(): void { this.request() }
   freeze(): void { this.stopped = true; clearTimeout(this.timer); this.abort.abort(); this.sortAbort?.abort(); this.cancelCopy(); this.cancelInspector(); this.closeContextMenu(false); this.closeFind() }
@@ -238,6 +323,15 @@ export class GridLens {
     this.status.textContent = text
   }
   private apply(top: number): void { this.element.scrollTop = top; this.state.confirmNative(this.element.scrollTop); this.layout() }
+
+  private placeAtRow(): void {
+    if (this.atRow === undefined) return
+    const row = Math.max(0, Math.min(this.atRow, this.rowCount - 1))
+    this.atRow = undefined
+    this.active = { row, column: this.active.column }
+    this.selection = selectCell(this.active, this.rowCount, this.columnCount)
+    this.apply(this.state.moveTo(row * ROW))
+  }
 
   private async size(): Promise<void> {
     const work = this.sizing.then(async () => {
@@ -545,12 +639,12 @@ export class GridLens {
     })
   }
 
-  private async copySelection(): Promise<void> {
-    if (this.copyPending) { this.cancelCopy(); this.message('Cancelling the previous copy…'); return }
+  private async copySelection(): Promise<boolean> {
+    if (this.copyPending) { this.cancelCopy(); this.message('Cancelling the previous copy…'); return false }
     const token = window.typose.beginClipboardWrite()
-    if (!token) { this.message('Copy unavailable · use Ctrl+C or Command+C on a Grid cell'); return }
-    if (!this.info.done) { window.typose.cancelClipboardWrite(token); this.message('Copy unavailable · wait for CSV indexing to finish'); return }
-    if (!this.options.budget || !this.order) { window.typose.cancelClipboardWrite(token); this.message('Copy unavailable · the Grid budget or order is missing'); return }
+    if (!token) { this.message('Copy unavailable · use a trusted Copy action in the Grid'); return false }
+    if (!this.info.done) { window.typose.cancelClipboardWrite(token); this.message('Copy unavailable · wait for CSV indexing to finish'); return false }
+    if (!this.options.budget || !this.order) { window.typose.cancelClipboardWrite(token); this.message('Copy unavailable · the Grid budget or order is missing'); return false }
     this.cancelCopy()
     const selection = { ...this.selection, anchor: { ...this.selection.anchor }, focus: { ...this.selection.focus } } as GridSelection
     const ref = this.info.ref, order = this.order, generation = this.opened.gen
@@ -607,10 +701,11 @@ export class GridLens {
       this.copyPending = false
       this.copySourceRange = undefined
     }
-    if (this.copyJob !== job) return
+    if (this.copyJob !== job) return false
     this.copyJob = undefined
     if (result.kind === 'copied') this.message(`Copied ${result.bytes.toLocaleString('en-US')} bytes`, true)
     else if (result.kind === 'refused' || result.kind === 'failed') this.message(result.reason, true)
+    return result.kind === 'copied'
   }
 
   private async *copyCellChunks(ref: CsvRef, sourceRecord: number, column: number, signal: AbortSignal, current: () => boolean): AsyncGenerator<string> {
@@ -877,6 +972,7 @@ export class GridLens {
         if (!this.valid(ref) || !sameRef(fresh.ref, ref)) return
         this.info = fresh; this.options.onInfo(fresh)
         if (fresh.status === 'locked') { this.message(fresh.reason || 'Grid is unavailable · open in Raw'); return }
+        if (this.atRow !== undefined && (this.rowCount > this.atRow || fresh.done)) this.placeAtRow()
         if (fresh.done && this.pendingFind) {
           const query = this.findQuery
           this.pendingFind = false

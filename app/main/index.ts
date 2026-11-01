@@ -4,12 +4,14 @@ import { once } from 'node:events'
 import { readFile } from 'node:fs/promises'
 import { extname, join, sep } from 'node:path'
 import coreHostPath from '../core-host/index?modulePath'
-import type { Command } from '../shared/protocol'
+import { MAX_PRINT_PAGES, type Command, type PrintDocumentResult } from '../shared/protocol'
 import { openExternal } from './external'
 import { writeClipboardText } from './clipboard'
 import { handoff, launchPaths } from './launch'
 import { startLifecycle } from './lifecycle'
 import { envWhole, isMark, marksHook } from './marks'
+import { SessionStore } from './session-store'
+import { MAX_PRINT_PDF_BYTES, physicalPageCount, validatePrintDocument } from './print-validation'
 
 const mainStart = Date.now() // plan C8's first startup mark: read now, written once the hook is set up below
 
@@ -20,6 +22,8 @@ crashReporter.start({ uploadToServer: false })
 // `running` marker (C9). Before the message loop, app.exit ends the process at once; app.quit would still emit ready.
 if (!app.requestSingleInstanceLock({ argv: process.argv, cwd: process.cwd() })) app.exit(0)
 const log = startLifecycle()
+const sessionStore = new SessionStore(join(app.getPath('userData'), 'session.json'))
+app.on('before-quit', () => { sessionStore.flush() })
 // Plan C8's startup controls, compiled only into the test-hooks build: show() a set delay after both
 // ready-to-show and the title bar's paint, or delay React's mount.
 const showDelay = __TEST_HOOKS__ ? envWhole('TYPOSE_TEST_DELAY_SHOW', process.env.TYPOSE_TEST_DELAY_SHOW, 'ms') : 0
@@ -145,9 +149,14 @@ const TRAFFIC_LIGHTS = { x: 14, y: (TITLE_BAR - 14) / 2 }
 function createWindow(): BrowserWindow {
   const isMac = process.platform === 'darwin'
   const isLinux = process.platform === 'linux'
+  const saved = sessionStore.snapshot().window
+  const reachable = saved?.x !== undefined && saved.y !== undefined && screen.getAllDisplays().some(display =>
+    saved.x! + saved.width > display.workArea.x && saved.x! < display.workArea.x + display.workArea.width &&
+    saved.y! + saved.height > display.workArea.y && saved.y! < display.workArea.y + display.workArea.height)
   const win = new BrowserWindow({
-    width: 1280,
-    height: 800,
+    width: saved?.width ?? 1280,
+    height: saved?.height ?? 800,
+    ...(reachable ? { x: saved!.x, y: saved!.y } : {}),
     minWidth: 720, // brief §9's minimum window
     minHeight: 480,
     show: false,
@@ -245,6 +254,46 @@ void app.whenReady().then(() => {
   session.defaultSession.setSpellCheckerEnabled(false)
   serveApp()
   const win = createWindow()
+  if (sessionStore.snapshot().window?.maximized) win.maximize()
+  const rememberBounds = () => { if (!win.isDestroyed()) sessionStore.bounds({ ...win.getNormalBounds(), maximized: win.isMaximized() }) }
+  win.on('resize', rememberBounds)
+  win.on('move', rememberBounds)
+  const fromMainApp = (event: IpcMainEvent | IpcMainInvokeEvent) => {
+    try {
+      const url = new URL(event.senderFrame!.url)
+      return event.sender === win.webContents && event.senderFrame === win.webContents.mainFrame && url.protocol === 'typose:' && url.host === 'app' && url.pathname === '/index.html'
+    } catch { return false }
+  }
+  ipcMain.handle('load-session', (event, ...args: unknown[]) => {
+    if (!fromMainApp(event) || args.length) throw new Error('refused load-session')
+    const workspace = sessionStore.snapshot()
+    delete workspace.window
+    return workspace
+  })
+  ipcMain.handle('save-session', (event, ...args: unknown[]) => {
+    if (!fromMainApp(event) || args.length !== 1) return false
+    return sessionStore.update(args[0])
+  })
+  let closeRequest = 0, allowClose = false, finishClose: (() => void) | undefined
+  ipcMain.on('session-captured', (event, request: unknown) => {
+    if (fromMainApp(event) && request === closeRequest) finishClose?.()
+  })
+  win.on('close', event => {
+    rememberBounds()
+    if (allowClose || win.webContents.isDestroyed() || win.webContents.isLoadingMainFrame()) { sessionStore.flush(); return }
+    event.preventDefault()
+    if (finishClose) return
+    const request = ++closeRequest
+    const timeout = setTimeout(() => finishClose?.(), 1000)
+    finishClose = () => {
+      clearTimeout(timeout)
+      finishClose = undefined
+      sessionStore.flush()
+      allowClose = true
+      win.close()
+    }
+    win.webContents.send('capture-session', request)
+  })
   // Electron's default menu goes (PR 4's residual): its accelerators, Force Reload's Ctrl+Shift+R among them, were live
   // even with its bar hidden. ☰ is the menu on Windows and Linux; macOS gets a minimal native one (spec §9).
   Menu.setApplicationMenu(process.platform === 'darwin' ? macMenu(win) : null)
@@ -308,6 +357,79 @@ void app.whenReady().then(() => {
   ipcMain.handle('open-external', (event: IpcMainInvokeEvent, ...args: unknown[]) => openExternal(win, event, args, (url) => shell.openExternal(url)))
   ipcMain.handle('write-clipboard', (event: IpcMainInvokeEvent, ...args: unknown[]) =>
     writeClipboardText(win, event, args, (text) => clipboard.writeText(text)))
+  ipcMain.handle('print-document', async (event: IpcMainInvokeEvent, ...args: unknown[]) => {
+    if (!fromMainApp(event) || args.length !== 4) return { kind: 'refused', reason: 'Invalid print request' } satisfies PrintDocumentResult
+    const [title, blocks, pages, confirmed] = args
+    const checked = validatePrintDocument(title, blocks, pages)
+    if (!checked.ok) return { kind: 'refused', reason: checked.reason } satisfies PrintDocumentResult
+    if (typeof confirmed !== 'boolean') return { kind: 'refused', reason: 'Invalid print confirmation' } satisfies PrintDocumentResult
+    const target = new BrowserWindow({
+      show: false,
+      width: 900,
+      height: 1200,
+      parent: win,
+      webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, spellcheck: false }
+    })
+    target.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    target.webContents.on('will-navigate', e => e.preventDefault())
+    try {
+      await target.loadURL('about:blank')
+      const title64 = Buffer.from(checked.title, 'utf8').toString('base64')
+      const blocks64 = Buffer.from(checked.json, 'utf8').toString('base64')
+      const install = `(() => {
+        const decode = value => new TextDecoder().decode(Uint8Array.from(atob(value), c => c.charCodeAt(0)));
+        const blocks = JSON.parse(decode('${blocks64}'));
+        document.title = decode('${title64}');
+        const policy = document.createElement('meta'); policy.httpEquiv = 'Content-Security-Policy'; policy.content = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src 'none'; object-src 'none'; base-uri 'none'"; document.head.append(policy);
+        const style = document.createElement('style');
+        style.textContent = '@page { size: Letter; margin: 16mm } body { box-sizing: border-box; width: 7.2in; margin: 0; color: #111; background: #fff; font: 10pt Arial, sans-serif } h1 { font: 600 15pt Arial, sans-serif; margin: 0 0 12pt } pre, code { font-family: Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere } pre { margin: 0 } table { border-collapse: collapse; width: 100% } th, td { border: 1px solid #888; padding: 3pt 5pt; text-align: left; vertical-align: top } thead { display: table-header-group } tr, pre, blockquote { break-inside: avoid } img { max-width: 100%; max-height: 8in; object-fit: contain }';
+        document.head.append(style);
+        const heading = document.createElement('h1'); heading.textContent = decode('${title64}'); document.body.append(heading);
+        const make = node => {
+          if (Object.hasOwn(node, 'text')) return document.createTextNode(node.text);
+          if (node.tag === 'img') { const image = document.createElement('img'); image.src = node.src; image.alt = node.alt || ''; return image; }
+          const tag = node.tag === 'a' ? 'span' : node.tag; const element = document.createElement(tag);
+          for (const child of node.children || []) element.append(make(child)); return element;
+        };
+        for (const block of blocks) document.body.append(make(block));
+      })()`
+      await target.webContents.executeJavaScript(install, true)
+      const layoutPages = await target.webContents.executeJavaScript(`(() => {
+        const pageHeight = 9.74 * 96;
+        const imageAllowance = document.images.length * 8 * 96;
+        return Math.ceil((document.body.scrollHeight + imageAllowance) / pageHeight * 1.25);
+      })()`)
+      if (!Number.isSafeInteger(layoutPages) || layoutPages < 1 || layoutPages > MAX_PRINT_PAGES)
+        return { kind: 'refused', reason: `Print layout exceeds the ${MAX_PRINT_PAGES.toLocaleString()}-page physical layout bound` } satisfies PrintDocumentResult
+      const pdf = await target.webContents.printToPDF({ printBackground: true, preferCSSPageSize: true, pageSize: 'Letter' })
+      if (pdf.byteLength > MAX_PRINT_PDF_BYTES) return { kind: 'refused', reason: 'Print preflight exceeded its 128 MiB memory bound' } satisfies PrintDocumentResult
+      const physicalPages = physicalPageCount(pdf)
+      if (physicalPages === null) return { kind: 'refused', reason: 'Could not verify the physical page count; nothing was sent to the printer' } satisfies PrintDocumentResult
+      if (physicalPages > MAX_PRINT_PAGES) return { kind: 'refused', reason: `Print job has ${physicalPages.toLocaleString()} physical pages; the limit is ${MAX_PRINT_PAGES.toLocaleString()}` } satisfies PrintDocumentResult
+      if (__TEST_HOOKS__ && process.env.TYPOSE_TEST_PRINT === '1') return { kind: 'printed', pages: physicalPages } satisfies PrintDocumentResult
+      if (physicalPages > 50 && !confirmed) {
+        const answer = await dialog.showMessageBox(win, { type: 'warning', buttons: ['Print', 'Cancel'], defaultId: 0, cancelId: 1,
+          message: `Print ${physicalPages.toLocaleString()} pages?`, detail: 'Large print jobs can take a long time.' })
+        if (answer.response !== 0) return { kind: 'cancelled' } satisfies PrintDocumentResult
+      }
+      return await new Promise<PrintDocumentResult>(resolve => {
+        try {
+          target.webContents.print({ silent: false, printBackground: true, pageSize: 'Letter', margins: { marginType: 'none' } }, success => {
+            if (!target.isDestroyed()) target.close()
+            resolve(success ? { kind: 'printed', pages: physicalPages } : { kind: 'cancelled' })
+          })
+        } catch {
+          if (!target.isDestroyed()) target.close()
+          resolve({ kind: 'refused', reason: 'The OS print dialog could not be opened' })
+        }
+      })
+    } catch {
+      if (!target.isDestroyed()) target.close()
+      return { kind: 'refused', reason: 'The print document could not be prepared' } satisfies PrintDocumentResult
+    } finally {
+      if (!target.isDestroyed()) target.close()
+    }
+  })
   const startupQuery = new URLSearchParams()
   if (mountDelay) startupQuery.set('delayMount', String(mountDelay))
   if (fontDelay) startupQuery.set('delayFonts', String(fontDelay))

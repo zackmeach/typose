@@ -64,6 +64,21 @@ impl Folder {
         }
     }
 
+    /// Stable filesystem identity for restart revalidation; this string grants no directory authority.
+    pub fn identity(&self) -> Result<String, DocError> {
+        #[cfg(windows)]
+        {
+            let inner = self.inner.lock().unwrap();
+            let tree = inner.as_ref().ok_or(DocError::Cancelled)?;
+            let (volume, id) = super::native::identity(&tree.root.file).map_err(error)?;
+            Ok(format!("{volume:016x}-{}", id.iter().map(|b| format!("{b:02x}")).collect::<String>()))
+        }
+        #[cfg(not(windows))]
+        {
+            Err(DocError::Cancelled)
+        }
+    }
+
     pub fn list(
         &self,
         node: u32,
