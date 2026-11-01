@@ -1,7 +1,8 @@
-import { expect } from '@playwright/test'
+import { expect, type Locator, type Page } from '@playwright/test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { FIXTURES, finish, launch, test } from './app'
+import { armPlaceProbe, readPlaceProbe } from './place-probe'
 
 /** Replace only the native folder picker in this dev-process test; filesystem listing stays real. */
 async function stubFolderDialog(app: Awaited<ReturnType<typeof launch>>['app'], selected: string): Promise<void> {
@@ -16,8 +17,8 @@ async function stubFolderDialog(app: Awaited<ReturnType<typeof launch>>['app'], 
   await expect(app.evaluate(({ dialog }) => dialog.showOpenDialog({}))).rejects.toThrow('the real folder dialog was reached')
 }
 
-const markdownReady = (win: Awaited<ReturnType<typeof launch>>['win']) =>
-  expect(win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 30_000 })
+const markdownReady = (scope: Page | Locator) =>
+  expect(scope.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 30_000 })
 
 function makeFolderFixture(): string {
   mkdirSync(FIXTURES, { recursive: true })
@@ -78,15 +79,31 @@ test('folder tree opens a nested Markdown link and Back restores the source plac
     await expect(win.getByRole('heading', { name: 'Source A', exact: true })).toBeVisible()
     await expect(win.locator('.card-parent')).toContainText(`${basename(root)} / docs`)
 
-    const guide = win.getByRole('link', { name: 'Guide', exact: true })
+    const sourceCard = win.locator('.reader-card').first()
+    const guide = sourceCard.getByRole('link', { name: 'Guide', exact: true })
     await guide.scrollIntoViewIfNeeded()
+    await armPlaceProbe(guide)
     await guide.click()
-    await markdownReady(win)
-    await expect(win.getByRole('heading', { name: 'Destination B', exact: true })).toBeVisible()
-    await win.getByRole('button', { name: 'Back', exact: true }).click()
-    await markdownReady(win)
+    const preview = win.getByRole('dialog', { name: 'Link preview', exact: true })
+    await expect(preview).toBeVisible()
+    await markdownReady(preview)
+    await expect(preview.getByRole('heading', { name: 'Destination B', exact: true })).toBeVisible()
+    await expect(preview.locator('.card-parent')).toContainText(`${basename(root)} / guide`)
+    const sourceDuringPreview = await readPlaceProbe(guide)
+    expect(sourceDuringPreview.sameNodes).toBe(true)
+    expect(sourceDuringPreview.scrollTop).toBe(sourceDuringPreview.originScrollTop)
+    expect(Math.abs(sourceDuringPreview.anchorTop - sourceDuringPreview.originAnchorTop)).toBeLessThanOrEqual(1)
+    await preview.getByRole('button', { name: 'Close preview', exact: true }).click()
+    await expect(preview).toHaveCount(0)
+    await expect(sourceCard.locator('.card-name')).toHaveText('A.md')
+    await markdownReady(sourceCard)
     await expect(win.getByRole('heading', { name: 'Source A', exact: true })).toBeVisible()
     await expect(guide).toBeInViewport()
+    await expect(guide).toBeFocused()
+    const sourceAfterClose = await readPlaceProbe(guide)
+    expect(sourceAfterClose.sameNodes).toBe(true)
+    expect(sourceAfterClose.scrollTop).toBe(sourceAfterClose.originScrollTop)
+    expect(Math.abs(sourceAfterClose.anchorTop - sourceAfterClose.originAnchorTop)).toBeLessThanOrEqual(1)
 
     await activateTreeItem(win, 'tool.exe')
     await expect(win.locator('.card-name')).toHaveText('A.md')

@@ -1,0 +1,11 @@
+.link-preview-overlay { position: fixed; inset: env(titlebar-area-height, 40px) 0 0; z-index: 30; background: rgb(0 0 0 / 48%); }
+.link-preview-frame { position: absolute; top: 16px; bottom: 16px; max-width: calc(100vw - 32px); outline: none; }
+.link-preview-dialog { position: absolute; inset: 0; outline: none; }
+.preview-reader { position: absolute; inset: 0; min-width: 0; }
+.preview-reader .file-card-panel { top: 0; }
+.preview-reader .card { inset: 0; box-shadow: 0 12px 40px rgb(0 0 0 / 35%); }
+.preview-actions { display: flex; align-items: center; gap: 4px; flex: none; }
+.preview-actions button { display: inline-flex; gap: 4px; align-items: center; padding: 4px 6px; color: var(--text2); background: transparent; border: 0; border-radius: 4px; font: 12px/20px var(--font-ui); }
+.preview-actions button:hover { background: var(--surface-raised); color: var(--text); }
+.preview-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+@container (max-width: 560px) { .preview-action-label { display: none; } }

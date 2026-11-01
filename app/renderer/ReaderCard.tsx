@@ -13,7 +13,7 @@ import { inputMark, markNow } from './perf'
 import { type SavedLocation, type SelectionTicket, type TabId, type WorkspaceStore, type WorkspaceTab } from './workspace'
 import { FileTabs } from './file-tabs'
 import { folderNode } from './folders'
-import type { ReaderHandle, ReaderWindow } from './reader-window'
+import type { LocalGesture, ReaderHandle, ReaderWindow } from './reader-window'
 
 /** Z37's scan marks (plan A's veto, `afc58f9`), on the renderer's User Timing timeline: the gate reads them. */
 const MARKS = ['typose:open-start', 'typose:first-screen', 'typose:line-scan', 'typose:index-done']
@@ -52,9 +52,10 @@ interface RetainedRendered {
   view: RenderedLens
 }
 
-export function ReaderCard({ id, label, workspace, window: shared, fonts, focused, onFocus, onCloseCard, windowNotice }: {
+export function ReaderCard({ id, label, workspace, window: shared, fonts, focused, onFocus, onCloseCard, windowNotice, preview }: {
   id: string; label: number; workspace: WorkspaceStore; window: ReaderWindow; fonts: Promise<void>; focused: boolean
   onFocus(): void; onCloseCard(): void; windowNotice: string
+  preview?: { busy: boolean; onTab(): void; onSide(): void; onClose(): void }
 }) {
   const core = shared.core
   const [fontLayoutReady, setFontLayoutReady] = useState(false)
@@ -627,6 +628,56 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     }
   }
 
+  function routeLocal(source: Opened, target: string, path: string, gesture: LocalGesture): Promise<boolean> {
+    const current = latest.current.card
+    if (current.kind !== 'open' || current.opened !== source || navigating.current || closing.current) return Promise.resolve(false)
+    return shared.openLink(id, source, target, path, gesture)
+  }
+
+  /** A target card opens only through the originating document's held capability, never its display path. */
+  async function openDerived(source: Opened, target: string, resolvedPath: string): Promise<boolean> {
+    const l = latest.current.limits, ownerSession = currentSession.current
+    if (!l || !surface.current || !recharged.current || closing.current || navigating.current || source.view?.session !== ownerSession) return false
+    navigating.current = true
+    setNavigationBusy(true)
+    pendingHistoryBytes.current = historyDraftBytes(l)
+    let candidate: Opened | undefined
+    const owner = budget.current
+    let plan: ReloadReservation | undefined
+    try {
+      const placeholder = { key: 'local:' + ownerSession + ':' + Number.MAX_SAFE_INTEGER, path: resolvedPath }
+      if (!await metadata(current => chargeWorkspace([...workspace.getSnapshot().tabs, placeholder], current))) return false
+      const rawBytes = viewportCap(l, window.innerHeight)
+      plan = owner?.reloadReservation(rawBytes)
+      const retired = Math.max(retiredRendered.current, plan?.retiredTreeMax ?? 0)
+      candidate = await ownerCall('openLocal', { doc: source.doc, gen: source.gen, target, count: firstCount(l), bytes: rawBytes + 2 * retired })
+      if (closing.current || currentSession.current !== ownerSession || candidate.path !== resolvedPath) return false
+      const key = 'local:' + ownerSession + ':' + candidate.doc
+      const result = workspace.beginOpen(key, resolvedPath)
+      if (result.kind !== 'open') return false
+      const next: Extract<Card, { kind: 'open' }> = { kind: 'open', path: resolvedPath, opened: candidate,
+        lines: candidate.lines, bytes: 0, indexed: candidate.indexed, lens: 'raw' }
+      if (!workspace.complete(result.ticket, key, next)) return false
+      leave()
+      const opened = candidate
+      candidate = undefined
+      restoreFocus.current = true
+      show(result.ticket.tab, opened, workspace.tab(result.ticket.tab)!, rawBytes, undefined, retired)
+      return true
+    } catch (error) {
+      setWorkspaceNotice('Cannot open local file · ' + String(error))
+      return false
+    } finally {
+      if (candidate && ownerSession === currentSession.current) void core.call('close', { surface: surface.current!, doc: candidate.doc }).catch(() => {})
+      if (plan) owner?.cancelTransition(plan)
+      lens.current?.resumeReservation()
+      pendingHistoryBytes.current = 0
+      navigating.current = false
+      setNavigationBusy(false)
+      releaseEmptyWorkspace()
+    }
+  }
+
   // The workspace's live + two retired graph allowance also pays the draft firstPage while source DOM stays mounted.
   const historyDraftBytes = (l: Limits, page = true) => 16_384 + 128 * 32_767 + (page ?
     256 * 16_384 + 2 * l.pageWireMax + 1024 * l.maxItems + (64 << 10) : 0)
@@ -948,7 +999,6 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   }
   const frozen = card.kind === 'open' ? card.frozen : undefined
   const breadcrumbParent = openedNow?.folder ? [openedNow.folder.label, ...openedNow.folder.segments.slice(0, -1)].join(' / ') : path ? parentName(path) : ''
-
   const secondaryLens = shown.lenses?.grid ? 'grid' : 'rendered'
   const detectedDelimiter = card.kind === 'open' && card.csv ? { ',': 'Comma', '\t': 'Tab', ';': 'Semicolon', '|': 'Pipe' }[card.csv.delimiter] : undefined
 
@@ -1006,7 +1056,11 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       </DialogTrigger> : null}
       <span className="card-status" title={shown.status} tabIndex={shown.status ? 0 : undefined}>{shown.status}</span>
       <span className="card-status-tooltip" aria-hidden="true">{shown.status}</span>
-      <Button className="close-card-button" aria-label="Close card" onPress={onCloseCard}>×</Button>
+      {preview ? <span className="preview-actions">
+        <Button aria-label="Open as tab" isDisabled={preview.busy || navigationBusy} onPress={preview.onTab}><span aria-hidden="true" title="Open as tab">↗</span><span className="preview-action-label">Open as tab</span></Button>
+        <Button aria-label="Open to side" isDisabled={preview.busy || navigationBusy} onPress={preview.onSide}><span aria-hidden="true" title="Open to side">▥</span><span className="preview-action-label">Open to side</span></Button>
+        <Button aria-label="Close preview" onPress={preview.onClose}><span aria-hidden="true" title="Close preview">×</span></Button>
+      </span> : <Button className="close-card-button" aria-label="Close card" onPress={onCloseCard}>×</Button>}
     </div>
   )
   const progress = shown.progress === null ? null : <ProgressLine value={shown.progress} />
@@ -1061,7 +1115,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         mode="raw"
         onFrozen={(why) => setCard((c) => (c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c))}
         onShowRaw={() => {}}
-        onOpenLocal={(target, path) => openLocal(card.opened, target, path)}
+        onOpenLocal={(target, path, gesture) => routeLocal(card.opened, target, path, gesture)}
         onDisposed={disposedView}
       />
     ) : fontLayoutReady && card.kind === 'open' && limits && 'grid' in shown.body && card.csv ? (
@@ -1072,7 +1126,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         onCsvInfo={info => setCard(c => c.kind === 'open' && c.opened === card.opened && c.csv?.ref.revision === info.ref.revision ? { ...c, csv: info } : c)}
         onFrozen={why => setCard(c => c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c)}
         onShowRaw={line => { jumpTo.current = line; onLens('raw') }}
-        onOpenLocal={(target, path) => openLocal(card.opened, target, path)} onDisposed={disposedView} />
+        onOpenLocal={(target, path, gesture) => routeLocal(card.opened, target, path, gesture)} onDisposed={disposedView} />
     ) : fontLayoutReady && card.kind === 'open' && limits && 'rendered' in shown.body && card.build ? (
       <LensHost
         core={core}
@@ -1099,7 +1153,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
           picked.current = 'raw'
           setCard((c) => (c.kind === 'open' && c.opened === card.opened ? { ...c, lens: 'raw' } : c))
         }}
-        onOpenLocal={(target, path) => openLocal(card.opened, target, path)}
+        onOpenLocal={(target, path, gesture) => routeLocal(card.opened, target, path, gesture)}
         onDisposed={disposedView}
       />
     ) : (
@@ -1109,7 +1163,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   useEffect(() => {
     const handle: ReaderHandle = {
       ready: () => surface.current || readyError.current ? Promise.resolve() : new Promise<void>(done => readyWaiters.current.push(done)),
-      open: openNamed, openChild: openFolderChild, pick, reload, back, close: () => close(), reopen: reopenClosed, clearClosed,
+      open: openNamed, openChild: openFolderChild, openDerived, navigateLocal: openLocal, pick, reload, back, close: () => close(), reopen: reopenClosed, clearClosed,
       cycle: step => { const state = workspace.getSnapshot(); const index = state.tabs.findIndex(tab => tab.id === state.selected); if (state.tabs.length) void selectTab(state.tabs[(index + step + state.tabs.length) % state.tabs.length].id) },
       capture: async () => {
         const c = latest.current.card
@@ -1168,8 +1222,8 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     return shared.register(id, handle)
   }, [])
 
-  return <section className="reader-card" role="region" aria-label={'Reader card ' + label} data-card={id} data-focused={focused || undefined} onPointerDownCapture={onFocus} onFocusCapture={onFocus}>
-      <FileTabs panelId={'file-card-' + id} tabs={snapshot.tabs} selected={snapshot.selected} onSelect={(id) => void selectTab(id)} onClose={(id) => close(id)} />
+  return <section className={preview ? 'reader-card preview-reader' : 'reader-card'} role="region" aria-label={preview ? 'Preview reader' : 'Reader card ' + label} data-card={id} data-focused={focused || undefined} onPointerDownCapture={onFocus} onFocusCapture={onFocus}>
+      {preview ? null : <FileTabs panelId={'file-card-' + id} tabs={snapshot.tabs} selected={snapshot.selected} onSelect={(id) => void selectTab(id)} onClose={(id) => close(id)} />}
       <div className="card">
         <div className="file-card-panel" id={'file-card-' + id} role={snapshot.selected ? 'tabpanel' : undefined} aria-labelledby={snapshot.selected ? `file-label-${snapshot.selected}` : undefined}>
         {(workspaceNotice || focused && windowNotice) ? <div className="banner" role="status">{workspaceNotice || windowNotice}</div> : null}
@@ -1258,7 +1312,7 @@ interface LensHostProps {
   build?: MdBuild
   onFrozen(why: string): void
   onShowRaw(line: number): void
-  onOpenLocal(target: string, path: string): Promise<boolean>
+  onOpenLocal(target: string, path: string, gesture: LocalGesture): Promise<boolean>
   onDisposed(opened: Opened): void
 }
 
@@ -1297,7 +1351,7 @@ function LensHost({ core, session, budget, retained, lens, jumpTo, place, hadFoc
         kept?.view.dispose()
         const made = new RenderedLens(host.current!, core, opened, build, limits, {
           onFrozen: onFrozenHere, atLine: at, onShowRaw: (line) => onShowRawNow.current(line),
-          onOpenLocal: (target, path) => onOpenLocalNow.current(target, path), budget: budget ?? undefined
+          onOpenLocal: (target, path, gesture) => onOpenLocalNow.current(target, path, gesture), budget: budget ?? undefined
         })
         retained.current = { session, doc: opened.doc, gen: opened.gen, view: made }
         view = made

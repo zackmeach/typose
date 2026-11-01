@@ -1,5 +1,5 @@
 import type { RefObject } from 'react'
-import type { Hello, SurfaceRef } from '../shared/protocol'
+import type { Hello, Opened, SurfaceRef } from '../shared/protocol'
 import type { CoreClient } from './core'
 import type { RootView } from './folders'
 import type { SavedLocation, TabId, WorkspaceMetadataQueue, WorkspaceStore, WorkspaceTab } from './workspace'
@@ -7,10 +7,13 @@ import type { WorkspaceBudget } from './workspace-budget'
 
 export interface ReaderGroup { id: string; workspace: WorkspaceStore; weight: number }
 export interface ClosedLocation { entry: SavedLocation; index: number; cardId: string }
+export interface LocalGesture { mode: 'peek' | 'tab' | 'side'; trigger: HTMLElement }
 export interface ReaderHandle {
   ready(): Promise<void>
   open(path: string): void
   openChild(root: string, node: string): Promise<void>
+  openDerived(source: Opened, target: string, path: string): Promise<boolean>
+  navigateLocal(source: Opened, target: string, path: string): Promise<boolean>
   pick(): Promise<void>
   reload(): Promise<void>
   back(): Promise<void>
@@ -49,6 +52,7 @@ export interface ReaderWindow {
   release(): void
   notice(message: string): void
   opened(): void
+  openLink(cardId: string, source: Opened, target: string, path: string, gesture: LocalGesture): Promise<boolean>
   report(cardId: string, title: string, folderNode?: string): void
   register(cardId: string, handle: ReaderHandle): () => void
 }

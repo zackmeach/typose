@@ -1,6 +1,6 @@
 import { type CSSProperties, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Button } from 'react-aria-components'
-import type { Command, Hello } from '../shared/protocol'
+import { Button, Dialog, Modal, ModalOverlay } from 'react-aria-components'
+import type { Command, Hello, Opened } from '../shared/protocol'
 import { CoreCallError, type CoreClient } from './core'
 import { AppIcon } from './file-icon'
 import { AppMenu, LINUX } from './menu'
@@ -10,8 +10,11 @@ import { WorkspaceStore, WorkspaceMetadataQueue, type WorkspaceTab } from './wor
 import { WorkspaceBudget } from './workspace-budget'
 import { FolderSidebar } from './folder-sidebar'
 import { entryView, folderNode, foldersCharge, rootView, updateFolder, type RootView } from './folders'
-import type { ClosedLocation, ReaderGroup, ReaderHandle, ReaderWindow } from './reader-window'
+import type { ClosedLocation, LocalGesture, ReaderGroup, ReaderHandle, ReaderWindow } from './reader-window'
 import './split-cards.css'
+import './link-preview.css'
+
+interface LinkPreview extends ReaderGroup { sourceId: string; trigger: HTMLElement; width: number; right: number }
 
 const MAC = navigator.platform.startsWith('Mac')
 export const appHooks: { close?: () => void; workspace?: () => ReturnType<WorkspaceBudget['snapshot']> | null } = {}
@@ -20,6 +23,12 @@ export const appHooks: { close?: () => void; workspace?: () => ReturnType<Worksp
 export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> }) {
   const [groups, setGroups] = useState<readonly ReaderGroup[]>(() => [{ id: 'card-1', workspace: new WorkspaceStore('card-1-tab'), weight: 1 }])
   const groupRef = useRef(groups)
+  const [preview, setPreviewState] = useState<LinkPreview | null>(null)
+  const previewRef = useRef<LinkPreview | null>(null)
+  const allGroups = useRef<readonly ReaderGroup[]>(groups)
+  const previewWork = useRef<'opening' | 'closing' | 'promoting' | null>(null)
+  const previewCloseRequested = useRef(false)
+  const [previewBusy, setPreviewBusy] = useState(false)
   const nextCard = useRef(2)
   const [focused, setFocused] = useState('card-1')
   const focusedRef = useRef(focused)
@@ -53,12 +62,20 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   const closingCards = useRef(new Set<string>())
   const row = useRef<HTMLElement>(null)
   const waiting = useRef<string[]>([])
-  const workspace = { getSnapshot: () => ({ ready: !!hello.current, tabs: groupRef.current.flatMap(group => group.workspace.getSnapshot().tabs) }) }
+  const workspace = { getSnapshot: () => ({ ready: !!hello.current, tabs: allGroups.current.flatMap(group => group.workspace.getSnapshot().tabs) }) }
   const navigating = { get current() { return splitBusy.current || [...handles.current.values()].some(handle => handle.busy()) } }
-  const [shared] = useState<ReaderWindow>(() => ({ core, hello, groups: groupRef, closed, folders, pendingFolders,
+  const [shared] = useState<ReaderWindow>(() => ({ core, hello, groups: allGroups, closed, folders, pendingFolders,
     budget: workspaceBudget, peak: workspacePeak, queue: metadataQueue, pendingWorkspace, pendingNative,
     pendingHistory: pendingHistory.current, recharged, paid: () => payment.current,
-    charge: async () => false, release: () => {}, notice: () => {}, opened: () => {}, report: () => {}, register: () => () => {} }))
+    charge: async () => false, release: () => {}, notice: () => {}, opened: () => {}, openLink: async () => false, report: () => {}, register: () => () => {} }))
+
+  function setPreview(next: LinkPreview | null): void {
+    const previous = previewRef.current
+    if (previous && previous !== next) cancelReaderWaiters('The preview was closed', previous.id)
+    previewRef.current = next
+    allGroups.current = next ? [...groupRef.current, next] : groupRef.current
+    setPreviewState(next)
+  }
 
   function cancelReaderWaiters(message: string, id?: string): void {
     for (const waiter of readerWaiters.current) if (id === undefined || waiter.id === id) waiter.cancel(message)
@@ -66,6 +83,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   function updateGroups(next: readonly ReaderGroup[]): void {
     for (const group of groupRef.current) if (!next.some(item => item.id === group.id)) cancelReaderWaiters('Reader card was removed', group.id)
     groupRef.current = next
+    allGroups.current = previewRef.current ? [...next, previewRef.current] : next
     setGroups(next)
   }
   function focusCard(id: string): void {
@@ -81,7 +99,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     const bank = workspaceBudget.current, session = currentSession.current
     if (!bank || !current()) return false
     const actual = workspace.getSnapshot().tabs
-    const tabs = owner ? groupRef.current.flatMap(group => group.workspace === owner ? override ?? [] : group.workspace.getSnapshot().tabs) : override ?? actual
+    const tabs = owner ? allGroups.current.flatMap(group => group.workspace === owner ? override ?? [] : group.workspace.getSnapshot().tabs) : override ?? actual
     const entries = [...actual.flatMap(tab => tab.back ?? []), ...closed.current.map(item => item.entry)]
     const text = entries.reduce((sum, entry) => sum + entry.path.length + (entry.location.kind === 'manual' ? entry.location.path.length : entry.location.ticket.id.length), 0)
     const folderBytes = actual.reduce((bytes, tab) => {
@@ -91,7 +109,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     const pending = [...pendingWorkspace.current.values()]
     const extra = entries.length * 16_384 + 128 * text + folderBytes + foldersCharge(folders.current) +
       [...pendingFolders.current.values()].reduce((sum, bytes) => sum + bytes, 0) + [...pendingHistory.current.values()].reduce((sum, bytes) => sum + bytes, 0) +
-      Math.max(0, groupRef.current.length - 1) * (32 * 16_384) + retiredPeak.current + pendingSplit.current
+      Math.max(0, allGroups.current.length - 1) * (32 * 16_384) + retiredPeak.current + pendingSplit.current
     const paid = await bank.hold(tabs.length + pending.length, tabs.reduce((sum, tab) => sum + tab.key.length + tab.path.length, 0) + pending.reduce((sum, item) => sum + item.units, 0), extra)
     if (bank !== workspaceBudget.current || session !== currentSession.current || !current()) return false
     if (!paid) setWorkspaceNotice("Cannot open the view · Typose's memory budget is full")
@@ -104,7 +122,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   }
   function releaseEmptyWorkspace(): void {
     requestAnimationFrame(() => {
-      if (groupRef.current.length > 1 || workspace.getSnapshot().tabs.length || closed.current.length || folders.current.length || pendingFolders.current.size || pendingNative.current.size || pendingWorkspace.current.size || [...pendingHistory.current.values()].some(Boolean) || metadataQueue.pending) return
+      if (previewRef.current || groupRef.current.length > 1 || workspace.getSnapshot().tabs.length || closed.current.length || folders.current.length || pendingFolders.current.size || pendingNative.current.size || pendingWorkspace.current.size || [...pendingHistory.current.values()].some(Boolean) || metadataQueue.pending) return
       const bank = workspaceBudget.current
       if (!bank) return
       void bank.release().then(released => {
@@ -116,15 +134,17 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   shared.release = releaseEmptyWorkspace
   shared.notice = setWorkspaceNotice
   shared.opened = () => { if (sidebarOverlay) setSidebarOpen(false) }
+  shared.openLink = openLink
   shared.report = (id, text, node) => { reports.current.set(id, { title: text, node }); if (focusedRef.current === id) { setTitle(text); setActiveNode(node) } }
   shared.register = (id, handle) => {
-    if (!groupRef.current.some(group => group.id === id)) return () => {}
+    if (!allGroups.current.some(group => group.id === id)) return () => {}
     handles.current.set(id, handle)
     for (const waiter of readerWaiters.current) if (waiter.id === id) waiter.start(handle)
     if (id === focusedRef.current) for (const path of waiting.current.splice(0)) handle.open(path)
     return () => {
       if (handles.current.get(id) === handle) {
         handles.current.delete(id)
+        reports.current.delete(id)
         cancelReaderWaiters('Reader card was unmounted', id)
       }
     }
@@ -155,11 +175,15 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     const ready = core.onReady(value => {
       currentSession.current = value.session
       hello.current = value
-      for (const group of groupRef.current) group.workspace.coreReady(value.session)
+      for (const group of allGroups.current) group.workspace.coreReady(value.session)
       workspaceBudget.current = new WorkspaceBudget(core, value.session, workspacePeak.current)
       payment.current = charge(null, null, () => hello.current?.session === value.session).then(paid => { if (hello.current?.session === value.session) recharged.current = paid; return paid })
     })
-    const openPath = (path: string) => { const reader = focusedReader(); if (reader) reader.open(path); else waiting.current.push(path) }
+    const openPath = (path: string) => {
+      const reader = focusedReader()
+      if (previewRef.current || !reader) waiting.current.push(path)
+      else reader.open(path)
+    }
     const offOpen = window.typose.onOpenPath(openPath)
     const offCommand = window.typose.onCommand(run)
     const key = (event: KeyboardEvent) => {
@@ -169,7 +193,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       if (command && event.key.toLowerCase() === 't' && event.shiftKey && !event.altKey) { event.preventDefault(); run('reopen-tab'); return }
       if (command && event.key.toLowerCase() === 'w' && !event.altKey && !event.shiftKey) { event.preventDefault(); run('close-tab'); return }
       const step = event.ctrlKey && event.key === 'Tab' && !event.altKey ? event.shiftKey ? -1 : 1 : !MAC && event.ctrlKey && !event.shiftKey && !event.altKey && (event.key === 'PageDown' || event.key === 'PageUp') ? event.key === 'PageDown' ? 1 : -1 : 0
-      if (step) { event.preventDefault(); focusedReader()?.cycle(step); return }
+      if (step) { event.preventDefault(); if (!previewRef.current) focusedReader()?.cycle(step); return }
       if (LINUX && event.ctrlKey && event.key.toLowerCase() === 'q' && !event.altKey && !event.shiftKey) { run('exit'); return }
       if (command && event.key.toLowerCase() === 'r' && !event.shiftKey && !event.altKey || event.key === 'F5' && !command && !event.shiftKey && !event.altKey) { event.preventDefault(); run('reload') }
     }
@@ -285,9 +309,167 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
 
 
 
+  function focusReader(id: string): void {
+    requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-card="${CSS.escape(id)}"] .csv-grid, [data-card="${CSS.escape(id)}"] .md-scroller, [data-card="${CSS.escape(id)}"] .vl-scroller`)?.focus({ preventScroll: true }))
+  }
+
+  function restorePreviewFocus(group: LinkPreview): void {
+    focusCard(group.sourceId)
+    requestAnimationFrame(() => {
+      if (group.trigger.isConnected) group.trigger.focus({ preventScroll: true })
+      else focusReader(group.sourceId)
+    })
+  }
+
+  async function openLink(cardId: string, source: Opened, target: string, path: string, gesture: LocalGesture): Promise<boolean> {
+    if (splitBusy.current || previewWork.current || !source.view || source.view.session !== hello.current?.session) return false
+    const origin = allGroups.current.find(group => group.id === cardId)
+    if (!origin) return false
+    const sourceId = previewRef.current?.id === cardId ? previewRef.current.sourceId : cardId
+    let created: ReaderGroup | null = null
+    let freshPreview: LinkPreview | null = null
+    splitBusy.current = true
+    previewWork.current = 'opening'
+    setPreviewBusy(true)
+    try {
+      if (gesture.mode === 'peek') {
+        if (previewRef.current) {
+          if (previewRef.current.id !== cardId) { setWorkspaceNotice('Close the current preview before opening another'); return false }
+          return await handles.current.get(cardId)?.navigateLocal(source, target, path) ?? false
+        }
+        pendingSplit.current = 32 * 16_384 + (8 << 20)
+        if (!await charge(null, null, () => true)) return false
+        const id = 'preview-' + nextCard.current++
+        const store = new WorkspaceStore(id + '-tab')
+        if (hello.current) store.coreReady(hello.current.session)
+        const rect = document.querySelector<HTMLElement>(`[data-card="${CSS.escape(sourceId)}"]`)?.getBoundingClientRect()
+        freshPreview = { id, workspace: store, weight: 1, sourceId, trigger: gesture.trigger,
+          width: Math.min(Math.max((rect?.width ?? 800) * .45, 420), window.innerWidth - 32), right: Math.max(16, window.innerWidth - (rect?.right ?? window.innerWidth - 16)) }
+        setPreview(freshPreview)
+        const reader = await waitForReader(id)
+        const opened = await reader.openDerived(source, target, path)
+        if (!opened) previewCloseRequested.current = true
+        return opened
+      }
+      let destination = groupRef.current.find(group => group.id === sourceId) ?? groupRef.current[0]
+      if (gesture.mode === 'side') {
+        const index = groupRef.current.indexOf(destination)
+        const neighbor = groupRef.current[index + 1] ?? groupRef.current[index - 1]
+        if (neighbor) destination = neighbor
+        else { created = await newRight(destination.id); if (created) destination = created }
+      }
+      const reader = await waitForReader(destination.id)
+      if (reader.busy() || closingCards.current.has(destination.id)) return false
+      const opened = await reader.openDerived(source, target, path)
+      if (opened) { focusCard(destination.id); focusReader(destination.id) }
+      return opened
+    } catch (error) {
+      setWorkspaceNotice('Cannot open local link · ' + String(error))
+      if (freshPreview) previewCloseRequested.current = true
+      return false
+    } finally {
+      pendingSplit.current = 0
+      splitBusy.current = false
+      previewWork.current = null
+      setPreviewBusy(false)
+      if (created && !created.workspace.getSnapshot().tabs.length) await closeCard(created.id)
+      if (previewCloseRequested.current) { previewCloseRequested.current = false; await closePreview() }
+    }
+  }
+
+  async function closePreview(): Promise<void> {
+    const group = previewRef.current
+    if (!group) return
+    if (previewWork.current) { previewCloseRequested.current = true; return }
+    previewWork.current = 'closing'
+    setPreviewBusy(true)
+    const handle = handles.current.get(group.id)
+    let retirement: ReturnType<ReaderHandle['prepareRetirement']> | undefined
+    let detached = false
+    try {
+      if (handle) {
+        retirement = handle.prepareRetirement()
+        const before = retiredPeak.current
+        retiredPeak.current = Math.max(before, retirement.bytes)
+        if (hello.current && !await charge(null, null, () => previewRef.current === group)) { retiredPeak.current = before; retirement.cancel(); return }
+        await handle.detach(true)
+        detached = true
+        const surface = handle.surface()
+        if (surface && surface.session === hello.current?.session && !await core.call('releaseSurface', { surface, retiredBytes: retirement.bytes })) throw new Error('The preview could not be released')
+      }
+      for (const tab of group.workspace.getSnapshot().tabs) for (const entry of tab.back ?? []) releaseLocation(entry)
+      pendingHistory.current.delete(group.id)
+      setPreview(null)
+      restorePreviewFocus(group)
+      requestAnimationFrame(() => { if (!previewRef.current) for (const path of waiting.current.splice(0)) focusedReader()?.open(path) })
+      releaseEmptyWorkspace()
+    } catch (error) {
+      setWorkspaceNotice('Cannot close preview · ' + String(error))
+      if (detached) await handle?.resume()
+      else retirement?.cancel()
+    } finally { previewWork.current = null; previewCloseRequested.current = false; setPreviewBusy(false) }
+  }
+
+  async function promotePreview(side: boolean): Promise<void> {
+    const group = previewRef.current, handle = group && handles.current.get(group.id)
+    if (!group || !handle || handle.busy() || previewWork.current || splitBusy.current) return
+    previewWork.current = 'promoting'; splitBusy.current = true; setPreviewBusy(true)
+    let destination = groupRef.current.find(item => item.id === group.sourceId) ?? groupRef.current[0]
+    let created: ReaderGroup | null = null
+    let target: ReaderHandle | undefined
+    let a: ReturnType<ReaderHandle['prepareRetirement']> | undefined
+    let b: ReturnType<ReaderHandle['prepareRetirement']> | undefined
+    let detached = false, moved = false
+    try {
+      if (side) {
+        const index = groupRef.current.indexOf(destination)
+        const neighbor = groupRef.current[index + 1] ?? groupRef.current[index - 1]
+        if (neighbor) destination = neighbor
+        else { created = await newRight(destination.id); if (created) destination = created }
+      }
+      if (closingCards.current.has(destination.id)) throw new Error('The destination card is busy')
+      closingCards.current.add(destination.id)
+      target = await waitForReader(destination.id)
+      if (target.busy()) throw new Error('The destination card is busy')
+      const tab = group.workspace.tab(group.workspace.getSnapshot().selected ?? '')
+      if (!tab || tab.card.kind !== 'open') return
+      a = handle.prepareRetirement(); b = target.prepareRetirement()
+      const before = retiredPeak.current
+      retiredPeak.current = Math.max(before, a.bytes + b.bytes)
+      if (!await charge(null, null, () => previewRef.current === group)) { retiredPeak.current = before; return }
+      await handle.detach(true)
+      detached = true
+      const from = handle.surface(), to = target.surface()
+      if (!from || !to || !await core.call('transferDoc', { from, to, doc: tab.card.opened.doc, gen: tab.card.opened.gen })) throw new Error('The preview document could not move')
+      destination.workspace.adoptTabs(group.workspace.takeTabs([tab.id]))
+      destination.workspace.select(tab.id)
+      moved = true
+      await target.resume()
+      if (from.session === hello.current?.session && !await core.call('releaseSurface', { surface: from, retiredBytes: a.bytes })) throw new Error('The empty preview surface could not be released')
+      pendingHistory.current.delete(group.id)
+      setPreview(null)
+      focusCard(destination.id)
+      focusReader(destination.id)
+      requestAnimationFrame(() => { if (!previewRef.current) for (const path of waiting.current.splice(0)) focusedReader()?.open(path) })
+    } catch (error) {
+      setWorkspaceNotice('Cannot promote preview · ' + String(error))
+      if (detached && !moved) await handle.resume()
+      if (moved) { setPreview(null); focusCard(destination.id); focusReader(destination.id) }
+    } finally {
+      if (!detached) a?.cancel()
+      if (!moved) b?.cancel()
+      closingCards.current.delete(destination.id)
+      pendingSplit.current = 0
+      previewWork.current = null; splitBusy.current = false; setPreviewBusy(false)
+      if (created && !moved) await closeCard(created.id)
+      if (previewCloseRequested.current && previewRef.current === group) { previewCloseRequested.current = false; await closePreview() }
+      else previewCloseRequested.current = false
+    }
+  }
+
   async function waitForReader(id: string): Promise<ReaderHandle> {
     const session = hello.current?.session
-    if (!session || !groupRef.current.some(group => group.id === id)) throw new Error('Reader card is unavailable')
+    if (!session || !allGroups.current.some(group => group.id === id)) throw new Error('Reader card is unavailable')
     return new Promise<ReaderHandle>((resolve, reject) => {
       let started = false, settled = false
       const waiter = {
@@ -303,7 +485,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
           started = true
           void handle.ready().then(() => {
             if (settled) return
-            if (hello.current?.session !== session || handles.current.get(id) !== handle || !groupRef.current.some(group => group.id === id)) {
+            if (hello.current?.session !== session || handles.current.get(id) !== handle || !allGroups.current.some(group => group.id === id)) {
               waiter.cancel('Reader card changed while creating its surface')
               return
             }
@@ -458,6 +640,14 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     }
   }
   function run(command: Command): void {
+    if (previewRef.current) {
+      if (command === 'close-tab' || command === 'close-card') void closePreview()
+      else if (command === 'split-right' || command === 'move-tab-right') void promotePreview(true)
+      else if (command === 'reload') void handles.current.get(previewRef.current.id)?.reload()
+      else if (command === 'exit') window.close()
+      else setWorkspaceNotice('Close the preview before changing the workspace')
+      return
+    }
     const reader = focusedReader()
     if (command === 'open') void reader?.pick()
     else if (command === 'open-folder') void pickFolder()
@@ -505,6 +695,15 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
             onPointerUp={event => { delete event.currentTarget.dataset.x }} onPointerCancel={event => { delete event.currentTarget.dataset.x }} /> : null}
         </div>)}
       </main>
+      {preview ? <ModalOverlay isOpen isDismissable className="link-preview-overlay" onOpenChange={open => { if (!open) void closePreview() }}>
+        <Modal className="link-preview-frame" style={{ width: preview.width, right: `min(${preview.right}px, max(16px, calc(100vw - ${preview.width}px - 16px)))` }}>
+          <Dialog aria-label="Link preview" className="link-preview-dialog">
+            <ReaderCard id={preview.id} label={0} workspace={preview.workspace} window={shared} fonts={fonts} focused
+              onFocus={() => {}} onCloseCard={() => void closePreview()} windowNotice={workspaceNotice}
+              preview={{ busy: previewBusy, onTab: () => void promotePreview(false), onSide: () => void promotePreview(true), onClose: () => void closePreview() }} />
+          </Dialog>
+        </Modal>
+      </ModalOverlay> : null}
     </div>
   </>
 }

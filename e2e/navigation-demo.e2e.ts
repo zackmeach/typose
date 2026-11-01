@@ -1,13 +1,14 @@
 // Checkpoint A's visible local-navigation demo on the production package. This is a short workflow smoke, not the
 // authority, lifecycle, or memory qualification suite.
-import { expect, type Page } from '@playwright/test'
+import { expect, type Locator, type Page } from '@playwright/test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { FIXTURES, test, visibleRows, waitIndexed, waitOpen } from './app'
 import { closePackaged, launchPackaged, unrequested } from './packaged'
+import { armPlaceProbe, readPlaceProbe } from './place-probe'
 
-const ready = (win: Page) =>
-  expect(win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 30_000 })
+const ready = (scope: Page | Locator) =>
+  expect(scope.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 30_000 })
 
 function demoDirectory(prefix: string): string {
   mkdirSync(FIXTURES, { recursive: true })
@@ -26,7 +27,7 @@ async function openMenuItem(win: Page, name: string): Promise<void> {
   await win.getByRole('menuitem', { name, exact: true }).click()
 }
 
-test('packaged local links: C backs to B and then A at each source link position', async () => {
+test('packaged local-link peek: B opens C, Back restores B, and closing returns to A', async () => {
   test.skip(process.platform !== 'win32', 'the packaged local-route backend is currently Windows-only')
   const directory = demoDirectory('navigation-back')
   const a = join(directory, 'A.md')
@@ -41,26 +42,38 @@ test('packaged local links: C backs to B and then A at each source link position
     l = await launchPackaged({ cdp: true, file: a })
     const win = l.page!
     await ready(win)
-    const aLink = win.getByRole('link', { name: 'Continue to B', exact: true })
+    const sourceCard = win.locator('.reader-card').first()
+    const aLink = sourceCard.getByRole('link', { name: 'Continue to B', exact: true })
+    await aLink.scrollIntoViewIfNeeded()
+    await armPlaceProbe(aLink)
     await aLink.click()
-    await expect(win.locator('.card-name')).toHaveText('B.md')
-    await ready(win)
-    const bLink = win.getByRole('link', { name: 'Continue to C', exact: true })
+    const dialog = win.getByRole('dialog', { name: 'Link preview', exact: true })
+    await expect(dialog).toBeVisible()
+    await expect(dialog.getByRole('heading', { name: 'B', exact: true })).toBeVisible()
+    await ready(dialog)
+    const sourceDuringPreview = await readPlaceProbe(aLink)
+    expect(sourceDuringPreview.sameNodes).toBe(true)
+    expect(sourceDuringPreview.scrollTop).toBe(sourceDuringPreview.originScrollTop)
+    expect(Math.abs(sourceDuringPreview.anchorTop - sourceDuringPreview.originAnchorTop)).toBeLessThanOrEqual(1)
+    const bLink = dialog.getByRole('link', { name: 'Continue to C', exact: true })
+    await bLink.scrollIntoViewIfNeeded()
     await bLink.click()
-    await expect(win.locator('.card-name')).toHaveText('C.txt')
-    await waitOpen(win)
-    await waitIndexed(win)
-    expect((await visibleRows(win))[0].text).toBe('C line 1')
-
-    await win.getByRole('button', { name: 'Back', exact: true }).click()
-    await expect(win.locator('.card-name')).toHaveText('B.md')
-    await ready(win)
-    await expect(win.getByRole('link', { name: 'Continue to C', exact: true })).toBeInViewport()
+    await expect(dialog.getByText('C line 1', { exact: true })).toBeVisible()
+    await dialog.getByRole('button', { name: 'Back', exact: true }).click()
+    await expect(dialog.getByRole('heading', { name: 'B', exact: true })).toBeVisible()
+    await ready(dialog)
+    await expect(dialog.getByRole('link', { name: 'Continue to C', exact: true })).toBeInViewport()
     await win.screenshot({ path: test.info().outputPath('back-restored.png') })
-    await win.getByRole('button', { name: 'Back', exact: true }).click()
-    await expect(win.locator('.card-name')).toHaveText('A.md')
-    await ready(win)
-    await expect(win.getByRole('link', { name: 'Continue to B', exact: true })).toBeInViewport()
+    await dialog.getByRole('button', { name: 'Close preview', exact: true }).click()
+    await expect(dialog).toHaveCount(0)
+    await expect(sourceCard.locator('.card-name')).toHaveText('A.md')
+    await ready(sourceCard)
+    await expect(aLink).toBeInViewport()
+    await expect(aLink).toBeFocused()
+    const sourceAfterClose = await readPlaceProbe(aLink)
+    expect(sourceAfterClose.sameNodes).toBe(true)
+    expect(sourceAfterClose.scrollTop).toBe(sourceAfterClose.originScrollTop)
+    expect(Math.abs(sourceAfterClose.anchorTop - sourceAfterClose.originAnchorTop)).toBeLessThanOrEqual(1)
     expect(await win.title()).toBe('A.md — Typose')
     await closeCleanly(l)
     l = undefined

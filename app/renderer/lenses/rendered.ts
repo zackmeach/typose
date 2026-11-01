@@ -4,6 +4,7 @@ import { renderedCharge } from './rendered-charge'
 import { viewportCap } from './raw'
 import type { LensBudget } from './lens-budget'
 import { RenderedImages } from './images'
+import type { LocalGesture } from '../reader-window'
 
 export { RENDERED_PER_UNIT, renderedCharge } from './rendered-charge'
 
@@ -15,7 +16,7 @@ export interface RenderedOptions {
   /** The note under an oversized block: show its source in Raw at this line. */
   onShowRaw(line: number): void
   /** Opens through this source document's local capability; false leaves the reader in place. */
-  onOpenLocal?(target: string, path: string): Promise<boolean>
+  onOpenLocal?(target: string, path: string, gesture: LocalGesture): Promise<boolean>
   budget?: LensBudget
 }
 
@@ -203,10 +204,12 @@ export class RenderedLens {
     const a = t.closest('a')
     if (!a || !this.scroller.contains(a)) return
     e.preventDefault()
-    if (e.type === 'click' && (!(e instanceof MouseEvent) || e.button === 0)) void this.follow(a)
+    if (e.type === 'click' && (!(e instanceof MouseEvent) || e.button === 0)) void this.follow(a, {
+      mode: e instanceof MouseEvent && (e.ctrlKey || e.metaKey) ? 'tab' : e instanceof MouseEvent && e.shiftKey ? 'side' : 'peek', trigger: a
+    })
   }
 
-  private async follow(a: HTMLAnchorElement): Promise<void> {
+  private async follow(a: HTMLAnchorElement, gesture: LocalGesture): Promise<void> {
     const href = a.getAttribute('data-href')
     if (!href || this.stopped || this.paused) return
     const generation = this.linkGeneration
@@ -217,7 +220,7 @@ export class RenderedLens {
       if (target.kind === 'external') {
         if (!await window.typose.openExternal(target.url)) a.title = `Not opened: ${href}`
       } else if (target.kind === 'local') {
-        if (!await this.options.onOpenLocal?.(target.target, target.path)) a.title = `Not opened: ${href}`
+        if (!await this.options.onOpenLocal?.(target.target, target.path, gesture)) a.title = `Not opened: ${href}`
       } else if (target.kind === 'heading' && interaction === this.interaction) {
         this.atLine = target.line
         this.moved = false

@@ -396,10 +396,14 @@ impl Document {
         })?;
         let route = source.resolve(target).map_err(local_error)?;
         let supported = route.path().extension().and_then(|s| s.to_str()).is_some_and(|s| {
-            s.eq_ignore_ascii_case("md") || s.eq_ignore_ascii_case("markdown") || s.eq_ignore_ascii_case("txt")
+            s.eq_ignore_ascii_case("md")
+                || s.eq_ignore_ascii_case("markdown")
+                || s.eq_ignore_ascii_case("txt")
+                || s.eq_ignore_ascii_case("csv")
+                || s.eq_ignore_ascii_case("tsv")
         });
         if !supported {
-            return Err(DocError::Refused("local links support only .md, .markdown and .txt files".into()));
+            return Err(DocError::Refused("local links support only Markdown, TXT, CSV and TSV files".into()));
         }
         self.check_local_source(generation)?;
         Ok(route)
@@ -1048,6 +1052,35 @@ mod tests {
         assert!(matches!(child.reload(), Err(DocError::Refused(_))));
         assert_eq!(child.generation(), 1);
         assert!(child.local_only());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn csv_and_tsv_local_targets_keep_markdown_origin_and_selected_folder_scope() {
+        let scratch = Scratch::new("local-csv-tsv");
+        let source_path = scratch.0.join("source.md");
+        fs::write(&source_path, b"# Source").unwrap();
+        fs::write(scratch.0.join("data.CSV"), b"a,b\n1,2\n").unwrap();
+        fs::write(scratch.0.join("data.TsV"), b"a\tb\n1\t2\n").unwrap();
+        let root = crate::local::folder::Folder::capture(&scratch.0, "1").unwrap();
+        let mut source = Document::open(&source_path).unwrap();
+        source.bind_folder(&root).unwrap();
+        for name in ["/data.CSV", "/data.TsV"] {
+            let mut target = source.open_local(1, name).unwrap();
+            assert!(target.local_only());
+            assert_eq!(target.folder_scope().unwrap().0, "1");
+            assert!(target.open_local(1, "source.md").is_err(), "CSV/TSV does not become a Markdown link source");
+            target.reload().unwrap();
+            assert!(target.local_only());
+            assert_eq!(target.folder_scope().unwrap().0, "1");
+        }
+        for refused in ["data.csv.exe", "data.tsv:stream", "/../outside.csv", r"\\server\share\data.csv"] {
+            assert!(source.open_local(1, refused).is_err(), "{refused}");
+        }
+        root.close();
+        let target = source.open_local(1, "/data.CSV").unwrap();
+        assert!(target.local_only());
+        assert_eq!(target.folder_scope().unwrap().0, "1");
     }
 
     #[cfg(windows)]
