@@ -428,6 +428,7 @@ body {
   border: none;
   border-radius: 6px;
   padding: 0;
+  cursor: pointer;
 }
 .lens-tab-tip {
   display: block;
@@ -439,6 +440,7 @@ body {
 }
 .lens-tab[data-disabled] {
   color: var(--text2);
+  cursor: not-allowed;
 }
 .lens-tab[data-focus-visible] {
   outline: 2px solid var(--accent);

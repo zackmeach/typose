@@ -6,6 +6,8 @@ Date: 2026-10-31. Plan review: READY after two independent critical reviews and 
 
 Execution steering, 2026-10-31: Zack requested “progress first, polish and robustity later.. we can refine once we see things work”. The next deliverable is an integrated working Back/Reopen demo, stacked on the reviewed saved-location head if needed. Use focused functional checks, typecheck and a packaged demo smoke; defer broad stress/platform qualification and polish until he has seen it. Preserve manual/derived filesystem authority and basic ownership cleanup. Existing failed/pending gate evidence stays recorded and must not be relabelled as passed. Checkpoint A remains the feedback point before sidebar expansion; the earlier full-gate-per-intermediate-slice cadence is superseded for this demo.
 
+Checkpoint A feedback, 2026-10-31: Zack confirmed the installed Back/Reopen demo worked. Correct the reported Raw/Rendered hover cursor, then proceed to the folder sidebar under the same progress-first cadence. Use focused checks and an installed working slice; keep filesystem authority and ownership intact. Broader qualification and polish remain deferred and explicitly recorded.
+
 Make the installed reader look intentional, close its basic navigation holes, then deliver the product's defining workflow:
 
 **Open a local folder -> read its Markdown -> click a relative CSV link -> inspect a real Grid in a peek -> promote it beside the source -> close the target without losing the source's place.**
