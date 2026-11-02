@@ -98,7 +98,12 @@ describe.skipIf(process.platform !== 'win32')('verified structured native bridge
     const columns = await c.value<StructuredColumns>('structuredColumns', { ref: info.ref, start: 0, count: 128 })
     expect(columns.columns.map((column) => column.key)).toEqual(['message', 'type', 'timestamp', 'n', 'nested', 'same', 'late'])
     expect(columns).toMatchObject({ total: 7, done: true })
-    const rows = await c.value<StructuredRows>('structuredRows', { ref: info.ref, start: 0, count: 3 })
+    // Rows wait on the Raw line index, which can trail the structured build: an unindexed record end is an empty page.
+    let rows = await c.value<StructuredRows>('structuredRows', { ref: info.ref, start: 0, count: 3 })
+    while (rows.rows.length < 3 && !rows.done && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      rows = await c.value<StructuredRows>('structuredRows', { ref: info.ref, start: 0, count: 3 })
+    }
     expect(rows.rows.map((row) => [row.line, row.status])).toEqual([[1, 'valid'], [2, 'failed'], [3, 'valid']])
     expect(rows.rows[0]).toMatchObject({ summary: 'first', type: 'info', timestamp: '2026-11-01' })
     expect(rows.rows[1]?.summary).toBe('{bad')

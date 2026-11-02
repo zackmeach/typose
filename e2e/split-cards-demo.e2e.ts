@@ -96,6 +96,7 @@ test('split clones the source place, opens into the focused card, and preserves 
     await stubOpenDialog(live.app, b)
     await win.getByRole('button', { name: 'Menu', exact: true }).click()
     await win.getByRole('menuitem', { name: 'Open file…', exact: true }).click()
+    await win.getByRole('button', { name: 'Browse…', exact: true }).click()
     await expect(right.locator('.card-name')).toHaveText('split-destination-b.md')
     await cardIndexed(right)
     await expect(right.locator('.md-scroller, .vl-row .text').first()).toBeAttached({ timeout: 30_000 })

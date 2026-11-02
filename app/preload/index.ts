@@ -40,6 +40,14 @@ window.addEventListener('click', event => {
   clipboardGesture = true
   setTimeout(() => { clipboardGesture = false }, 0)
 }, { capture: true })
+window.addEventListener('keydown', event => {
+  if (!event.isTrusted || event.isComposing || event.key !== 'Enter' || !(event.target instanceof Element)) return
+  const active = event.target.getAttribute('aria-activedescendant')
+  const command = active ? document.getElementById(active) : event.target.closest('[role="menuitem"]')
+  if (command?.getAttribute('data-clipboard-copy') !== 'true') return
+  clipboardGesture = true
+  setTimeout(() => { clipboardGesture = false }, 0)
+}, { capture: true })
 
 // Files and folders dropped anywhere on the window: their real paths, read here (only a trusted drop has them), go to
 // main, which checks them as it does the dialogs' choices. A file drag's default, a file:// navigation, is cancelled
@@ -71,7 +79,10 @@ window.addEventListener('drop', event => {
 // before React Aria's press handlers call the bridge. Page script can't make a trusted event or read the token.
 let handoffToken: string | undefined
 const armHandoff = (event: Event) => {
-  if (!event.isTrusted || !(event.target instanceof Element) || !event.target.closest('[data-handoff="true"]')) return
+  if (!event.isTrusted || !(event.target instanceof Element)) return
+  // A combobox (the palette) names its highlighted row with aria-activedescendant; Enter there is that row's activation.
+  const active = event instanceof KeyboardEvent && event.key === 'Enter' ? event.target.getAttribute('aria-activedescendant') : null
+  if (!(active ? document.getElementById(active) : event.target)?.closest('[data-handoff="true"]')) return
   if (event instanceof PointerEvent && event.button !== 0) return
   if (event instanceof KeyboardEvent && (event.repeat || event.isComposing || (event.key !== 'Enter' && event.key !== ' '))) return
   const token = crypto.randomUUID()
@@ -88,6 +99,12 @@ const takeHandoff = () => {
 }
 
 const typose: TyposeApi = {
+  loadSettings: () => ipcRenderer.invoke('load-settings'),
+  changeSetting: (key, value, revision) => ipcRenderer.invoke('change-setting', key, value, revision),
+  exportTheme: (name, tokens) => ipcRenderer.invoke('export-theme', name, tokens),
+  setChromeTheme: (dark, canvas, text) => ipcRenderer.invoke('chrome-theme', dark, canvas, text),
+  zoom: action => webFrame.setZoomFactor(action === 'reset' ? 1 : Math.max(0.5, Math.min(2, webFrame.getZoomFactor() * (action === 'in' ? 1.1 : 1 / 1.1)))),
+  fullScreen: () => ipcRenderer.invoke('full-screen'),
   loadSession: () => ipcRenderer.invoke('load-session'),
   saveSession: (session) => ipcRenderer.invoke('save-session', session),
   onSessionCapture: (cb) => {

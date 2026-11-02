@@ -154,6 +154,7 @@ test('Open file… while the core is stopped acknowledges the queued file and op
   await expect(win.locator('.card-message .open-button')).toHaveCount(0)
   await win.getByRole('button', { name: 'Menu', exact: true }).click()
   await win.getByRole('menuitem', { name: 'Open file…' }).click()
+  await win.getByRole('button', { name: 'Browse…', exact: true }).click()
   // The lost document keeps its tab. The explicit manual request is acknowledged, then opens when the core returns.
   await expect(win.locator('.card-name')).toHaveText('core-death-first.txt')
   await expect(win.locator('.card-message p')).toHaveText("Typose's core stopped")

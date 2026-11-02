@@ -308,11 +308,18 @@ describe('plan (Rendered Markdown slice) §2.1: render builds the blocks, and md
 
   it('every block, sanitized, with its lines, slug and index', async () => {
     const doc = Doc.open(mdPath)
-    expect(await doc.render(1, new Cancel())).toEqual({ blocks: 3, units: 45, htmlBytes: 153, nodes: 24, noteUnits: 0 })
+    // Text runs carry their source maps (`L:start:width:units`) so a partial Rendered selection copies exact source bytes.
+    expect(await doc.render(1, new Cancel())).toEqual({ blocks: 3, units: 45, htmlBytes: 551, nodes: 38, noteUnits: 0 })
     expect((await doc.mdPage(1, 0, 10, new Cancel())).items).toEqual([
-      { block: 0, line: 0, lines: 1, html: '<h1>Title</h1>\n', slug: 'title' },
-      { block: 1, line: 2, lines: 1, html: '<p>See <a href="#">x</a>, <a href="#" data-href="other.md">y</a> and &lt;script&gt;s&lt;/script&gt;.</p>\n' },
-      { block: 2, line: 4, lines: 2, html: '<ul>\n<li>a</li>\n<li>b</li>\n</ul>\n' }
+      { block: 0, line: 0, lines: 1, html: '<h1><span data-source-map="L:2:1:5">Title</span></h1>\n', slug: 'title' },
+      {
+        block: 1, line: 2, lines: 1,
+        html: '<p><span data-source-map="L:9:1:4">See </span><a href="#"><span data-source-map="L:14:1:1">x</span></a>' +
+          '<span data-source-map="L:37:1:2">, </span><a href="#" data-href="other.md"><span data-source-map="L:40:1:1">y</span></a>' +
+          '<span data-source-map="L:52:1:5"> and </span>&lt;script&gt;<span data-source-map="L:65:1:1">s</span>&lt;/script&gt;' +
+          '<span data-source-map="L:75:1:1">.</span></p>\n'
+      },
+      { block: 2, line: 4, lines: 2, html: '<ul>\n<li><span data-source-map="L:80:1:1">a</span></li>\n<li><span data-source-map="L:84:1:1">b</span></li>\n</ul>\n' }
     ])
     expect((await doc.mdPage(1, 2, 10, new Cancel())).items.map((i) => i.block)).toEqual([2])
     expect((await doc.mdPage(1, 3, 10, new Cancel())).items).toEqual([])

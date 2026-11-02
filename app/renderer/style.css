@@ -51,12 +51,14 @@
   --text: #ededed;
   --text2: #8a8a8f;
   --accent: #8fb0ff;
-  --font-ui: system-ui, sans-serif;
-  --font-mono: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  --font-ui-base: system-ui, sans-serif;
+  --font-mono-base: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  --font-ui: var(--font-ui-base);
+  --font-mono: var(--font-mono-base);
 }
 :root[data-fonts='ready'] {
-  --font-ui: Inter, system-ui, sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+  --font-ui-base: Inter, system-ui, sans-serif;
+  --font-mono-base: 'JetBrains Mono', ui-monospace, Consolas, monospace;
 }
 html,
 body {

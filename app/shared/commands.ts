@@ -1,0 +1,46 @@
+import type { Command } from './protocol'
+export interface CommandDefinition { id: Command; label: string; shortcut?: string; document?: boolean }
+/** Shared by native menu, renderer menu, palette and shortcut reference. */
+export const COMMANDS: readonly CommandDefinition[] = [
+  { id: 'open', label: 'Open file…', shortcut: 'Ctrl+O' },
+  { id: 'browse', label: 'Browse…' },
+  { id: 'open-folder', label: 'Open folder…' },
+  { id: 'palette', label: 'Command palette', shortcut: 'Ctrl+K' },
+  { id: 'settings', label: 'Settings', shortcut: 'Ctrl+,' },
+  { id: 'toggle-sidebar', label: 'Toggle sidebar', shortcut: 'Ctrl+B' },
+  { id: 'split-right', label: 'Split right', shortcut: 'Ctrl+\\' },
+  { id: 'move-tab-right', label: 'Move tab right', document: true },
+  { id: 'close-card', label: 'Close card' },
+  { id: 'switch-lens', label: 'Switch lens', document: true },
+  { id: 'wrap-lines', label: 'Wrap lines' },
+  { id: 'zoom-in', label: 'Zoom in', shortcut: 'Ctrl+=' },
+  { id: 'zoom-out', label: 'Zoom out', shortcut: 'Ctrl+-' },
+  { id: 'zoom-reset', label: 'Reset zoom', shortcut: 'Ctrl+0' },
+  { id: 'full-screen', label: 'Full screen', shortcut: 'F11' },
+  { id: 'reload', label: 'Reload', shortcut: 'Ctrl+R', document: true },
+  { id: 'refresh-folders', label: 'Refresh folders' },
+  { id: 'find', label: 'Find in file…', shortcut: 'Ctrl+F', document: true },
+  { id: 'find-next', label: 'Next match', shortcut: 'F3', document: true },
+  { id: 'find-previous', label: 'Previous match', shortcut: 'Shift+F3', document: true },
+  { id: 'go-to', label: 'Go to line / row…', shortcut: 'Ctrl+G', document: true },
+  { id: 'copy', label: 'Copy selection', shortcut: 'Ctrl+C', document: true },
+  { id: 'copy-path', label: 'Copy path', document: true },
+  { id: 'show-in-folder', label: 'Show in folder', document: true },
+  { id: 'open-default', label: 'Open with default app', document: true },
+  { id: 'print', label: 'Print…', shortcut: 'Ctrl+P', document: true },
+  { id: 'close-tab', label: 'Close tab', shortcut: 'Ctrl+W' },
+  { id: 'reopen-tab', label: 'Reopen closed tab', shortcut: 'Ctrl+Shift+T' },
+  { id: 'clear-closed', label: 'Clear recently closed tabs' },
+  { id: 'theme-light', label: 'Theme: light' },
+  { id: 'theme-dark', label: 'Theme: dark' },
+  { id: 'theme-system', label: 'Theme: system' },
+  { id: 'shortcuts', label: 'Keyboard shortcuts' },
+  { id: 'exit', label: 'Exit' }
+]
+export function commandShortcut(shortcut: string | undefined, mac = false): string { return shortcut?.replaceAll('Ctrl+', mac ? '⌘' : 'Ctrl+') ?? '' }
+/** The palette's section headings; ids not listed here (the palette itself) are not offered. */
+export const COMMAND_GROUPS: readonly { title: 'LENS' | 'VIEW' | 'FILE'; ids: readonly Command[] }[] = [
+  { title: 'LENS', ids: ['switch-lens', 'wrap-lines', 'find', 'find-next', 'find-previous', 'go-to', 'copy'] },
+  { title: 'VIEW', ids: ['settings', 'shortcuts', 'toggle-sidebar', 'split-right', 'move-tab-right', 'close-card', 'zoom-in', 'zoom-out', 'zoom-reset', 'full-screen', 'theme-light', 'theme-dark', 'theme-system', 'refresh-folders'] },
+  { title: 'FILE', ids: ['open', 'browse', 'open-folder', 'reload', 'print', 'copy-path', 'show-in-folder', 'open-default', 'close-tab', 'reopen-tab', 'clear-closed', 'exit'] }
+]
