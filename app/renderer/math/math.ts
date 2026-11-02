@@ -29,10 +29,11 @@ if (__TEST_HOOKS__) Object.assign(window, { typoseSanitizeMath: sanitizeMath })
 /**
  * Renderer bytes a rendered formula keeps, charged before the DOM sees any: a fixed part plus one per element. 30 dense
  * 6×6 matrices (2,340 elements each) raised the renderer's private bytes by 156.6 MiB, and 2,000 inline `$x_i$` (28
- * each) by 292 MiB: 2,358 B an element and 87,064 B a formula. Each ×1.25, rounded up to 64 B.
+ * each) by 292 MiB: 5,473,567 B and 153,092 B an item, which fit 2,301 B an element plus 88,657 B a formula. Each
+ * ×1.25, rounded up to 64 B.
  */
-export const MATH_ELEMENT_BYTES = 2944
-export const MATH_FORMULA_BYTES = 108_864
+export const MATH_ELEMENT_BYTES = 2880
+export const MATH_FORMULA_BYTES = 110_848
 /** A formula still in the worker after this is a runaway: the worker is terminated and respawned for the next. */
 const MATH_TIMEOUT_MS = 1500
 
