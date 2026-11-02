@@ -1227,8 +1227,8 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         <Popover className="csv-info-popover" placement="bottom end">
           <Dialog aria-label="CSV file info">
             <p>{card.csv ? `${Math.max(0, card.csv.sourceRecords - (card.csv.header ? 1 : 0))} rows${card.csv.done ? '' : '…'} · ${card.csv.expectedColumns} columns · ${card.csv.encoding}` : 'Preparing CSV…'}</p>
-            <label><input type="checkbox" checked={card.csv?.header ?? false} disabled={csvChanging || !card.csv} onChange={event => void configureCsv({ ...(card.csvOptions ?? CSV_OPTIONS), header: event.target.checked })} /> First row is header</label>
-            <label>Delimiter <select aria-label="Delimiter" value={card.csvOptions?.delimiter ?? 'auto'} disabled={csvChanging} onChange={event => void configureCsv({ ...(card.csvOptions ?? CSV_OPTIONS), delimiter: event.target.value as CsvOptions['delimiter'] })}>
+            <label><input type="checkbox" checked={card.csv?.header ?? false} disabled={!card.csv} aria-disabled={csvChanging || undefined} onChange={event => void configureCsv({ ...(card.csvOptions ?? CSV_OPTIONS), header: event.target.checked })} /> First row is header</label>
+            <label>Delimiter <select aria-label="Delimiter" value={card.csvOptions?.delimiter ?? 'auto'} aria-disabled={csvChanging || undefined} onChange={event => void configureCsv({ ...(card.csvOptions ?? CSV_OPTIONS), delimiter: event.target.value as CsvOptions['delimiter'] })}>
               <option value="auto">Auto{detectedDelimiter ? ` (${detectedDelimiter})` : ''}</option><option value=",">Comma</option><option value={'\t'}>Tab</option><option value=";">Semicolon</option><option value="|">Pipe</option>
             </select></label>
             {card.gridOff ? <p>{card.gridOff}</p> : null}
