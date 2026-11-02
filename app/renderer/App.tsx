@@ -114,7 +114,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   }
 
   async function captureWindowSession(): Promise<boolean> {
-    if (!sessionReady.current || !hello.current || splitBusy.current || previewWork.current) return false
+    if (!sessionReady.current || !hello.current && workspace.getSnapshot().tabs.some(tab => tab.card.kind === 'open') || splitBusy.current || previewWork.current) return false
     const before = groupRef.current, snapshots = before.map(group => group.workspace.getSnapshot())
     try {
       const cards = []

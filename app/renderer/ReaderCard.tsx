@@ -1407,7 +1407,9 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
 
   async function captureSession(): Promise<SessionCard | null> {
     const before = workspace.getSnapshot()
-    if (!before.ready || navigating.current) return null
+    // With the core down every tab is gone or never opened, and is captured without asking it: Z78's crash mark must
+    // reach disk even if a second death keeps the next core away until the window closes.
+    if (navigating.current || !before.ready && before.tabs.some(tab => tab.card.kind === 'open')) return null
     const tabs: SessionTab[] = []
     for (const tab of before.tabs) {
       let location: SessionTab['location'] = { kind: 'reselect', path: tab.path }

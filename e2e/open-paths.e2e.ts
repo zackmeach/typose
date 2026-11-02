@@ -216,6 +216,25 @@ test("a file the core died reading comes back unopened after a restart, and open
   rmSync(second.userData, { recursive: true, force: true })
 })
 
+test('the crash mark reaches the session even when a second death keeps the next core away until the window closes', async () => {
+  const file = fixture('open-paths-crash-twice.txt', 'twice\n')
+  const first = await launch({ hooks: true, env: { TYPOSE_TEST_READ_DELAY: '4000' }, file })
+  await expect(first.win.locator('.card-status')).toHaveText('Opening…', { timeout: 30_000 })
+  killCore(first)
+  // The respawn dies as soon as it's spawned: within 60 s of the last respawn, no third core comes before the quit.
+  const spawns = () => lifecycle(first.userData).filter(r => r.event === 'utility-spawn').length
+  for (let i = 0; i < 1000 && spawns() < 2; i++) await new Promise(done => setTimeout(done, 5))
+  killCore(first)
+  await expect.poll(() => lifecycle(first.userData).some(r => r.event === 'core-stopped')).toBe(true)
+  expect(await finish(first, true)).toEqual({ code: 0, signal: null })
+
+  const second = await launch({ hooks: true, userData: first.userData })
+  await expect(second.win.locator('.card-message p')).toHaveText("Typose's core stopped while reading this file.", { timeout: 30_000 })
+  expect(await debugStats(second.win)).toMatchObject({ docs: 0 })
+  expect(second.pageErrors).toEqual([])
+  await finish(second)
+})
+
 test('a restored record that names a folder never becomes a root, even replayed after the core dies during restore', async () => {
   const slow = fixture('open-paths-restore-slow.txt', 'slow\n')
   const folder = folderFixture('open-paths-restore-dir', { 'inside.md': '# Inside\n' })
