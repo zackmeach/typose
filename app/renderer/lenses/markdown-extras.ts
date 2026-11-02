@@ -133,10 +133,15 @@ export function markdownExtras(root: HTMLElement, current: () => boolean, reserv
         if (!current() || source.length > 32768 || !await reserve((16 << 20) + source.length * 512)) { host.title = 'Diagram source kept · rendering budget exceeded'; return }
         await renderDiagram(host, source)
       })
-    } else pending.push(async () => {
-      if (!current() || !await reserve((1 << 20) + (code.textContent?.length ?? 0) * 64)) return
-      await highlight(code)
-    })
+    } else {
+      // Only a block that can highlight pays: unlabeled, unsupported and oversized blocks stay plain for nothing.
+      const lang = [...code.classList].find(name => name.startsWith('language-'))?.slice(9)
+      const length = code.textContent?.length ?? 0
+      if (lang && OFFLINE_LANGUAGES.has(lang) && length <= 32 << 10) pending.push(async () => {
+        if (!current() || !await reserve((1 << 20) + length * 64)) return
+        await highlight(code)
+      })
+    }
   }
   return Promise.all([0, 1].map(async () => { while (current() && pending.length) await pending.shift()!() })).then(() => {})
 }

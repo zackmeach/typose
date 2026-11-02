@@ -1,7 +1,7 @@
 import { type Page, expect } from '@playwright/test'
 import { join } from 'node:path'
 import { HOSTILE_HTML, HOSTILE_MERMAID, HOSTILE_TEX, MATH_BOMB, MATH_BOMB_3 } from '../app/renderer/math/hostile'
-import { FIXTURES, assertNetLog, finish, fixture, launch, test, waitIndexed } from './app'
+import { FIXTURES, type TestHooks, assertNetLog, finish, fixture, launch, test, waitIndexed } from './app'
 
 /**
  * Until the returned stop: the worst eval round-trip from the test, the renderer's longest task, and the most a 25 ms
@@ -33,6 +33,12 @@ async function responsiveness(win: Page): Promise<() => Promise<{ worstRoundTrip
     return { worstRoundTrip, ...page }
   }
 }
+
+/** Rendered's extras share: the lens's rendered reservation less what the build itself pays (renderedCharge). */
+const extrasReserved = (win: Page) => win.evaluate(() => {
+  const r = (window as unknown as { typoseTest: TestHooks }).typoseTest.client.rendered!()
+  return r.reserved - ((6 << 20) + 128 * (r.units + r.noteUnits) + 16384 * r.nodes + 2 * r.htmlBytes)
+})
 
 test('offline Markdown extras render securely and offscreen math/diagrams reach normalized print', async () => {
   const source = ['---', 'title: Markdown candidate', 'owner: Zack', 'tags: [alpha, beta]', '---', '# Markdown extras', '',
@@ -202,4 +208,15 @@ test('math bombs, oversized formulas and hostile sanitizer input stay bounded an
     expect(live.pageErrors).toEqual([])
   } finally { await finish(live) }
   expect(assertNetLog(netlog)).toContain('PASS: no Chromium network-stack activity')
+})
+
+test('blocks that cannot highlight pay nothing, so a formula after a thousand of them still renders', async () => {
+  const source = ['# Shell', '', ...Array.from({ length: 1000 }, (_, i) => ['```sh', `echo ${i}`, '```', '']).flat(), '$$x^2$$', ''].join('\n')
+  const live = await launch({ file: fixture('markdown-extras-sh.md', source), hooks: true, env: { TYPOSE_TEST_BUDGET: String(1 << 30) } })
+  try {
+    await expect(live.win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 60_000 })
+    await expect(live.win.locator('.tp-math .katex')).toHaveCount(1, { timeout: 60_000 })
+    expect(await extrasReserved(live.win)).toBeLessThan(4 << 20)
+    expect(live.pageErrors).toEqual([])
+  } finally { await finish(live) }
 })
