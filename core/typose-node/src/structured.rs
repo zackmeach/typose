@@ -739,7 +739,7 @@ enum Gist {
 }
 /// Z80: a readable line, never the record's JSON. The first message-like string, looked for in a nested message and
 /// its first content blocks too; else a tool call's name, path-like argument and the record's size; else the first
-/// scalar pairs. Bounded: four levels, four blocks per array.
+/// scalar pairs. Bounded: five object levels (arrays between them don't count), four blocks per array.
 fn compose(
     raw: &Raw,
     store: &store::ByteStore,
@@ -837,8 +837,10 @@ fn gist(
         return Ok(Some(Gist::Tool(call)));
     }
     for key in MESSAGE_KEYS {
+        // Only object levels count toward the bound: an array of blocks is a list, not a level.
         if let Some(inner) = fields.get(key).and_then(|c| c.container)
-            && let Some(found) = gist(raw, store, index, inner, depth + 1)?
+            && let Some(found) =
+                gist(raw, store, index, inner, depth + u32::from(fields[key].kind == json::Kind::Object))?
         {
             return Ok(Some(found));
         }

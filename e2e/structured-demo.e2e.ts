@@ -213,7 +213,8 @@ test('a Claude-session-shaped JSONL reads in Rows, Table and Raw without stoppin
     { type: 'assistant', uuid: 'a1', parentUuid: 'u1', sessionId: 's1', timestamp: '2026-11-01T09:00:01.250Z', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: 'C:\\work\\pulse\\launch-plan.md' } }] } },
     { type: 'user', uuid: 'u2', parentUuid: 'a1', sessionId: 's1', timestamp: '2026-11-01T09:00:01.900Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: '# Launch plan\nMove the pier on Tuesday.' }] } },
     { type: 'assistant', uuid: 'a2', parentUuid: 'u2', sessionId: 's1', timestamp: '2026-11-01T09:00:03.000Z', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'Short plan.' }, { type: 'text', text: 'The plan moves the pier on Tuesday.' }] } },
-    { type: 'summary', summary: 'Launch plan review', leafUuid: 'a2' }
+    { type: 'summary', summary: 'Launch plan review', leafUuid: 'a2' },
+    { type: 'user', uuid: 'u3', parentUuid: 'a2', sessionId: 's1', timestamp: '2026-11-01T09:00:04.000Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_2', content: [{ type: 'text', text: 'Pier schedule confirmed' }] }] } }
   ]
   const live = await launch({ hooks: true, file: fixture('structured-claude-shaped.jsonl', records.map(record => JSON.stringify(record)).join('\n') + '\n') })
   try {
@@ -224,9 +225,11 @@ test('a Claude-session-shaped JSONL reads in Rows, Table and Raw without stoppin
     await expect(row(2).locator('.text')).toHaveText('# Launch plan Move the pier on Tuesday.')
     await expect(row(3).locator('.text')).toHaveText('The plan moves the pier on Tuesday.')
     await expect(row(4).locator('.text')).toHaveText('Launch plan review')
+    // A tool_result whose content is an array of text blocks: array hops don't count toward the depth bound.
+    await expect(row(5).locator('.text')).toHaveText('Pier schedule confirmed')
     await expect(row(1).locator('.jsonl-type')).toHaveText('assistant')
     await expect(row(1).locator('.jsonl-time')).toHaveText('09:00:01.250')
-    await expect(card.locator('.card-status')).toHaveText('5 lines · 5 parsed · 0 failed · 0 blank')
+    await expect(card.locator('.card-status')).toHaveText('6 lines · 6 parsed · 0 failed · 0 blank')
     await card.getByRole('tab', { name: 'Table', exact: true }).click()
     await expect(card.locator('.jsonl-table')).toBeVisible()
     await card.getByRole('tab', { name: 'Raw', exact: true }).click()
