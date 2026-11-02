@@ -197,28 +197,31 @@ export function rowBreaks(text: string): number[] {
   return out
 }
 
-/** East Asian Wide and Fullwidth code points, which a monospace font draws two columns wide (wcwidth's ranges). */
+/** East Asian Wide and Fullwidth code points, and emoji, which a monospace font draws two columns wide (wcwidth's
+ *  ranges, with every emoji block from U+1F300 to U+1FAFF). */
 const wide = (cp: number): boolean => cp >= 0x1100 && (cp <= 0x115f || cp === 0x2329 || cp === 0x232a ||
   cp >= 0x2e80 && cp <= 0xa4cf && cp !== 0x303f || cp >= 0xac00 && cp <= 0xd7a3 || cp >= 0xf900 && cp <= 0xfaff ||
   cp >= 0xfe30 && cp <= 0xfe6f || cp >= 0xff00 && cp <= 0xff60 || cp >= 0xffe0 && cp <= 0xffe6 ||
-  cp >= 0x1f300 && cp <= 0x1f64f || cp >= 0x1f900 && cp <= 0x1f9ff || cp >= 0x20000 && cp <= 0x3fffd)
+  cp >= 0x1f300 && cp <= 0x1faff || cp >= 0x20000 && cp <= 0x3fffd)
 
 /**
- * Raw's Wrap lines: where `text` breaks into rows of at most `cols` columns, a wide character two, only between
- * graphemes, so a surrogate pair or a cluster never splits. A row also stays within `WRAP` units, so what a row costs
- * stays within `rowCost`: a grapheme longer than that is cut as `rowBreaks` cuts one, never inside a surrogate pair.
- * Returns the rows' starts, then the text's length.
+ * Raw's Wrap lines: where `text` breaks into rows of at most `cols` columns, a wide character or an emoji presentation
+ * (VS16) two, and a tab on to the next multiple of 8, only between graphemes, so a surrogate pair or a cluster never
+ * splits. A row also stays within `WRAP` units, so what a row costs stays within `rowCost`: a grapheme longer than
+ * that is cut as `rowBreaks` cuts one, never inside a surrogate pair. Returns the rows' starts, then the text's length.
  */
 export function wrapBreaks(text: string, cols: number): number[] {
-  if (2 * text.length <= cols) return [0, text.length]
+  if (2 * text.length <= cols && !text.includes('\t')) return [0, text.length]
   const out = [0]
   let start = 0, width = 0
   for (const { index, segment } of graphemes.segment(text)) {
-    const w = wide(segment.codePointAt(0)!) ? 2 : 1
+    const tab = segment === '\t'
+    let w = tab ? 8 - width % 8 : wide(segment.codePointAt(0)!) || segment.includes('\uFE0F') ? 2 : 1
     if (index > start && (width + w > cols || index + segment.length - start > WRAP)) {
       out.push(index)
       start = index
       width = 0
+      if (tab) w = 8 // a row starts on a tab stop
     }
     while (index + segment.length - start > WRAP) {
       const at = start + WRAP - (/[\uDC00-\uDFFF]/.test(text[start + WRAP]) ? 1 : 0)

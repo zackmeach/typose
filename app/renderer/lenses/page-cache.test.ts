@@ -272,8 +272,14 @@ describe('wrapBreaks (Wrap lines)', () => {
     expect(wrapped('語'.repeat(12), 10).map(r => r.length)).toEqual([5, 5, 2])
     expect(wrapped('ab語cd語ef', 4)).toEqual(['ab語', 'cd語', 'ef'])
   })
+  it('takes a tab on to the next multiple of 8, and counts emoji and VS16 presentations two columns', () => {
+    expect(wrapped('ab\tcdef', 10)).toEqual(['ab\tcd', 'ef'])
+    expect(wrapped('abcdefghi\tx', 10)).toEqual(['abcdefghi', '\tx']) // a tab past the edge starts the next row
+    expect(wrapped('\u{1FAE0}'.repeat(6), 4).map(r => r.length)).toEqual([4, 4, 4]) // U+1FA00 block: two emoji a row
+    expect(wrapped('\u2764\uFE0F'.repeat(4), 4)).toEqual(['\u2764\uFE0F\u2764\uFE0F', '\u2764\uFE0F\u2764\uFE0F'])
+  })
   it('never splits a surrogate pair or a grapheme cluster', () => {
-    const text = 'a\u{20000}é\u{1F468}‍\u{1F469}‍\u{1F467}x'.repeat(40)
+    const text = 'a\u{20000}e\u0301\u{1F468}\u200D\u{1F469}\u200D\u{1F467}x'.repeat(40)
     for (const cols of [2, 3, 7, 80]) {
       const b = wrapBreaks(text, cols)
       for (const at of b.slice(1, -1)) expect(clusters(text).has(at), `cols ${cols} at ${at}`).toBe(true)
@@ -281,9 +287,9 @@ describe('wrapBreaks (Wrap lines)', () => {
     }
   })
   it('keeps every row within 2,048 units, cutting one grapheme longer than that outside its surrogate pairs', () => {
-    const marks = 'a' + '́'.repeat(5000)
+    const marks = 'a' + '\u0301'.repeat(5000)
     expect(Math.max(...wrapped(marks + 'b', 80).map(r => r.length))).toBeLessThanOrEqual(WRAP)
-    const zwj = `${'\u{1F468}‍'.repeat(2000)}\u{1F469}`
+    const zwj = `${'\u{1F468}\u200D'.repeat(2000)}\u{1F469}`
     const b = wrapBreaks(zwj, 80)
     expect(Math.max(...wrapped(zwj, 80).map(r => r.length))).toBeLessThanOrEqual(WRAP)
     for (const at of b.slice(1, -1)) expect(zwj.charCodeAt(at) < 0xdc00 || zwj.charCodeAt(at) > 0xdfff).toBe(true)
