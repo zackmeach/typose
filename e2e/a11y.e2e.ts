@@ -332,7 +332,8 @@ test('at 200% zoom in the smallest window, the chrome and Raw stay reachable, an
     await expect(win.getByRole('menuitem')).toHaveText(['Open file…', 'Open folder…', 'Toggle sidebar', 'Split right', 'Move tab right', 'Close card', 'Reload', 'Find in file…', 'Next match', 'Previous match', 'Close tab', 'Reopen closed tab', 'Clear recently closed tabs', EXIT])
     for (const item of await win.getByRole('menuitem').all()) {
       await expect(item).toBeFocused()
-      expect(await item.evaluate(el => {
+      // The menu scrolls the focused item into view after focus lands, so poll rather than read once.
+      await expect.poll(() => item.evaluate(el => {
         const rect = el.getBoundingClientRect()
         return rect.top >= 0 && rect.left >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight
       })).toBe(true)
