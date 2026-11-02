@@ -74,9 +74,11 @@ describe("dropPaths: a drop's items, of a real drop's shape, with only local pat
     expect(dropPaths([{ path: '/home/a.md', folder: false }, { path: '//host/share', folder: true }, { path: 'C:\\a.md', folder: false }], false))
       .toEqual({ files: ['/home/a.md'], folders: [], refused: ['//host/share', 'C:\\a.md'] })
   })
+  it('opens nothing of a drop over 256 items, and says how many it held', () => {
+    expect(dropPaths(Array(256).fill({ path: 'C:\\a.md', folder: false }), true)?.files).toHaveLength(256)
+    expect(dropPaths(Array(257).fill({ path: 'C:\\a.md', folder: false }), true)).toEqual({ files: [], folders: [], refused: [], tooMany: 257 })
+  })
   it('refuses a message of any other shape or size', () => {
-    expect(dropPaths(Array(256).fill({ path: 'C:\\a.md', folder: false }), true)).not.toBeNull()
-    expect(dropPaths(Array(257).fill({ path: 'C:\\a.md', folder: false }), true)).toBeNull()
     expect(dropPaths([{ path: 'C:\\' + 'a'.repeat(32_764), folder: false }], true)).not.toBeNull()
     expect(dropPaths([{ path: 'C:\\' + 'a'.repeat(32_765), folder: false }], true)).toBeNull()
     for (const items of [undefined, null, 'C:\\a.md', { 0: { path: 'C:\\a.md', folder: false }, length: 1 }, [null], [{ path: 'C:\\a.md' }], [{ path: 1, folder: false }], [{ path: 'C:\\a.md', folder: 'yes' }]])

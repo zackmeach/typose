@@ -1,6 +1,6 @@
 // Spec §8.1: files a launch names, from its argv and cwd: this launch's own, or a second instance's; and what a drop names.
 import { resolve } from 'node:path'
-import type { DroppedPaths } from '../shared/protocol'
+import { MAX_DROP, type DroppedPaths } from '../shared/protocol'
 
 /** Windows' command-line limit, in characters. A real launch's argv and cwd fit in it. */
 const MAX_CHARS = 32_767
@@ -34,18 +34,17 @@ export function handoff(data: unknown): { argv: string[]; cwd: string } | null {
   return { argv: argv as string[], cwd }
 }
 
-/** The most items one drop opens. */
-const MAX_DROP = 256
-
 /**
  * A drop is an explicit choice, as Open file… and Open folder… are, of what the preload read from it (untrusted): items
- * of `{ path, folder }`, or null when the message has another shape or size. Only a drive path (Windows) or an absolute
- * path (elsewhere) is opened; UNC, device, relative and empty paths are refused here, before anything touches them,
- * since the manual open a file then takes would reach a share's host. Files then take Open file…'s manual-open policy
- * and folders Open folder…'s capture, which refuses network, reparse and cloud-backed folders.
+ * of `{ path, folder }`, or null when the message has another shape. A drop of more than `MAX_DROP` items opens nothing
+ * and says how many it held. UNC, device, relative and empty paths are refused here, before anything touches them: a
+ * manual open would reach a UNC share's host. A drive letter mapped to a share passes, as it does through Open file…;
+ * files then take that manual-open policy, and folders Open folder…'s capture, which refuses network, reparse and
+ * cloud-backed folders.
  */
 export function dropPaths(items: unknown, windows = process.platform === 'win32'): DroppedPaths | null {
-  if (!Array.isArray(items) || items.length > MAX_DROP) return null
+  if (!Array.isArray(items)) return null
+  if (items.length > MAX_DROP) return { files: [], folders: [], refused: [], tooMany: items.length }
   const drop: DroppedPaths = { files: [], folders: [], refused: [] }
   for (const item of items as unknown[]) {
     const { path, folder } = (item ?? {}) as { path?: unknown; folder?: unknown }

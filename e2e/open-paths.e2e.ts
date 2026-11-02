@@ -76,10 +76,15 @@ test('a UNC drop is refused before anything opens it, and text or link drags are
   await expect(win.getByRole('heading', { name: 'Drop files or folders anywhere' })).toBeVisible({ timeout: 30_000 })
   const unc = '\\\\example.invalid\\share\\x.md' // never a real host: the refusal is main's, before any access
   await drag(win, 'drop', [{ path: unc, folder: false }, { path: '\\\\example.invalid\\share', folder: true }])
-  await expect(win.locator('.banner')).toHaveText(`Can't open ${unc}, \\\\example.invalid\\share · only files and folders on this computer's drives can be dropped`)
+  await expect(win.locator('.banner')).toHaveText(`Can't open ${unc}, \\\\example.invalid\\share · UNC share, device and virtual paths can't be dropped`)
   await expect(tabs(win)).toHaveCount(0)
   await expect(win.getByRole('treeitem')).toHaveCount(0)
   expect(await debugStats(win)).toMatchObject({ docs: 0 })
+  // Over 256 items, a drop opens none of them, and says so.
+  const many = fixture('open-paths-many.txt', 'many\n')
+  await drag(win, 'drop', Array.from({ length: 257 }, () => ({ path: many, folder: false })))
+  await expect(win.locator('.banner')).toHaveText("Can't open 257 items at once · drop at most 256")
+  await expect(tabs(win)).toHaveCount(0)
 
   await drag(win, 'enter', 'some text')
   await expect(win.locator('.drop-target')).toHaveCount(0)

@@ -308,8 +308,11 @@ export interface ProgressEvent {
   error?: string
 }
 
-/** A drop on the window, as main checked it: local files, local folders, and what it refused unopened. */
-export interface DroppedPaths { files: string[]; folders: string[]; refused: string[] }
+/** The most items one drop opens. */
+export const MAX_DROP = 256
+/** A drop on the window, as main checked it: files, folders, and what it refused unopened. `tooMany`: it held more than
+ *  `MAX_DROP` items, this many, and opens none. */
+export interface DroppedPaths { files: string[]; folders: string[]; refused: string[]; tooMany?: number }
 
 /** What the preload forwards from main to the page, with `window.postMessage` to its own origin. */
 export type MainMessage = { type: 'core-port'; session: number } | { type: 'core-gone'; session: number }

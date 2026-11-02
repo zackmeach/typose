@@ -1,6 +1,6 @@
 import { type CSSProperties, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Button, Dialog, Modal, ModalOverlay } from 'react-aria-components'
-import type { Command, Hello, Opened } from '../shared/protocol'
+import { MAX_DROP, type Command, type Hello, type Opened } from '../shared/protocol'
 import { CoreCallError, type CoreClient } from './core'
 import { AppIcon, FileIcon } from './file-icon'
 import { fileName } from './card'
@@ -296,7 +296,8 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     const offDrop = window.typose.onDrop(drop => {
       for (const path of drop.files) openPath(path)
       void drop.folders.reduce((added, path) => added.then(() => pickFolder(undefined, path)), Promise.resolve())
-      if (drop.refused.length) setWorkspaceNotice(`Can't open ${drop.refused.filter(Boolean).join(', ') || 'what was dropped'} · only files and folders on this computer's drives can be dropped`)
+      if (drop.tooMany) setWorkspaceNotice(`Can't open ${drop.tooMany.toLocaleString('en')} items at once · drop at most ${MAX_DROP}`)
+      if (drop.refused.length) setWorkspaceNotice(`Can't open ${drop.refused.filter(Boolean).join(', ') || 'what was dropped'} · UNC share, device and virtual paths can't be dropped`)
     })
     const offCommand = window.typose.onCommand(run)
     const key = (event: KeyboardEvent) => {
