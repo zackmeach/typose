@@ -379,7 +379,16 @@ impl Document {
         Ok(next)
     }
 
+    /// Any extension: the hand-off sheet shows where a program or script is, and nothing here opens it.
+    pub fn link_path(&self, generation: u32, target: &str) -> Result<LocalRoute, DocError> {
+        self.link_target(generation, target, false)
+    }
+
     fn local_target(&self, generation: u32, target: &str) -> Result<LocalRoute, DocError> {
+        self.link_target(generation, target, true)
+    }
+
+    fn link_target(&self, generation: u32, target: &str, supported_only: bool) -> Result<LocalRoute, DocError> {
         if generation != self.generation {
             return Err(DocError::Stale { current: self.generation, asked: generation });
         }
@@ -402,7 +411,7 @@ impl Document {
                 || s.eq_ignore_ascii_case("csv")
                 || s.eq_ignore_ascii_case("tsv")
         });
-        if !supported {
+        if supported_only && !supported {
             return Err(DocError::Refused("local links support only Markdown, TXT, CSV and TSV files".into()));
         }
         self.check_local_source(generation)?;

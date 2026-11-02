@@ -54,7 +54,8 @@ it('shows each file state', () => {
       { banner: { text: "Can't reload: Typose's memory budget is full", action: 'Retry (Ctrl+R)' }, body: { raw: true } }
     ],
     ['changed on disk mid-index', open({ frozen: 'changed on disk (chunk 3)' }), { status: 'Indexing stopped at 1,234,567 lines', progress: null }],
-    ['binary', failed('Binary', 'binary file'), { body: { message: 'Binary file · not shown', actions: [] } }],
+    ['binary', failed('Binary', 'binary file'), { body: { message: 'Binary file · not shown', detail: 'It has a .jsonl name but contains NUL bytes in the first 8 KB.', actions: ['Open with default app', 'Show in folder'] } }],
+    ['binary, not a text name', { kind: 'failed', path: 'C:\\x\\archive.zip', code: 'Binary', message: '' }, { body: { message: 'Binary file · not shown', detail: 'It contains NUL bytes in the first 8 KB.', actions: ['Open with default app', 'Show in folder'] } }],
     ['missing', failed('NotFound', 'io: not found'), { body: { message: `File not found at ${PATH}`, actions: ['Locate…', 'Close'] } }],
     [
       'permission denied',

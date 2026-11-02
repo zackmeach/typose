@@ -221,6 +221,7 @@ test('the keyboard reaches ☰ and Raw, ☰ runs its commands from the keyboard,
     ['.file-tab[aria-selected="true"]', '2px'],
     ['.file-pill[data-selected] .file-tab-close', '2px'],
     ['.card-header .card-status', '2px'],
+    ['.file-actions-button', '2px'],
     ['.close-card-button', '2px'],
     ['.vl-scroller', '-2px']
   ]

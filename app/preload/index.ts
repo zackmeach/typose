@@ -56,6 +56,8 @@ const typose: TyposeApi = {
   openDialog: () => ipcRenderer.invoke('open-dialog'),
   folderDialog: () => ipcRenderer.invoke('folder-dialog'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  showInFolder: (subject) => ipcRenderer.invoke('show-in-folder', subject),
+  openWithDefault: (subject) => ipcRenderer.invoke('open-with-default', subject),
   beginClipboardWrite: () => {
     if (!clipboardGesture) return null
     clipboardGesture = false

@@ -22,6 +22,8 @@ export interface RenderedOptions {
   onShowRaw(line: number): void
   /** Opens through this source document's local capability; false leaves the reader in place. */
   onOpenLocal?(target: string, path: string, gesture: LocalGesture): Promise<boolean>
+  /** A link to a program or script: never opened, only shown where it is (Z79). */
+  onExecutable?(target: string, path: string): void
   budget?: LensBudget
 }
 
@@ -380,6 +382,8 @@ export class RenderedLens {
         if (!await window.typose.openExternal(target.url)) a.title = `Not opened: ${href}`
       } else if (target.kind === 'local') {
         if (!await this.options.onOpenLocal?.(target.target, target.path, gesture)) a.title = `Not opened: ${href}`
+      } else if (target.kind === 'executable') {
+        this.options.onExecutable?.(target.target, target.path)
       } else if (target.kind === 'heading' && interaction === this.interaction) {
         this.atLine = target.line
         this.moved = false

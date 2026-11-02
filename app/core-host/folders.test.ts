@@ -117,6 +117,43 @@ windows('real host resolves and opens root-relative links only through the sourc
   }
 })
 
+windows('Z79: real host turns only held documents, listed entries and program links into hand-off paths', async () => {
+  setBudget(totalmem())
+  const path = scratch()
+  writeFileSync(join(path, 'source.md'), '# Source\n[Setup](setup.bat)\n')
+  writeFileSync(join(path, 'cover.png'), 'not a png')
+  writeFileSync(join(path, 'setup.bat'), '@echo off\n')
+  const dispatch = makeDispatcher({ limits, coreVersion: () => 'test', openDoc: (p) => Doc.open(p),
+    captureFolder: (p, id) => FolderRoot.capture(p, id), cancelFlag: () => new Cancel(), reserveCache }, 7, () => {})
+  let next = 1
+  const call = (method: string, params: Record<string, unknown>) => dispatch({ id: next++, method, params })
+  const added = await call('addRoot', { path })
+  if (!('result' in added)) throw Error(JSON.stringify(added))
+  const root = added.result as RootInfo
+  const listed = await call('listFolder', { folder: root.ref })
+  if (!('result' in listed)) throw Error(JSON.stringify(listed))
+  const entries = (listed.result as FolderPage).entries
+  const cover = entries.find((e) => e.name === 'cover.png')!
+  expect(cover.kind).toBe('unsupported')
+  expect(dispatch.handoffPath({ entry: cover.ref })).toBe(join(path, 'cover.png'))
+  expect(() => dispatch.handoffPath({ entry: { ...cover.ref, node: '4095' } })).toThrow()
+  const source = entries.find((e) => e.name === 'source.md')!
+  const opened = await call('openChild', { entry: source.ref, count: 1, bytes: 100 })
+  if (!('result' in opened)) throw Error(JSON.stringify(opened))
+  const doc = (opened.result as { doc: number }).doc
+  await call('render', { doc, gen: 1 })
+  expect(dispatch.handoffPath({ session: 7, doc, gen: 1 })).toBe(join(path, 'source.md'))
+  expect(await call('resolve', { doc, gen: 1, href: 'setup.bat' })).toMatchObject({ result: { kind: 'executable', target: 'setup.bat', path: join(path, 'setup.bat') } })
+  expect(dispatch.handoffPath({ session: 7, doc, gen: 1, target: 'setup.bat' })).toBe(join(path, 'setup.bat'))
+  for (const subject of [{ session: 7, doc, gen: 1, target: 'cover.png' }, { session: 7, doc, gen: 1, target: '/../outside.bat' }, { session: 6, doc, gen: 1 },
+    { session: 7, doc, gen: 2 }, { session: 7, doc: doc + 1, gen: 1 }, { path: join(path, 'source.md') }, null])
+    expect(() => dispatch.handoffPath(subject), JSON.stringify(subject)).toThrow()
+  await call('close', { doc })
+  expect(() => dispatch.handoffPath({ session: 7, doc, gen: 1 })).toThrow()
+  await call('removeRoot', { root: root.ref.root, session: 7 })
+  expect(() => dispatch.handoffPath({ entry: cover.ref })).toThrow()
+})
+
 it('precharges root metadata and preserves source across rejected admission and removed pending listing', async () => {
   const page = { items: [] } as Page
   const doc = { generation: 1, format: 'text', size: 0, encoding: 'UTF-8', lines: 0, indexed: true, blank: true,

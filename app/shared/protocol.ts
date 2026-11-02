@@ -250,6 +250,15 @@ export interface Methods {
 }
 
 export type LinkTarget = { kind: 'heading'; line: number } | { kind: 'external'; url: string } | { kind: 'local'; target: string; path: string } | { kind: 'inert' }
+  /** A program or script: never opened, only shown where it is (Z79). */
+  | { kind: 'executable'; target: string; path: string }
+
+/**
+ * What the page asks main to hand to the OS: never a bare path of its own. `path` only matches what main itself handed
+ * the page (a launch, Open file…); the others name what the core host holds, which turns them into the path.
+ */
+export type HandoffSubject = { path: string } | { entry: FolderRef } | { session: number; doc: number; gen: number; target?: string }
+export type HandoffResult = { ok: true } | { ok: false; reason: string }
 
 /** The test-hooks build's debug stats (plan C5, C6): the core's live jobs, tasks and file handles, the longest a chunk
  *  read's delay actually waited since the delay was set (`delayMs`), the documents the core host holds, and how its
@@ -327,6 +336,9 @@ export interface TyposeApi {
   folderDialog(): Promise<string | null>
   /** A user-activated external link. Main independently checks the app's main frame, size and allowed scheme. */
   openExternal(url: string): Promise<boolean>
+  /** Z79's hand-offs. Main resolves and checks the subject; Open with default app refuses programs, scripts and folders. */
+  showInFolder(subject: HandoffSubject): Promise<HandoffResult>
+  openWithDefault(subject: HandoffSubject): Promise<HandoffResult>
   /** Claim/revoke the one-use token armed by a trusted Grid copy shortcut. */
   beginClipboardWrite(): string | null
   cancelClipboardWrite(token: string): void
