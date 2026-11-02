@@ -99,6 +99,11 @@ pub struct Metadata {
     pending_utf8: Vec<u8>,
     pending_at: u64,
 }
+impl Default for Metadata {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 impl Metadata {
     pub fn new() -> Self {
         Self {

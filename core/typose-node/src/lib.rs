@@ -817,10 +817,8 @@ impl Doc {
             "markdown"
         } else if csv::supported(path) {
             "csv"
-        } else if let Some(format) = structured::format(path) {
-            format
         } else {
-            "text"
+            structured::format(path).unwrap_or("text")
         }
         .into())
     }

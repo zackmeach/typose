@@ -365,10 +365,10 @@ impl Task for Build {
                         let _job = job;
                         let result =
                             cancellable(&flag, || index.build_reserved(raw.document(), generation, &flag, temp));
-                        if let Err(error) = result {
-                            if !matches!(error, DocError::Cancelled) {
-                                index.progress.write().unwrap().error = Some(error.to_string());
-                            }
+                        if let Err(error) = result
+                            && !matches!(error, DocError::Cancelled)
+                        {
+                            index.progress.write().unwrap().error = Some(error.to_string());
                         }
                     })
                     .map_err(DocError::Io)?;
@@ -502,10 +502,10 @@ impl Doc {
         } else {
             self.structured.epoch.fetch_add(1, Ordering::Relaxed) + 1
         };
-        if existing.is_none() {
-            if let Some(flag) = self.structured.pending.lock().unwrap().replace(cancel.flag.clone()) {
-                flag.store(true, Ordering::Relaxed);
-            }
+        if existing.is_none()
+            && let Some(flag) = self.structured.pending.lock().unwrap().replace(cancel.flag.clone())
+        {
+            flag.store(true, Ordering::Relaxed);
         }
         Ok(AsyncTask::new(Build {
             raw: raw.clone(),
@@ -524,6 +524,7 @@ impl Doc {
         }))
     }
     #[napi(ts_return_type = "Promise<StructuredChildren>")]
+    #[allow(clippy::too_many_arguments, reason = "napi page request carries exact owner, range, cancel and record")]
     pub fn structured_children(
         &self,
         generation: f64,
