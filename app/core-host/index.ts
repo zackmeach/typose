@@ -49,6 +49,7 @@ process.parentPort.once('message', (e) => {
     limits: addon.limits,
     openDoc: (path: string) => addon.Doc.open(path),
     captureFolder: (path: string, id: string) => addon.FolderRoot.capture(path, id),
+    networkPath: addon.networkPath,
     cancelFlag: () => new addon.Cancel(),
     reserveCache: addon.reserveCache
   }
@@ -57,4 +58,11 @@ process.parentPort.once('message', (e) => {
   const dispatch = makeDispatcher({ ...core, ...hooks }, session, (event) => port.postMessage(event))
   port.on('message', ({ data }) => void dispatch(data).then((response) => port.postMessage(response)))
   port.start()
+  // Z79: main, never the page, asks for a hand-off's path over the parent port.
+  process.parentPort.on('message', ({ data }) => {
+    const ask = data as { handoff?: unknown; subject?: unknown } | null
+    if (typeof ask?.handoff !== 'number') return
+    try { process.parentPort.postMessage({ handoff: ask.handoff, path: dispatch.handoffPath(ask.subject) }) }
+    catch (e) { process.parentPort.postMessage({ handoff: ask.handoff, error: e instanceof Error ? e.message : String(e) }) }
+  })
 })

@@ -156,7 +156,8 @@ test('folder tree opens a nested Markdown link and Back restores the source plac
 
     await activateTreeItem(win, 'tool.exe')
     await expect(win.locator('.card-name')).toHaveText('A.md')
-    await expect(win.getByRole('status').filter({ hasText: /unsupported/i })).toBeVisible()
+    await expect(win.getByRole('dialog', { name: 'Typose won\'t run tool.exe', exact: true })).toBeVisible() // Z79's sheet
+    await win.keyboard.press('Escape')
     expect(live.pageErrors).toEqual([])
   } finally {
     try { if (l) await finish(l) } finally { rmSync(root, { recursive: true, force: true }) }

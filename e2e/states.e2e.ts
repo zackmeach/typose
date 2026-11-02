@@ -16,9 +16,10 @@ test('an empty file and a whitespace-only one show "Empty file"', async () => {
   }
 })
 
-test('a binary file shows the message only', async () => {
+test('a binary file shows the message, why, and the hand-off (Z79)', async () => {
   const l = await launch({ file: fixture('binary.zip', Buffer.from('PK\x03\x04\0\0\0\0binary', 'latin1')) })
-  await expect(l.win.locator('.card-message')).toHaveText('Binary file · not shown')
+  await expect(l.win.locator('.card-message p')).toHaveText(['Binary file · not shown', 'It contains NUL bytes in the first 8 KB.'])
+  await expect(l.win.locator('.card-message .open-button')).toHaveText(['Open with default app', /^Show in (Explorer|Finder|folder)$/])
   await finish(l)
 })
 

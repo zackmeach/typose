@@ -60,3 +60,17 @@ it('validates root-relative restart recipes and rejects traversal or mismatched 
     store.flush()
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
+
+it('refuses relative paths wherever a restart would open, list or show them', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'typose-session-'))
+  try {
+    const store = new SessionStore(join(dir, 'session.json'))
+    const tab = (path: string) => ({ ...emptySession(), cards: [{ tabs: [{ location: { kind: 'manual', path }, anchor: 0, lens: 'raw' }], selected: 0, weight: 1 }] })
+    for (const relative of ['notes.md', String.raw`.\notes.md`, String.raw`..\notes.md`, 'C:notes.md', String.raw`\notes.md`]) {
+      expect(store.update(tab(relative)), relative).toBe(false)
+      expect(store.update({ ...emptySession(), roots: [relative] }), relative).toBe(false)
+      expect(store.update({ ...emptySession(), recents: [{ kind: 'file', path: relative }] }), relative).toBe(false)
+    }
+    for (const absolute of [String.raw`C:\notes.md`, 'c:/notes.md', String.raw`\\host\share\notes.md`, '/Users/z/notes.md']) expect(store.update(tab(absolute)), absolute).toBe(true)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})

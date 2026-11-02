@@ -66,14 +66,16 @@ test('CSV signature opens Grid; quoted multiline, ragged fields, and header proj
     await expect(extraRow).toContainText('extra')
 
     await page.getByRole('button', { name: 'File info', exact: true }).click()
-    await header.uncheck()
+    // The checkbox shows the core's header state, so it changes when csvConfigure answers, not at the click:
+    // uncheck()/check() read it once right after the click and lose that race.
+    await header.click()
     await expect(header).not.toBeChecked()
     await page.keyboard.press('Escape')
     await expect(info).toHaveCount(0)
     await expect(csvGrid.getByRole('columnheader', { name: 'key', exact: true })).toHaveCount(0)
     await expect(csvGrid.getByRole('row').filter({ hasText: 'key' })).toBeVisible()
     await page.getByRole('button', { name: 'File info', exact: true }).click()
-    await header.check()
+    await header.click()
     await expect(header).toBeChecked()
     await page.keyboard.press('Escape')
     await expect(info).toHaveCount(0)

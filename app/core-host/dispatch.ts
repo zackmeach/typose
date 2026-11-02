@@ -53,6 +53,7 @@ import {
 } from '../shared/protocol'
 import { isValid } from './numbers'
 import { boundedLink, decodedLocalTarget, localTarget } from './local-target'
+import { isExecutable } from '../shared/handoff'
 import { structuredChildren, structuredColumns, structuredInfo, structuredRows } from './structured-validation'
 import { findNumber, findProgress, sourceHit, sourceHits, csvFindHit, csvFindHits } from './find-validation'
 
@@ -64,6 +65,8 @@ export interface Addon {
   limits(): Limits
   openDoc(path: string): Doc
   captureFolder?(path: string, id: string): NativeFolderRoot
+  /** UNC, or a drive letter the network redirector serves; nothing is opened. */
+  networkPath?(path: string): boolean
   /** A new cancel flag, for one page read or one index job (plan C5, C6). */
   cancelFlag(): Cancel
   /** Plan C1: sets the renderer cache's reservation in the ledger; false if the ledger refused it. */
@@ -99,7 +102,7 @@ type Params = Record<string, unknown>
 const isRecord = (v: unknown): v is Params => typeof v === 'object' && v !== null && !Array.isArray(v)
 const codeOf = (e: unknown): unknown => (e as { code?: unknown } | null)?.code
 
-export function makeDispatcher(addon: Addon, session: number, emit: (event: ProgressEvent) => void, ticketId: () => string = randomUUID): (data: unknown) => Promise<Response> {
+export function makeDispatcher(addon: Addon, session: number, emit: (event: ProgressEvent) => void, ticketId: () => string = randomUUID): ((data: unknown) => Promise<Response>) & { handoffPath(subject: unknown): string } {
   const limits = addon.limits()
   const ranges = new Map(limits.ranges.map((r) => [r.field, r]))
   /** `params[field]`, checked against the core's range for `field`; `name` is how the error names it. */
@@ -1201,6 +1204,12 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         return { kind: 'located', span: nativeCsvSpan(result.span), rawLine: csvResultNumber(result.rawLine, 'raw line') }
       })
     },
+    networkPath: (p): boolean => {
+      if (typeof p.path !== 'string' || p.path.length === 0 || p.path.length > 32_767 || p.path.includes('\0'))
+        throw new Refusal('InvalidParams', 'path must be a non-empty string of at most 32,767 characters, without NUL', 'path')
+      // Without the native test, only the UNC form is known to be a share.
+      return addon.networkPath ? addon.networkPath(p.path) : /^[\\/]{2}/.test(p.path)
+    },
     open: async (p, req): Promise<Opened> => {
       const [count, bytes] = [int(p, 'count'), int(p, 'bytes')]
       if (typeof p.path !== 'string' || p.path.length === 0 || p.path.length > 32_767 || p.path.includes('\0'))
@@ -1442,7 +1451,11 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       }
       const target = localTarget(p.href, !!doc.folder)
       if (target !== null) {
-        try { return { kind: 'local', target, path: doc.localPath(gen, target) } }
+        try {
+          // A link never launches a program or script (Z79): the page shows where it is instead.
+          if (isExecutable(target)) return { kind: 'executable', target, path: doc.linkPath(gen, target, p.href) }
+          return { kind: 'local', target, path: doc.localPath(gen, target) }
+        }
         catch (e) {
           if (codeOf(e) === 'Frozen') cancelReads(id)
           throw e
@@ -1542,7 +1555,30 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       : {})
   }
 
-  return async (data) => {
+  /**
+   * Z79's hand-off, asked by main and never by the page's port: the path of an entry a sidebar root lists, a document
+   * this session holds, or a program or script one of its Markdown links names (`href`, which the native build must
+   * hold as a link). Anything else is a Refusal.
+   */
+  const handoffPath = (value: unknown): string => {
+    if (!isRecord(value)) throw new Refusal('InvalidParams', 'a hand-off names a held document, folder entry or link')
+    if (value.entry !== undefined) {
+      const ref = folderRef(value.entry, 'entry')
+      return rootFor(ref).native.entryPath(Number(ref.node))
+    }
+    if (int(value, 'session') !== session) throw new Refusal('Stale', 'the document belongs to another core session')
+    const [id, gen] = [int(value, 'doc'), int(value, 'gen')]
+    const doc = getDoc(id)
+    if (doc.generation !== gen) throw new Refusal('Stale', `generation ${gen} was replaced`)
+    if (value.href === undefined) return doc.path
+    // Only the executable sheet asks for a link's path; every other link target opens through openLocal.
+    const target = boundedLink(value.href) ? localTarget(value.href, !!doc.folder) : null
+    if (target === null || !isExecutable(target))
+      throw new Refusal('InvalidParams', 'href must be a link to a program or script', 'href')
+    return doc.linkPath(gen, target, value.href as string)
+  }
+
+  return Object.assign(async (data: unknown): Promise<Response> => {
     const fail = (id: number | null, error: CoreError): Response => ({ id, session, error })
     if (!isRecord(data)) return fail(null, { code: 'InvalidParams', message: 'a request is an object', field: 'request' })
     const idRange = ranges.get('id')!
@@ -1564,5 +1600,5 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const message = e instanceof Error ? e.message : String(e)
       return fail(id, { code: typeof code === 'string' && ADDON_CODES.has(code) ? (code as ErrorCode) : 'Internal', message })
     }
-  }
+  }, { handoffPath })
 }

@@ -1,13 +1,14 @@
 import { BrowserWindow, Menu, MessageChannelMain, app, clipboard, crashReporter, dialog, ipcMain, protocol, screen, session, shell, systemPreferences, utilityProcess } from 'electron'
 import type { IpcMainEvent, IpcMainInvokeEvent } from 'electron'
 import { once } from 'node:events'
-import { readFile } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import { extname, join, sep } from 'node:path'
 import coreHostPath from '../core-host/index?modulePath'
 import { MAX_PRINT_PAGES, type Command, type PrintDocumentResult } from '../shared/protocol'
 import { openExternal } from './external'
 import { writeClipboardText } from './clipboard'
 import { dropPaths, handoff, launchPaths } from './launch'
+import { gestures, handOff, type HandoffAction } from './handoff'
 import { startLifecycle } from './lifecycle'
 import { envWhole, isMark, marksHook } from './marks'
 import { SessionStore } from './session-store'
@@ -68,12 +69,20 @@ const MIME: Record<string, string> = {
 // Spec §7.1, sent as a header on every app response rather than a meta tag. No inline script; inline style stays
 // allowed, as in the spike, because React Aria injects a style element.
 const CSP =
-  "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+  "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-src data:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 /** Files queued before the page asks for them; subsequent opens are delivered individually. */
 let pendingPaths = launchPaths(process.argv, process.cwd(), !!process.defaultApp)
+/** Z79: the newest 1,024 paths main handed the page, which a hand-off may name as they are. */
+const granted = new Set<string>()
+const grant = (path: string) => {
+  granted.delete(path) // re-granting makes it the newest
+  granted.add(path)
+  if (granted.size > 1024) granted.delete(granted.values().next().value!)
+}
+pendingPaths.forEach(grant)
 let newest = pendingPaths.at(-1) ?? null
-let deliver = (path: string) => { newest = path; pendingPaths.push(path) }
+let deliver = (path: string) => { grant(path); newest = path; pendingPaths.push(path) }
 // macOS names files through open-file, not argv: before ready for the file a launch opens, and after.
 app.on('open-file', (event, path) => {
   event.preventDefault()
@@ -105,6 +114,9 @@ let sessions = 0
 let respawned = -Infinity
 let quitting = false
 app.on('before-quit', () => (quitting = true))
+const coreStopped = () => Promise.reject(new Error("Typose's core isn't running"))
+/** Z79: asks the live core host for the path of something it holds (dispatch.ts's `handoffPath`). */
+let askCore: (subject: unknown) => Promise<string> = coreStopped
 
 /**
  * Spawns the core host as a new session (plan C7) and hands one end of a fresh channel to each side. When it dies,
@@ -121,9 +133,27 @@ function spawnCore(win: BrowserWindow, loaded: Promise<void>): void {
   void loaded.then(() => {
     if (!exited && !win.isDestroyed()) win.webContents.postMessage('core-port', { session: id }, [port2])
   })
+  const asks = new Map<number, { ok(path: string): void; fail(e: Error): void }>()
+  let nextAsk = 0
+  core.on('message', (reply: { handoff?: unknown; path?: unknown; error?: unknown } | null) => {
+    const ask = typeof reply?.handoff === 'number' ? asks.get(reply.handoff) : undefined
+    if (!ask) return
+    asks.delete(reply!.handoff as number)
+    if (typeof reply!.path === 'string') ask.ok(reply!.path)
+    else ask.fail(new Error(typeof reply!.error === 'string' ? reply!.error : 'refused'))
+  })
+  const ask = (subject: unknown) => new Promise<string>((ok, fail) => {
+    const n = ++nextAsk
+    asks.set(n, { ok, fail })
+    core.postMessage({ handoff: n, subject })
+  })
+  askCore = ask
   core.once('spawn', () => log('utility-spawn', { session: id, utilityPid: core.pid }))
   core.once('exit', (code) => {
     exited = true
+    if (askCore === ask) askCore = coreStopped
+    for (const pending of asks.values()) pending.fail(new Error("Typose's core stopped"))
+    asks.clear()
     log('utility-exit', { session: id, code })
     port1.close()
     port2.close()
@@ -331,6 +361,7 @@ void app.whenReady().then(() => {
   })
   const liveDelivery = () => {
     deliver = (path) => {
+      grant(path)
       newest = path
       if (!win.isDestroyed()) win.webContents.send('open-path', path)
     }
@@ -348,15 +379,45 @@ void app.whenReady().then(() => {
   })
   handle(win, 'open-dialog', async () => {
     const r = await dialog.showOpenDialog(win, { properties: ['openFile'] })
-    return r.canceled ? null : (r.filePaths[0] ?? null)
+    const chosen = r.canceled ? null : (r.filePaths[0] ?? null)
+    if (chosen) grant(chosen)
+    return chosen
   })
   handle(win, 'folder-dialog', async () => {
     const r = await dialog.showOpenDialog(win, { properties: ['openDirectory'] })
     return r.canceled ? null : (r.filePaths[0] ?? null)
   })
-  // A drop names files and folders as the dialogs above do; the preload sends only a trusted drop's items.
-  ipcMain.handle('drop-paths', (event, ...args: unknown[]) => fromMainApp(event) && args.length === 1 ? dropPaths(args[0]) : null)
+  // A drop names files and folders as the dialogs above do; the preload sends only a trusted drop's items. Its files are
+  // granted as Open file…'s choice is, so a hand-off may name them.
+  ipcMain.handle('drop-paths', (event, ...args: unknown[]) => {
+    const drop = fromMainApp(event) && args.length === 1 ? dropPaths(args[0]) : null
+    drop?.files.forEach(grant)
+    return drop
+  })
   ipcMain.handle('open-external', (event: IpcMainInvokeEvent, ...args: unknown[]) => openExternal(win, event, args, (url) => shell.openExternal(url)))
+  // Z79. The test-hooks build never reaches the real shell: under TYPOSE_TEST_SHELL=record it records the call for e2e
+  // (`globalThis.typoseShellCalls`), and otherwise refuses.
+  const shellCalls: { action: HandoffAction; path: string }[] = []
+  const recordShell = __TEST_HOOKS__ && process.env.TYPOSE_TEST_SHELL === 'record'
+  if (recordShell) (globalThis as { typoseShellCalls?: typeof shellCalls }).typoseShellCalls = shellCalls
+  const viaShell = <T>(action: HandoffAction, path: string, real: () => T, recorded: T): T => {
+    if (!__TEST_HOOKS__) return real()
+    if (!recordShell) throw new Error('Hand-offs are off in the test-hooks build unless TYPOSE_TEST_SHELL=record')
+    shellCalls.push({ action, path })
+    return recorded
+  }
+  const gesture = gestures()
+  ipcMain.on('handoff-gesture', (event, token: unknown) => { if (fromMainApp(event)) gesture.arm(token) })
+  for (const [channel, action] of [['show-in-folder', 'show'], ['open-with-default', 'open']] as const)
+    ipcMain.handle(channel, (event: IpcMainInvokeEvent, ...args: unknown[]) => fromMainApp(event)
+      ? handOff(action, args, {
+        takeGesture: token => gesture.take(token),
+        granted, resolve: subject => askCore(subject), platform: process.platform, pathext: process.env.PATHEXT ?? '',
+        isDirectory: async path => (await stat(path)).isDirectory(),
+        show: path => viaShell('show', path, () => shell.showItemInFolder(path), undefined),
+        open: path => viaShell('open', path, () => shell.openPath(path), Promise.resolve(''))
+      })
+      : { ok: false, reason: 'refused' })
   ipcMain.handle('write-clipboard', (event: IpcMainInvokeEvent, ...args: unknown[]) =>
     writeClipboardText(win, event, args, (text) => clipboard.writeText(text)))
   ipcMain.handle('print-document', async (event: IpcMainInvokeEvent, ...args: unknown[]) => {
@@ -389,6 +450,15 @@ void app.whenReady().then(() => {
         const heading = document.createElement('h1'); heading.textContent = decode('${title64}'); document.body.append(heading);
         const make = node => {
           if (Object.hasOwn(node, 'text')) return document.createTextNode(node.text);
+          if (node.tag === 'math') {
+            const math = value => {
+              if (Object.hasOwn(value, 'text')) return document.createTextNode(value.text);
+              const element = document.createElementNS('http://www.w3.org/1998/Math/MathML', value.tag);
+              for (const [key, text] of Object.entries(value.attrs || {})) element.setAttribute(key, text);
+              for (const child of value.children || []) element.append(math(child)); return element;
+            };
+            return math(node.math);
+          }
           if (node.tag === 'img') { const image = document.createElement('img'); image.src = node.src; image.alt = node.alt || ''; return image; }
           const tag = node.tag === 'a' ? 'span' : node.tag; const element = document.createElement(tag);
           for (const child of node.children || []) element.append(make(child)); return element;

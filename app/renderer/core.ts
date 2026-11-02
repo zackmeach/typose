@@ -24,7 +24,7 @@ export class CoreCallError extends Error {
 /** What the core was working on when it died (Z78): every document a pending call named, at any depth of its params
  *  (a page's `doc`, a view's, a ref's), and every path an open named. Bookkeeping that reads no file doesn't count. */
 export interface Busy { docs: ReadonlySet<number>; paths: ReadonlySet<string> }
-const BOOKKEEPING = new Set<Method>(['reserve', 'deactivate', 'deactivateActivation', 'close', 'captureLocation', 'releaseSaved',
+const BOOKKEEPING = new Set<Method>(['reserve', 'deactivate', 'deactivateActivation', 'close', 'captureLocation', 'releaseSaved', 'networkPath',
   'releaseImage', 'transferDoc', 'releaseSurface', 'cancel', 'sourceFindClose', 'csvFindClose', 'csvOrderClose'])
 
 function busy(params: unknown, into: { docs: Set<number>; paths: Set<string> }, depth = 0): void {

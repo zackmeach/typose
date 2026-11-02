@@ -3,6 +3,7 @@ import type { CoreClient } from '../core'
 import { CoreCallError } from '../core'
 import type { LensBudget } from './lens-budget'
 const YAML_MAX_BYTES = 8 << 20
+const YAML_BUILD_MS = 5000
 
 export interface StructuredSource {
   info: StructuredInfo
@@ -59,7 +60,11 @@ export async function prepareStructured(core: CoreClient, opened: Opened, budget
       raw.set(bytes, start)
     }
     if (!await core.call('sourceVerify', { view, start: 0, end: opened.size }, signal)) throw new Error('Source changed; reload before viewing YAML')
-    const built = await call<Pick<StructuredInfo, 'root' | 'problems'>>('build', { bytes: raw, encoding: opened.encoding }, [raw.buffer])
+    // A build that runs away is stopped: the worker is terminated and the Tree is locked with the reason.
+    let watchdog: ReturnType<typeof setTimeout> | undefined
+    const built = await Promise.race([call<Pick<StructuredInfo, 'root' | 'problems'>>('build', { bytes: raw, encoding: opened.encoding }, [raw.buffer]),
+      new Promise<never>((_, reject) => { watchdog = setTimeout(() => { worker.terminate(); reject(new Error(`YAML Tree took longer than ${YAML_BUILD_MS / 1000} s to build · use Raw`)) }, YAML_BUILD_MS) })])
+      .finally(() => clearTimeout(watchdog))
     if (!await core.call('sourceVerify', { view, start: 0, end: opened.size }, signal)) throw new CoreCallError('Frozen', 'Source changed while parsing YAML; reload')
     const info: StructuredInfo = { ref, format: 'yaml', status: built.problems.some(p => p.kind === 'parse') ? 'partial' : 'ready', done: true, ...built }
     return { info, children: (container, start) => call('children', { container, start, count: 128 }), dispose }

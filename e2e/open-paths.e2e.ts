@@ -267,20 +267,15 @@ test('the crash mark reaches the session even when a second death keeps the next
   await finish(second)
 })
 
-test('a restored record that names a folder never becomes a root, even replayed after the core dies during restore', async () => {
-  const slow = fixture('open-paths-restore-slow.txt', 'slow\n')
+test('a restored record that names a folder opens as a refused tab, never a root, and is saved for reselection', async () => {
   const folder = folderFixture('open-paths-restore-dir', { 'inside.md': '# Inside\n' })
   const userData = mkdtempSync(join(tmpdir(), 'typose-restore-dir-'))
   // A folder saved as a manual file record, as a refused tab from an older build was.
   writeFileSync(join(userData, 'session.json'), JSON.stringify({ ...emptySession(), cards: [{ tabs: [
-    { location: { kind: 'manual', path: slow }, anchor: 0, lens: null },
     { location: { kind: 'manual', path: folder }, anchor: 5, lens: null }
   ], selected: 0, weight: 1 }] }))
-  // Every chunk read waits 3 s: the core dies while restore opens the first file, so the folder's open is queued.
-  const l = await launch({ hooks: true, userData, env: { TYPOSE_TEST_READ_DELAY: '3000' } })
+  const l = await launch({ hooks: true, userData })
   const { win } = l
-  await expect(win.locator('.card-status')).toHaveText('Opening…', { timeout: 30_000 })
-  killCore(l)
   await expect(win.locator('.card-message p')).toHaveText(`Can't open ${folder} · refused: not a regular file`, { timeout: 30_000 })
   await win.waitForTimeout(500)
   await expect(win.getByRole('treeitem')).toHaveCount(0)

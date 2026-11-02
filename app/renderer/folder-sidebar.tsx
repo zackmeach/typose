@@ -1,6 +1,7 @@
 import { useRef, useState, type KeyboardEvent, type PointerEvent } from 'react'
 import { Button, Menu, MenuItem, MenuTrigger, Popover } from 'react-aria-components'
 import { FileIcon } from './file-icon'
+import { type HandoffKind, SHOW_IN_FOLDER } from './handoff'
 import './folder-sidebar.css'
 
 export interface FolderNodeView {
@@ -19,6 +20,8 @@ export interface FolderRootView {
   path: string
   node: FolderNodeView
   unavailable?: boolean
+  /** A network share left unopened at launch: Locate reconnects its path. */
+  network?: boolean
 }
 
 export interface FolderSidebarProps {
@@ -35,6 +38,8 @@ export interface FolderSidebarProps {
   onMore(root: string, node: string): void
   onRemove(root: string): void
   onLocate(root: string): void
+  /** Z79's right-click menu on a file row: Copy path, Show in Explorer, Open with default app. */
+  onHandoff(root: string, node: string, kind: HandoffKind): void
 }
 
 const widthWithinBounds = (width: number) => Math.max(180, Math.min(420, width))
@@ -44,6 +49,9 @@ export function FolderSidebar(props: FolderSidebarProps) {
   const tree = useRef<HTMLDivElement>(null)
   const [focused, setFocused] = useState<string | null>(null)
   const drag = useRef<{ x: number; width: number } | null>(null)
+  const menuRow = useRef<HTMLElement | null>(null)
+  const [menu, setMenu] = useState<{ root: string; node: FolderNodeView } | null>(null)
+  const closeMenu = () => { setMenu(null); menuRow.current?.focus() }
   const visibleIds: string[] = []
   const collect = (root: string, node: FolderNodeView) => {
     visibleIds.push(root + ':' + node.id)
@@ -85,7 +93,15 @@ export function FolderSidebar(props: FolderSidebarProps) {
       aria-busy={node.loading || undefined} data-node={root.id + ':' + node.id}
       tabIndex={tabStop === root.id + ':' + node.id ? 0 : -1}
       onFocus={event => { if (event.target === event.currentTarget) setFocused(root.id + ':' + node.id) }}
-      onKeyDown={event => key(event, root.id, node, parent)}>
+      onKeyDown={event => key(event, root.id, node, parent)}
+      onContextMenu={event => {
+        // A right-click, Shift+F10 or the Menu key: the innermost row takes it; a folder row has no menu.
+        if (node.kind === 'directory') return
+        event.preventDefault()
+        event.stopPropagation()
+        menuRow.current = event.currentTarget
+        setMenu({ root: root.id, node })
+      }}>
       <div className="folder-row" data-active={props.activeNode === root.id + ':' + node.id || undefined}
         data-unsupported={node.kind === 'unsupported' || undefined} style={{ paddingLeft: 8 + (level - 1) * 16 }}
         title={level === 1 ? root.path : node.name}
@@ -116,7 +132,7 @@ export function FolderSidebar(props: FolderSidebarProps) {
       </div>
       {node.error ? <div className="folder-error" role="status">
         {node.error}
-        {level === 1 ? <><Button className="folder-inline" onPress={() => props.onLocate(root.id)}>Locate…</Button><Button className="folder-inline" onPress={() => props.onRemove(root.id)}>Remove</Button></> : null}
+        {level === 1 ? <><Button className="folder-inline" onPress={() => props.onLocate(root.id)}>{root.network ? 'Reconnect' : 'Locate…'}</Button><Button className="folder-inline" onPress={() => props.onRemove(root.id)}>Remove</Button></> : null}
       </div> : null}
       {node.expanded ? <div role="group">
         {node.children?.map(child => nodeView(root, child, level + 1, node.id))}
@@ -138,6 +154,15 @@ export function FolderSidebar(props: FolderSidebarProps) {
         {props.roots.map(root => nodeView(root, root.node, 1))}
       </div>
       <Button className="folder-add" onPress={props.onAdd}>+ Add folder…</Button>
+      {menu ? <Popover className="menu-popover" aria-label="File actions" triggerRef={menuRow} isOpen placement="bottom start"
+        onOpenChange={open => { if (!open) closeMenu() }}>
+        <Menu className="menu" aria-label={'Actions for ' + menu.node.name} autoFocus="first"
+          onAction={kind => props.onHandoff(menu.root, menu.node.id, kind as HandoffKind)} onClose={closeMenu}>
+          <MenuItem id="copy" className="menu-item">Copy path</MenuItem>
+          <MenuItem id="show" className="menu-item" data-handoff="true">{SHOW_IN_FOLDER}</MenuItem>
+          <MenuItem id="open" className="menu-item" data-handoff="true">Open with default app</MenuItem>
+        </Menu>
+      </Popover> : null}
       <div className="folder-resizer" role="separator" aria-label="Sidebar width" aria-orientation="vertical"
         aria-valuemin={180} aria-valuemax={420} aria-valuenow={Math.round(props.width)} tabIndex={0}
         onPointerDown={startResize} onPointerMove={event => {

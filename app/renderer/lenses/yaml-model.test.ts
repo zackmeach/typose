@@ -26,12 +26,42 @@ describe('YAML 1.2 CST projection', () => {
     expect(nodes[0]!.span).toEqual({ start: source.indexOf('"é"') * 2, end: (source.indexOf('"é"') + 3) * 2 })
     expect(nodes[1]!.span.start).toBe(source.indexOf('3.10') * 2)
   })
+  it('maps a single-byte encoding one byte per character', () => {
+    const bytes = Uint8Array.from([...'a: caf', 0xe9, ...' ', 0x80, 0x80, 0x80, 0x80, ...'\nsecret: value\n'].map(c => typeof c === 'number' ? c : c.charCodeAt(0)))
+    expect(bytes).toHaveLength(27)
+    const source = new TextDecoder('windows-1252').decode(bytes)
+    expect(source).toBe('a: café €€€€\nsecret: value\n')
+    const nodes = children(yamlModel(source, 'windows-1252', 0))
+    expect(nodes[1]!.keySpan).toEqual({ start: 13, end: 19 })
+    expect(nodes[1]!.span).toEqual({ start: 21, end: 26 })
+  })
+  it('places 18,000 comments in one sequence in source order without re-sorting per comment', () => {
+    const source = 'items:\n' + Array.from({ length: 18_000 }, (_, i) => `  # note ${i}\n  - ${i}\n`).join('')
+    expect(source.length).toBeGreaterThan(360_000)
+    const started = performance.now(), model = yamlModel(source)
+    expect(performance.now() - started).toBeLessThan(3000) // 5.5 s when each comment re-sorted its container
+    // The first note precedes the sequence's own span, so the mapping holds it; the rest sit between items.
+    const sequence = children(model).find(node => node.kind === 'array')!, items = children(model, sequence)
+    expect(sequence.children).toBe(35_999)
+    expect(items.slice(0, 4).map(node => node.text)).toEqual(['0', '# note 1', '1', '# note 2'])
+    expect(items.every((node, i) => i === 0 || items[i - 1]!.span.start < node.span.start)).toBe(true)
+  })
+  it('walks a CST token list of 95,000 comments without spreading it into one call', () => {
+    const model = yamlModel('items:\n' + '  # c\n'.repeat(95_000) + '  - 1\n')
+    expect(model.root.kind).toBe('object')
+    expect(model.root.children).toBe(95_001)
+  })
   it('uses CST comments so block-scalar hash lines remain scalar content', () => {
     const model = yamlModel('# top\nbody: |\n  # literal\n  hello\n# end\n')
     const walk = (node: StructuredNode): StructuredNode[] => [node, ...(node.container === undefined ? [] : children(model, node).flatMap(walk))]
     const all = walk(model.root)
     expect(all.filter(node => node.kind === 'comment').map(node => node.text)).toEqual(['# top', '# end'])
     expect(all.some(node => node.kind === 'string' && node.text.includes('# literal'))).toBe(true)
+  })
+  it('keeps a lone document as the root, with its leading comment as its first row', () => {
+    const model = yamlModel('# launch plan\nname: pier\nsteps: [a, b]\n')
+    expect(model.root.kind).toBe('object')
+    expect(children(model).map(node => node.kind === 'comment' ? node.text : node.key)).toEqual(['# launch plan', 'name', 'steps'])
   })
   it('retains document separation and reports parse error source locations', () => {
     const model = yamlModel('a: 1\n---\nb: [bad\n')

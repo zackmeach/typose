@@ -10,7 +10,8 @@ import { ReaderCard } from './ReaderCard'
 import { WorkspaceStore, WorkspaceMetadataQueue, type WorkspaceTab } from './workspace'
 import { WorkspaceBudget } from './workspace-budget'
 import { FolderSidebar } from './folder-sidebar'
-import { entryView, folderNode, foldersCharge, rootView, updateFolder, type RootView } from './folders'
+import { entryView, folderNode, foldersCharge, nodePath, rootView, updateFolder, type RootView } from './folders'
+import { handOff } from './handoff'
 import type { ClosedLocation, LocalGesture, ReaderGroup, ReaderHandle, ReaderWindow } from './reader-window'
 import './split-cards.css'
 import './link-preview.css'
@@ -163,6 +164,13 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     pendingSplit.current = 0
     for (const savedRoot of saved.roots) {
       const path = savedRoot.path
+      // Brief §4.6: a network share is never touched at launch; Reconnect adds it again.
+      if (await core.call('networkPath', { path }).catch(() => true)) {
+        const id = 'network-' + folders.current.length
+        setFolders([...folders.current, { id, path, identity: savedRoot.identity, ref: { session: 0, root: id, node: '0' }, unavailable: true, network: true,
+          node: { id: '0', ref: { session: 0, root: id, node: '0' }, name: path.split(/[\\/]/).filter(Boolean).at(-1) ?? path, kind: 'directory', error: 'Network folder · not opened at launch' } }])
+        continue
+      }
       await pickFolder(undefined, path)
       const captured = folders.current.find(root => root.path === path)
       if (captured && savedRoot.identity && captured.identity !== savedRoot.identity) {
@@ -273,7 +281,8 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       recharged.current = false
       hello.current = null
       folderRequests.current.clear()
-      setFolders(folders.current.map(root => ({ ...root, unavailable: true, node: { ...root.node, expanded: false, loading: false, children: undefined, cursor: undefined, error: 'Core restarted · Locate the folder again to restore access' } })))
+      // A network placeholder was never opened, so it has no access to lose and keeps its own message.
+      setFolders(folders.current.map(root => root.network ? root : ({ ...root, unavailable: true, node: { ...root.node, expanded: false, loading: false, children: undefined, cursor: undefined, error: 'Core restarted · Locate the folder again to restore access' } })))
       workspacePeak.current = Math.max(workspacePeak.current, workspaceBudget.current?.snapshot().peakBytes ?? 0)
       workspaceBudget.current?.invalidate()
       workspaceBudget.current = null
@@ -494,7 +503,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       return opened
     } catch (error) {
       if (freshPreview) previewCloseRequested.current = true
-      if (error instanceof CoreCallError && error.code === 'Frozen') throw error
+      if (error instanceof CoreCallError && (error.code === 'Frozen' || error.code === 'NotFound')) throw error
       setWorkspaceNotice('Cannot open local link · ' + String(error))
       return false
     } finally {
@@ -824,7 +833,12 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       {sidebarOpen ? <FolderSidebar roots={folderRoots} width={sidebarWidth} overlay={sidebarOverlay} activeNode={activeNode}
         onWidth={setSidebarWidth} onCollapse={() => { setSidebarOpen(false); requestAnimationFrame(() => document.querySelector<HTMLElement>('.sidebar-toggle')?.focus()) }}
         onAdd={() => void pickFolder()} onToggle={toggleFolder} onOpen={(root, node) => void focusedReader()?.openChild(root, node)}
-        onRefresh={refreshDirectory} onMore={(root, node) => void listDirectory(root, node, true)} onRemove={removeFolder} onLocate={root => void pickFolder(root)} /> : null}
+        onRefresh={refreshDirectory} onMore={(root, node) => void listDirectory(root, node, true)} onRemove={removeFolder}
+        onLocate={root => void pickFolder(root, folders.current.find(item => item.id === root && item.network)?.path)}
+        onHandoff={(rootId, nodeId, kind) => {
+          const root = folders.current.find(item => item.id === rootId), node = root && folderNode(root, nodeId)
+          if (root && node) void handOff(kind, { entry: node.ref }, nodePath(root, nodeId) ?? node.name).then(message => { if (message) setWorkspaceNotice(message) })
+        }} /> : null}
       <main className="card-row" ref={row}>
         {groups.map((group, index) => <div className="card-slot" style={{ flexGrow: group.weight }} key={group.id}>
           <ReaderCard id={group.id} label={index + 1} workspace={group.workspace} window={shared} fonts={fonts} focused={focused === group.id}

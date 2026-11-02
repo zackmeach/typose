@@ -28,3 +28,6 @@
 .md-copy-status:empty { display: none; }
 ::highlight(typose-find) { background-color: #8fb0ff55; }
 ::highlight(typose-find-current) { color: #111113; background-color: #8fb0ff; text-decoration: underline; }
+/* The light theme's accent (#285ac9): the dark accent's pale fill vanishes on a light canvas. */
+:root[data-theme="light"] ::highlight(typose-find) { background-color: #285ac933; }
+:root[data-theme="light"] ::highlight(typose-find-current) { color: #ffffff; background-color: #285ac9; }

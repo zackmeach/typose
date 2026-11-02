@@ -138,6 +138,21 @@ pub(crate) fn query_open(path: &Path, flags: u32) -> io::Result<File> {
         .open(path)
 }
 
+/// Whether `path` reaches a network share: a UNC path, or a drive letter (through any `subst` chain) that the
+/// network redirector serves. String work and `QueryDosDeviceW` only: nothing is opened, so a dead share can't stall
+/// it. Session restore uses it to leave such paths unopened until a click (brief §4.6).
+pub fn network(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        windows::network(path)
+    }
+    #[cfg(unix)]
+    {
+        let _ = path;
+        false
+    }
+}
+
 /// The part of `refusal` that opens nothing a device could answer, to run before any by-path access after the
 /// open too (plan PR 4): a path swapped for a link into the pipe namespace, or a drive letter remapped onto it,
 /// must not connect a later identity check. On Unix a stat opens nothing, so there's nothing to check.
@@ -195,6 +210,24 @@ mod windows {
             }
         }
         Ok(Some("too many links"))
+    }
+
+    pub fn network(path: &Path) -> bool {
+        let unc = |p: &Path| match p.components().next() {
+            Some(Component::Prefix(x)) => matches!(x.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..)),
+            _ => false,
+        };
+        let Ok(mut path) = std::path::absolute(path) else { return unc(path) }; // GetFullPathNameW: string work
+        for _ in 0..MAX_LINKS {
+            if unc(&path) {
+                return true;
+            }
+            match drive(&path) {
+                Ok(Drive::Path(mapped)) => path = mapped,
+                _ => return false,
+            }
+        }
+        false
     }
 
     enum Drive {
