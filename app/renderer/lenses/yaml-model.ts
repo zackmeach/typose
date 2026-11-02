@@ -8,10 +8,12 @@ const MAX_DEPTH = 100
 export function yamlModel(source: string, encoding = 'utf-8', bom = 0) {
   const offsets = new Uint32Array(source.length + 1)
   let bytes = bom
+  // Any other encoding the core reports is its single-byte fallback (`encoding::decode_prefix` assumes the same).
+  const label = encoding.toLowerCase(), utf16 = label.startsWith('utf-16'), utf8 = label === 'utf-8'
   for (let i = 0; i < source.length; i++) {
     offsets[i] = bytes
     const code = source.codePointAt(i)!
-    const width = encoding.toLowerCase().startsWith('utf-16') ? (code > 0xffff ? 4 : 2) : code < 128 ? 1 : code < 2048 ? 2 : code > 0xffff ? 4 : 3
+    const width = utf16 ? (code > 0xffff ? 4 : 2) : !utf8 || code < 128 ? 1 : code < 2048 ? 2 : code > 0xffff ? 4 : 3
     if (code > 0xffff) { offsets[++i] = bytes; bytes += width } else bytes += width
   }
   offsets[source.length] = bytes
@@ -50,7 +52,7 @@ export function yamlModel(source: string, encoding = 'utf-8', bom = 0) {
     while (stack.length) {
       const token = stack.pop()
       if (!token || typeof token !== 'object') continue
-      if (Array.isArray(token)) { stack.push(...token); continue }
+      if (Array.isArray(token)) { for (const item of token) stack.push(item); continue } // a spread of 95,000 overflows the stack
       const part = token as Record<string, unknown>
       if (part.type === 'comment' || part.type === 'tag') (part.type === 'comment' ? comments : tags).push(part as unknown as { offset: number; source: string })
       for (const key of ['start', 'sep', 'end', 'items', 'key', 'value', 'props']) if (part[key] && typeof part[key] === 'object') stack.push(part[key])
@@ -112,6 +114,7 @@ export function yamlModel(source: string, encoding = 'utf-8', bom = 0) {
     while (low < high) { const mid = (low + high) >>> 1; if ((end ? items[mid]!.span.end : items[mid]!.span.start) <= position) low = mid + 1; else high = mid }
     return items[low - 1]
   }
+  const commented = new Set<StructuredNode>()
   for (const comment of comments) {
     if (++count > MAX_NODES) throw new Error('YAML Tree structural limit exceeded')
     const lineStart = source.lastIndexOf('\n', comment.offset - 1) + 1
@@ -123,8 +126,13 @@ export function yamlModel(source: string, encoding = 'utf-8', bom = 0) {
     const entry: StructuredNode = { ordinal: 0, kind: 'comment', span: span(comment.offset, comment.offset + comment.source.length), text: comment.source.slice(0, 4096), more: comment.source.length > 4096 }
     let owner = preceding(values, entry.span.start, false)
     while (owner && (owner.container === undefined || owner.kind === 'alias' || owner.span.end < entry.span.end)) owner = parents.get(owner)
-    if (owner) { const children = containers.get(owner.container!)!; children.push(entry); children.sort((a, b) => a.span.start - b.span.start); owner.children = children.length }
+    if (owner) { containers.get(owner.container!)!.push(entry); commented.add(owner) }
     else roots.push(entry)
+  }
+  // Once per container: re-sorting per comment is quadratic in a comment-heavy container.
+  for (const owner of commented) {
+    const children = containers.get(owner.container!)!
+    children.sort((a, b) => a.span.start - b.span.start); owner.children = children.length
   }
   // One document keeps its top-level keys at the root; comments outside its value become its first or last rows.
   const content = roots.filter(node => node.kind !== 'comment')

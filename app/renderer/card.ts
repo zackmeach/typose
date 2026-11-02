@@ -46,6 +46,8 @@ export type Card =
     }
   | {
       kind: 'failed'; path: string; code: ErrorCode; message: string; localOnly?: true
+      /** A network share left unopened at launch (brief §4.6): Retry opens its path. */
+      network?: true
       /** Inactive activation froze, but this tab still owns the native document and its Reload capability. */
       reloadable?: true
     }
@@ -137,6 +139,7 @@ export function view(card: DisplayCard): CardView {
     }
     case 'failed':
       if (card.reloadable) return say(`Can't open ${card.path} · ${card.message}`, 'Reload', 'Close')
+      if (card.network) return say(`${card.path} is on a network share · ${card.message}. Retry to connect.`, 'Retry', 'Close')
       // A lost local capability cannot be recreated by treating its display path as a manual open.
       if (card.localOnly) return say(`Can't open ${card.path} · ${card.message}`, 'Locate…', 'Close')
       switch (card.code) {

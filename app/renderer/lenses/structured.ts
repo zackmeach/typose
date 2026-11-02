@@ -273,7 +273,8 @@ export class StructuredLens {
       panel.append(tree)
     }
     if (large(record)) {
-      const copy = el('button', `Copy record · ${(record.span.end - record.span.start).toLocaleString()} source bytes`); copy.type = 'button'
+      // A trusted Copy gesture: data-clipboard-copy arms the preload's write, and copySpan takes its token first thing.
+      const copy = el('button', `Copy record · ${(record.span.end - record.span.start).toLocaleString()} source bytes`); copy.type = 'button'; copy.dataset.clipboardCopy = 'true'
       copy.onclick = () => { void this.copySpan(record.span) }; panel.append(copy)
     }
   }
@@ -492,10 +493,16 @@ export class StructuredLens {
   }
   private menu(x: number, y: number): void {
     this.context?.remove(); const menu = el('div', undefined, 'structured-context'); menu.setAttribute('role', 'menu'); menu.style.left = `${x}px`; menu.style.top = `${y}px`
-    const add = (label: string, action: () => void) => { const button = el('button', label); button.onclick = () => { action(); menu.remove() }; menu.append(button) }
+    // Each item is a trusted Copy gesture, which arms the preload's one clipboard write.
+    const add = (label: string, action: () => void) => { const button = el('button', label); button.dataset.clipboardCopy = 'true'; button.onclick = () => { action(); menu.remove() }; menu.append(button) }
     add('Copy value (source text)', () => { void this.copy() })
     add('Copy key', () => { const span = this.selectedNode?.keySpan; if (span) void this.copySpan(span) })
-    add('Copy path', () => { void window.typose.writeClipboardText(this.selectedPath, crypto.randomUUID()) })
+    add('Copy path', () => {
+      this.copies.cancel()
+      const token = window.typose.beginClipboardWrite()
+      if (token) void window.typose.writeClipboardText(this.selectedPath, token)
+      else this.options.notice('Copy unavailable · use Ctrl+C or a Copy action in the reader')
+    })
     this.context = menu; this.element.append(menu); (menu.firstElementChild as HTMLElement)?.focus()
   }
   private readonly key = (event: KeyboardEvent) => {
@@ -512,9 +519,12 @@ export class StructuredLens {
   }
   async copy(): Promise<boolean> { return this.selected ? this.copySpan(this.selected) : false }
   private async copySpan(span: SourceSpan): Promise<boolean> {
+    // Taken before anything awaits, while the trusted gesture that armed it is still current (as Raw and Grid do).
+    const token = window.typose.beginClipboardWrite()
+    if (!token) { this.options.notice('Copy unavailable · use Ctrl+C or a Copy action in the reader'); return false }
     const view = this.opened.view, owner = this.options.budget
-    if (!view || !owner || this.stopped) return false
-    try { return await this.copies.run((current, signal, token) => copySourceSpan({ valid: () => current() && !this.stopped && owner.current(this.opened.gen), reserve: bytes => owner.reserveCopy(this.opened.gen, bytes), read: (start, count, check) => this.core.call('sourceBytes', { view, start, count }, check), verify: check => this.core.call('sourceVerify', { view, ...span }, check), confirm: async bytes => window.confirm(`Copy ${bytes.toLocaleString()} bytes?`), write: text => window.typose.writeClipboardText(text, token), cancelWrite: () => window.typose.cancelClipboardWrite(token), status: this.options.notice }, span.start, span.end, this.opened.encoding, signal), async () => { await owner.reserveCopy(this.opened.gen, 0) }) }
+    if (!view || !owner || this.stopped) { window.typose.cancelClipboardWrite(token); return false }
+    try { return await this.copies.run(token, (current, signal) => copySourceSpan({ valid: () => current() && !this.stopped && owner.current(this.opened.gen), reserve: bytes => owner.reserveCopy(this.opened.gen, bytes), read: (start, count, check) => this.core.call('sourceBytes', { view, start, count }, check), verify: check => this.core.call('sourceVerify', { view, ...span }, check), confirm: async bytes => window.confirm(`Copy ${bytes.toLocaleString()} bytes?`), write: text => window.typose.writeClipboardText(text, token), cancelWrite: () => window.typose.cancelClipboardWrite(token), status: this.options.notice }, span.start, span.end, this.opened.encoding, signal), async () => { await owner.reserveCopy(this.opened.gen, 0) }) }
     catch (error) { this.error(error); return false }
   }
   private reveal(line: number, offset?: number): void {

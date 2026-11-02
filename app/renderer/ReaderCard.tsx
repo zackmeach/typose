@@ -1227,8 +1227,8 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         <Popover className="csv-info-popover" placement="bottom end">
           <Dialog aria-label="CSV file info">
             <p>{card.csv ? `${Math.max(0, card.csv.sourceRecords - (card.csv.header ? 1 : 0))} rows${card.csv.done ? '' : '…'} · ${card.csv.expectedColumns} columns · ${card.csv.encoding}` : 'Preparing CSV…'}</p>
-            <label><input type="checkbox" checked={card.csv?.header ?? false} disabled={csvChanging || !card.csv} onChange={event => void configureCsv({ ...(card.csvOptions ?? CSV_OPTIONS), header: event.target.checked })} /> First row is header</label>
-            <label>Delimiter <select aria-label="Delimiter" value={card.csvOptions?.delimiter ?? 'auto'} disabled={csvChanging} onChange={event => void configureCsv({ ...(card.csvOptions ?? CSV_OPTIONS), delimiter: event.target.value as CsvOptions['delimiter'] })}>
+            <label><input type="checkbox" checked={card.csv?.header ?? false} disabled={!card.csv} aria-disabled={csvChanging || undefined} onChange={event => void configureCsv({ ...(card.csvOptions ?? CSV_OPTIONS), header: event.target.checked })} /> First row is header</label>
+            <label>Delimiter <select aria-label="Delimiter" value={card.csvOptions?.delimiter ?? 'auto'} aria-disabled={csvChanging || undefined} onChange={event => void configureCsv({ ...(card.csvOptions ?? CSV_OPTIONS), delimiter: event.target.value as CsvOptions['delimiter'] })}>
               <option value="auto">Auto{detectedDelimiter ? ` (${detectedDelimiter})` : ''}</option><option value=",">Comma</option><option value={'\t'}>Tab</option><option value=";">Semicolon</option><option value="|">Pipe</option>
             </select></label>
             {card.gridOff ? <p>{card.gridOff}</p> : null}
@@ -1442,7 +1442,9 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     const restored: TabId[] = []
     for (const entry of saved.tabs) {
       let restoredTab: WorkspaceTab | undefined
-      if (entry.location.kind === 'manual') {
+      // Brief §4.6: a network share is never touched at launch; its tab waits for a click on Retry.
+      const network = entry.location.kind === 'manual' && await core.call('networkPath', { path: entry.location.path }).catch(() => true)
+      if (entry.location.kind === 'manual' && !network) {
         await open(entry.location.path, entry.anchor)
         restoredTab = workspace.find(manualKey(entry.location.path))
       } else if (entry.location.kind === 'folder') restoredTab = await restoreFolderEntry(entry)
@@ -1457,13 +1459,16 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
           setCard(card => card.kind === 'open' && card.opened.doc === doc ? { ...card, csvOptions: entry.csvOptions } : card)
         }
       } else {
-        if (!await metadata(current => chargeWorkspace([...workspace.getSnapshot().tabs, { key: 'reselect:' + entry.location.path, path: entry.location.path }], current))) continue
+        // A share keeps its manual key, so it's saved as manual again until the click opens it.
+        const key = network ? manualKey(entry.location.path) : 'reselect:' + entry.location.path
+        if (!await metadata(current => chargeWorkspace([...workspace.getSnapshot().tabs, { key, path: entry.location.path }], current))) continue
         leave()
-        const requested = workspace.beginOpen('reselect:' + entry.location.path, entry.location.path)
+        const requested = workspace.beginOpen(key, entry.location.path)
         if (requested.kind !== 'open') continue
-        const blocked: Extract<Card, { kind: 'failed' }> = { kind: 'failed', path: entry.location.path, code: 'Refused',
-          message: 'The source must be selected again after restart', localOnly: true }
-        workspace.complete(requested.ticket, 'reselect:' + entry.location.path, blocked)
+        const blocked: Extract<Card, { kind: 'failed' }> = network
+          ? { kind: 'failed', path: entry.location.path, code: 'Refused', message: 'Not opened at launch', network: true }
+          : { kind: 'failed', path: entry.location.path, code: 'Refused', message: 'The source must be selected again after restart', localOnly: true }
+        workspace.complete(requested.ticket, key, blocked)
         workspace.remember(requested.ticket.tab, entry.anchor, entry.lens)
         display(requested.ticket.tab, blocked)
         restored.push(requested.ticket.tab)

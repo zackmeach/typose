@@ -5,6 +5,8 @@ use crate::doc::DocError;
 
 pub const SAMPLE_ROWS: u64 = 1000;
 pub const SAMPLE_FIELD_BYTES: usize = 512;
+/// Columns that get sampled metadata, at 8 KiB each; the rest show as plain text.
+pub const MAX_COLUMNS: usize = 512;
 #[derive(Clone, Default)]
 pub struct ColumnMetadata {
     pub width_units: usize,
@@ -129,10 +131,19 @@ impl Metadata {
         if self.done || record < u64::from(header) || record - u64::from(header) >= SAMPLE_ROWS {
             return Ok(());
         }
-        let column = usize::try_from(column).map_err(|_| DocError::Invalid("CSV column extent overflow".into()))?;
+        // Display metadata is a nicety: the first columns only, and none at all rather than a failed index.
+        if column >= MAX_COLUMNS as u64 {
+            return Ok(());
+        }
+        let column = column as usize;
         if column >= self.columns.len() {
             let extra = column + 1 - self.columns.len();
-            self.charge.grow(extra as u64 * 8192).map_err(DocError::Memory)?;
+            if self.charge.grow(extra as u64 * 8192).is_err() {
+                self.columns = Vec::new();
+                self.charge = Reservation::none();
+                self.done = true; // the Grid shows plain columns
+                return Ok(());
+            }
             self.columns.resize_with(column + 1, ColumnMetadata::default);
         }
         self.columns[column].sample(text, complete);
@@ -214,6 +225,16 @@ mod tests {
         assert_eq!(metadata.columns[1].kind, "number");
         metadata.sample(1001, 0, false, "late", true).unwrap();
         assert_eq!(metadata.columns[0].pills.as_ref().unwrap().len(), 2);
+    }
+    #[test]
+    fn only_the_first_512_columns_are_sampled_and_charged() {
+        let mut metadata = Metadata::new();
+        metadata.sample(0, 100_000, false, "far", true).unwrap();
+        metadata.sample(0, 3, false, "near", true).unwrap();
+        assert_eq!(metadata.columns.len(), 4);
+        metadata.sample(0, 511, false, "last", true).unwrap();
+        assert_eq!(metadata.columns.len(), 512);
+        assert_eq!(metadata.charged(), 512 * 8192);
     }
     #[test]
     fn small_or_high_cardinality_columns_do_not_get_pills() {

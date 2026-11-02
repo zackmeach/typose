@@ -1,5 +1,6 @@
 import { expect } from '@playwright/test'
 import { fixture, launch, finish, test } from './app'
+import { command } from './find-ui'
 import { mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 
@@ -301,6 +302,51 @@ test('CSV sampled metadata adds types, fitted widths and stable pills without re
     await card.locator('.go-to-bar input').fill('1002'); await card.locator('.go-to-bar input').press('Enter')
     await expect(grid.locator('[role="row"][aria-rowindex="1003"] [aria-colindex="4"] .csv-value-pill')).toHaveText('late')
     await expect(grid.locator('[role="row"][aria-rowindex="1003"] [aria-colindex="4"] .csv-value-pill')).toHaveAttribute('data-tint', 'neutral')
+    expect(live.pageErrors).toEqual([])
+  } finally { await finish(live) }
+})
+
+/** Main's clipboard writes, recorded instead of reaching the system clipboard. */
+async function recordClipboard(live: Awaited<ReturnType<typeof launch>>): Promise<() => Promise<string[]>> {
+  await live.app.evaluate(({ clipboard }) => {
+    clipboard.writeText = async (value: string) => { const g = globalThis as { copied?: string[] }; g.copied = [...g.copied ?? [], value] }
+  })
+  return () => live.app.evaluate(() => (globalThis as { copied?: string[] }).copied ?? [])
+}
+
+for (const [name, source, value, key] of [
+  ['structured-copy.json', '{"name":"café","n":3.10}\n', '"café"', '"name"'],
+  ['structured-copy.yaml', 'name: café\nn: 3.10\n', 'café', 'name']
+] as const) test(`${name.endsWith('.json') ? 'JSON' : 'YAML'} Tree Ctrl+C, Copy value, Copy key and Copy path write source text`, async () => {
+  const live = await launch({ hooks: true, file: fixture(name, source) })
+  try {
+    const copied = await recordClipboard(live)
+    const card = live.win.getByRole('region', { name: 'Reader card 1' })
+    await expect(card.locator('[data-lens="tree"]')).toBeVisible({ timeout: 30_000 })
+    const row = card.locator('.tree-row').filter({ hasText: 'name:' })
+    await row.click()
+    await live.win.keyboard.press(command + '+c')
+    await expect.poll(copied).toEqual([value])
+    for (const item of ['Copy value (source text)', 'Copy key', 'Copy path']) {
+      await row.click({ button: 'right' })
+      await card.getByRole('button', { name: item, exact: true }).click()
+    }
+    await expect.poll(copied).toEqual([value, value, key, '$["name"]'])
+    expect(live.pageErrors).toEqual([])
+  } finally { await finish(live) }
+})
+
+test('JSONL Rows Copy record writes the long record’s source text', async () => {
+  const long = JSON.stringify({ message: 'north pier '.repeat(500) })
+  const live = await launch({ hooks: true, file: fixture('structured-copy-record.jsonl', long + '\n{"message":"short"}\n') })
+  try {
+    const copied = await recordClipboard(live)
+    const card = live.win.getByRole('region', { name: 'Reader card 1' })
+    await expect(card.locator('[data-lens="rows"]')).toBeVisible({ timeout: 30_000 })
+    // Rows keeps Copy record in the row's detail.
+    await card.getByRole('button', { name: 'Expand row 1', exact: true }).click()
+    await card.getByRole('button', { name: `Copy record · ${(long.length + 1).toLocaleString('en-US')} source bytes`, exact: true }).click()
+    await expect.poll(async () => (await copied()).map(text => text.replace(/\r?\n$/, ''))).toEqual([long])
     expect(live.pageErrors).toEqual([])
   } finally { await finish(live) }
 })

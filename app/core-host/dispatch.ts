@@ -64,6 +64,8 @@ export interface Addon {
   limits(): Limits
   openDoc(path: string): Doc
   captureFolder?(path: string, id: string): NativeFolderRoot
+  /** UNC, or a drive letter the network redirector serves; nothing is opened. */
+  networkPath?(path: string): boolean
   /** A new cancel flag, for one page read or one index job (plan C5, C6). */
   cancelFlag(): Cancel
   /** Plan C1: sets the renderer cache's reservation in the ledger; false if the ledger refused it. */
@@ -1200,6 +1202,12 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         if (result.kind !== 'located') throw new Refusal('Internal', 'the core returned an invalid CSV source location')
         return { kind: 'located', span: nativeCsvSpan(result.span), rawLine: csvResultNumber(result.rawLine, 'raw line') }
       })
+    },
+    networkPath: (p): boolean => {
+      if (typeof p.path !== 'string' || p.path.length === 0 || p.path.length > 32_767 || p.path.includes('\0'))
+        throw new Refusal('InvalidParams', 'path must be a non-empty string of at most 32,767 characters, without NUL', 'path')
+      // Without the native test, only the UNC form is known to be a share.
+      return addon.networkPath ? addon.networkPath(p.path) : /^[\\/]{2}/.test(p.path)
     },
     open: async (p, req): Promise<Opened> => {
       const [count, bytes] = [int(p, 'count'), int(p, 'bytes')]
