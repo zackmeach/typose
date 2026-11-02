@@ -101,6 +101,7 @@ The packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`) holds
 | Z90 | **Quick-open picks open by absolute path as manual records.** The open is gesture-gated and refuses reparse points. This relaxes "display paths are never opened as manual paths" for quick open only. (2026-11-02) |
 | Z91 | **The Rendered charge growth from source maps is accepted for now.** Inline-heavy Markdown reserves up to about twice as much; recalibrating the per-span cost waits until a real document hits the limit. (2026-11-02) |
 | Z92 | **On Linux the accessibility mode is always on.** Electron reports accessibility support on macOS and Windows only, so on Linux every Markdown block stays in the accessibility tree (no `content-visibility: auto` skipping) whether or not a screen reader runs. (2026-11-02) |
+| Z93 | **Size-bounding Raw's reservation is shelved, and the per-row cost gap is a known issue.** Raw charges items per UTF-16 unit, so a row's own DOM cost (about 0.7 KB live, more as repaint garbage) is unmodeled: a 192 KB file of newlines overruns its reservation by about 176 MiB on `26792b3`. Bounding reservations by file size (branch `fix/size-bound-reservations`, review FIX-FIRST) would extend that gap to 4 KB files, so 7–8 GB machines and hosted runners keep the 1.75–2 GiB link-preview limit. Fixing both needs calibrated per-row terms. (2026-11-02) |
 
 ---
 
