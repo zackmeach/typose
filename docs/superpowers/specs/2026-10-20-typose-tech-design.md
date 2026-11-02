@@ -94,6 +94,12 @@ The packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`) holds
 | Z83 | **Cleanup of merged worktrees and the landed draft chain is authorized.** (2026-11-01) |
 | Z84 | **Each PR lands on main before the next stacks,** at most one layer deep. Claude is PM with Opus/Sonnet lanes; review is lean. (2026-11-01) |
 | Z85 | **The merge bar is the full local Windows gate.** Per-PR hosted CI is slim: lint, typecheck, Vitest, cargo and an e2e smoke (`npm run e2e:smoke`). Full Linux e2e runs weekly (Mondays 07:00 UTC, `weekly-linux.yml`), and macOS stays weekly. (2026-11-01) |
+| Z86 | **Math macro definitions stay refused:** `\newcommand`, `\def` and the like show their source instead of rendering, which bounds KaTeX worker memory. Revisit if a real document needs one. (2026-11-02) |
+| Z87 | **Z63 is satisfied per page:** structured reads check file identity once per page, after that page's reads and before anything returns (`Document::batch`), not after every read. (2026-11-02) |
+| Z88 | **The hand-off residual is accepted:** a real gesture on a Typose hand-off control can hand off a file that page script opened through the core. It is limited to allowlisted document and media types on plain local paths; there is no main-side path provenance. (2026-11-02) |
+| Z89 | **Open with default app stays an allowlist** of document and media types. Anything else gets Show in Explorer only. (2026-11-02) |
+| Z90 | **Quick-open picks open by absolute path as manual records.** The open is gesture-gated and refuses reparse points. This relaxes "display paths are never opened as manual paths" for quick open only. (2026-11-02) |
+| Z91 | **The Rendered charge growth from source maps is accepted for now.** Inline-heavy Markdown reserves up to about twice as much; recalibrating the per-span cost waits until a real document hits the limit. (2026-11-02) |
 
 ---
 
