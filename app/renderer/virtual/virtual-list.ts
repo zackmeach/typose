@@ -88,6 +88,12 @@ export class VirtualList {
     this.measure(this.rows.values())
   }
 
+  /** Forgets the widest row seen, when every row's width has changed (Raw's Wrap lines); the next paint measures again. */
+  resetWidth(): void {
+    this.contentWidth = 0
+    this.layer.style.width = ''
+  }
+
   /** Scrolls row `i` to the top, `offset` px into it. */
   scrollToRow(i: number, offset = 0): void {
     this.apply(this.state.moveTo(i * this.rowHeight + offset))

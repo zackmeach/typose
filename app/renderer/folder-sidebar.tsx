@@ -131,7 +131,7 @@ export function FolderSidebar(props: FolderSidebarProps) {
         </span> : null}
       </div>
       {node.error ? <div className="folder-error" role="status">
-        {root.unavailable && !root.network && level === 1 ? 'Folder not found · ' : ''}{node.error}
+        {node.error}
         {level === 1 ? <><Button className="folder-inline" onPress={() => props.onLocate(root.id)}>{root.network ? 'Reconnect' : 'Locate…'}</Button><Button className="folder-inline" onPress={() => props.onRemove(root.id)}>Remove</Button></> : null}
       </div> : null}
       {node.expanded ? <div role="group">

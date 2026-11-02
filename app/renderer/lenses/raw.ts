@@ -2,7 +2,7 @@ import { MAX_PRINT_BYTES, MAX_PRINT_PAGES, type Limits, type Opened, type PageIt
 import { type CoreClient, CoreCallError, testHooks } from '../core'
 import { inputMark, markPainted, setPaintProbe } from '../perf'
 import { VirtualList } from '../virtual/virtual-list'
-import { type Key, type Mounted, PageCache, ROW_HEIGHT, capFor, rowsFor, rowsOf, viewportCap } from './page-cache'
+import { type Key, type Mounted, PageCache, ROW_HEIGHT, WRAP, capFor, rowsFor, rowsOf, viewportCap } from './page-cache'
 import type { LensBudget } from './lens-budget'
 import { SourceFind } from './source-find'
 import { copySourceSpan } from './source-copy'
@@ -53,16 +53,28 @@ const size = (bytes: number) => (bytes >= 1e6 ? `${mb.format(bytes / 1e6)} MB` :
 
 /**
  * Raw (brief §5.1) on the virtualizer: a labelled, focusable region whose gutter is hidden from assistive tech
- * (plan §7 proposal 4). Rows wider than the card scroll horizontally; wrapping is M4, but a row shows at most 2,048
- * units, and a longer piece goes on in the next rows (Z66). A line longer than a piece shows its first piece with a
- * marker; expanding it mounts the further pieces' rows, fetched with the core's continuation tokens as they come into
- * view, up to the line's first 1 MiB (plan C3).
+ * (plan §7 proposal 4). Rows wider than the card scroll horizontally, but a row shows at most 2,048 units, and a
+ * longer piece goes on in the next rows (Z66); with Wrap lines on (`<html data-wrap-lines="true">`), a row shows at
+ * most the card's width, and the line goes on in the next rows the same way. A line longer than a piece shows its first
+ * piece with a marker; expanding it mounts the further pieces' rows, fetched with the core's continuation tokens as they
+ * come into view, up to the line's first 1 MiB (plan C3).
  */
 export class RawLens {
   readonly list: VirtualList
   readonly find: SourceFind
   private readonly cache: PageCache
+  /** Only lines of more than one row, and only while their items are cached: an evicted item's line is forgotten, and
+   *  counted again once it's fetched again. */
   private readonly long = new Map<number, LongLine>()
+  /** Wrap lines' width in columns, or 0 for Z66's rows. */
+  private cols = 0
+  /** Items whose rows are counted at this width. Wrapping counts a line's rows only once it's mounted. */
+  private counted = new WeakSet<PageItem>()
+  /** Keys the cache evicted, for `forget` to drop from `long` at the next re-placing. */
+  private readonly evicted: Key[] = []
+  private readonly wrapSetting: MutationObserver
+  private readonly wrapWidth: ResizeObserver
+  private wrapTimer: ReturnType<typeof setTimeout> | undefined
   /** The long lines, ascending, and each one's rows past one in the lines before it: rows are found by bisection. */
   private longLines: number[] = []
   private before: number[] = []
@@ -114,18 +126,20 @@ export class RawLens {
     this.reserved = options.budget?.rawReserved ?? opened.reserved
     this.indexed = opened.indexed
     this.cache = new PageCache(limits)
+    this.cache.onEvict = key => this.evicted.push(key)
     this.cache.setCap(this.reserved)
     this.cache.add(opened.firstPage.items)
-    for (const item of opened.firstPage.items) this.setRows(item.line, 0, rowsOf(item).length - 1)
+    for (const item of opened.firstPage.items) this.count(item.line, item)
     this.reindex()
     this.list = new VirtualList(host, ROW_HEIGHT, (i, el) => this.paint(i, el), (r) => this.want(r), this.coveredRows())
-    this.find = new SourceFind(host, this.list.element, core, opened, options.budget, line => {
+    this.find = new SourceFind(host, this.list.element, core, opened, options.budget, (line, hit) => {
       this.moved = true
       this.atLine = line
       this.findLineFloor = Math.max(this.findLineFloor, line + 1)
       this.lineCount = Math.max(this.lineCount, this.findLineFloor)
+      const sub = hit ? this.wrappedRowAt(line, hit.start) : 0 // counts the line's rows first
       this.list.setRowCount(this.rowCount())
-      this.list.scrollToRow(this.rowOf(line))
+      this.list.scrollToRow(this.rowOf(line) + sub)
       this.shownLine = line
     }, options.onFrozen)
     if (__TEST_HOOKS__) {
@@ -165,6 +179,15 @@ export class RawLens {
         { passive: true }
       )
     setPaintProbe(() => this.paintedKey())
+    // Wrap lines: wrapped now, and again as the setting or the fonts change, and once the card's width has settled.
+    this.wrapSetting = new MutationObserver(() => this.rewrap())
+    this.wrapSetting.observe(document.documentElement, { attributes: true, attributeFilter: ['data-wrap-lines', 'data-fonts'] })
+    this.wrapWidth = new ResizeObserver(() => {
+      clearTimeout(this.wrapTimer)
+      this.wrapTimer = setTimeout(() => this.rewrap(), 100)
+    })
+    this.wrapWidth.observe(host)
+    this.rewrap()
     markPainted('rawUsable') // the first bounded piece is on screen and scrollable (Z37)
     // Z37's first screen: the first frame that shows the first page has painted (rAF, then a task). Once per open.
     if (opened.firstPage.items.length > 0 && performance.getEntriesByName('typose:first-screen').length === 0)
@@ -314,7 +337,7 @@ export class RawLens {
       const textNode = span.firstChild
       const inText = container === textNode ? offset : container === span ? (side === 'start' ? 0 : textNode?.textContent?.length ?? 0) : null
       if (inText === null) return null
-      const bounds = rowsOf(item)
+      const bounds = rowsOf(item, this.cols)
       const unit = bounds[sub] + inText
       return sourceByteAt(item.map, unit, side)
     }
@@ -426,6 +449,9 @@ export class RawLens {
    * it here would race the hold. Close releases it with the document.
    */
   dispose(release = true): void {
+    this.wrapSetting.disconnect()
+    this.wrapWidth.disconnect()
+    clearTimeout(this.wrapTimer)
     this.cancelCopy()
     document.removeEventListener('selectionchange', this.selectionChanged)
     this.find.destroy()
@@ -455,7 +481,90 @@ export class RawLens {
     }
     if (l.rows[piece] === rows) return false
     l.rows[piece] = rows
+    if (!l.tokens.length && rows <= 1) this.long.delete(line) // back to one row; an expanded line keeps its pieces
     return true
+  }
+
+  /** Counts `item`'s rows at this width, once. Returns whether its line's rows changed. */
+  private count(key: Key, item: PageItem): boolean {
+    if (this.counted.has(item)) return false
+    this.counted.add(item)
+    const [line, piece] = typeof key === 'number' ? [key, 0] : key.split(':').map(Number)
+    return this.setRows(line, piece, rowsOf(item, this.cols).length - 1)
+  }
+
+  /** Forgets the rows of what the cache evicted: a line counts as one row until it's fetched and counted again. */
+  private forget(): boolean {
+    let changed = false
+    for (const key of this.evicted.splice(0)) {
+      const [line, piece] = typeof key === 'number' ? [key, 0] : key.split(':').map(Number)
+      changed = this.setRows(line, piece, 1) || changed
+    }
+    return changed
+  }
+
+  /** Wrap lines' width in columns: the scroller's width past a row's gutter, its text's end padding and a ↪, in the
+   *  mono font's advance, measured on a hidden row. */
+  private wrapColumns(): number {
+    const probe = Object.assign(document.createElement('div'), { className: 'vl-row' })
+    probe.style.visibility = 'hidden'
+    const gutter = Object.assign(document.createElement('span'), { className: 'gutter', textContent: String(Math.max(1, this.lineCount)) })
+    const text = Object.assign(document.createElement('span'), { className: 'text', textContent: '0'.repeat(100) })
+    probe.append(gutter, text)
+    this.list.element.append(probe)
+    const range = document.createRange()
+    range.selectNodeContents(text)
+    const advance = range.getBoundingClientRect().width / 100
+    const room = this.list.element.clientWidth - gutter.getBoundingClientRect().width - (text.getBoundingClientRect().width - 100 * advance) - advance
+    probe.remove()
+    return advance > 0 ? Math.max(2, Math.min(WRAP, Math.floor(room / advance))) : 0
+  }
+
+  /** With Wrap lines on, which of `line`'s rows shows source byte `byte`, when its first piece is here and holds it;
+   *  else 0, its first row. */
+  private wrappedRowAt(line: number, byte: number): number {
+    const item = this.cache.get(line)
+    if (!this.cols || !item || byte < item.map.start || byte >= item.map.end) return 0
+    if (this.count(line, item)) this.reindex() // the view moves to it next, so nothing on screen needs keeping
+    let [lo, hi] = [0, item.text.length] // the last unit that starts at or before `byte`
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1
+      if (sourceByteAt(item.map, mid, 'start') <= byte) lo = mid
+      else hi = mid - 1
+    }
+    const b = rowsOf(item, this.cols)
+    let sub = 0
+    while (sub + 2 < b.length && b[sub + 1] <= lo) sub++
+    return sub
+  }
+
+  /** Wrap lines went on or off, or its width changed: every line's rows are forgotten, the line at the top is counted
+   *  again so the view keeps the text that was there, and the rest count as they're mounted (`want`), so the work is a
+   *  screen's, however much is cached. A hidden card keeps its rows until it's shown. Off, nothing is measured. */
+  private rewrap(): void {
+    const on = document.documentElement.dataset.wrapLines === 'true'
+    if (!on && !this.cols || this.list.element.clientWidth === 0) return
+    const cols = on ? this.wrapColumns() : 0
+    if (cols === this.cols) return
+    const was = this.place()
+    const top = this.cache.get(was.at.key)
+    const unit = top ? rowsOf(top, this.cols)[was.at.sub] ?? 0 : 0
+    this.cols = this.cache.cols = cols
+    this.counted = new WeakSet()
+    this.evicted.length = 0
+    for (const [line, l] of this.long) {
+      if (l.tokens.length) l.rows = l.rows.map(() => 1) // an expanded line keeps its pieces
+      else this.long.delete(line)
+    }
+    let sub = 0
+    if (top) {
+      this.count(was.at.key, top)
+      const b = rowsOf(top, cols)
+      while (sub + 2 < b.length && b[sub + 1] <= unit) sub++
+    }
+    this.list.resetWidth()
+    this.placeRows(true, { at: { ...was.at, sub }, into: was.into }) // mounts the rows again, which counts them
+    this.list.refresh()
   }
 
   /** Rebuilds the long lines' order and their rows before each. */
@@ -523,6 +632,22 @@ export class RawLens {
     this.sizeCache()
     const rows: Mounted[] = []
     for (let row = r.first; row < r.last; row++) rows.push(this.slot(row))
+    // A mounted line's rows are counted now, at the latest (Wrap lines counts no sooner), and what the cache evicted
+    // is forgotten. Either can move rows: placing them again mounts this range anew, which comes back here. The list's
+    // first render comes from its constructor, before `list` is set; the constructor has counted the first page.
+    if (this.list) {
+      const was = this.place()
+      let changed = this.forget()
+      for (const s of rows) {
+        const item = this.cache.get(s.key)
+        if (item) changed = this.count(s.key, item) || changed
+      }
+      if (changed) {
+        this.placeRows(true, was)
+        this.list.refresh()
+        return
+      }
+    }
     this.cache.setMounted(rows)
     this.wanted = r
     this.wantedKeys = new Set(rows.map((s) => s.key))
@@ -650,8 +775,9 @@ export class RawLens {
       const items = page.items.filter((item) => item.gen === gen)
       this.cache.add(items)
       const was = this.place()
-      let changed = false
-      for (const item of items) changed = this.setRows(item.line, 0, rowsOf(item).length - 1) || changed
+      let changed = this.forget()
+      // Z66's rows count at once; Wrap lines counts only what's to be mounted, and the rest once it is (`want`).
+      for (const item of items) if (!this.cols || this.wantedKeys.has(item.line)) changed = this.count(item.line, item) || changed
       this.placeRows(changed, was)
       this.list.refresh()
     } finally {
@@ -669,7 +795,8 @@ export class RawLens {
       if (this.stopped || q.abort.signal.aborted || !item || item.gen !== this.opened.gen) return
       this.cache.addPiece(String(s.key), item)
       const was = this.place()
-      let changed = this.setRows(s.line, s.piece, rowsOf(item).length - 1)
+      let changed = this.forget()
+      changed = this.count(s.key, item) || changed
       if (item.next && expansion.tokens.length === s.piece) {
         expansion.tokens.push(item.next) // the line goes on: one more piece below this one
         expansion.rows.push(1)
@@ -711,7 +838,7 @@ export class RawLens {
     Object.assign(el.dataset, { line: String(s.line), piece: String(s.piece), sub: String(s.sub) })
     const item = this.cache.get(s.key)
     if (!item) return
-    const b = rowsOf(item)
+    const b = rowsOf(item, this.cols)
     if (s.sub + 1 >= b.length) return
     el.append(Object.assign(document.createElement('span'), { className: 'text', textContent: item.text.slice(b[s.sub], b[s.sub + 1]) }))
     // Z66: a piece's rows but its last go on in the next row (brief §5.1's ↪ continuation marker), which assistive tech

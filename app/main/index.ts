@@ -7,7 +7,7 @@ import coreHostPath from '../core-host/index?modulePath'
 import { MAX_PRINT_PAGES, type Command, type PrintDocumentResult } from '../shared/protocol'
 import { openExternal } from './external'
 import { writeClipboardText } from './clipboard'
-import { handoff, launchPaths } from './launch'
+import { dropPaths, handoff, launchPaths } from './launch'
 import { gestures, handOff, type HandoffAction } from './handoff'
 import { startLifecycle } from './lifecycle'
 import { envWhole, isMark, marksHook } from './marks'
@@ -402,6 +402,13 @@ void app.whenReady().then(() => {
   handle(win, 'folder-dialog', async () => {
     const r = await dialog.showOpenDialog(win, { properties: ['openDirectory'] })
     return r.canceled ? null : (r.filePaths[0] ?? null)
+  })
+  // A drop names files and folders as the dialogs above do; the preload sends only a trusted drop's items. Its files are
+  // granted as Open file…'s choice is, so a hand-off may name them.
+  ipcMain.handle('drop-paths', (event, ...args: unknown[]) => {
+    const drop = fromMainApp(event) && args.length === 1 ? dropPaths(args[0]) : null
+    drop?.files.forEach(grant)
+    return drop
   })
   ipcMain.handle('open-external', (event: IpcMainInvokeEvent, ...args: unknown[]) => openExternal(win, event, args, (url) => shell.openExternal(url)))
   // Z79. The test-hooks build never reaches the real shell: under TYPOSE_TEST_SHELL=record it records the call for e2e

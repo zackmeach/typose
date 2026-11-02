@@ -57,7 +57,7 @@ export const viewportCap = (l: Bounds, height: number): number => capFor(l, Math
 export const rowsFor = (l: Bounds, reserved: number): number => Math.max(0, Math.floor((reserved - fixedCost(l)) / rowCost(l)))
 
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
-const breaks = new WeakMap<PageItem, number[]>()
+const breaks = new WeakMap<PageItem, { cols: number; at: number[] }>()
 
 /**
  * The grapheme boundaries in (`from`, `to`] of `text`, read from `from`: `from` itself isn't one. `extra` units past
@@ -197,11 +197,48 @@ export function rowBreaks(text: string): number[] {
   return out
 }
 
-/** An item's row breaks, once per item. */
-export function rowsOf(item: PageItem): number[] {
+/** East Asian Wide and Fullwidth code points, and emoji, which a monospace font draws two columns wide (wcwidth's
+ *  ranges, with every emoji block from U+1F300 to U+1FAFF). */
+const wide = (cp: number): boolean => cp >= 0x1100 && (cp <= 0x115f || cp === 0x2329 || cp === 0x232a ||
+  cp >= 0x2e80 && cp <= 0xa4cf && cp !== 0x303f || cp >= 0xac00 && cp <= 0xd7a3 || cp >= 0xf900 && cp <= 0xfaff ||
+  cp >= 0xfe30 && cp <= 0xfe6f || cp >= 0xff00 && cp <= 0xff60 || cp >= 0xffe0 && cp <= 0xffe6 ||
+  cp >= 0x1f300 && cp <= 0x1faff || cp >= 0x20000 && cp <= 0x3fffd)
+
+/**
+ * Raw's Wrap lines: where `text` breaks into rows of at most `cols` columns, a wide character or an emoji presentation
+ * (VS16) two, and a tab on to the next multiple of 8, only between graphemes, so a surrogate pair or a cluster never
+ * splits. A row also stays within `WRAP` units, so what a row costs stays within `rowCost`: a grapheme longer than
+ * that is cut as `rowBreaks` cuts one, never inside a surrogate pair. Returns the rows' starts, then the text's length.
+ */
+export function wrapBreaks(text: string, cols: number): number[] {
+  if (2 * text.length <= cols && !text.includes('\t')) return [0, text.length]
+  const out = [0]
+  let start = 0, width = 0
+  for (const { index, segment } of graphemes.segment(text)) {
+    const tab = segment === '\t'
+    let w = tab ? 8 - width % 8 : wide(segment.codePointAt(0)!) || segment.includes('\uFE0F') ? 2 : 1
+    if (index > start && (width + w > cols || index + segment.length - start > WRAP)) {
+      out.push(index)
+      start = index
+      width = 0
+      if (tab) w = 8 // a row starts on a tab stop
+    }
+    while (index + segment.length - start > WRAP) {
+      const at = start + WRAP - (/[\uDC00-\uDFFF]/.test(text[start + WRAP]) ? 1 : 0)
+      out.push(at)
+      start = at
+    }
+    width += w
+  }
+  out.push(text.length)
+  return out
+}
+
+/** An item's row breaks, once per item and wrap width: `cols` columns when wrapping, else Z66's rows. */
+export function rowsOf(item: PageItem, cols = 0): number[] {
   let b = breaks.get(item)
-  if (!b) breaks.set(item, (b = rowBreaks(item.text)))
-  return b
+  if (!b || b.cols !== cols) breaks.set(item, (b = { cols, at: cols ? wrapBreaks(item.text, cols) : rowBreaks(item.text) }))
+  return b.at
 }
 
 /** A line's first piece is keyed by its line number; a further piece by `line:k`, its k-th continuation. */
@@ -227,6 +264,10 @@ export class PageCache {
   private mountedCharge = 0
   /** What the cache may charge. */
   cap = ELASTIC
+  /** The Raw lens's wrap width in columns, or 0 for Z66's rows: a mounted row is charged for the units it shows. */
+  cols = 0
+  /** Told each key eviction drops, so the lens can forget that line's rows. */
+  onEvict?: (key: Key) => void
 
   constructor(private readonly bounds: Bounds) {}
 
@@ -262,7 +303,7 @@ export class PageCache {
     for (const { key, sub } of this.mounted) {
       const item = this.items.get(key)
       if (!item) continue
-      const b = rowsOf(item)
+      const b = rowsOf(item, this.cols)
       if (sub + 1 < b.length) this.mountedCharge += LAYOUT_PER_UNIT * (b[sub + 1] - b[sub])
     }
     this.evict()
@@ -309,6 +350,7 @@ export class PageCache {
       if (this.mountedKeys.has(key)) continue
       this.items.delete(key)
       this.cached -= charge(item)
+      this.onEvict?.(key)
     }
   }
 }

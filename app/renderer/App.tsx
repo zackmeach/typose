@@ -1,6 +1,6 @@
 import { type CSSProperties, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { Button, Dialog, Modal, ModalOverlay } from 'react-aria-components'
-import type { Command, Hello, Opened } from '../shared/protocol'
+import { MAX_DROP, type Command, type Hello, type Opened } from '../shared/protocol'
 import { CoreCallError, type CoreClient } from './core'
 import { AppIcon, FileIcon } from './file-icon'
 import { fileName } from './card'
@@ -23,6 +23,7 @@ import { SettingsPanel, type SettingsSection } from './SettingsPanel'
 import { WorkspaceOverlay, type QuickChoice } from './WorkspaceOverlay'
 import { indexRoot, type QuickIndex } from './workspace-search'
 import './settings.css'
+import { DropTarget } from './drop-target'
 
 interface LinkPreview extends ReaderGroup { sourceId: string; trigger: HTMLElement; width: number; right: number }
 
@@ -92,7 +93,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   const [shared] = useState<ReaderWindow>(() => ({ core, hello, groups: allGroups, closed, folders, pendingFolders,
     budget: workspaceBudget, peak: workspacePeak, queue: metadataQueue, pendingWorkspace, pendingNative,
     pendingHistory: pendingHistory.current, recharged, paid: () => payment.current,
-    charge: async () => false, release: () => {}, notice: () => {}, opened: () => {}, openLink: async () => false, report: () => {}, register: () => () => {} }))
+    charge: async () => false, release: () => {}, notice: () => {}, opened: () => {}, addFolder: async () => {}, openLink: async () => false, report: () => {}, register: () => () => {} }))
 
   function setPreview(next: LinkPreview | null): void {
     const previous = previewRef.current
@@ -119,6 +120,8 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     setActiveNode(reports.current.get(id)?.node)
   }
   function focusedReader(): ReaderHandle | undefined { return handles.current.get(focusedRef.current) }
+  /** An argv, drop or queued open shows its file, so a card showing Settings switches back to its file tabs. */
+  function openInFocused(path: string): void { settingsTab(focusedRef.current, 'file'); focusedReader()?.open(path) }
 
   function rememberRecent(entry: RecentLocation): void {
     const next = [entry, ...recentRef.current.filter(item => item.kind !== entry.kind || item.path !== entry.path)].slice(0, 8)
@@ -128,7 +131,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   }
 
   async function captureWindowSession(): Promise<boolean> {
-    if (!sessionReady.current || !hello.current || splitBusy.current || previewWork.current) return false
+    if (!sessionReady.current || !hello.current && workspace.getSnapshot().tabs.some(tab => tab.card.kind === 'open') || splitBusy.current || previewWork.current) return false
     const before = groupRef.current, snapshots = before.map(group => group.workspace.getSnapshot())
     try {
       const cards = []
@@ -255,13 +258,14 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   shared.release = releaseEmptyWorkspace
   shared.notice = setWorkspaceNotice
   shared.opened = () => { if (sidebarOverlay) setSidebarOpen(false) }
+  shared.addFolder = path => pickFolder(undefined, path)
   shared.openLink = openLink
   shared.report = (id, text, node) => { reports.current.set(id, { title: text, node }); if (focusedRef.current === id) { setTitle(text); setActiveNode(node) } }
   shared.register = (id, handle) => {
     if (!allGroups.current.some(group => group.id === id)) return () => {}
     handles.current.set(id, handle)
     for (const waiter of readerWaiters.current) if (waiter.id === id) waiter.start(handle)
-    if (id === focusedRef.current) for (const path of waiting.current.splice(0)) handle.open(path)
+    if (id === focusedRef.current) for (const path of waiting.current.splice(0)) openInFocused(path)
     return () => {
       if (handles.current.get(id) === handle) {
         handles.current.delete(id)
@@ -313,7 +317,8 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       recharged.current = false
       hello.current = null
       folderRequests.current.clear()
-      setFolders(folders.current.map(root => ({ ...root, unavailable: true, node: { ...root.node, expanded: false, loading: false, children: undefined, cursor: undefined, error: 'Core restarted · select the folder again' } })))
+      // A network placeholder was never opened, so it has no access to lose and keeps its own message.
+      setFolders(folders.current.map(root => root.network ? root : ({ ...root, unavailable: true, node: { ...root.node, expanded: false, loading: false, children: undefined, cursor: undefined, error: 'Core restarted · Locate the folder again to restore access' } })))
       workspacePeak.current = Math.max(workspacePeak.current, workspaceBudget.current?.snapshot().peakBytes ?? 0)
       workspaceBudget.current?.invalidate()
       workspaceBudget.current = null
@@ -333,9 +338,16 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     const openPath = (path: string) => {
       const reader = focusedReader()
       if (previewRef.current || !reader) waiting.current.push(path)
-      else reader.open(path)
+      else openInFocused(path)
     }
     const offOpen = window.typose.onOpenPath(openPath)
+    // A drop is the dialogs' explicit choice: files open as tabs in the focused card, folders become roots, in order.
+    const offDrop = window.typose.onDrop(drop => {
+      for (const path of drop.files) openPath(path)
+      void drop.folders.reduce((added, path) => added.then(() => pickFolder(undefined, path)), Promise.resolve())
+      if (drop.tooMany) setWorkspaceNotice(`Can't open ${drop.tooMany.toLocaleString('en')} items at once · drop at most ${MAX_DROP}`)
+      if (drop.refused.length) setWorkspaceNotice(`Can't open ${drop.refused.filter(Boolean).join(', ') || 'what was dropped'} · UNC share, device and virtual paths can't be dropped`)
+    })
     const offCommand = window.typose.onCommand(run)
     const key = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing) return
@@ -370,7 +382,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       for (const path of paths) openPath(path)
       scheduleSession()
     }).catch(error => { sessionReady.current = true; setWorkspaceNotice('Cannot restore workspace · ' + String(error)) })
-    return () => { cancelReaderWaiters('The workspace was unmounted'); gone(); ready(); offOpen(); offCommand(); window.removeEventListener('keydown', key) }
+    return () => { cancelReaderWaiters('The workspace was unmounted'); gone(); ready(); offOpen(); offDrop(); offCommand(); window.removeEventListener('keydown', key) }
   }, [core])
 
   function setFolders(next: readonly RootView[]): void {
@@ -436,7 +448,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       if (valid()) {
         setFolders(updateFolder(folders.current, rootId, nodeId, before => ({ ...before, error: e instanceof Error ? e.message : String(e) })))
         if (nodeId === root.node.id && e instanceof CoreCallError && e.code === 'NotFound')
-          setFolders(folders.current.map(item => item.id === rootId ? { ...item, unavailable: true } : item))
+          setFolders(folders.current.map(item => item.id === rootId ? { ...item, unavailable: true, node: { ...item.node, error: 'Folder not found · ' + e.message } } : item))
       }
     } finally {
       if (valid()) setFolders(updateFolder(folders.current, rootId, nodeId, before => ({ ...before, loading: false })))
@@ -577,7 +589,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       pendingHistory.current.delete(group.id)
       setPreview(null)
       restorePreviewFocus(group)
-      requestAnimationFrame(() => { if (!previewRef.current) for (const path of waiting.current.splice(0)) focusedReader()?.open(path) })
+      requestAnimationFrame(() => { if (!previewRef.current) for (const path of waiting.current.splice(0)) openInFocused(path) })
       releaseEmptyWorkspace()
     } catch (error) {
       setWorkspaceNotice('Cannot close preview · ' + String(error))
@@ -626,7 +638,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       setPreview(null)
       focusCard(destination.id)
       focusReader(destination.id)
-      requestAnimationFrame(() => { if (!previewRef.current) for (const path of waiting.current.splice(0)) focusedReader()?.open(path) })
+      requestAnimationFrame(() => { if (!previewRef.current) for (const path of waiting.current.splice(0)) openInFocused(path) })
     } catch (error) {
       setWorkspaceNotice('Cannot promote preview · ' + String(error))
       if (detached && !moved) await handle.resume()
@@ -951,6 +963,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
             onPointerUp={event => { delete event.currentTarget.dataset.x }} onPointerCancel={event => { delete event.currentTarget.dataset.x }} /> : null}
         </div>)}
       </main>
+      <DropTarget />
       {preview ? <ModalOverlay isOpen isDismissable className="link-preview-overlay" onOpenChange={open => { if (!open) void closePreview() }}>
         <Modal className="link-preview-frame" style={{ width: preview.width, right: `min(${preview.right}px, max(16px, calc(100vw - ${preview.width}px - 16px)))` }}>
           <Dialog aria-label="Link preview" className="link-preview-dialog">

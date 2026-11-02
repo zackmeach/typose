@@ -33,6 +33,10 @@ const markOnce = (name: string) => performance.getEntriesByName(name).length ===
 const firstCount = (l: Limits) => Math.min(l.maxItems, 3 * Math.ceil(window.innerHeight / ROW_HEIGHT) + 1)
 const CSV_OPTIONS: CsvOptions = { delimiter: 'auto', header: 'auto' }
 
+/** The core's manual open refused a folder (or another non-file) before reading anything. */
+const NOT_REGULAR = 'refused: not a regular file'
+const notRegular = (e: unknown) => e instanceof CoreCallError && e.code === 'Refused' && e.message === NOT_REGULAR
+
 const failed = (path: string, e: unknown): Extract<Card, { kind: 'failed' }> => ({
   kind: 'failed',
   path,
@@ -244,7 +248,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   const budget = useRef<LensBudget | null>(null)
   const retiredRendered = useRef(0)
   const rendered = useRef<RetainedRendered | null>(null)
-  const waiting = useRef<string[]>([])
+  const waiting = useRef<{ path: string; atLine?: number; replace?: TabId; named: boolean }[]>([])
   const floorBytes = (l: Limits) => lens.current?.floorBytes() ?? viewportCap(l, 800)
   const path = 'path' in card ? card.path : undefined
   const title = path ? `${fileName(path)} — Typose` : 'Typose'
@@ -345,11 +349,15 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   useEffect(() => {
     let alive = true
     let requestedSession = 0
-    const gone = core.onGone(() => {
+    const gone = core.onGone(busy => {
+      // Z78: which files the core may have died on. No call names the culprit, so every file it was opening or
+      // reading (an open, a page or other read, or an index still running) is marked, and a restart won't reopen it.
+      const crashed = new Set(workspace.getSnapshot().tabs.filter(tab => tab.card.kind === 'opening' || busy.paths.has(tab.path) ||
+        tab.card.kind === 'open' && (!tab.card.indexed || busy.docs.has(tab.card.opened.doc))).map(tab => tab.id))
       leave()
       surface.current = null
       abort.current.abort()
-      workspace.coreGone(currentSession.current)
+      workspace.coreGone(currentSession.current, crashed)
       const selected = workspace.getSnapshot().selected
       const tab = selected ? workspace.tab(selected) : undefined
       display(selected, tab?.card.kind === 'gone' ? tab.card : { kind: 'gone', ready: false })
@@ -383,7 +391,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       activationFailed.current.clear()
       setCard(c => c.kind === 'gone' ? { ...c, ready: true } : c.kind === 'connecting' ? { kind: 'empty' } : c)
       for (const done of readyWaiters.current.splice(0)) done()
-      for (const path of waiting.current.splice(0)) await open(path)
+      for (const queued of waiting.current.splice(0)) await open(queued.path, queued.atLine, queued.replace, queued.named)
     }
     const readyOff = core.onReady(hello => { void ready(hello).catch(e => setWorkspaceNotice(String(e))) })
     if (shared.hello.current) void ready(shared.hello.current).catch(e => setWorkspaceNotice(String(e)))
@@ -655,10 +663,11 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     }
   }
 
-  /** Manual paths create permanent tabs; an equal caller key focuses the existing tab. */
-  async function open(path: string, atLine?: number, replace?: TabId): Promise<void> {
+  /** Manual paths create permanent tabs; an equal caller key focuses the existing tab. `named`: a launch, a second
+   *  instance or a drop named it, so a folder becomes a root instead of a refused tab. */
+  async function open(path: string, atLine?: number, replace?: TabId, named = false): Promise<void> {
     if (!latest.current.limits || !workspace.getSnapshot().ready || !surface.current) {
-      waiting.current.push(path)
+      waiting.current.push({ path, atLine, replace, named }) // the whole request, so a replay can't change what it does
       if (currentSession.current) setWorkspaceNotice('Queued until the core restarts: ' + fileName(path))
       return
     }
@@ -717,6 +726,20 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       else deactivateInactive({ session: ticket.session, doc: opened.doc, gen: opened.gen, view: opened.view })
     } catch (e) {
       if (!workspace.current(ticket) || e instanceof CoreCallError && e.code === 'CoreGone') return
+      // A folder a launch, a second instance, Explorer or a drop named (the core's manual open refuses it before
+      // reading anything) becomes a root through Open folder…'s own capture and checks, instead of a refused tab.
+      // Never a restored or queued record: only that explicit gesture grants a root.
+      if (named && !previous && notRegular(e)) {
+        const wasSelected = workspace.selected(selection)
+        workspace.close(ticket.tab)
+        if (wasSelected) {
+          const next = workspace.getSnapshot().selected
+          display(null, { kind: 'empty' })
+          if (next) void selectTab(next)
+        }
+        void shared.addFolder(path)
+        return
+      }
       const error = failed(path, e)
       // Reopen/Locate keeps an already owned document on failure; a new tab keeps the bounded error metadata.
       if (previous?.card.kind === 'open') workspace.cancel(ticket)
@@ -1124,9 +1147,10 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     await open(chosen, undefined, tab && (c.kind === 'gone' || c.kind === 'failed') && (locate || c.localOnly) ? tab : undefined)
   }
 
+  /** A path a launch, a second instance or a drop named (App's `open`): the explicit gesture a folder root needs. */
   function openNamed(path: string): void {
-    if (!workspace.getSnapshot().ready) { waiting.current.push(path); return }
-    void open(path)
+    if (!workspace.getSnapshot().ready) { waiting.current.push({ path, named: true }); return }
+    void open(path, undefined, undefined, true)
   }
 
   /** Tab ownership closes native documents; changing the displayed card never does. */
@@ -1213,6 +1237,10 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     Reopen: () => {
       const id = workspace.getSnapshot().selected
       if (id && card.kind === 'gone' && !card.localOnly && card.path) void open(card.path, card.line, id)
+    },
+    'Open anyway': () => {
+      const id = workspace.getSnapshot().selected
+      if (id && card.kind === 'crashed') void open(card.path, card.line, id)
     }
   }
   const frozen = card.kind === 'open' ? card.frozen : undefined
@@ -1418,7 +1446,9 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
 
   async function captureSession(): Promise<SessionCard | null> {
     const before = workspace.getSnapshot()
-    if (!before.ready || navigating.current) return null
+    // With the core down every tab is gone or never opened, and is captured without asking it: Z78's crash mark must
+    // reach disk even if a second death keeps the next core away until the window closes.
+    if (navigating.current || !before.ready && before.tabs.some(tab => tab.card.kind === 'open')) return null
     const tabs: SessionTab[] = []
     for (const tab of before.tabs) {
       let location: SessionTab['location'] = { kind: 'reselect', path: tab.path }
@@ -1433,13 +1463,17 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
           if (root?.identity && folder?.segments.length) location = { kind: 'folder', path: tab.path,
             root: { path: root.path, identity: root.identity }, segments: [...folder.segments] }
         }
-      } else if (tab.key === manualKey(tab.path) && (!(tab.card.kind === 'failed' || tab.card.kind === 'gone') || !tab.card.localOnly)) {
+      } else if (tab.key === manualKey(tab.path) && (!(tab.card.kind === 'failed' || tab.card.kind === 'gone') || !tab.card.localOnly)
+        // A refused folder stays a reselect record: a restart must never retry it as a manual open.
+        && !(tab.card.kind === 'failed' && tab.card.code === 'Refused' && tab.card.message === NOT_REGULAR)) {
         location = { kind: 'manual', path: tab.path }
       }
       const visible = tab.id === before.selected && displayed.current === tab.id ? latest.current.card : tab.card
       tabs.push({ location, anchor: tab.id === before.selected && displayed.current === tab.id ? lens.current?.topLine() ?? tab.anchor ?? 0 : tab.anchor ?? 0,
         lens: (tab.id === before.selected ? picked.current : tab.preferredLens) ?? (visible.kind === 'open' ? visible.lens ?? 'raw' : null),
-        ...(tab.card.kind === 'open' && tab.card.csvOptions ? { csvOptions: tab.card.csvOptions } : {}) })
+        ...(tab.card.kind === 'open' && tab.card.csvOptions ? { csvOptions: tab.card.csvOptions } : {}),
+        // Z78: still marked while Open anyway runs, since its card changes only once that open succeeds.
+        ...(location.kind === 'manual' && (tab.card.kind === 'crashed' || tab.card.kind === 'gone' && tab.card.crashed) ? { crashed: true } : {}) })
     }
     if (workspace.getSnapshot() !== before) return null
     return { tabs, selected: before.tabs.findIndex(tab => tab.id === before.selected), weight: 1 }
@@ -1481,9 +1515,22 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     const restored: TabId[] = []
     for (const entry of saved.tabs) {
       let restoredTab: WorkspaceTab | undefined
-      // Brief §4.6: a network share is never touched at launch; its tab waits for a click on Retry.
-      const network = entry.location.kind === 'manual' && await core.call('networkPath', { path: entry.location.path }).catch(() => true)
-      if (entry.location.kind === 'manual' && !network) {
+      // Brief §4.6: a network share is never touched at launch; its tab waits for a click on Retry. A file the core
+      // died reading isn't opened at launch either, so it isn't asked about.
+      const network = entry.location.kind === 'manual' && !entry.crashed && await core.call('networkPath', { path: entry.location.path }).catch(() => true)
+      if (entry.location.kind === 'manual' && entry.crashed) {
+        // Z78: the core stopped while reading it. It comes back unopened, so a file that crashes the core can't do it
+        // again at every launch; only Open anyway opens it.
+        const path = entry.location.path
+        if (!await metadata(current => chargeWorkspace([...workspace.getSnapshot().tabs, { key: manualKey(path), path }], current))) continue
+        leave()
+        const requested = workspace.beginOpen(manualKey(path), path)
+        if (requested.kind !== 'open') continue
+        const stopped: Extract<Card, { kind: 'crashed' }> = { kind: 'crashed', path, line: entry.anchor }
+        workspace.complete(requested.ticket, manualKey(path), stopped)
+        display(requested.ticket.tab, stopped)
+        restoredTab = workspace.tab(requested.ticket.tab)
+      } else if (entry.location.kind === 'manual' && !network) {
         await open(entry.location.path, entry.anchor)
         restoredTab = workspace.find(manualKey(entry.location.path))
       } else if (entry.location.kind === 'folder') restoredTab = await restoreFolderEntry(entry)

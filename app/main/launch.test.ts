@@ -1,7 +1,7 @@
 // Spec §8.1 and plan C4 for what PR 8 adds: the path a launch names, and the untrusted message a second instance sends.
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { handoff, launchPath, launchPaths } from './launch'
+import { dropPaths, handoff, launchPath, launchPaths } from './launch'
 
 const cwd = resolve('/launch-cwd')
 const exe = 'typose'
@@ -60,5 +60,28 @@ describe("handoff: a second instance's argv and cwd, refused unless they have a 
       expect(handoff({ argv, cwd }), JSON.stringify(argv)).toBeNull()
     for (const data of [undefined, null, 1, 'x', [], { argv: [exe] }, { argv: [exe], cwd: 1 }, { cwd }])
       expect(handoff(data), JSON.stringify(data)).toBeNull()
+  })
+})
+
+describe("dropPaths: a drop's items, of a real drop's shape, with only local paths opened", () => {
+  it('splits local files from folders, in order, and refuses UNC, device, relative and empty paths unopened', () => {
+    const items = [
+      { path: 'C:\\docs\\a.md', folder: false }, { path: 'd:/notes', folder: true }, { path: '\\\\example.invalid\\share\\x.md', folder: false },
+      { path: '//example.invalid/share', folder: true }, { path: '\\\\?\\C:\\x.md', folder: false }, { path: '\\\\.\\pipe\\x', folder: false },
+      { path: 'a.md', folder: false }, { path: '', folder: false }, { path: 'C:\\a\u0000b', folder: false }
+    ]
+    expect(dropPaths(items, true)).toEqual({ files: ['C:\\docs\\a.md'], folders: ['d:/notes'], refused: items.slice(2).map(item => item.path) })
+    expect(dropPaths([{ path: '/home/a.md', folder: false }, { path: '//host/share', folder: true }, { path: 'C:\\a.md', folder: false }], false))
+      .toEqual({ files: ['/home/a.md'], folders: [], refused: ['//host/share', 'C:\\a.md'] })
+  })
+  it('opens nothing of a drop over 256 items, and says how many it held', () => {
+    expect(dropPaths(Array(256).fill({ path: 'C:\\a.md', folder: false }), true)?.files).toHaveLength(256)
+    expect(dropPaths(Array(257).fill({ path: 'C:\\a.md', folder: false }), true)).toEqual({ files: [], folders: [], refused: [], tooMany: 257 })
+  })
+  it('refuses a message of any other shape or size', () => {
+    expect(dropPaths([{ path: 'C:\\' + 'a'.repeat(32_764), folder: false }], true)).not.toBeNull()
+    expect(dropPaths([{ path: 'C:\\' + 'a'.repeat(32_765), folder: false }], true)).toBeNull()
+    for (const items of [undefined, null, 'C:\\a.md', { 0: { path: 'C:\\a.md', folder: false }, length: 1 }, [null], [{ path: 'C:\\a.md' }], [{ path: 1, folder: false }], [{ path: 'C:\\a.md', folder: 'yes' }]])
+      expect(dropPaths(items, true), JSON.stringify(items)).toBeNull()
   })
 })
