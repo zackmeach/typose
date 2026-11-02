@@ -26,6 +26,15 @@ describe('YAML 1.2 CST projection', () => {
     expect(nodes[0]!.span).toEqual({ start: source.indexOf('"é"') * 2, end: (source.indexOf('"é"') + 3) * 2 })
     expect(nodes[1]!.span.start).toBe(source.indexOf('3.10') * 2)
   })
+  it('maps a single-byte encoding one byte per character', () => {
+    const bytes = Uint8Array.from([...'a: caf', 0xe9, ...' ', 0x80, 0x80, 0x80, 0x80, ...'\nsecret: value\n'].map(c => typeof c === 'number' ? c : c.charCodeAt(0)))
+    expect(bytes).toHaveLength(27)
+    const source = new TextDecoder('windows-1252').decode(bytes)
+    expect(source).toBe('a: café €€€€\nsecret: value\n')
+    const nodes = children(yamlModel(source, 'windows-1252', 0))
+    expect(nodes[1]!.keySpan).toEqual({ start: 13, end: 19 })
+    expect(nodes[1]!.span).toEqual({ start: 21, end: 26 })
+  })
   it('uses CST comments so block-scalar hash lines remain scalar content', () => {
     const model = yamlModel('# top\nbody: |\n  # literal\n  hello\n# end\n')
     const walk = (node: StructuredNode): StructuredNode[] => [node, ...(node.container === undefined ? [] : children(model, node).flatMap(walk))]

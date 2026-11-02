@@ -8,10 +8,12 @@ const MAX_DEPTH = 100
 export function yamlModel(source: string, encoding = 'utf-8', bom = 0) {
   const offsets = new Uint32Array(source.length + 1)
   let bytes = bom
+  // Any other encoding the core reports is its single-byte fallback (`encoding::decode_prefix` assumes the same).
+  const label = encoding.toLowerCase(), utf16 = label.startsWith('utf-16'), utf8 = label === 'utf-8'
   for (let i = 0; i < source.length; i++) {
     offsets[i] = bytes
     const code = source.codePointAt(i)!
-    const width = encoding.toLowerCase().startsWith('utf-16') ? (code > 0xffff ? 4 : 2) : code < 128 ? 1 : code < 2048 ? 2 : code > 0xffff ? 4 : 3
+    const width = utf16 ? (code > 0xffff ? 4 : 2) : !utf8 || code < 128 ? 1 : code < 2048 ? 2 : code > 0xffff ? 4 : 3
     if (code > 0xffff) { offsets[++i] = bytes; bytes += width } else bytes += width
   }
   offsets[source.length] = bytes
