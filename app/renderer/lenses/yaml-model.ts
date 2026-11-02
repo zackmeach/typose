@@ -52,7 +52,7 @@ export function yamlModel(source: string, encoding = 'utf-8', bom = 0) {
     while (stack.length) {
       const token = stack.pop()
       if (!token || typeof token !== 'object') continue
-      if (Array.isArray(token)) { stack.push(...token); continue }
+      if (Array.isArray(token)) { for (const item of token) stack.push(item); continue } // a spread of 95,000 overflows the stack
       const part = token as Record<string, unknown>
       if (part.type === 'comment' || part.type === 'tag') (part.type === 'comment' ? comments : tags).push(part as unknown as { offset: number; source: string })
       for (const key of ['start', 'sep', 'end', 'items', 'key', 'value', 'props']) if (part[key] && typeof part[key] === 'object') stack.push(part[key])

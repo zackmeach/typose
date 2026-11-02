@@ -46,6 +46,11 @@ describe('YAML 1.2 CST projection', () => {
     expect(items.slice(0, 4).map(node => node.text)).toEqual(['0', '# note 1', '1', '# note 2'])
     expect(items.every((node, i) => i === 0 || items[i - 1]!.span.start < node.span.start)).toBe(true)
   })
+  it('walks a CST token list of 95,000 comments without spreading it into one call', () => {
+    const model = yamlModel('items:\n' + '  # c\n'.repeat(95_000) + '  - 1\n')
+    expect(model.root.kind).toBe('object')
+    expect(model.root.children).toBe(95_001)
+  })
   it('uses CST comments so block-scalar hash lines remain scalar content', () => {
     const model = yamlModel('# top\nbody: |\n  # literal\n  hello\n# end\n')
     const walk = (node: StructuredNode): StructuredNode[] => [node, ...(node.container === undefined ? [] : children(model, node).flatMap(walk))]
