@@ -2,7 +2,8 @@ import { type CSSProperties, useEffect, useLayoutEffect, useRef, useState } from
 import { Button, Dialog, Modal, ModalOverlay } from 'react-aria-components'
 import type { Command, Hello, Opened } from '../shared/protocol'
 import { CoreCallError, type CoreClient } from './core'
-import { AppIcon } from './file-icon'
+import { AppIcon, FileIcon } from './file-icon'
+import { fileName } from './card'
 import { AppMenu, LINUX } from './menu'
 import { markPainted } from './perf'
 import { ReaderCard } from './ReaderCard'
@@ -13,6 +14,8 @@ import { entryView, folderNode, foldersCharge, rootView, updateFolder, type Root
 import type { ClosedLocation, LocalGesture, ReaderGroup, ReaderHandle, ReaderWindow } from './reader-window'
 import './split-cards.css'
 import './link-preview.css'
+import { sessionWorkspace, type RecentLocation, type SessionWorkspace } from '../shared/session'
+import './workspace-controls.css'
 
 interface LinkPreview extends ReaderGroup { sourceId: string; trigger: HTMLElement; width: number; right: number }
 
@@ -62,6 +65,13 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   const closingCards = useRef(new Set<string>())
   const row = useRef<HTMLElement>(null)
   const waiting = useRef<string[]>([])
+  const [recents, setRecents] = useState<RecentLocation[]>([])
+  const recentRef = useRef<RecentLocation[]>([])
+  const lastRecent = useRef('')
+  const sessionReady = useRef(false)
+  const sessionTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const sessionSerial = useRef(Promise.resolve(true))
+  const captureNow = useRef<() => Promise<boolean>>(async () => false)
   const workspace = { getSnapshot: () => ({ ready: !!hello.current, tabs: allGroups.current.flatMap(group => group.workspace.getSnapshot().tabs) }) }
   const navigating = { get current() { return splitBusy.current || [...handles.current.values()].some(handle => handle.busy()) } }
   const [shared] = useState<ReaderWindow>(() => ({ core, hello, groups: allGroups, closed, folders, pendingFolders,
@@ -94,6 +104,88 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     setActiveNode(reports.current.get(id)?.node)
   }
   function focusedReader(): ReaderHandle | undefined { return handles.current.get(focusedRef.current) }
+
+  function rememberRecent(entry: RecentLocation): void {
+    const next = [entry, ...recentRef.current.filter(item => item.kind !== entry.kind || item.path !== entry.path)].slice(0, 8)
+    if (JSON.stringify(next) === JSON.stringify(recentRef.current)) return
+    recentRef.current = next
+    setRecents(next)
+  }
+
+  async function captureWindowSession(): Promise<boolean> {
+    if (!sessionReady.current || !hello.current || splitBusy.current || previewWork.current) return false
+    const before = groupRef.current, snapshots = before.map(group => group.workspace.getSnapshot())
+    try {
+      const cards = []
+      for (const group of before) {
+        const captured = await handles.current.get(group.id)?.captureSession()
+        if (!captured) return false
+        cards.push({ ...captured, weight: group.weight })
+      }
+      if (groupRef.current !== before || before.some((group, index) => group.workspace.getSnapshot() !== snapshots[index])) return false
+      const focused = Math.max(0, before.findIndex(group => group.id === focusedRef.current))
+      const selected = cards[focused]?.tabs[cards[focused].selected]
+      if (selected?.location.kind === 'manual' && lastRecent.current !== selected.location.path) {
+        lastRecent.current = selected.location.path
+        rememberRecent({ kind: 'file', path: selected.location.path })
+      }
+      const saved: SessionWorkspace = { version: 1, cards, focused, roots: folders.current.map(root => ({ path: root.path, ...(root.identity ? { identity: root.identity } : {}) })),
+        sidebar: { open: sidebarOpen, width: sidebarWidth }, recents: recentRef.current }
+      const accepted = await window.typose.saveSession(saved)
+      if (!accepted) setWorkspaceNotice('The workspace could not be saved')
+      return accepted
+    } catch { return false }
+  }
+  captureNow.current = () => {
+    const next = sessionSerial.current.then(captureWindowSession, captureWindowSession)
+    sessionSerial.current = next
+    return next
+  }
+  function scheduleSession(): void {
+    clearTimeout(sessionTimer.current)
+    sessionTimer.current = setTimeout(() => { void captureNow.current() }, 300)
+  }
+
+  async function restoreWindowSession(value: SessionWorkspace): Promise<void> {
+    const saved = sessionWorkspace(value)
+    if (!saved) return
+    recentRef.current = saved.recents
+    setRecents(saved.recents)
+    pendingSplit.current = Math.max(0, saved.cards.length - 1) * 32 * 16_384
+    if (!await charge(null, null, () => !!hello.current)) { pendingSplit.current = 0; return }
+    const restored = saved.cards.map((card, index) => {
+      const group = index === 0 ? groupRef.current[0] : { id: 'card-' + nextCard.current++, workspace: new WorkspaceStore('restored-' + index + '-tab'), weight: card.weight }
+      group.workspace.coreReady(currentSession.current)
+      return { ...group, weight: card.weight }
+    })
+    updateGroups(restored)
+    pendingSplit.current = 0
+    for (const savedRoot of saved.roots) {
+      const path = savedRoot.path
+      // Brief §4.6: a network share is never touched at launch; Reconnect adds it again.
+      if (await core.call('networkPath', { path }).catch(() => true)) {
+        const id = 'network-' + folders.current.length
+        setFolders([...folders.current, { id, path, identity: savedRoot.identity, ref: { session: 0, root: id, node: '0' }, unavailable: true, network: true,
+          node: { id: '0', ref: { session: 0, root: id, node: '0' }, name: path.split(/[\\/]/).filter(Boolean).at(-1) ?? path, kind: 'directory', error: 'Network folder · not opened at launch' } }])
+        continue
+      }
+      await pickFolder(undefined, path)
+      const captured = folders.current.find(root => root.path === path)
+      if (captured && savedRoot.identity && captured.identity !== savedRoot.identity) {
+        await core.call('removeRoot', { root: captured.id, session: captured.ref.session })
+        setFolders(folders.current.map(root => root.id === captured.id ? { ...root, identity: savedRoot.identity, unavailable: true,
+          node: { ...root.node, expanded: false, children: undefined, error: 'Folder changed · select it again using Locate…' } } : root))
+      } else if (!captured) {
+        const id = 'missing-' + folders.current.length
+        setFolders([...folders.current, { id, path, identity: savedRoot.identity, ref: { session: 0, root: id, node: '0' }, unavailable: true,
+          node: { id: '0', ref: { session: 0, root: id, node: '0' }, name: path.split(/[\\/]/).at(-1) ?? path, kind: 'directory', error: 'Folder not found' } }])
+      }
+    }
+    for (let index = 0; index < restored.length; index++) await (await waitForReader(restored[index].id)).restoreSession(saved.cards[index])
+    setSidebarWidth(saved.sidebar.width)
+    setSidebarOpen(saved.sidebar.open && !window.matchMedia('(max-width: 999px)').matches)
+    focusCard(restored[saved.focused]?.id ?? restored[0].id)
+  }
 
   async function charge(owner: WorkspaceStore | null, override: readonly Pick<WorkspaceTab, 'key' | 'path'>[] | null, current: () => boolean): Promise<boolean> {
     const bank = workspaceBudget.current, session = currentSession.current
@@ -164,6 +256,13 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   }
 
   useEffect(() => { document.title = title }, [title])
+  useEffect(() => {
+    const off = groups.map(group => group.workspace.subscribe(scheduleSession))
+    const capture = window.typose.onSessionCapture(() => captureNow.current())
+    window.addEventListener('scroll', scheduleSession, true)
+    return () => { off.forEach(unsubscribe => unsubscribe()); capture(); window.removeEventListener('scroll', scheduleSession, true); clearTimeout(sessionTimer.current) }
+  }, [groups])
+  useEffect(() => { scheduleSession() }, [sidebarOpen, sidebarWidth, focused, folderRoots])
   useLayoutEffect(() => markPainted('titlebarPainted'), [])
   useEffect(() => {
     const media = window.matchMedia('(max-width: 999px)')
@@ -202,6 +301,10 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     const key = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing) return
       const command = MAC ? event.metaKey : event.ctrlKey
+      const textControl = event.target instanceof Element && event.target.closest('input,textarea,select,[contenteditable="true"],[role="textbox"]')
+      if (command && event.key.toLowerCase() === 'c' && !event.shiftKey && !event.altKey && !textControl) { event.preventDefault(); run('copy'); return }
+      if (command && event.key.toLowerCase() === 'g' && !event.shiftKey && !event.altKey) { event.preventDefault(); run('go-to'); return }
+      if (command && event.key.toLowerCase() === 'p' && !event.shiftKey && !event.altKey) { event.preventDefault(); run('print'); return }
       if (command && event.key.toLowerCase() === 'f' && !event.shiftKey && !event.altKey) { event.preventDefault(); run('find'); return }
       if (event.key === 'F3' && !command && !event.altKey) { event.preventDefault(); run(event.shiftKey ? 'find-previous' : 'find-next'); return }
       if (command && event.key.toLowerCase() === 'b' && !event.shiftKey && !event.altKey) { event.preventDefault(); run('toggle-sidebar'); return }
@@ -214,7 +317,14 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       if (command && event.key.toLowerCase() === 'r' && !event.shiftKey && !event.altKey || event.key === 'F5' && !command && !event.shiftKey && !event.altKey) { event.preventDefault(); run('reload') }
     }
     window.addEventListener('keydown', key)
-    void core.connect().then(async () => { await payment.current; for (const path of await window.typose.launchPaths()) openPath(path) }, () => {})
+    void core.connect().then(async () => {
+      await payment.current
+      const [saved, paths] = await Promise.all([window.typose.loadSession(), window.typose.launchPaths()])
+      await restoreWindowSession(saved)
+      sessionReady.current = true
+      for (const path of paths) openPath(path)
+      scheduleSession()
+    }).catch(error => { sessionReady.current = true; setWorkspaceNotice('Cannot restore workspace · ' + String(error)) })
     return () => { cancelReaderWaiters('The workspace was unmounted'); gone(); ready(); offOpen(); offCommand(); window.removeEventListener('keydown', key) }
   }, [core])
 
@@ -223,8 +333,8 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     setFolderRoots(next)
   }
 
-  async function pickFolder(replace?: string): Promise<void> {
-    const path = await window.typose.folderDialog()
+  async function pickFolder(replace?: string, chosen?: string): Promise<void> {
+    const path = chosen ?? await window.typose.folderDialog()
     if (!path || !workspace.getSnapshot().ready || !recharged.current) return
     const ownerSession = currentSession.current
     const operation = Symbol()
@@ -239,6 +349,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       added = undefined
       if (replace && replace !== next.id) void core.call('removeRoot', { root: replace, session: ownerSession }).catch(() => {})
       setSidebarOpen(true)
+      rememberRecent({ kind: 'folder', path })
       void listDirectory(next.id, next.node.id)
     } catch (e) {
       setWorkspaceNotice('Cannot add folder · ' + (e instanceof Error ? e.message : String(e)))
@@ -657,6 +768,13 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     }
   }
   function run(command: Command): void {
+    if (command === 'go-to' || command === 'copy' || command === 'print') {
+      const reader = previewRef.current ? handles.current.get(previewRef.current.id) : focusedReader()
+      if (command === 'go-to') reader?.goTo()
+      else if (command === 'copy') void reader?.copy()
+      else reader?.print()
+      return
+    }
     if (command === 'find' || command === 'find-next' || command === 'find-previous') {
       const reader = previewRef.current ? handles.current.get(previewRef.current.id) : focusedReader()
       reader?.find(command === 'find' ? 'open' : command === 'find-next' ? 'next' : 'previous')
@@ -704,11 +822,23 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       {sidebarOpen ? <FolderSidebar roots={folderRoots} width={sidebarWidth} overlay={sidebarOverlay} activeNode={activeNode}
         onWidth={setSidebarWidth} onCollapse={() => { setSidebarOpen(false); requestAnimationFrame(() => document.querySelector<HTMLElement>('.sidebar-toggle')?.focus()) }}
         onAdd={() => void pickFolder()} onToggle={toggleFolder} onOpen={(root, node) => void focusedReader()?.openChild(root, node)}
-        onRefresh={refreshDirectory} onMore={(root, node) => void listDirectory(root, node, true)} onRemove={removeFolder} onLocate={root => void pickFolder(root)} /> : null}
+        onRefresh={refreshDirectory} onMore={(root, node) => void listDirectory(root, node, true)} onRemove={removeFolder}
+        onLocate={root => void pickFolder(root, folders.current.find(item => item.id === root && item.network)?.path)} /> : null}
       <main className="card-row" ref={row}>
         {groups.map((group, index) => <div className="card-slot" style={{ flexGrow: group.weight }} key={group.id}>
           <ReaderCard id={group.id} label={index + 1} workspace={group.workspace} window={shared} fonts={fonts} focused={focused === group.id}
-            onFocus={() => focusCard(group.id)} onCloseCard={() => void closeCard(group.id)} windowNotice={workspaceNotice} />
+            onFocus={() => focusCard(group.id)} onCloseCard={() => void closeCard(group.id)} windowNotice={workspaceNotice}
+            emptyContent={<div className="workspace-empty">
+              <h1>Drop files or folders anywhere</h1>
+              <div className="workspace-empty-actions"><Button className="open-button" onPress={() => { focusCard(group.id); run('open') }}>Open file… <kbd>{MAC ? '⌘O' : 'Ctrl+O'}</kbd></Button>
+                <Button className="open-button" onPress={() => void pickFolder()}>Open folder…</Button></div>
+              {recents.length ? <section aria-label="Recent files and folders"><h2>Recent</h2>{recents.map(recent =>
+                <button className="recent-location" key={recent.kind + recent.path} title={recent.path} onClick={() => {
+                  focusCard(group.id)
+                  if (recent.kind === 'folder') void pickFolder(undefined, recent.path)
+                  else handles.current.get(group.id)?.open(recent.path)
+                }}><FileIcon path={recent.path} /><span>{fileName(recent.path)}<small>{recent.path}</small></span></button>)}</section> : null}
+            </div>} />
           {index < groups.length - 1 ? <div className="card-divider" role="separator" aria-label="Card divider" aria-orientation="vertical" tabIndex={0}
             onDoubleClick={() => updateGroups(groupRef.current.map(item => ({ ...item, weight: 1 })))}
             onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); resizeCards(index, event.key === 'ArrowLeft' ? -16 : 16) } }}

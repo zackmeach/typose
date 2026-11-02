@@ -1,7 +1,7 @@
-import { type RefObject, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { type FormEvent, type ReactNode, type RefObject, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { Button, Dialog, DialogTrigger, Menu, MenuItem, MenuTrigger, Popover, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
-import type { CapturedLocation, CsvInfo, CsvOptions, Hello, Limits, MdBuild, Methods, Opened, SurfaceRef, ViewRef } from '../shared/protocol'
-import { type Action, type Card, fileName, parentName, view } from './card'
+import { MAX_PRINT_PAGES, type CapturedLocation, type CsvInfo, type CsvOptions, type Hello, type Limits, type MdBuild, type Methods, type Opened, type SurfaceRef, type ViewRef } from '../shared/protocol'
+import { type Action, type Card, type LensName, fileName, parentName, view } from './card'
 import { FileIcon } from './file-icon'
 import { type CoreClient, CoreCallError } from './core'
 import { RenderedLens, renderedCharge } from './lenses/rendered'
@@ -9,13 +9,19 @@ import { LensBudget, type ReloadReservation } from './lenses/lens-budget'
 import { ROW_HEIGHT, RawLens, viewportCap } from './lenses/raw'
 import { GridLens } from './lenses/grid'
 import './grid.css'
+import './structured.css'
+import { StructuredLens, type StructuredMode } from './lenses/structured'
+import { prepareStructured, type StructuredSource } from './lenses/structured-source'
 import { inputMark, markNow } from './perf'
 import { type SavedLocation, type SelectionTicket, type TabId, type WorkspaceStore, type WorkspaceTab } from './workspace'
 import { FileTabs } from './file-tabs'
-import { folderNode } from './folders'
+import { entryView, folderNode } from './folders'
 import type { LocalGesture, ReaderHandle, ReaderWindow } from './reader-window'
 import { FindBar } from './FindBar'
 import type { FindController } from './find'
+import type { SessionCard, SessionTab } from '../shared/session'
+import type { FolderEntry, FolderRef } from '../shared/protocol'
+import { PRINT_LINES_PER_PAGE, type PrintPayload, type PrintPlan } from './print'
 
 /** Z37's scan marks (plan A's veto, `afc58f9`), on the renderer's User Timing timeline: the gate reads them. */
 const MARKS = ['typose:open-start', 'typose:first-screen', 'typose:line-scan', 'typose:index-done']
@@ -38,6 +44,10 @@ interface ShownLens {
   readerMoved(): boolean
   floorBytes(): number
   focus(): void
+  goTo(target: number): void
+  copy?(): Promise<boolean>
+  printPlan?(): PrintPlan
+  printRange?(start: number, end: number, signal: AbortSignal): Promise<PrintPayload>
   element: HTMLElement
   setLineCount(lines: number): void
   indexDone(): void
@@ -55,10 +65,11 @@ interface RetainedRendered {
   view: RenderedLens
 }
 
-export function ReaderCard({ id, label, workspace, window: shared, fonts, focused, onFocus, onCloseCard, windowNotice, preview }: {
+export function ReaderCard({ id, label, workspace, window: shared, fonts, focused, onFocus, onCloseCard, windowNotice, preview, emptyContent }: {
   id: string; label: number; workspace: WorkspaceStore; window: ReaderWindow; fonts: Promise<void>; focused: boolean
   onFocus(): void; onCloseCard(): void; windowNotice: string
   preview?: { busy: boolean; onTab(): void; onSide(): void; onClose(): void }
+  emptyContent?: ReactNode
 }) {
   const core = shared.core
   const [fontLayoutReady, setFontLayoutReady] = useState(false)
@@ -96,6 +107,17 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   const [findOpen, setFindOpen] = useState(false)
   const [findQuery, setFindQuery] = useState('')
   const [findCase, setFindCase] = useState(false)
+  const [goToOpen, setGoToOpen] = useState(false)
+  const [goToValue, setGoToValue] = useState('')
+  const goToInput = useRef<HTMLInputElement>(null)
+  const [printPlan, setPrintPlan] = useState<PrintPlan | null>(null)
+  const [printOpen, setPrintOpen] = useState(false)
+  const [printMode, setPrintMode] = useState<'all' | 'around' | 'custom'>('around')
+  const [printStart, setPrintStart] = useState('1')
+  const [printEnd, setPrintEnd] = useState('1')
+  const [printConfirmed, setPrintConfirmed] = useState(false)
+  const [printBusy, setPrintBusy] = useState(false)
+  const printAbort = useRef<AbortController | null>(null)
   const findNow = useRef({ open: findOpen, query: findQuery, controller: findController })
   findNow.current = { open: findOpen, query: findQuery, controller: findController }
   const findDirection = useRef<1 | -1 | undefined>(undefined)
@@ -125,7 +147,88 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     } else state.controller?.next(action === 'previous' ? -1 : 1)
     return true
   }
-  const picked = useRef<'raw' | 'rendered' | 'grid' | null>(null)
+  function openGoTo(): void {
+    setGoToValue('')
+    setGoToOpen(true)
+    requestAnimationFrame(() => { goToInput.current?.focus(); goToInput.current?.select() })
+  }
+  function submitGoTo(event: FormEvent<HTMLFormElement>): void {
+    event.preventDefault()
+    const target = Number(goToValue)
+    if (!Number.isSafeInteger(target) || target < 1) return
+    lens.current?.goTo(target)
+    setGoToOpen(false)
+    lens.current?.focus()
+  }
+  function copyAction(): Promise<boolean> {
+    const active = lens.current
+    if (active?.copy) return active.copy()
+    shared.notice('Copy is unavailable in this view')
+    return Promise.resolve(false)
+  }
+  function printAction(): void {
+    const plan = lens.current?.printPlan?.()
+    if (!plan) { shared.notice('Print is unavailable in this view'); return }
+    if (!plan.indexed) { shared.notice('Print is unavailable · wait for indexing to finish'); return }
+    setPrintPlan(plan)
+    setPrintMode('around')
+    setPrintStart(String(Math.max(1, plan.current + 1)))
+    setPrintEnd(String(Math.min(plan.total, plan.current + PRINT_LINES_PER_PAGE)))
+    setPrintConfirmed(false)
+    setPrintOpen(true)
+  }
+  function closePrint(): void {
+    printAbort.current?.abort()
+    printAbort.current = null
+    setPrintBusy(false)
+    setPrintOpen(false)
+    requestAnimationFrame(() => lens.current?.focus())
+  }
+  function selectedPrintRange(plan: PrintPlan): { start: number; end: number; pages: number } | null {
+    let start = 0, end = plan.total
+    if (printMode === 'around') {
+      const centerPage = Math.floor(plan.current / PRINT_LINES_PER_PAGE)
+      const firstPage = Math.max(0, centerPage - 2)
+      start = firstPage * PRINT_LINES_PER_PAGE
+      end = Math.min(plan.total, start + 5 * PRINT_LINES_PER_PAGE)
+    } else if (printMode === 'custom') {
+      const first = Number(printStart), last = Number(printEnd)
+      if (!Number.isSafeInteger(first) || !Number.isSafeInteger(last) || first < 1 || last < first || last > plan.total) return null
+      start = first - 1; end = last
+    }
+    const pages = Math.ceil((end - start) / PRINT_LINES_PER_PAGE)
+    return end > start && pages >= 1 && pages <= MAX_PRINT_PAGES ? { start, end, pages } : null
+  }
+  async function submitPrint(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault()
+    const plan = printPlan, active = lens.current
+    if (!plan || !active?.printRange || !plan.indexed || printBusy) return
+    const range = selectedPrintRange(plan)
+    if (!range || range.pages > 50 && !printConfirmed) return
+    const controller = new AbortController()
+    printAbort.current = controller
+    setPrintBusy(true)
+    let payload: PrintPayload | undefined
+    try {
+      payload = await active.printRange(range.start, range.end, controller.signal)
+      if (controller.signal.aborted || printAbort.current !== controller) return
+      if (payload.pages !== range.pages) throw new Error('Page estimate changed; review the range and try again')
+      if (!await payload.verify(controller.signal) || controller.signal.aborted || printAbort.current !== controller)
+        throw new Error('The source changed while preparing the print job; reload before printing')
+      const printed = await window.typose.printDocument(path ? fileName(path) : 'Typose', payload.blocks, payload.pages, printConfirmed)
+      if (!controller.signal.aborted) shared.notice(printed.kind === 'printed' ? 'Print job sent' : printed.kind === 'refused' ? printed.reason : 'Print cancelled')
+      closePrint()
+    } catch (error) {
+      if (!controller.signal.aborted) shared.notice(error instanceof Error ? `Print failed · ${error.message}` : 'Print failed')
+      closePrint()
+    } finally {
+      await payload?.release()
+      if (printAbort.current === controller) printAbort.current = null
+      setPrintBusy(false)
+    }
+  }
+  const picked = useRef<LensName | null>(null)
+  const structuredSource = useRef<StructuredSource | null>(null)
   const [csvChanging, setCsvChanging] = useState(false)
   const csvChangingNow = useRef(false)
   const jumpTo = useRef<number | undefined>(undefined)
@@ -186,7 +289,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     const owner = budget.current
     if (!owner) return
     const snapshot = owner.snapshot()
-    retiredRendered.current = Math.max(retiredRendered.current, snapshot.rendered + snapshot.grid + (snapshot.search ?? 0) + (snapshot.copy ?? 0), owner.retiredTreeMax)
+    retiredRendered.current = Math.max(retiredRendered.current, snapshot.rendered + snapshot.grid + (snapshot.search ?? 0) + (snapshot.copy ?? 0) + (snapshot.model ?? 0), owner.retiredTreeMax)
     owner.invalidate()
   }
 
@@ -377,6 +480,31 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     return () => { alive = false; ac.abort() }
   }, [openedNow, core])
 
+  useEffect(() => {
+    if (!openedNow || !['json', 'jsonl', 'yaml'].includes(openedNow.format) || openedNow.blank) return
+    const opened = openedNow, ac = new AbortController()
+    let active = true, prepared: StructuredSource | undefined, unsubscribe: (() => void) | undefined
+    void prepareStructured(core, opened, budgetFor(opened), ac.signal).then(source => {
+      if (!active) { source.dispose(); return }
+      prepared = source; structuredSource.current = source
+      const update = () => {
+        if (!active) return
+        const info = source.info
+        const off = info.status === 'locked' ? info.reason ?? 'Structured view unavailable' : !info.root && info.format !== 'jsonl' ? 'Couldn’t parse · showing Raw' : undefined
+        const preferred: LensName = info.format === 'jsonl' ? 'rows' : 'tree'
+        const current = latest.current.card
+        const already = current.kind === 'open' && current.opened === opened && ['tree', 'rows', 'table', 'transcript'].includes(current.lens ?? '')
+        const go = !off && picked.current !== 'raw' && (already || picked.current !== null || !lens.current?.readerMoved())
+        const chosen = ['tree', 'rows', 'table', 'transcript'].includes(picked.current ?? '') ? picked.current! : already && lens.current?.readerMoved() ? current.lens! : preferred
+        setCard(c => c.kind === 'open' && c.opened === opened ? { ...c, structured: info, structuredOff: off, transcriptOff: info.transcript ? 'Transcript graph is not available in this checkpoint · use Rows' : undefined, lens: go && chosen !== 'transcript' ? chosen : 'raw' } : c)
+      }
+      update(); unsubscribe = source.subscribe?.(update)
+    }).catch(error => {
+      if (active) setCard(c => c.kind === 'open' && c.opened === opened ? { ...c, structuredOff: String(error), lens: 'raw', ...(error instanceof CoreCallError && error.code === 'Frozen' ? { frozen: error.message } : {}) } : c)
+    })
+    return () => { active = false; unsubscribe?.(); ac.abort(); prepared?.dispose(); if (structuredSource.current === prepared) structuredSource.current = null }
+  }, [openedNow, core])
+
   async function configureCsv(options: CsvOptions): Promise<void> {
     const c = latest.current.card
     if (c.kind !== 'open' || c.opened.format !== 'csv' || csvChangingNow.current) return
@@ -427,7 +555,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
 
   /** The switch. Rendered before its build exists is remembered; the effect mounts it when the build fits. */
   function onLens(key: string | number): void {
-    if (key !== 'raw' && key !== 'rendered' && key !== 'grid') return
+    if (key !== 'raw' && key !== 'rendered' && key !== 'grid' && key !== 'tree' && key !== 'rows' && key !== 'table' && key !== 'transcript') return
     const c = latest.current.card
     if (c.kind !== 'open' || (c.lens ?? 'raw') === key) return
     picked.current = key
@@ -440,6 +568,11 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     if (key === 'grid') {
       if (!c.csv || c.gridOff) return
       setCard(d => d.kind === 'open' && d.opened === c.opened ? { ...d, lens: 'grid' } : d)
+      return
+    }
+    if (key === 'tree' || key === 'rows' || key === 'table' || key === 'transcript') {
+      if (!c.structured || c.structuredOff || key === 'transcript' && (!c.structured.transcript || c.transcriptOff) || key === 'table' && c.structured.tableOff) return
+      setCard(d => d.kind === 'open' && d.opened === c.opened ? { ...d, lens: key } : d)
       return
     }
     if (c.renderedOff || !c.build) return
@@ -919,9 +1052,9 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       bytes: saved?.bytes ?? 0, indexed: saved?.indexed ?? opened.indexed, atLine: tab.anchor ?? saved?.atLine, lens: 'raw', rendering: false })
   }
 
-  async function openFolderChild(rootId: string, nodeId: string): Promise<void> {
+  async function openFolderChild(rootId: string, nodeId: string, provided?: FolderEntry, restored?: SessionTab): Promise<void> {
     const root = folders.current.find(root => root.id === rootId)
-    const node = root && folderNode(root, nodeId)
+    const node = root && (provided ? { ...entryView(provided), ref: provided.ref } : folderNode(root, nodeId))
     if (!root || !node) return
     if (node.kind !== 'file') { setWorkspaceNotice('Unsupported file · ' + node.name); return }
     const l = latest.current.limits
@@ -949,8 +1082,9 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       const request = workspace.beginOpen(key, candidate.path)
       if (request.kind !== 'open') return
       const next: Extract<Card, { kind: 'open' }> = { kind: 'open', path: candidate.path, opened: candidate, lines: candidate.lines,
-        bytes: 0, indexed: candidate.indexed, lens: 'raw' }
+        bytes: 0, indexed: candidate.indexed, lens: 'raw', atLine: restored?.anchor, csvOptions: restored?.csvOptions }
       if (!workspace.complete(request.ticket, key, next)) return
+      if (restored) workspace.remember(request.ticket.tab, restored.anchor, restored.lens)
       leave()
       const opened = candidate
       candidate = undefined
@@ -969,13 +1103,13 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     }
   }
 
-  async function pick(): Promise<void> {
+  async function pick(locate = false): Promise<void> {
     const chosen = await window.typose.openDialog()
     if (!chosen) return
     const tab = workspace.getSnapshot().selected
     const c = latest.current.card
     // Recovery replaces the unusable slot but obtains new manual authority from the real dialog.
-    await open(chosen, undefined, tab && (c.kind === 'gone' || c.kind === 'failed') && c.localOnly ? tab : undefined)
+    await open(chosen, undefined, tab && (c.kind === 'gone' || c.kind === 'failed') && (locate || c.localOnly) ? tab : undefined)
   }
 
   function openNamed(path: string): void {
@@ -1046,7 +1180,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   }
   const actions: Record<Action, () => void> = {
     'Open file…': () => void pick(),
-    'Locate…': () => void pick(),
+    'Locate…': () => void pick(true),
     Retry: () => void reload(),
     Reload: () => void reload(),
     Close: () => close(),
@@ -1058,6 +1192,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   const frozen = card.kind === 'open' ? card.frozen : undefined
   const breadcrumbParent = openedNow?.folder ? [openedNow.folder.label, ...openedNow.folder.segments.slice(0, -1)].join(' / ') : path ? parentName(path) : ''
   const secondaryLens = shown.lenses?.grid ? 'grid' : 'rendered'
+  const lensOptions = [...(shown.lenses?.structured ?? (shown.lenses?.grid ? [{ id: 'grid' as const, label: 'Grid', off: shown.lenses.gridOff }] : [{ id: 'rendered' as const, label: 'Rendered', off: shown.lenses?.renderedOff }])), { id: 'raw' as const, label: 'Raw', off: undefined }]
   const detectedDelimiter = card.kind === 'open' && card.csv ? { ',': 'Comma', '\t': 'Tab', ';': 'Semicolon', '|': 'Pipe' }[card.csv.delimiter] : undefined
 
   const header = (
@@ -1073,44 +1208,47 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       {shown.lenses ? (
         <>
         <TabList aria-label="Lens" className="lens-switch">
-          <Tab id={secondaryLens} className="lens-tab" isDisabled={!!(shown.lenses.grid ? shown.lenses.gridOff : shown.lenses.renderedOff)}>
-            {/* `Tab` doesn't take a DOM `title`. The span carries the reason, which is the tooltip (Z71, Z34). */}
-            <span className="lens-tab-tip" title={shown.lenses.grid ? shown.lenses.gridOff : shown.lenses.renderedOff}>
-              {shown.lenses.grid ? 'Grid' : 'Rendered'}
-            </span>
-          </Tab>
-          <Tab id="raw" className="lens-tab">
-            <span className="lens-tab-tip">Raw</span>
-          </Tab>
+          {lensOptions.map(option => <Tab key={option.id} id={option.id} className="lens-tab" isDisabled={!!option.off}><span className="lens-tab-tip" title={option.off}>{option.label}</span></Tab>)}
         </TabList>
         <MenuTrigger>
-          <Button className="lens-dropdown" aria-label={`Lens: ${shown.lenses.showing === 'grid' ? 'Grid' : shown.lenses.showing === 'rendered' ? 'Rendered' : 'Raw'}`}>
-            {shown.lenses.showing === 'grid' ? 'Grid' : shown.lenses.showing === 'rendered' ? 'Rendered' : 'Raw'} <span aria-hidden="true">⌄</span>
+          <Button className="lens-dropdown" aria-label={`Lens: ${lensOptions.find(option => option.id === shown.lenses?.showing)?.label ?? 'Raw'}`}>
+            {lensOptions.find(option => option.id === shown.lenses?.showing)?.label ?? 'Raw'} <span aria-hidden="true">⌄</span>
           </Button>
           <Popover className="menu-popover" placement="bottom end">
-            <Menu className="menu" aria-label="Lens" onAction={onLens} disabledKeys={shown.lenses.gridOff ? ['grid'] : shown.lenses.renderedOff ? ['rendered'] : []}>
-              <MenuItem id={shown.lenses.grid ? 'grid' : 'rendered'} className="menu-item" textValue={shown.lenses.grid ? 'Grid' : 'Rendered'}>
-                {shown.lenses.grid ? 'Grid' : 'Rendered'}{shown.lenses.gridOff || shown.lenses.renderedOff ? <span className="lens-unavailable"> · {shown.lenses.gridOff || shown.lenses.renderedOff}</span> : null}
-              </MenuItem>
-              <MenuItem id="raw" className="menu-item">Raw</MenuItem>
+            <Menu className="menu" aria-label="Lens" onAction={onLens} disabledKeys={lensOptions.filter(option => option.off).map(option => option.id)}>
+              {lensOptions.map(option => <MenuItem key={option.id} id={option.id} className="menu-item" textValue={option.label}>{option.label}{option.off ? <span className="lens-unavailable"> · {option.off}</span> : null}</MenuItem>)}
             </Menu>
           </Popover>
         </MenuTrigger>
         </>
       ) : null}
       {card.kind === 'open' && card.opened.format === 'csv' ? <DialogTrigger>
-        <Button className="csv-info-button" aria-label="File info">ⓘ</Button>
+        <Button className="csv-info-button" aria-label="File info">ⓘ{card.csv?.problems?.length ? <span className="structured-problem" aria-label="File has problems"> ●</span> : null}</Button>
         <Popover className="csv-info-popover" placement="bottom end">
           <Dialog aria-label="CSV file info">
             <p>{card.csv ? `${Math.max(0, card.csv.sourceRecords - (card.csv.header ? 1 : 0))} rows${card.csv.done ? '' : '…'} · ${card.csv.expectedColumns} columns · ${card.csv.encoding}` : 'Preparing CSV…'}</p>
-            <label><input type="checkbox" checked={card.csv?.header ?? false} disabled={csvChanging || !card.csv} onChange={event => void configureCsv({ ...(card.csvOptions ?? CSV_OPTIONS), header: event.target.checked })} /> First row is header</label>
-            <label>Delimiter <select aria-label="Delimiter" value={card.csvOptions?.delimiter ?? 'auto'} disabled={csvChanging} onChange={event => void configureCsv({ ...(card.csvOptions ?? CSV_OPTIONS), delimiter: event.target.value as CsvOptions['delimiter'] })}>
+            <label><input type="checkbox" checked={card.csv?.header ?? false} disabled={!card.csv} aria-disabled={csvChanging || undefined} onChange={event => void configureCsv({ ...(card.csvOptions ?? CSV_OPTIONS), header: event.target.checked })} /> First row is header</label>
+            <label>Delimiter <select aria-label="Delimiter" value={card.csvOptions?.delimiter ?? 'auto'} aria-disabled={csvChanging || undefined} onChange={event => void configureCsv({ ...(card.csvOptions ?? CSV_OPTIONS), delimiter: event.target.value as CsvOptions['delimiter'] })}>
               <option value="auto">Auto{detectedDelimiter ? ` (${detectedDelimiter})` : ''}</option><option value=",">Comma</option><option value={'\t'}>Tab</option><option value=";">Semicolon</option><option value="|">Pipe</option>
             </select></label>
             {card.gridOff ? <p>{card.gridOff}</p> : null}
+            <div className="structured-problem-list">{card.csv?.problems?.map(problem => <details key={problem.kind}><summary>{problem.kind === 'ragged' ? 'Ragged rows' : 'Undecodable sequences'}: {problem.count.toLocaleString()}</summary><button type="button" onClick={() => {
+              if (problem.sourceLine !== undefined) { jumpTo.current = problem.sourceLine; onLens('raw') }
+              else if (card.opened.view) void core.call('sourceLineAt', { view: card.opened.view, offset: problem.first.start }).then(result => { jumpTo.current = result.line; onLens('raw') }).catch(error => shared.notice(String(error)))
+            }}>First at {problem.sourceRecord !== undefined ? `source record ${problem.sourceRecord + 1}` : `byte ${problem.first.start}`} · View in Raw</button></details>)}</div>
             <p>Read-only grid · decoded cell values.</p>
           </Dialog>
         </Popover>
+      </DialogTrigger> : null}
+      {card.kind === 'open' && ['json', 'jsonl', 'yaml'].includes(card.opened.format) ? <DialogTrigger>
+        <Button className="csv-info-button" aria-label="File info">ⓘ{card.structured?.problems.length ? <span className="structured-problem" aria-label="File has problems"> ●</span> : null}</Button>
+        <Popover className="csv-info-popover" placement="bottom end"><Dialog aria-label="File info">
+          <p>{card.path}</p><p>{card.opened.size.toLocaleString()} bytes · {card.opened.encoding} · {card.lines.toLocaleString()} lines</p>
+          {card.structured?.parsedAs ? <p>Parsed as {card.structured.parsedAs === 'jsonc' ? 'JSONC' : 'JSON'}</p> : null}
+          {card.opened.format === 'jsonl' ? <p>{card.structured?.parsed ?? '…'} parsed · {card.structured?.failed ?? 0} failed · {card.structured?.blank ?? 0} blank · {card.structured?.transcript?.adapter ?? 'Generic JSONL'}</p> : null}
+          {card.structuredOff ? <p>{card.structuredOff}</p> : null}
+          <div className="structured-problem-list">{card.structured?.problems.map((problem, index) => <details key={index}><summary>{problem.kind}: {problem.count.toLocaleString()}</summary><button type="button" onClick={() => { jumpTo.current = Math.max(0, (problem.line ?? 1) - 1); onLens('raw') }}>{problem.message} · {problem.line ? `line ${problem.line}` : `byte ${problem.first.start}`}</button></details>)}</div>
+        </Dialog></Popover>
       </DialogTrigger> : null}
       <span className="card-status" title={shown.status} tabIndex={shown.status ? 0 : undefined}>{shown.status}</span>
       <span className="card-status-tooltip" aria-hidden="true">{shown.status}</span>
@@ -1128,6 +1266,12 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       <Button
         className="banner-button"
         onPress={() => {
+          if (shown.banner?.action === 'View problem in Raw' && card.kind === 'open') {
+            const problem = card.structured?.problems.find(problem => problem.kind === 'parse')
+            if (problem?.line) lens.current?.goTo(problem.line)
+            else if (problem && card.opened.view) void core.call('sourceLineAt', { view: card.opened.view, offset: problem.first.start }).then(result => lens.current?.goTo(result.line + 1)).catch(error => shared.notice(String(error)))
+            return
+          }
           restoreFocus.current = true // the click focuses the button; show() would then drop the scroller's focus
           void reload()
         }}
@@ -1138,6 +1282,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   ) : null
   const message = (
     <div className="card-message">
+      {card.kind === 'empty' && emptyContent ? emptyContent :
       <div className="card-state">
         {'message' in shown.body && shown.body.message ? <p>{shown.body.message}</p> : null}
         {'actions' in shown.body
@@ -1147,12 +1292,21 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
               </Button>
             ))
           : null}
-      </div>
+      </div>}
     </div>
   )
 
   const body =
-    fontLayoutReady && card.kind === 'open' && limits && 'raw' in shown.body ? (
+    fontLayoutReady && card.kind === 'open' && limits && 'structured' in shown.body && structuredSource.current ? (
+      <LensHost core={core} onFind={setFindController} session={session} budget={budgetFor(card.opened)} retained={rendered} lens={lens}
+        jumpTo={jumpTo} place={place} hadFocus={hadFocus} restoreFocus={restoreFocus} atLine={card.atLine}
+        opened={card.opened} name={fileName(card.path)} lines={card.lines} indexed={card.indexed} limits={limits}
+        frozen={frozen !== undefined} mode={card.lens as StructuredMode} structured={structuredSource.current}
+        onRows={() => onLens('rows')}
+        onFrozen={why => setCard(c => c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c)}
+        notice={message => shared.notice(message)} onShowRaw={line => { jumpTo.current = line; onLens('raw') }}
+        onOpenLocal={(target, path, gesture) => routeLocal(card.opened, target, path, gesture)} onDisposed={disposedView} />
+    ) : fontLayoutReady && card.kind === 'open' && limits && 'raw' in shown.body ? (
       <LensHost
         core={core}
         onFind={setFindController}
@@ -1173,6 +1327,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         frozen={frozen !== undefined}
         mode="raw"
         onFrozen={(why) => setCard((c) => (c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c))}
+        notice={message => shared.notice(message)}
         onShowRaw={() => {}}
         onOpenLocal={(target, path, gesture) => routeLocal(card.opened, target, path, gesture)}
         onDisposed={disposedView}
@@ -1184,6 +1339,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         frozen={frozen !== undefined} mode="grid" csv={card.csv} csvOptions={card.csvOptions ?? CSV_OPTIONS}
         onCsvInfo={info => setCard(c => c.kind === 'open' && c.opened === card.opened && c.csv?.ref.revision === info.ref.revision ? { ...c, csv: info } : c)}
         onFrozen={why => setCard(c => c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c)}
+        notice={message => shared.notice(message)}
         onShowRaw={line => { jumpTo.current = line; onLens('raw') }}
         onOpenLocal={(target, path, gesture) => routeLocal(card.opened, target, path, gesture)} onDisposed={disposedView} />
     ) : fontLayoutReady && card.kind === 'open' && limits && 'rendered' in shown.body && card.build ? (
@@ -1208,6 +1364,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         mode="rendered"
         build={card.build}
         onFrozen={(why) => setCard((c) => (c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c))}
+        notice={message => shared.notice(message)}
         onShowRaw={(line) => {
           jumpTo.current = line
           picked.current = 'raw'
@@ -1220,12 +1377,117 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       message
     )
 
+  async function captureSession(): Promise<SessionCard | null> {
+    const before = workspace.getSnapshot()
+    if (!before.ready || navigating.current) return null
+    const tabs: SessionTab[] = []
+    for (const tab of before.tabs) {
+      let location: SessionTab['location'] = { kind: 'reselect', path: tab.path }
+      if (tab.card.kind === 'open') {
+        // Ask the owning native document: a derived display path never becomes manual authority on disk.
+        const captured = await core.call('captureLocation', { doc: tab.card.opened.doc, gen: tab.card.opened.gen })
+        if (captured.kind === 'manual') location = { kind: 'manual', path: captured.path }
+        else {
+          await core.call('releaseSaved', { ticket: captured.ticket })
+          const folder = tab.card.opened.folder
+          const root = folder && folders.current.find(root => root.id === folder.root && !root.unavailable)
+          if (root?.identity && folder?.segments.length) location = { kind: 'folder', path: tab.path,
+            root: { path: root.path, identity: root.identity }, segments: [...folder.segments] }
+        }
+      } else if (tab.key === manualKey(tab.path) && (!(tab.card.kind === 'failed' || tab.card.kind === 'gone') || !tab.card.localOnly)) {
+        location = { kind: 'manual', path: tab.path }
+      }
+      const visible = tab.id === before.selected && displayed.current === tab.id ? latest.current.card : tab.card
+      tabs.push({ location, anchor: tab.id === before.selected && displayed.current === tab.id ? lens.current?.topLine() ?? tab.anchor ?? 0 : tab.anchor ?? 0,
+        lens: (tab.id === before.selected ? picked.current : tab.preferredLens) ?? (visible.kind === 'open' ? visible.lens ?? 'raw' : null),
+        ...(tab.card.kind === 'open' && tab.card.csvOptions ? { csvOptions: tab.card.csvOptions } : {}) })
+    }
+    if (workspace.getSnapshot() !== before) return null
+    return { tabs, selected: before.tabs.findIndex(tab => tab.id === before.selected), weight: 1 }
+  }
+
+  async function restoreFolderEntry(saved: SessionTab): Promise<WorkspaceTab | undefined> {
+    if (saved.location.kind !== 'folder') return undefined
+    const location = saved.location
+    const root = folders.current.find(root => root.path === location.root.path && root.identity === location.root.identity && !root.unavailable)
+    if (!root || root.ref.session !== currentSession.current) return undefined
+    const operation = Symbol()
+    shared.pendingFolders.current.set(operation, 128 * 16_384 + 128 * 65_536)
+    try {
+      if (!await metadata(current => chargeWorkspace(workspace.getSnapshot().tabs, current))) return undefined
+      let directory: FolderRef = root.ref
+      for (let index = 0; index < location.segments.length; index++) {
+        let cursor: string | undefined, found: FolderEntry | undefined
+        do {
+          const page = await core.call('listFolder', { folder: directory, cursor, hidden: true })
+          found = page.entries.find(entry => entry.name === location.segments[index])
+          cursor = page.cursor
+        } while (!found && cursor)
+        if (!found) return undefined
+        if (index < location.segments.length - 1) {
+          if (found.kind !== 'directory') return undefined
+          directory = found.ref
+        } else {
+          if (found.kind !== 'file') return undefined
+          await openFolderChild(root.id, found.ref.node, found, saved)
+          return workspace.getSnapshot().tabs.find(tab => tab.card.kind === 'open' && tab.card.opened.folder?.root === root.id && tab.card.opened.folder.node === found!.ref.node)
+        }
+      }
+    } catch { /* A changed or missing route requires explicit reselection, never a path fallback. */ }
+    finally { shared.pendingFolders.current.delete(operation); releaseEmptyWorkspace() }
+    return undefined
+  }
+
+  async function restoreSession(saved: SessionCard): Promise<void> {
+    const restored: TabId[] = []
+    for (const entry of saved.tabs) {
+      let restoredTab: WorkspaceTab | undefined
+      // Brief §4.6: a network share is never touched at launch; its tab waits for a click on Retry.
+      const network = entry.location.kind === 'manual' && await core.call('networkPath', { path: entry.location.path }).catch(() => true)
+      if (entry.location.kind === 'manual' && !network) {
+        await open(entry.location.path, entry.anchor)
+        restoredTab = workspace.find(manualKey(entry.location.path))
+      } else if (entry.location.kind === 'folder') restoredTab = await restoreFolderEntry(entry)
+      if (restoredTab) {
+        const tab = restoredTab
+        restored.push(tab.id)
+        workspace.remember(tab.id, entry.anchor, entry.lens)
+        if (tab.card.kind === 'open') {
+          workspace.updateDocument({ session: tab.session, doc: tab.card.opened.doc, gen: tab.card.opened.gen }, card => ({ ...card, csvOptions: entry.csvOptions }))
+          picked.current = entry.lens
+          const doc = tab.card.opened.doc
+          setCard(card => card.kind === 'open' && card.opened.doc === doc ? { ...card, csvOptions: entry.csvOptions } : card)
+        }
+      } else {
+        // A share keeps its manual key, so it's saved as manual again until the click opens it.
+        const key = network ? manualKey(entry.location.path) : 'reselect:' + entry.location.path
+        if (!await metadata(current => chargeWorkspace([...workspace.getSnapshot().tabs, { key, path: entry.location.path }], current))) continue
+        leave()
+        const requested = workspace.beginOpen(key, entry.location.path)
+        if (requested.kind !== 'open') continue
+        const blocked: Extract<Card, { kind: 'failed' }> = network
+          ? { kind: 'failed', path: entry.location.path, code: 'Refused', message: 'Not opened at launch', network: true }
+          : { kind: 'failed', path: entry.location.path, code: 'Refused', message: 'The source must be selected again after restart', localOnly: true }
+        workspace.complete(requested.ticket, key, blocked)
+        workspace.remember(requested.ticket.tab, entry.anchor, entry.lens)
+        display(requested.ticket.tab, blocked)
+        restored.push(requested.ticket.tab)
+      }
+    }
+    const selected = restored[saved.selected]
+    if (selected) await selectTab(selected, true)
+  }
+
   useEffect(() => {
     const handle: ReaderHandle = {
       ready: () => surface.current || readyError.current ? Promise.resolve() : new Promise<void>(done => readyWaiters.current.push(done)),
       open: openNamed, openChild: openFolderChild, openDerived, navigateLocal: openLocal, pick, reload, back, close: () => close(), reopen: reopenClosed, clearClosed,
       cycle: step => { const state = workspace.getSnapshot(); const index = state.tabs.findIndex(tab => tab.id === state.selected); if (state.tabs.length) void selectTab(state.tabs[(index + step + state.tabs.length) % state.tabs.length].id) },
       find: findAction,
+      goTo: openGoTo,
+      copy: copyAction,
+      print: printAction,
+      captureSession, restoreSession, selectTab,
       capture: async () => {
         const c = latest.current.card
         if (c.kind !== 'open' || navigating.current || !latest.current.limits) return null
@@ -1284,12 +1546,50 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   }, [])
 
   return <section className={preview ? 'reader-card preview-reader' : 'reader-card'} role="region" aria-label={preview ? 'Preview reader' : 'Reader card ' + label} data-card={id} data-focused={focused || undefined} onPointerDownCapture={onFocus} onFocusCapture={onFocus}
-    onKeyDown={event => { if (!event.defaultPrevented && event.key === 'Escape' && !event.nativeEvent.isComposing && findAction('close')) { event.preventDefault(); event.stopPropagation() } }}>
+    onKeyDown={event => {
+      if (event.defaultPrevented || event.key !== 'Escape' || event.nativeEvent.isComposing) return
+      if (printOpen) { closePrint(); event.preventDefault(); event.stopPropagation(); return }
+      if (goToOpen) { setGoToOpen(false); lens.current?.focus(); event.preventDefault(); event.stopPropagation(); return }
+      if (findAction('close')) { event.preventDefault(); event.stopPropagation() }
+    }}>
       {preview ? null : <FileTabs panelId={'file-card-' + id} tabs={snapshot.tabs} selected={snapshot.selected} onSelect={(id) => void selectTab(id)} onClose={(id) => close(id)} />}
       <div className="card">
         <div className="file-card-panel" id={'file-card-' + id} role={snapshot.selected ? 'tabpanel' : undefined} aria-labelledby={snapshot.selected ? `file-label-${snapshot.selected}` : undefined}>
         {(workspaceNotice || focused && windowNotice) ? <div className="banner" role="status">{workspaceNotice || windowNotice}</div> : null}
         {findOpen ? <FindBar controller={findController} query={findQuery} matchCase={findCase} onQuery={setFindQuery} onCase={setFindCase} onClose={() => findAction('close')} /> : null}
+        {goToOpen ? (
+          <form className="go-to-bar" aria-label={`Go to ${card.kind === 'open' && card.csv ? 'row' : 'line'}`} onSubmit={submitGoTo}>
+            <label htmlFor={`go-to-${id}`}>Go to {card.kind === 'open' && card.csv ? 'row' : 'line'}</label>
+            <input ref={goToInput} id={`go-to-${id}`} type="number" min="1" step="1" inputMode="numeric" value={goToValue} onChange={event => setGoToValue(event.target.value)} />
+            <button type="submit">Go</button>
+            <button type="button" aria-label="Close go to" onClick={() => { setGoToOpen(false); lens.current?.focus() }}>×</button>
+          </form>
+        ) : null}
+        {printOpen && printPlan ? (() => {
+          const range = selectedPrintRange(printPlan)
+          const pages = range?.pages ?? 0
+          return <form className="print-sheet" role="dialog" aria-modal="true" aria-labelledby={`print-title-${id}`} onSubmit={event => { void submitPrint(event) }}>
+            <h2 id={`print-title-${id}`}>Print {path ? fileName(path) : 'document'}</h2>
+            <p>{printPlan.total.toLocaleString()} {printPlan.unit}s · estimated {printPlan.totalPages.toLocaleString()} pages</p>
+            <fieldset disabled={printBusy || !printPlan.indexed}>
+              <legend>Range</legend>
+              <label><input type="radio" name={`print-range-${id}`} checked={printMode === 'around'} onChange={() => setPrintMode('around')} /> Pages around current view</label>
+              {printPlan.allFits ? <label><input type="radio" name={`print-range-${id}`} checked={printMode === 'all'} onChange={() => setPrintMode('all')} /> All</label> : null}
+              <label><input type="radio" name={`print-range-${id}`} checked={printMode === 'custom'} onChange={() => setPrintMode('custom')} /> Custom {printPlan.unit} range</label>
+              {printMode === 'custom' ? <div className="print-range-inputs">
+                <label>From <input type="number" min="1" max={printPlan.total} value={printStart} onChange={event => setPrintStart(event.target.value)} /></label>
+                <label>To <input type="number" min="1" max={printPlan.total} value={printEnd} onChange={event => setPrintEnd(event.target.value)} /></label>
+              </div> : null}
+            </fieldset>
+            <p role="status">Selected range: {range ? `${range.pages} page${range.pages === 1 ? '' : 's'}` : 'invalid or over the 1,000-page job limit'}</p>
+            {pages > 50 ? <label className="print-confirm"><input type="checkbox" checked={printConfirmed} onChange={event => setPrintConfirmed(event.target.checked)} /> Confirm print job of {pages} pages</label> : null}
+            {printBusy ? <p role="status">Preparing print document… Press Escape to cancel.</p> : null}
+            <div className="print-actions">
+              <button type="button" autoFocus onClick={closePrint}>{printBusy ? 'Cancel' : 'Close'}</button>
+              <button type="submit" disabled={printBusy || !printPlan.indexed || !range || pages > 50 && !printConfirmed}>Continue to print…</button>
+            </div>
+          </form>
+        })() : null}
         {card.kind === 'open' ? (
           <>
             {shown.lenses ? (
@@ -1298,12 +1598,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
                 {progress}
                 {banner}
                 <div className="card-body">
-                  <TabPanel id={secondaryLens} className="lens-panel">
-                    {shown.lenses.showing === secondaryLens ? body : null}
-                  </TabPanel>
-                  <TabPanel id="raw" className="lens-panel">
-                    {shown.lenses.showing === 'raw' ? body : null}
-                  </TabPanel>
+                  {lensOptions.map(option => <TabPanel key={option.id} id={option.id} className="lens-panel">{shown.lenses?.showing === option.id ? body : null}</TabPanel>)}
                 </div>
               </Tabs>
             ) : (
@@ -1369,19 +1664,22 @@ interface LensHostProps {
   indexed: boolean
   limits: Limits
   frozen: boolean
-  mode: 'raw' | 'rendered' | 'grid'
+  mode: 'raw' | 'rendered' | 'grid' | StructuredMode
+  structured?: StructuredSource
+  onRows?(): void
   csv?: CsvInfo
   csvOptions?: CsvOptions
   onCsvInfo?(info: CsvInfo): void
   build?: MdBuild
   onFrozen(why: string): void
+  notice(message: string): void
   onShowRaw(line: number): void
   onOpenLocal(target: string, path: string, gesture: LocalGesture): Promise<boolean>
   onDisposed(opened: Opened): void
 }
 
 /** Mounts Raw or Rendered into the card body. A switch or Reload of this document keeps the previous lens's top line. */
-function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place, hadFocus, restoreFocus, atLine, opened, name, lines, indexed, limits, frozen, mode, build, csv, csvOptions, onCsvInfo, onFrozen, onShowRaw, onOpenLocal, onDisposed }: LensHostProps) {
+function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place, hadFocus, restoreFocus, atLine, opened, name, lines, indexed, limits, frozen, mode, build, csv, csvOptions, onCsvInfo, structured, onRows, onFrozen, notice, onShowRaw, onOpenLocal, onDisposed }: LensHostProps) {
   const host = useRef<HTMLDivElement>(null)
   const onFrozenNow = useRef(onFrozen)
   onFrozenNow.current = onFrozen
@@ -1402,7 +1700,9 @@ function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place
     jumpTo.current = undefined
     const onFrozenHere = (why: string) => onFrozenNow.current(why)
     let view: ShownLens
-    if (mode === 'grid' && csv) {
+    if (structured && (mode === 'tree' || mode === 'rows' || mode === 'table' || mode === 'transcript')) {
+      view = new StructuredLens(host.current!, core, opened, structured, mode, { budget, atLine: at, notice, onFrozen: onFrozenHere, onShowRaw: line => onShowRawNow.current(line), onRows: () => onRows?.() })
+    } else if (mode === 'grid' && csv) {
       view = new GridLens(host.current!, core, opened, csv, limits, { atLine: at, options: csvOptions ?? CSV_OPTIONS,
         onFrozen: onFrozenHere, budget, onInfo: info => onCsvInfoNow.current?.(info),
         onShowRaw: line => onShowRawNow.current(line) })
@@ -1420,7 +1720,7 @@ function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place
         retained.current = { session, doc: opened.doc, gen: opened.gen, view: made }
         view = made
       }
-    } else view = new RawLens(host.current!, core, opened, name, limits, { onFrozen: onFrozenHere, atLine: at, budget: budget ?? undefined })
+    } else view = new RawLens(host.current!, core, opened, name, limits, { onFrozen: onFrozenHere, atLine: at, budget: budget ?? undefined, notice })
     lens.current = view
     onFind(view.find)
     // A Markdown reload mounts Raw first, then Rendered. Focusing Raw would consume the flag before Rendered exists.
@@ -1439,7 +1739,7 @@ function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place
       else view.dispose(false)
       onDisposedNow.current(opened)
     }
-  }, [core, session, budget, retained, opened, name, limits, lens, atLine, mode, build, csv?.ref.revision, csvOptions, jumpTo, place, hadFocus, restoreFocus])
+  }, [core, session, budget, retained, opened, name, limits, lens, atLine, mode, build, csv?.ref.revision, csvOptions, structured, jumpTo, place, hadFocus, restoreFocus])
   useEffect(() => lens.current?.setLineCount(lines), [lines])
   useEffect(() => {
     if (indexed) lens.current?.indexDone()
@@ -1447,5 +1747,5 @@ function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place
   useEffect(() => {
     if (frozen) lens.current?.freeze()
   }, [frozen])
-  return <div className={mode === 'grid' ? 'grid-host' : mode === 'rendered' ? 'rendered-host' : 'raw-host'} ref={host} data-gen={opened.gen} data-lens={mode} />
+  return <div className={['tree', 'rows', 'table', 'transcript'].includes(mode) ? 'structured-host' : mode === 'grid' ? 'grid-host' : mode === 'rendered' ? 'rendered-host' : 'raw-host'} ref={host} data-gen={opened.gen} data-lens={mode} />
 }

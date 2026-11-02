@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path'
 import { FIXTURES, finish, launch, test, waitIndexed, waitOpen } from './app'
 import { FIRST_FRAME, MARKS, type Marks, outcome, scanGate, scanMarks, vetoControls } from './z37'
 
-const ONE_LINE = join(FIXTURES, '1gib-one-line.jsonl')
+const ONE_LINE = join(FIXTURES, '1gib-one-line.txt') // .txt: a .jsonl name would open in Rows, and this exercises Raw
 /** Brief §8.2's indexing indicator, "Indexing N lines…", with N as the card writes it (compact: "1.2M"). */
 const INDEXING = /^Indexing [\d.]+[KMBT]? lines?…$/
 

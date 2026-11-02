@@ -9,9 +9,10 @@ export interface FolderNode extends Omit<FolderNodeView, 'children'> {
 export interface RootView extends Omit<FolderRootView, 'node'> {
   ref: FolderRef
   node: FolderNode
+  identity?: string
 }
 
-export const rootView = (root: FolderRoot): RootView => ({ id: root.ref.root, ref: root.ref, path: root.path,
+export const rootView = (root: FolderRoot): RootView => ({ id: root.ref.root, ref: root.ref, path: root.path, identity: root.identity,
   node: { id: root.ref.node, ref: root.ref, name: root.label, kind: 'directory', expanded: true } })
 export const entryView = (entry: FolderEntry): FolderNode => ({ id: entry.ref.node, ref: entry.ref, name: entry.name, kind: entry.kind })
 

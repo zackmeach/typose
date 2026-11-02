@@ -30,7 +30,7 @@ test('a missing file shows where it was looked for, with Locate… and Close', a
   await expect(win.locator('.card-message p')).toHaveText(`File not found at ${missing}`)
   await expect(win.locator('.card-message .open-button')).toHaveText(['Locate…', 'Close'])
   await win.getByRole('button', { name: 'Close', exact: true }).click()
-  await expect(win.locator('.card-message .open-button')).toHaveText(['Open file…'])
+  await expect(win.locator('.card-message .open-button')).toHaveText([/^Open file…/, 'Open folder…'])
   await finish(l)
 })
 
@@ -104,7 +104,7 @@ test('a same-size write freezes the document with nothing new shown; Ctrl+R relo
 test("the opening line's sweep holds still under reduced motion (brief §6.6, §9)", async () => {
   const l = await launch()
   const { win } = l
-  await expect(win.locator('.open-button')).toBeVisible()
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   // The indeterminate line shows only during a slow open, so the same element is mounted here to read its styles.
   const animations = () =>
     win.evaluate(() => {

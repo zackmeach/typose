@@ -10,6 +10,8 @@ use crate::bytemap::{ByteMap, MapBuilder};
 use crate::doc::{DocError, Document};
 use crate::encoding::decode_prefix;
 use crate::store::cancelled;
+#[path = "csv_metadata.rs"]
+pub mod metadata;
 
 pub const CP_BYTES: u64 = 1 << 20;
 pub const READ_BYTES: usize = 64 << 10;
@@ -218,6 +220,7 @@ pub struct Index {
     pub done: bool,
     pub expected_columns: u64,
     pub max_columns: u64,
+    pub metadata: metadata::Metadata,
     _charge: Reservation,
 }
 pub struct Csv {
@@ -286,12 +289,14 @@ impl Csv {
                 done: locked,
                 expected_columns: 0,
                 max_columns: 0,
+                metadata: metadata::Metadata::new(),
                 _charge: charge,
             }),
         })
     }
     pub fn charged(&self) -> u64 {
-        self.index.read().unwrap()._charge.bytes()
+        let index = self.index.read().unwrap();
+        index._charge.bytes() + index.metadata.charged()
     }
     fn publish_row(&self, event: &Event) {
         if let Event::Field { row: Some(row), .. } = event {
@@ -300,6 +305,8 @@ impl Csv {
                 index.expected_columns = row.fields;
             }
             index.max_columns = index.max_columns.max(row.fields);
+            let expected = index.expected_columns;
+            index.metadata.row(*row, expected, self.header);
         }
     }
     pub fn build(&self, doc: &Document, mut progress: impl FnMut(u64, u64, bool) -> bool) -> Result<(), DocError> {
@@ -320,25 +327,70 @@ impl Csv {
         let mut scan = self.index.read().unwrap().checkpoints[0].clone();
         let mut next_cp = scan.pos + CP_BYTES;
         let mut out = [0u8; 4096];
+        let mut sample = Vec::with_capacity(metadata::SAMPLE_FIELD_BYTES);
+        let mut sample_more = false;
         loop {
             check_cancel()?;
             let until = (scan.pos + READ_BYTES as u64).min(next_cp).min(doc.len());
             let bytes = read(doc, self.generation, scan.pos, until)?;
             let base = scan.pos;
+            if self.encoding == UTF_8 {
+                self.index.write().unwrap().metadata.utf8(&bytes, base, until == doc.len());
+            }
             while scan.pos < until {
                 check_cancel()?;
-                let event = scan.step(&bytes[(scan.pos - base) as usize..], &mut out, |_, _| {});
+                let sampling = scan.record < metadata::SAMPLE_ROWS + u64::from(self.header);
+                let event = scan.step(&bytes[(scan.pos - base) as usize..], &mut out, |byte, _| {
+                    if sampling {
+                        if sample.len() < metadata::SAMPLE_FIELD_BYTES {
+                            sample.push(byte);
+                        } else {
+                            sample_more = true;
+                        }
+                    }
+                });
+                if let Event::Field { record, column, .. } = &event {
+                    if sampling {
+                        let text = self.encoding.decode_without_bom_handling(&sample).0;
+                        self.index.write().unwrap().metadata.sample(
+                            *record,
+                            *column,
+                            self.header,
+                            &text,
+                            !sample_more,
+                        )?;
+                    }
+                    sample.clear();
+                    sample_more = false;
+                }
                 self.publish_row(&event);
             }
             if scan.pos == doc.len() {
                 if scan.in_record {
-                    let event = scan.step(&[], &mut out, |_, _| {});
+                    let event = scan.step(&[], &mut out, |byte, _| {
+                        if sample.len() < metadata::SAMPLE_FIELD_BYTES {
+                            sample.push(byte);
+                        } else {
+                            sample_more = true;
+                        }
+                    });
+                    if let Event::Field { record, column, .. } = &event {
+                        let text = self.encoding.decode_without_bom_handling(&sample).0;
+                        self.index.write().unwrap().metadata.sample(
+                            *record,
+                            *column,
+                            self.header,
+                            &text,
+                            !sample_more,
+                        )?;
+                    }
                     self.publish_row(&event);
                 }
                 let mut index = self.index.write().unwrap();
                 index.records = scan.record;
                 index.indexed_bytes = scan.pos;
                 index.done = true;
+                index.metadata.finish();
                 drop(index);
                 progress(scan.record, scan.pos, true);
                 return Ok(());
@@ -645,6 +697,23 @@ mod tests {
             };
             assert_eq!(parse(&mut copied), parse(&mut reader));
         }
+    }
+    #[test]
+    fn metadata_samples_actual_unescaped_values_and_groups_full_file_problems() {
+        let mut bytes = Vec::new();
+        for record in 0..15 {
+            bytes.extend_from_slice(format!("{},\"blue\",3.10\n", record).as_bytes());
+        }
+        bytes.extend_from_slice(b"late,red\nlast,\xff,1,extra\n");
+        let (_path, doc, csv) = csv(&bytes, b',');
+        let index = csv.index.read().unwrap();
+        assert!(index.metadata.done);
+        assert_eq!(index.metadata.columns[2].kind, "number");
+        assert_eq!(index.metadata.columns[2].pills, None);
+        assert_eq!(index.metadata.problems.iter().find(|problem| problem.kind == "ragged").unwrap().count, 2);
+        assert_eq!(index.metadata.problems.iter().find(|problem| problem.kind == "decoding").unwrap().count, 1);
+        drop(index);
+        assert_eq!(csv.piece(&doc, 0, 2, None).unwrap().text, "3.10");
     }
     #[test]
     fn newline_less_row_and_original_quoted_spans_are_preserved() {

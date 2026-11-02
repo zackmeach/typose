@@ -1,4 +1,4 @@
-import type { Limits, MdBuild, MdItem, Opened } from '../../shared/protocol'
+import { MAX_CLIPBOARD_BYTES, MAX_PRINT_BYTES, MAX_PRINT_PAGES, type Limits, type MdBuild, type MdItem, type Opened } from '../../shared/protocol'
 import { type CoreClient, CoreCallError, testHooks } from '../core'
 import { renderedCharge } from './rendered-charge'
 import { viewportCap } from './raw'
@@ -6,6 +6,10 @@ import type { LensBudget } from './lens-budget'
 import { RenderedImages } from './images'
 import type { LocalGesture } from '../reader-window'
 import { RenderedFind } from './rendered-find'
+import { markdownPrintNodes } from './markdown-print'
+import { PRINT_LINES_PER_PAGE, type PrintPayload, type PrintPlan } from '../print'
+import { utf8ByteLength } from './grid-interactions'
+import { copySourceSpan } from './source-copy'
 
 export { RENDERED_PER_UNIT, renderedCharge } from './rendered-charge'
 
@@ -54,6 +58,12 @@ export class RenderedLens {
   private linkGeneration = 0
   private focusJump = false
   private readonly reserved: number
+  private indexed: boolean
+  private totalLines: number
+  private copyAll = false
+  private copyAbort: AbortController | undefined
+  private copyToken: string | null = null
+  private copyStatus: HTMLDivElement
 
   constructor(
     host: HTMLElement,
@@ -64,6 +74,8 @@ export class RenderedLens {
     private readonly options: RenderedOptions
   ) {
     this.blocks = build.blocks
+    this.indexed = opened.indexed
+    this.totalLines = opened.lines
     this.reserved = renderedCharge(build)
     this.atLine = options.atLine
     this.shown = options.atLine ?? 0
@@ -73,7 +85,9 @@ export class RenderedLens {
     this.scroller.setAttribute('aria-label', 'Rendered')
     this.column = document.createElement('div')
     this.column.className = 'md-column'
-    this.scroller.append(this.column)
+    this.copyStatus = Object.assign(document.createElement('div'), { className: 'md-copy-status' })
+    this.copyStatus.setAttribute('role', 'status')
+    this.scroller.append(this.column, this.copyStatus)
     host.append(this.scroller)
     this.element = this.scroller
     this.find = new RenderedFind(this.scroller, this.column, () => this.cursor >= this.blocks, options.budget, opened.gen)
@@ -89,6 +103,18 @@ export class RenderedLens {
         this.atLine = undefined
         this.focusJump = false
       }, { passive: true })
+    this.scroller.addEventListener('keydown', event => {
+      if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'a' && !(event.target instanceof HTMLInputElement)) {
+        event.preventDefault()
+        this.copyAll = true
+        this.cancelCopy()
+        this.copyStatus.textContent = 'All source text selected · press Ctrl+C to copy'
+      } else if (!['Control', 'Meta', 'Shift', 'Alt'].includes(event.key) && !((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c')) {
+        this.copyAll = false
+        this.cancelCopy()
+      }
+    }, { capture: true })
+    for (const type of ['pointerdown', 'wheel'] as const) this.scroller.addEventListener(type, () => { this.copyAll = false; this.cancelCopy() }, { passive: true })
     // Remember the top line while the view is on screen. Unmount hides the panel first, and every block's box is then
     // empty, so reading geometry in dispose would report the last block.
     this.scroller.addEventListener('scroll', () => this.remember(), { passive: true })
@@ -103,7 +129,8 @@ export class RenderedLens {
         retiredReserved: this.options.budget?.snapshot().retired ?? 0,
         totalReserved: this.options.budget?.snapshot().total ?? this.reserved,
         blocks: this.blocks,
-        appended: this.column.childElementCount
+        appended: this.column.childElementCount,
+        copyAll: this.copyAll
       })
     this.schedule()
   }
@@ -140,13 +167,139 @@ export class RenderedLens {
     this.scroller.focus()
   }
 
+  /** Go to a one-based source line; the build's progressive page pump will reach distant blocks. */
+  goTo(lineNumber: number): void {
+    if (!Number.isSafeInteger(lineNumber) || lineNumber < 1 || this.stopped || this.paused) return
+    this.atLine = lineNumber - 1
+    this.moved = false
+    this.focusJump = true
+    delete this.scroller.dataset.ready
+    this.settle()
+    this.schedule()
+  }
+
+  /** Ctrl+A then Copy returns the original source; a partial visual selection needs per-run native maps. */
+  async copy(): Promise<boolean> {
+    this.cancelCopy()
+    const token = window.typose.beginClipboardWrite()
+    if (!token) { this.copyStatus.textContent = 'Copy unavailable · use the reader Copy command'; return false }
+    if (!this.copyAll) {
+      window.typose.cancelClipboardWrite(token)
+      const selected = window.getSelection()
+      const node = selected?.anchorNode instanceof Element ? selected.anchorNode : selected?.anchorNode?.parentElement
+      this.copyStatus.textContent = node && this.scroller.contains(node)
+        ? 'Partial Rendered copy is unavailable until this selection has a source map'
+        : 'Press Ctrl+A in Rendered, then Copy to copy the complete source'
+      return false
+    }
+    const view = this.opened.view, owner = this.options.budget, generation = this.opened.gen
+    if (!view || !owner || this.opened.size > MAX_CLIPBOARD_BYTES) {
+      window.typose.cancelClipboardWrite(token)
+      this.copyStatus.textContent = 'Copy refused · source is unavailable or exceeds the 16 MiB limit'
+      return false
+    }
+    const controller = new AbortController()
+    this.copyAbort = controller
+    this.copyToken = token
+    const current = () => this.copyAbort === controller && !controller.signal.aborted && !this.stopped && !this.paused && this.copyAll && owner.current(generation)
+    this.copyStatus.textContent = 'Preparing source copy…'
+    try {
+      const copied = await copySourceSpan({
+        valid: current,
+        reserve: bytes => owner.reserveCopy(generation, bytes),
+        read: (start, count, signal) => this.core.call('sourceBytes', { view, start, count }, signal),
+        verify: signal => this.core.call('sourceVerify', { view, start: 0, end: this.opened.size }, signal),
+        confirm: async bytes => window.confirm(`Copy ${new Intl.NumberFormat('en').format(bytes)} bytes to the clipboard?`),
+        write: text => window.typose.writeClipboardText(text, token),
+        cancelWrite: () => window.typose.cancelClipboardWrite(token),
+        status: message => { this.copyStatus.textContent = message }
+      }, 0, this.opened.size, this.opened.encoding, controller.signal)
+      if (copied) this.copyStatus.textContent = 'Copied source text'
+      else if (controller.signal.aborted) this.copyStatus.textContent = 'Copy cancelled'
+      return copied
+    } catch (error) {
+      if (!controller.signal.aborted) this.copyStatus.textContent = error instanceof Error ? `Copy failed · ${error.message}` : 'Copy failed'
+      return false
+    } finally {
+      await owner.reserveCopy(generation, 0)
+      if (this.copyAbort === controller) this.copyAbort = undefined
+      if (this.copyToken === token) this.copyToken = null
+      window.typose.cancelClipboardWrite(token)
+    }
+  }
+
+  private cancelCopy(): void {
+    this.copyAbort?.abort()
+    this.copyAbort = undefined
+    if (this.copyToken) window.typose.cancelClipboardWrite(this.copyToken)
+    this.copyToken = null
+  }
+
+  printPlan(): PrintPlan {
+    const pages = Math.ceil(this.totalLines / PRINT_LINES_PER_PAGE)
+    return { unit: 'line', total: this.totalLines, current: this.topLine(), indexed: this.indexed, totalPages: pages,
+      allFits: this.indexed && pages <= MAX_PRINT_PAGES && this.opened.size <= MAX_PRINT_BYTES }
+  }
+
+  async printRange(start: number, end: number, signal: AbortSignal): Promise<PrintPayload> {
+    const generation = this.opened.gen
+    const current = () => !signal.aborted && !this.stopped && !this.paused && this.indexed && this.options.budget?.current(generation) !== false
+    if (!current() || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start || end > this.totalLines)
+      throw new Error('The Markdown print range is no longer available')
+    const owner = this.options.budget
+    if (!owner || !await owner.reserveCopy(generation, 512 << 10)) throw new Error('Print is unavailable · the memory budget is full')
+    const blocks: import('../../shared/protocol').PrintNode[] = []
+    let jsonBytes = 0, cursor = 0, visited = 0
+    let retained = true
+    try {
+      while (cursor < this.blocks && current()) {
+        const page = await this.core.call('page', { doc: this.opened.doc, lens: 'rendered', gen: generation, start: cursor, count: 64 }, signal)
+        if (!current() || !('items' in page) || !page.items.length) break
+        const items = page.items as MdItem[]
+        const last = items.at(-1)!
+        if (last.block < cursor) throw new Error('The Markdown print index returned an invalid block')
+        cursor = last.block + 1
+        for (const item of items) {
+          if (item.line >= end || item.line + item.lines <= start) continue
+          if (!await owner.reserveCopy(generation, (512 << 10) + jsonBytes * 4 + item.html.length * 8 + visited * 64))
+            throw new Error('Print is unavailable · the memory budget is full')
+          const rendered = markdownPrintNodes(item.html, item.note)
+          const chunkBytes = utf8ByteLength(JSON.stringify(rendered))
+          jsonBytes += chunkBytes
+          visited += rendered.length
+          if (jsonBytes > MAX_PRINT_BYTES || visited > 100_000 || !await owner.reserveCopy(generation, (512 << 10) + jsonBytes * 4 + visited * 64))
+            throw new Error('The selected Markdown range exceeds the bounded print budget')
+          blocks.push(...rendered)
+        }
+      }
+      if (!current()) throw new Error('The Markdown print job was cancelled or the source changed')
+      if (!blocks.length) blocks.push({ tag: 'p', children: [{ text: 'No rendered blocks in this range.' }] })
+      const serializedBytes = utf8ByteLength(JSON.stringify(blocks))
+      if (serializedBytes > MAX_PRINT_BYTES || !await owner.reserveCopy(generation, (512 << 10) + jsonBytes * 4 + serializedBytes * 2 + visited * 64))
+        throw new Error('The selected Markdown range exceeds the bounded print budget')
+      retained = false
+      let released = false
+      return {
+        blocks, pages: Math.ceil((end - start) / PRINT_LINES_PER_PAGE),
+        verify: async checkSignal => {
+          if (checkSignal.aborted || !current() || !this.opened.view) return false
+          const range = await this.core.call('sourceLineRange', { view: this.opened.view, startLine: start, count: end - start }, checkSignal)
+          return !checkSignal.aborted && current() && await this.core.call('sourceVerify', { view: this.opened.view, start: range.start, end: range.end }, checkSignal)
+        },
+        release: async () => { if (released) return; released = true; await owner.reserveCopy(generation, 0) }
+      }
+    } finally {
+      if (retained) await owner.reserveCopy(generation, 0)
+    }
+  }
+
   /** The line index is Raw's. Rendered's lines come from the build. */
-  setLineCount(): void {
-    /* the build already numbered every block */
+  setLineCount(lines: number): void {
+    this.totalLines = Math.max(this.totalLines, lines)
   }
 
   indexDone(): void {
-    /* nothing was fetched against the index */
+    this.indexed = true
   }
 
   /** A freeze keeps what's shown (plan §2.2). Pages of the build don't read the file, so they may finish. */
@@ -190,6 +343,7 @@ export class RenderedLens {
 
   /** `release` is Raw's. Closing the document releases the reservation; a lens switch must not zero it first. */
   dispose(_release = true): void {
+    this.cancelCopy()
     this.find.destroy()
     this.stopped = true
     this.images.dispose()

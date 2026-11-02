@@ -101,7 +101,7 @@ test('packaged Ctrl+Shift+T reopens a closed scrolled text file at the same line
     const savedLine = before[0].line
 
     await win.getByRole('button', { name: 'Close scroll-place.txt', exact: true }).click()
-    await expect(win.locator('.open-button')).toBeVisible()
+    await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
     await win.keyboard.press(process.platform === 'darwin' ? 'Meta+Shift+T' : 'Control+Shift+T')
     await expect(win.locator('.card-name')).toHaveText('scroll-place.txt')
     await waitOpen(win)
@@ -127,16 +127,16 @@ test('packaged menu reopens a closed file and Clear recently closed tabs removes
     const win = l.page!
     await waitOpen(win)
     await openMenuItem(win, 'Close tab')
-    await expect(win.locator('.open-button')).toBeVisible()
+    await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
 
     await openMenuItem(win, 'Reopen closed tab')
     await expect(win.locator('.card-name')).toHaveText('menu-reopen.txt')
     await waitOpen(win)
     await openMenuItem(win, 'Close tab')
-    await expect(win.locator('.open-button')).toBeVisible()
+    await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
     await openMenuItem(win, 'Clear recently closed tabs')
     await openMenuItem(win, 'Reopen closed tab')
-    await expect(win.locator('.open-button')).toBeVisible()
+    await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
     await expect(win.locator('.file-tab')).toHaveCount(0)
     await closeCleanly(l)
     l = undefined

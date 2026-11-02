@@ -1,10 +1,12 @@
 import { expect } from '@playwright/test'
 import { cachedItems, finish, fixture, launch, test, visibleRows, waitIndexed, waitOpen } from './app'
 
-test('a file named on the command line opens into Raw, indexes and reaches its last line', async () => {
+test('a JSONL file named on the command line opens in Rows and reaches its last source line in Raw', async () => {
   const lines = Array.from({ length: 5000 }, (_, i) => `{"type":"tool","msg":"row ${i}"}`)
   const l = await launch({ file: fixture('open.jsonl', lines.join('\n')) })
   const { win } = l
+  await expect(win.getByRole('tab', { name: 'Rows', exact: true })).toHaveAttribute('aria-selected', 'true', { timeout: 30_000 })
+  await win.getByRole('tab', { name: 'Raw', exact: true }).click()
   await waitOpen(win)
   expect(await win.title()).toBe('open.jsonl — Typose')
   await expect(win.getByRole('region', { name: 'open.jsonl, Raw' })).toBeVisible()
