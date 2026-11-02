@@ -1,5 +1,6 @@
 import { expect } from '@playwright/test'
 import { join } from 'node:path'
+import { HOSTILE_MERMAID, HOSTILE_TEX } from '../app/renderer/math/hostile'
 import { FIXTURES, assertNetLog, finish, fixture, launch, test, waitIndexed } from './app'
 
 test('offline Markdown extras render securely and offscreen math/diagrams reach normalized print', async () => {
@@ -54,6 +55,28 @@ test('offline Markdown extras render securely and offscreen math/diagrams reach 
     })
     expect(refused.map(result => result.kind)).toEqual(['refused', 'refused', 'refused'])
     expect(await live.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)).toBe(windows)
+    expect(live.pageErrors).toEqual([])
+  } finally { await finish(live) }
+  expect(assertNetLog(netlog)).toContain('PASS: no Chromium network-stack activity')
+})
+
+test('every hostile Mermaid diagram type and hostile TeX settle in script-less frames or source, with no request', async () => {
+  const source = ['# Hostile', '', ...HOSTILE_MERMAID.flatMap(({ source }) => ['~~~~mermaid', source, '~~~~', '']),
+    ...HOSTILE_TEX.slice(0, 8).flatMap(tex => ['$$' + tex + '$$', ''])].join('\n')
+  const file = fixture('markdown-extras-hostile.md', source)
+  const netlog = join(FIXTURES, 'markdown-extras-hostile.netlog.json')
+  const live = await launch({ file, netlog, hooks: true })
+  try {
+    await expect(live.win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 60_000 })
+    // A diagram ends as a frame, its source with a problem marker, or its source with the budget note.
+    const settled = () => live.win.evaluate(() => [...document.querySelectorAll('.md-diagram')]
+      .filter(d => d.querySelector('iframe, .problem') || d.getAttribute('title')).length)
+    await expect.poll(settled, { timeout: 180_000 }).toBe(HOSTILE_MERMAID.length)
+    const frames = await live.win.evaluate(() => [...document.querySelectorAll('iframe')]
+      .map(f => f.getAttribute('sandbox') === '' && !!f.closest('.md-diagram') && !!f.getAttribute('src')?.startsWith('data:text/html;')))
+    expect(frames.length).toBeGreaterThan(0)
+    expect(frames.every(Boolean)).toBe(true)
+    expect(live.win.url()).toContain('typose://')
     expect(live.pageErrors).toEqual([])
   } finally { await finish(live) }
   expect(assertNetLog(netlog)).toContain('PASS: no Chromium network-stack activity')
