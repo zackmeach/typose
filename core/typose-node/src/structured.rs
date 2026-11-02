@@ -824,15 +824,20 @@ fn gist(
         && tool_like
     {
         let mut call = clip(&scalar(raw, store, name)?, 80);
-        let places = arguments.and_then(|c| c.container).into_iter().chain([container]);
-        for place in places {
-            if let Some(path) = path_argument(raw, store, index, place)? {
-                call = format!(
-                    "{call} {}",
-                    clip(path.rsplit(['/', '\\']).find(|part| !part.is_empty()).unwrap_or(&path), 80)
-                );
+        // JSON-encoded arguments (OpenAI's `arguments` string) are searched for a path key, never shown.
+        let mut path = match arguments.filter(|c| c.kind == json::Kind::String) {
+            Some(encoded) => embedded_path(&scalar(raw, store, encoded)?),
+            None => None,
+        };
+        for place in arguments.and_then(|c| c.container).into_iter().chain([container]) {
+            if path.is_some() {
                 break;
             }
+            path = path_argument(raw, store, index, place)?;
+        }
+        if let Some(path) = path {
+            call =
+                format!("{call} {}", clip(path.rsplit(['/', '\\']).find(|part| !part.is_empty()).unwrap_or(&path), 80));
         }
         return Ok(Some(Gist::Tool(call)));
     }
@@ -846,6 +851,25 @@ fn gist(
         }
     }
     Ok(None)
+}
+/// Never JSON: a path candidate that opens like an object or array, or holds a quote, is encoded data.
+fn plausible(text: &str) -> bool {
+    !text.is_empty() && !text.starts_with(['{', '[']) && !text.contains('"')
+}
+/// A known path key's string inside JSON-encoded arguments, found textually (`"key"`, `:`, then a string), so no
+/// second parser runs on the record; `\\` and `\/` are the only escapes a basename needs undone.
+fn embedded_path(text: &str) -> Option<String> {
+    PATH_KEYS.iter().find_map(|key| {
+        let at = text.find(&format!("\"{key}\""))? + key.len() + 2;
+        let value = text[at..].trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+        let mut escaped = false;
+        let (end, _) = value.char_indices().find(|&(_, c)| {
+            let quote = c == '"' && !escaped;
+            escaped = c == '\\' && !escaped;
+            quote
+        })?;
+        Some(value[..end].replace("\\\\", "\\").replace("\\/", "/")).filter(|path| plausible(path))
+    })
 }
 /// A known path key's string, else the first string that looks like a path: no whitespace, with a separator.
 fn path_argument(
@@ -865,6 +889,9 @@ fn path_argument(
         {
             let key = jsonl::read_string_encoding(store, key, raw.source_encoding())?;
             let text = scalar(raw, store, &child)?;
+            if !plausible(&text) {
+                return Ok(seen < 32);
+            }
             if PATH_KEYS.contains(&key.as_str()) {
                 named = Some(text);
             } else if looks.is_none() && text.contains(['/', '\\']) && !text.contains(char::is_whitespace) {

@@ -174,7 +174,9 @@ test('JSONL Rows compose readable summaries, tinted type pills and clock times, 
     { ts: '2026-11-01T12:04:13.722Z', type: 'tool', name: 'read_file', input: { path: 'docs/launch-plan.md' } },
     { time: '12:04:14.5', level: 'info', user: 42, ok: true, detail: { nested: 1 } },
     { created_at: 1730462653, event: 'note', summary: 'Pier survey booked' },
-    { level: 'error', msg: 'Crane offline' }
+    { level: 'error', msg: 'Crane offline' },
+    { name: 'read', arguments: JSON.stringify({ path: '/etc/hosts' }) },
+    { name: 'fetch', args: JSON.stringify({ q: 'x/z' }) }
   ]
   const live = await launch({ hooks: true, file: fixture('structured-summaries.jsonl', records.map(record => JSON.stringify(record)).join('\n') + '\n') })
   try {
@@ -190,6 +192,9 @@ test('JSONL Rows compose readable summaries, tinted type pills and clock times, 
     await expect(row(2).locator('.jsonl-time')).toHaveText('1730462653')
     await expect(row(3).locator('.jsonl-type')).toHaveAttribute('data-tint', '4')
     await expect(row(3).locator('.text')).toHaveText('Crane offline')
+    // OpenAI-style JSON-encoded arguments: the path is read from inside them, and their JSON never shows.
+    await expect(row(4).locator('.text')).toHaveText(`read hosts · ${Buffer.byteLength(JSON.stringify(records[4]))} B`)
+    await expect(row(5).locator('.text')).toHaveText(`fetch · ${Buffer.byteLength(JSON.stringify(records[5]))} B`)
     await expect(card.locator('.jsonl-row .text').filter({ hasText: '{"' })).toHaveCount(0)
     const expand = card.getByRole('button', { name: 'Expand row 1', exact: true })
     expect(await expand.evaluate(button => [getComputedStyle(button).backgroundColor, getComputedStyle(button).borderStyle])).toEqual(['rgba(0, 0, 0, 0)', 'none'])
@@ -201,7 +206,7 @@ test('JSONL Rows compose readable summaries, tinted type pills and clock times, 
       return next!.y - (detail!.y + detail!.height)
     }).toBeGreaterThanOrEqual(-0.5)
     expect((await row(0).boundingBox())!.height).toBeGreaterThan(64)
-    await expect(card.locator('.card-status')).toHaveText('4 lines · 4 parsed · 0 failed · 0 blank')
+    await expect(card.locator('.card-status')).toHaveText('6 lines · 6 parsed · 0 failed · 0 blank')
     await screenshot(live.win, 'jsonl-rows-summaries')
     expect(live.pageErrors).toEqual([])
   } finally { await finish(live) }
