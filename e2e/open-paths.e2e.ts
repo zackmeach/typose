@@ -70,6 +70,33 @@ test('a drop shows its target, opens files as tabs in the focused card and folde
   await finish(l)
 })
 
+test('a real drop, in the shipping build, opens a file as a tab and a folder as a root', async () => {
+  const file = fixture('open-paths-cdp.txt', 'dropped for real\n')
+  const root = folderFixture('open-paths-cdp-root', { 'real.md': '# Real\n' })
+  const l = await launch() // no test hooks: only a trusted drop's files have paths
+  const { win } = l
+  await expect(win.getByRole('heading', { name: 'Drop files or folders anywhere' })).toBeVisible({ timeout: 30_000 })
+  const cdp = await win.context().newCDPSession(win)
+  const box = (await win.locator('.card-row').boundingBox())!
+  // Chromium's own drag input, as the OS's would arrive: its files are real paths.
+  const drop = async (files: string[]) => {
+    const data = { items: [], files, dragOperationsMask: 1 }
+    for (const type of ['dragEnter', 'dragOver', 'drop'] as const)
+      await cdp.send('Input.dispatchDragEvent', { type, x: box.x + box.width / 2, y: box.y + box.height / 2, data })
+  }
+  await drop([file])
+  await expect(tabs(win)).toHaveText(['open-paths-cdp.txt'], { timeout: 30_000 })
+  await waitOpen(win)
+  expect((await visibleRows(win))[0]).toEqual({ line: 1, text: 'dropped for real' })
+  await drop([root])
+  await expect(win.getByRole('treeitem', { name: basename(root), exact: true })).toBeVisible({ timeout: 30_000 })
+  await expect(win.getByRole('treeitem', { name: 'real.md', exact: true })).toBeVisible()
+  await expect(tabs(win)).toHaveText(['open-paths-cdp.txt'])
+  expect(win.url()).toBe('typose://app/index.html')
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
 test('a UNC drop is refused before anything opens it, and text or link drags are ignored', async () => {
   const l = await launch({ hooks: true })
   const { win } = l
