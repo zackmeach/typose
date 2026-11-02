@@ -41,7 +41,30 @@ static AMMONIA: LazyLock<ammonia::Builder<'static>> = LazyLock::new(|| {
     let mut b = ammonia::Builder::empty();
     b.tags(RAW_TAGS.iter().chain(&OWN_TAGS).copied().collect())
         .tag_attributes(attrs.iter().map(|&(t, a)| (t, set(a))).collect::<HashMap<_, _>>())
-        .allowed_classes([("span", set(&["tp-img", "tp-math"])), ("code", set(&["language-mermaid", "language-ts", "language-typescript", "language-js", "language-javascript", "language-json", "language-rust", "language-python", "language-css", "language-html", "language-bash", "language-yaml"]))].into_iter().collect())
+        .allowed_classes(
+            [
+                ("span", set(&["tp-img", "tp-math"])),
+                (
+                    "code",
+                    set(&[
+                        "language-mermaid",
+                        "language-ts",
+                        "language-typescript",
+                        "language-js",
+                        "language-javascript",
+                        "language-json",
+                        "language-rust",
+                        "language-python",
+                        "language-css",
+                        "language-html",
+                        "language-bash",
+                        "language-yaml",
+                    ]),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        )
         .generic_attributes(HashSet::new()) // ammonia's default allows `lang` and `title` everywhere
         .url_schemes(["http", "https", "mailto"].into())
         .link_rel(None);

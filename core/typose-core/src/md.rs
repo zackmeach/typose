@@ -511,20 +511,35 @@ fn mapped_text(text: &str, source: &str, range: Range<usize>, bytes: &[u64], cod
             let mut chars = body.char_indices().peekable();
             while let Some((at, ch)) = chars.next() {
                 let mut end = at + ch.len_utf8();
-                if ch == '\r' && chars.peek().is_some_and(|&(_, c)| c == '\n') { end = chars.next().unwrap().0 + 1; }
-                atoms.push((if matches!(ch, '\r' | '\n') { ' ' } else { ch }, range.start + fence + at..range.start + fence + end));
+                if ch == '\r' && chars.peek().is_some_and(|&(_, c)| c == '\n') {
+                    end = chars.next().unwrap().0 + 1;
+                }
+                atoms.push((
+                    if matches!(ch, '\r' | '\n') { ' ' } else { ch },
+                    range.start + fence + at..range.start + fence + end,
+                ));
             }
-            if atoms.first().is_some_and(|a| a.0 == ' ') && atoms.last().is_some_and(|a| a.0 == ' ') && atoms.iter().any(|a| a.0 != ' ') {
-                atoms.pop(); atoms.remove(0);
+            if atoms.first().is_some_and(|a| a.0 == ' ')
+                && atoms.last().is_some_and(|a| a.0 == ' ')
+                && atoms.iter().any(|a| a.0 != ' ')
+            {
+                atoms.pop();
+                atoms.remove(0);
             }
         }
         (atoms.iter().map(|a| a.0).collect::<String>() == text).then_some(atoms)
-    } else { None };
+    } else {
+        None
+    };
     let mut scalars = Vec::with_capacity(text.len());
     for (index, (at, ch)) in text.char_indices().enumerate() {
-        let (start, end) = if literal { (bytes[range.start + at], bytes[range.start + at + ch.len_utf8()]) }
-            else if let Some(atoms) = &code_atoms { (bytes[atoms[index].1.start], bytes[atoms[index].1.end]) }
-            else { (bytes[range.start], bytes[range.end]) };
+        let (start, end) = if literal {
+            (bytes[range.start + at], bytes[range.start + at + ch.len_utf8()])
+        } else if let Some(atoms) = &code_atoms {
+            (bytes[atoms[index].1.start], bytes[atoms[index].1.end])
+        } else {
+            (bytes[range.start], bytes[range.end])
+        };
         scalars.push((start, end, ch.len_utf16()));
     }
     let edges = source_map(&scalars);
@@ -575,7 +590,10 @@ fn source_map(scalars: &[(u64, u64, usize)]) -> String {
             }
         }
         if out.len() > 2 * units + 32 {
-            let (s, e) = (scalars.iter().map(|x| x.0).min().unwrap_or(first), scalars.iter().map(|x| x.1).max().unwrap_or(first_end));
+            let (s, e) = (
+                scalars.iter().map(|x| x.0).min().unwrap_or(first),
+                scalars.iter().map(|x| x.1).max().unwrap_or(first_end),
+            );
             out.clear();
             let _ = write!(out, "R:{s}:{e}:{units}");
         }
@@ -641,17 +659,32 @@ impl<'a, I: Iterator<Item = (Event<'a>, Range<usize>)>> Events<'_, '_, 'a, I> {
         };
         Ok(match event {
             Event::Start(Tag::Link { link_type, dest_url, .. }) => {
-                let url = if link_type == LinkType::Email { format!("mailto:{dest_url}") }
-                    else if matches!(link_type, LinkType::WikiLink { .. }) { format!("typose-wiki:{dest_url}") }
-                    else { dest_url.to_string() };
+                let url = if link_type == LinkType::Email {
+                    format!("mailto:{dest_url}")
+                } else if matches!(link_type, LinkType::WikiLink { .. }) {
+                    format!("typose-wiki:{dest_url}")
+                } else {
+                    dest_url.to_string()
+                };
                 Event::InlineHtml(format!("<a data-href=\"{}\">", escape_attr(&url)).into())
             }
-            Event::Start(Tag::BlockQuote(Some(kind))) => Event::Html(format!("<blockquote data-callout=\"{}\">", format!("{kind:?}").to_lowercase()).into()),
-            Event::Text(t) if self.alt.is_none() => Event::InlineHtml(mapped_text(&t, self.source, range, self.source_bytes, false).into()),
+            Event::Start(Tag::BlockQuote(Some(kind))) => {
+                Event::Html(format!("<blockquote data-callout=\"{}\">", format!("{kind:?}").to_lowercase()).into())
+            }
+            Event::Text(t) if self.alt.is_none() => {
+                Event::InlineHtml(mapped_text(&t, self.source, range, self.source_bytes, false).into())
+            }
             Event::Code(t) => Event::InlineHtml(mapped_text(&t, self.source, range, self.source_bytes, true).into()),
             Event::InlineMath(t) | Event::DisplayMath(t) => {
                 let display = matches!(self.source.get(range.clone()), Some(s) if s.starts_with("$$"));
-                Event::InlineHtml(format!("<span class=\"tp-math\" data-display=\"{}\">{}</span>", if display { "1" } else { "0" }, escaped_text(&t)).into())
+                Event::InlineHtml(
+                    format!(
+                        "<span class=\"tp-math\" data-display=\"{}\">{}</span>",
+                        if display { "1" } else { "0" },
+                        escaped_text(&t)
+                    )
+                    .into(),
+                )
             }
             Event::FootnoteReference(label) => {
                 let n = self.build.number(&label).map_err(DocError::Memory)?;
@@ -787,7 +820,13 @@ fn blocks(
     blocks_mapped(text, front, encoding, &edges, cancelled)
 }
 
-fn blocks_mapped(text: &str, front: usize, encoding: &'static Encoding, edges: &[u64], cancelled: &dyn Fn() -> bool) -> Result<Rendered, DocError> {
+fn blocks_mapped(
+    text: &str,
+    front: usize,
+    encoding: &'static Encoding,
+    edges: &[u64],
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Rendered, DocError> {
     let mut out = Rendered::new().map_err(DocError::Memory)?;
     let mut build =
         Build { events: 0, cancelled, numbers: HashMap::new(), slugs: HashMap::new(), charge: Reservation::none() };
@@ -954,7 +993,10 @@ mod tests {
                 ],
             ),
             ("> q\n> > r\n", &["<blockquote>\n<p>q</p>\n<blockquote>\n<p>r</p>\n</blockquote>\n</blockquote>\n"]),
-            ("```rust\nfn x() {} // <b>\n```\n", &["<pre><code class=\"language-rust\">fn x() {} // &lt;b&gt;\n</code></pre>\n"]),
+            (
+                "```rust\nfn x() {} // <b>\n```\n",
+                &["<pre><code class=\"language-rust\">fn x() {} // &lt;b&gt;\n</code></pre>\n"],
+            ),
             ("    indented\n", &["<pre><code>indented\n</code></pre>\n"]),
             (
                 "| a | b |\n|:--|--:|\n| 1 | x<br>y |\n",
@@ -1079,7 +1121,12 @@ mod tests {
         assert!(r.items()[0].html.len() < 25_200, "{} bytes of HTML", r.items()[0].html.len());
         let prose = "Une crème brûlée, très légère, à côté du café. ".repeat(400);
         let r = render(&prose);
-        assert!(r.items()[0].html.len() < prose.len() * 2, "{} bytes of HTML for {}", r.items()[0].html.len(), prose.len());
+        assert!(
+            r.items()[0].html.len() < prose.len() * 2,
+            "{} bytes of HTML for {}",
+            r.items()[0].html.len(),
+            prose.len()
+        );
     }
 
     /// Each map form, from scalars' `(start, end, units)`.
@@ -1087,7 +1134,14 @@ mod tests {
     fn source_maps_encode_runs_of_one_width_as_segments() {
         let run = |widths: &[(u64, usize)], from: u64| {
             let mut at = from;
-            widths.iter().map(|&(w, u)| { let s = (at, at + w, u); at += w; s }).collect::<Vec<_>>()
+            widths
+                .iter()
+                .map(|&(w, u)| {
+                    let s = (at, at + w, u);
+                    at += w;
+                    s
+                })
+                .collect::<Vec<_>>()
         };
         assert_eq!(source_map(&run(&[(1, 1); 4], 7)), "L:7:1:4");
         // "café ·" in UTF-8: c a f é space ·
@@ -1128,7 +1182,10 @@ mod tests {
     fn front_matter_shows_only_at_the_start_and_within_64_kib() {
         let r = render("---\ntitle: <x>\n---\nbody\n");
         let got: Vec<_> = r.items().iter().map(|i| (i.line, i.lines, semantic_html(&i.html))).collect();
-        assert_eq!(got, [(0, 3, "<pre><code>---\ntitle: &lt;x&gt;\n---\n</code></pre>".into()), (3, 1, "<p>body</p>\n".into())]);
+        assert_eq!(
+            got,
+            [(0, 3, "<pre><code>---\ntitle: &lt;x&gt;\n---\n</code></pre>".into()), (3, 1, "<p>body</p>\n".into())]
+        );
         assert_eq!(htmls("intro\n\n---\ntitle: x\n---\n"), ["<p>intro</p>\n", "<hr>\n", "<h2>title: x</h2>\n"]);
         assert_eq!(htmls("\n---\ntitle: x\n---\n"), ["<hr>\n", "<h2>title: x</h2>\n"]); // not at offset 0
         // Closing within the first 64 KiB, at 65,536 exactly, and one byte past it.
@@ -1144,7 +1201,11 @@ mod tests {
         let utf16 =
             |s: &str| [&[0xFF, 0xFE][..], &s.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>()].concat();
         let fits = format!("---\n{}\n---\n", "k".repeat(FRONT_MATTER / 2 - 10)); // 65,534 bytes after the BOM
-        assert!(render_file("md-fm-u16", &utf16(&fits)).unwrap().items()[0].html.starts_with("<pre data-frontmatter=\"1\"><code>"));
+        assert!(
+            render_file("md-fm-u16", &utf16(&fits)).unwrap().items()[0]
+                .html
+                .starts_with("<pre data-frontmatter=\"1\"><code>")
+        );
         let over = format!("---\n{}\n---\n", "k".repeat(FRONT_MATTER / 2 - 9));
         assert_eq!(render_file("md-fm-u16-over", &utf16(&over)).unwrap().items()[0].html.as_ref(), "<hr>\n");
     }
@@ -1397,7 +1458,13 @@ mod tests {
                     "href" => value != "#",
                     "data-href" => scheme.is_some_and(|s| matches!(s.as_str(), "javascript" | "vbscript" | "data")),
                     "data-src" => network_path(&s) || scheme.is_some_and(|s| !matches!(s.as_str(), "http" | "https")),
-                    "class" => if name == "code" { !value.is_empty() && !value.starts_with("language-") } else { !matches!(value.as_str(), "tp-img" | "tp-math") },
+                    "class" => {
+                        if name == "code" {
+                            !value.is_empty() && !value.starts_with("language-")
+                        } else {
+                            !matches!(value.as_str(), "tp-img" | "tp-math")
+                        }
+                    }
                     "data-source-map" => !value.bytes().all(|b| b.is_ascii_digit() || b"LSRp*:,".contains(&b)),
                     "data-display" | "data-frontmatter" => !matches!(value.as_str(), "0" | "1"),
                     _ => false,
