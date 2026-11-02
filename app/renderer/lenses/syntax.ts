@@ -1,7 +1,8 @@
 import type { HighlighterCore, ThemedTokenWithVariants } from 'shiki/core'
 
-/** All grammars and the regular-expression engine are packaged locally; no WASM eval or network. */
-export const OFFLINE_LANGUAGES = new Set(['ts', 'typescript', 'js', 'javascript', 'json', 'jsonc', 'rust', 'python', 'css', 'html', 'bash', 'yaml', 'markdown', 'md'])
+/** What sanitize.rs's `language-*` class allowlist lets through. Grammars and the regular-expression engine are packaged
+ *  locally; no WASM eval or network. */
+export const OFFLINE_LANGUAGES = new Set(['ts', 'typescript', 'js', 'javascript', 'json', 'rust', 'python', 'css', 'html', 'bash', 'yaml'])
 let highlighting: Promise<HighlighterCore> | undefined
 
 function highlighter(): Promise<HighlighterCore> {
@@ -9,8 +10,7 @@ function highlighter(): Promise<HighlighterCore> {
     import('shiki/core'), import('shiki/engine/javascript'), import('@shikijs/themes/github-dark'), import('@shikijs/themes/github-light'),
     import('@shikijs/langs/typescript'), import('@shikijs/langs/javascript'), import('@shikijs/langs/json'),
     import('@shikijs/langs/rust'), import('@shikijs/langs/python'), import('@shikijs/langs/css'),
-    import('@shikijs/langs/html'), import('@shikijs/langs/bash'), import('@shikijs/langs/yaml'),
-    import('@shikijs/langs/markdown'), import('@shikijs/langs/jsonc')
+    import('@shikijs/langs/html'), import('@shikijs/langs/bash'), import('@shikijs/langs/yaml')
   ]).then(([core, engine, dark, light, ...languages]) => core.createHighlighterCore({
     engine: engine.createJavaScriptRegexEngine(), themes: [dark.default, light.default], langs: languages.map(language => language.default)
   }))
