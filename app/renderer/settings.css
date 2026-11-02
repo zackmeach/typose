@@ -55,3 +55,4 @@ body { font-size: var(--ui-size, 13px); }
 .settings-panel .segmented button:last-child { border-radius: 0 6px 6px 0; }
 .settings-panel .config-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .settings-panel .config-banner strong { display: block; }
+.settings-panel .card-header h1 { font: inherit; margin: 0; }

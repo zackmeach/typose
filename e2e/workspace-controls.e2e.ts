@@ -270,3 +270,43 @@ test('F5 retries a file that was missing and now exists', async () => {
   expect(live.pageErrors).toEqual([])
   expect(await finish(live)).toEqual({ code: 0, signal: null })
 })
+
+test('Settings has a level-one heading and the size fields can be typed into', async () => {
+  const userData = mkdtempSync(join(tmpdir(), 'typose-sizes-'))
+  const live = await launch({ userData })
+  await expect(live.win.getByRole('button', { name: /^Open file/ })).toBeVisible()
+  await live.win.keyboard.press('Control+,')
+  await expect(live.win.getByRole('heading', { level: 1, name: /Settings/ })).toBeVisible()
+  const size = live.win.getByLabel('Interface size', { exact: true })
+  await size.click()
+  await live.win.keyboard.press('Control+A')
+  await live.win.keyboard.type('16')
+  await expect(size).toHaveValue('16')
+  await expect(live.win.getByRole('alert')).toHaveCount(0)
+  await live.win.keyboard.press('Enter')
+  await expect.poll(() => readFileSync(join(userData, 'config.toml'), 'utf8')).toContain('ui_size = 16')
+  await expect(live.win.getByRole('alert')).toHaveCount(0)
+  expect(live.pageErrors).toEqual([])
+  expect(await finish(live)).toEqual({ code: 0, signal: null })
+})
+
+test('zoom shortcuts clamp at 50% and 200% and reset, and F11 toggles full screen', async () => {
+  const live = await launch({ file: fixture('zoom-doc.md', '# Zoom\n') })
+  await expect(live.win.getByRole('heading', { name: 'Zoom', exact: true })).toBeVisible()
+  const state = () => live.app.evaluate(({ BrowserWindow }) => {
+    const w = BrowserWindow.getAllWindows()[0]
+    return { zoom: Math.round(w.webContents.getZoomFactor() * 100) / 100, fullScreen: w.isFullScreen() }
+  })
+  for (let i = 0; i < 12; i++) await live.win.keyboard.press('Control+=')
+  await expect.poll(async () => (await state()).zoom).toBe(2)
+  for (let i = 0; i < 30; i++) await live.win.keyboard.press('Control+-')
+  await expect.poll(async () => (await state()).zoom).toBe(0.5)
+  await live.win.keyboard.press('Control+0')
+  await expect.poll(async () => (await state()).zoom).toBe(1)
+  await live.win.keyboard.press('F11')
+  await expect.poll(async () => (await state()).fullScreen).toBe(true)
+  await live.win.keyboard.press('F11')
+  await expect.poll(async () => (await state()).fullScreen).toBe(false)
+  expect(live.pageErrors).toEqual([])
+  expect(await finish(live)).toEqual({ code: 0, signal: null })
+})

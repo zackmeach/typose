@@ -12,7 +12,7 @@ export function SettingsPanel({ controller, initial = 'Appearance', openFile }: 
   const fontMissing = [values.ui_font, values.mono_font].filter(font => !fontAvailable(font))
   const accent = values.accent || String(controller.activeTheme().tokens.accent), background = String(controller.activeTheme().tokens.surface)
   return <div className="settings-panel" onFocus={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) void controller.refresh() }}>
-    <header className="card-header"><span>⚙ Settings / {section}</span></header>
+    <header className="card-header"><h1>⚙ Settings / {section}</h1></header>
     {snapshot.parse ? <div role="alert" className="banner config-banner"><span><strong>{"config.toml couldn't be parsed"}</strong>Line {snapshot.parse.line}, col {snapshot.parse.column}: {snapshot.parse.message}. Typose is using your last good settings.</span>
       {openFile ? <button onClick={() => openFile(snapshot.parse!.path)}>Open config.toml</button> : null}</div>
       : snapshot.error ? <div role="alert" className="banner">{snapshot.error}</div> : null}
@@ -25,7 +25,7 @@ export function SettingsPanel({ controller, initial = 'Appearance', openFile }: 
         <div className="theme-slots">{(['light', 'dark'] as const).map(scheme => <fieldset key={scheme}><legend>{scheme === 'light' ? 'Light theme' : 'Dark theme'}</legend>{controller.themes().filter(theme => theme.scheme === scheme).map(theme => <button key={theme.id} className="theme-sample" aria-pressed={values[scheme === 'light' ? 'light_theme' : 'dark_theme'] === theme.id} style={{ color: String(theme.tokens.text), background: String(theme.tokens.surface) }} onClick={() => controller.selectTheme(scheme, theme)}><b>Aa</b>{theme.name}</button>)}</fieldset>)}</div>
         {(['ui_font', 'mono_font'] as const).map(key => <label key={key}>{key === 'ui_font' ? 'Interface font' : 'Monospace font'}<input aria-label={key === 'ui_font' ? 'Interface font' : 'Monospace font'} key={values[key]} defaultValue={values[key]} onBlur={event => { if (event.target.value !== values[key]) controller.change(key, event.target.value) }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} /></label>)}
         {fontMissing.length ? <p role="status">Font unavailable: {fontMissing.join(', ')}. Using the bundled fallback.</p> : null}
-        {(['ui_size', 'mono_size'] as const).map(key => <label key={key}>{key === 'ui_size' ? 'Interface size' : 'Monospace size'}<input aria-label={key === 'ui_size' ? 'Interface size' : 'Monospace size'} type="number" min="10" max="28" value={values[key]} onChange={event => controller.change(key, Number(event.target.value))} /></label>)}
+        {(['ui_size', 'mono_size'] as const).map(key => <SizeField key={key} label={key === 'ui_size' ? 'Interface size' : 'Monospace size'} value={values[key]} commit={size => controller.change(key, size)} />)}
         {select('Density', 'density', ['compact', 'default', 'spacious'])}{select('Frame', 'frame', ['card', 'flush'])}
         <label>Accent<input aria-label="Accent" type="color" value={accent} onChange={event => controller.change('accent', event.target.value)} /></label><button onClick={() => controller.change('accent', '')}>Reset accent</button>
         {contrast(accent, background) < 4.5 ? <p role="status">Accent contrast is below 4.5:1 against the card background.</p> : null}
@@ -39,4 +39,15 @@ export function SettingsPanel({ controller, initial = 'Appearance', openFile }: 
       {section === 'Shortcuts' ? <table className="shortcut-table"><tbody>{COMMANDS.filter(command => command.shortcut).map(command => <tr key={command.id}><td>{command.label}</td><td><kbd>{commandShortcut(command.shortcut, navigator.platform.startsWith('Mac'))}</kbd></td></tr>)}</tbody></table> : null}
     </div>
   </div>
+}
+/** Typing "1" on the way to "14" is not a setting: the draft is committed on blur or Enter, clamped to 10–28. */
+function SizeField({ label, value, commit }: { label: string; value: number; commit(size: number): void }) {
+  const [draft, setDraft] = useState(String(value))
+  useEffect(() => { setDraft(String(value)) }, [value])
+  const done = () => {
+    const size = Math.min(28, Math.max(10, Math.round(Number(draft))))
+    if (draft.trim() !== '' && Number.isFinite(size) && size !== value) commit(size)
+    else setDraft(String(value))
+  }
+  return <label>{label}<input aria-label={label} type="number" min="10" max="28" value={draft} onChange={event => setDraft(event.target.value)} onBlur={done} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} /></label>
 }
