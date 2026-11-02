@@ -143,6 +143,32 @@ test('JSONL Rows is one scrolling list: End reaches line 5,000 and Home line 1, 
   } finally { await finish(live) }
 })
 
+test('opening a 17th row closes the oldest, above the view, without moving the rows on screen', async () => {
+  const lines = Array.from({ length: 120 }, (_, index) => JSON.stringify({ ts: '2026-11-01T09:00:00.000Z', level: 'info', msg: `entry ${index + 1}`, n: index, tags: ['a', 'b'] }))
+  const live = await launch({ hooks: true, file: fixture('structured-rows-expand.jsonl', lines.join('\n') + '\n') })
+  try {
+    const card = live.win.getByRole('region', { name: 'Reader card 1' }), row = (line: number) => card.locator(`.jsonl-entry[data-line="${line}"]`)
+    const frames = () => live.win.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))))
+    await expect(card.locator('[data-lens="rows"]')).toBeVisible({ timeout: 30_000 })
+    for (let line = 0; line < 16; line++) {
+      await card.getByRole('button', { name: `Expand row ${line + 1}`, exact: true }).click()
+      await expect(row(line).locator('.jsonl-detail .tree-row')).toHaveCount(6)
+    }
+    const target = row(16).locator('.jsonl-row')
+    await target.scrollIntoViewIfNeeded()
+    await frames()
+    const before = (await target.boundingBox())!.y
+    await card.getByRole('button', { name: 'Expand row 17', exact: true }).click()
+    await expect(row(16).locator('.jsonl-detail .tree-row')).toHaveCount(6)
+    await frames()
+    expect(Math.abs((await target.boundingBox())!.y - before)).toBeLessThanOrEqual(2)
+    await card.locator('.structured-view').evaluate(view => { view.scrollTop = 0 })
+    await expect(row(0).locator('.jsonl-expand')).toHaveAttribute('aria-expanded', 'false')
+    await expect(row(1).locator('.jsonl-expand')).toHaveAttribute('aria-expanded', 'true')
+    expect(live.pageErrors).toEqual([])
+  } finally { await finish(live) }
+})
+
 test('JSONL Rows compose readable summaries, tinted type pills and clock times, never the raw record', async () => {
   const records = [
     { ts: '2026-11-01T12:04:13.722Z', type: 'tool', name: 'read_file', input: { path: 'docs/launch-plan.md' } },

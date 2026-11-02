@@ -107,12 +107,14 @@ export class StructuredLens {
       if (entry) this.focusLine = Number(entry.dataset.line)
     })
     this.resize = new ResizeObserver(entries => {
+      const heights = new Map<number, number>()
       for (const { target } of entries) {
-        const line = Number((target as HTMLElement).dataset.line)
+        const line = Number((target as HTMLElement).dataset.line), px = Math.max(0, (target as HTMLElement).offsetHeight - ROW)
         // A detached detail measures 0: keep the height it had while mounted.
-        if (target !== this.element && target.isConnected && this.expanded.get(line) === target) this.extra.set(line, Math.max(0, (target as HTMLElement).offsetHeight - ROW))
+        if (target !== this.element && target.isConnected && this.expanded.get(line) === target && this.extra.get(line) !== px) heights.set(line, px)
       }
-      this.schedule()
+      if (heights.size) this.holdView(() => { for (const [line, px] of heights) this.extra.set(line, px) })
+      else this.schedule()
     })
     this.resize.observe(this.element)
     this.focusLine = this.anchor = Math.max(0, at)
@@ -145,6 +147,20 @@ export class StructuredLens {
   /** List pixels map 1:1 onto scrollTop up to the spacer cap; past it, proportionally (scrollmath's logical scrolling).
    *  ponytail: past the cap a wheel notch moves proportionally further; intercept wheel as VirtualList does if that bites. */
   private geometry() { return { total: this.top(this.total()), viewport: this.element.clientHeight } }
+  /** Changes open details' heights without moving what's on screen: the first visible line keeps its offset, so a
+   *  detail above the view that grows, shrinks or closes doesn't shift the rows below it. Only repositions mounted
+   *  rows (no mounting), so it is safe inside a ResizeObserver callback; the next frame mounts what came into view. */
+  private holdView(change: () => void): void {
+    const y = toLogical(this.element.scrollTop, this.geometry()), line = this.lineAt(y), offset = y - this.top(line)
+    change()
+    const geometry = this.geometry(), inside = offset < ROW + (this.extra.get(line) ?? 0)
+    this.content.style.height = `${spacerHeight(geometry.total)}px`
+    // A line whose own detail shrank past the view's top keeps its top edge there.
+    this.element.scrollTop = toNative(this.top(line) + (inside ? offset : 0), geometry)
+    const shift = this.element.scrollTop - toLogical(this.element.scrollTop, geometry)
+    for (const [at, node] of this.mountedRows) node.style.top = `${this.top(at) + shift}px`
+    this.schedule()
+  }
   private scrollToLine(line: number, from: number): void {
     const geometry = this.geometry()
     this.content.style.height = `${spacerHeight(geometry.total)}px`
@@ -261,9 +277,9 @@ export class StructuredLens {
     if (panel) { this.mounted -= panel.querySelectorAll('.tree-entry').length; panel.remove() }
     if (expand) { expand.textContent = expand.dataset.closed ?? '›'; expand.setAttribute('aria-expanded', 'false') }
     if (this.expanded.get(line) !== wrapper) return
-    this.expanded.delete(line); this.extra.delete(line); this.resize?.unobserve(wrapper)
+    this.expanded.delete(line); this.resize?.unobserve(wrapper)
     if (!this.mountedRows.has(line)) wrapper.remove()
-    this.schedule()
+    this.holdView(() => this.extra.delete(line))
   }
   private error(error: unknown): void {
     if (this.stopped) return
