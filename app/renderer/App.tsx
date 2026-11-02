@@ -162,6 +162,13 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     pendingSplit.current = 0
     for (const savedRoot of saved.roots) {
       const path = savedRoot.path
+      // Brief §4.6: a network share is never touched at launch; Reconnect adds it again.
+      if (await core.call('networkPath', { path }).catch(() => true)) {
+        const id = 'network-' + folders.current.length
+        setFolders([...folders.current, { id, path, identity: savedRoot.identity, ref: { session: 0, root: id, node: '0' }, unavailable: true, network: true,
+          node: { id: '0', ref: { session: 0, root: id, node: '0' }, name: path.split(/[\\/]/).filter(Boolean).at(-1) ?? path, kind: 'directory', error: 'Network folder · not opened at launch' } }])
+        continue
+      }
       await pickFolder(undefined, path)
       const captured = folders.current.find(root => root.path === path)
       if (captured && savedRoot.identity && captured.identity !== savedRoot.identity) {
@@ -815,7 +822,8 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       {sidebarOpen ? <FolderSidebar roots={folderRoots} width={sidebarWidth} overlay={sidebarOverlay} activeNode={activeNode}
         onWidth={setSidebarWidth} onCollapse={() => { setSidebarOpen(false); requestAnimationFrame(() => document.querySelector<HTMLElement>('.sidebar-toggle')?.focus()) }}
         onAdd={() => void pickFolder()} onToggle={toggleFolder} onOpen={(root, node) => void focusedReader()?.openChild(root, node)}
-        onRefresh={refreshDirectory} onMore={(root, node) => void listDirectory(root, node, true)} onRemove={removeFolder} onLocate={root => void pickFolder(root)} /> : null}
+        onRefresh={refreshDirectory} onMore={(root, node) => void listDirectory(root, node, true)} onRemove={removeFolder}
+        onLocate={root => void pickFolder(root, folders.current.find(item => item.id === root && item.network)?.path)} /> : null}
       <main className="card-row" ref={row}>
         {groups.map((group, index) => <div className="card-slot" style={{ flexGrow: group.weight }} key={group.id}>
           <ReaderCard id={group.id} label={index + 1} workspace={group.workspace} window={shared} fonts={fonts} focused={focused === group.id}
