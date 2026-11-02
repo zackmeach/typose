@@ -216,6 +216,7 @@ test('the keyboard reaches ☰ and Raw, ☰ runs its commands from the keyboard,
   const l = await opened()
   const { win } = l
   await win.emulateMedia({ colorScheme: 'dark' }) // the ring is the dark accent; the default theme follows the OS
+  await expect(win.locator('html')).toHaveAttribute('data-theme', 'dark')
   await focusStart(win)
   const stops: [selector: string, ringOffset: string][] = [
     ...(!MAC ? [['.menu-button', '2px'] as [string, string]] : []),
