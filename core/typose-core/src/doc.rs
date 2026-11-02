@@ -309,6 +309,43 @@ impl Document {
         self.local_only
     }
 
+    pub fn folder_scope(&self) -> Option<(&str, Option<u32>, &str, &str)> {
+        let route = self.local.as_ref()?;
+        route
+            .folder_scope()
+            .map(|(id, label, _)| (id, route.folder_node(), label, route.folder_relative().expect("scoped route")))
+    }
+
+    /// Only a fresh manual open/reload can adopt an active root; the origin policy stays manual.
+    pub fn bind_folder(&mut self, folder: &crate::local::folder::Folder) -> Result<bool, DocError> {
+        if self.local_only || self.folder_scope().is_some() {
+            return Ok(false);
+        }
+        let Some(route) = folder.bind(&self.path, self.store.file())? else { return Ok(false) };
+        self.local = Some(route);
+        Ok(true)
+    }
+
+    /// Retain authority, not this document's bytes/index. Manual opens never become derived locations.
+    /// Saving an owned generation needs no filesystem access; reopen verifies the route's current bytes.
+    pub fn saved_route(&self, generation: u32) -> Result<LocalRoute, DocError> {
+        if generation != self.generation {
+            return Err(DocError::Stale { current: self.generation, asked: generation });
+        }
+        if !self.local_only {
+            return Err(DocError::Refused("manual locations use manual-open policy".into()));
+        }
+        self.local
+            .as_ref()
+            .ok_or_else(|| DocError::Refused("the derived location has no local route".into()))?
+            .try_clone()
+            .map_err(local_error)
+    }
+
+    pub(crate) fn from_saved(route: &LocalRoute, cache_chunks: usize) -> Result<Document, DocError> {
+        Self::from_local(route.try_clone().map_err(local_error)?, cache_chunks, 1)
+    }
+
     /// Resolve a decoded local target without opening it. Only the source route is checked for mutation.
     pub fn local_path(&self, generation: u32, target: &str) -> Result<LocalRoute, DocError> {
         self.local_target(generation, target)
@@ -359,10 +396,14 @@ impl Document {
         })?;
         let route = source.resolve(target).map_err(local_error)?;
         let supported = route.path().extension().and_then(|s| s.to_str()).is_some_and(|s| {
-            s.eq_ignore_ascii_case("md") || s.eq_ignore_ascii_case("markdown") || s.eq_ignore_ascii_case("txt")
+            s.eq_ignore_ascii_case("md")
+                || s.eq_ignore_ascii_case("markdown")
+                || s.eq_ignore_ascii_case("txt")
+                || s.eq_ignore_ascii_case("csv")
+                || s.eq_ignore_ascii_case("tsv")
         });
         if !supported {
-            return Err(DocError::Refused("local links support only .md, .markdown and .txt files".into()));
+            return Err(DocError::Refused("local links support only Markdown, TXT, CSV and TSV files".into()));
         }
         self.check_local_source(generation)?;
         Ok(route)
@@ -374,7 +415,7 @@ impl Document {
 
     /// A fresh index handle must retain the derived document's local-only policy too.
     pub(crate) fn index_file(&self) -> Result<File, DocError> {
-        if self.local_only {
+        if self.local_only || self.folder_scope().is_some() {
             self.checked_local_file(self.generation)
         } else {
             self.store.reopen().map_err(|e| self.fail(StoreError::Io(e)))
@@ -416,21 +457,23 @@ impl Document {
     }
 
     pub(crate) fn reopened(&self) -> Result<Document, DocError> {
-        if self.local_only {
+        if self.local_only || self.folder_scope().is_some() {
             let route = self
                 .local
                 .as_ref()
                 .expect("derived documents retain their local route")
                 .try_clone()
                 .map_err(local_error)?;
-            Self::from_local(route, self.cache_chunks, self.generation + 1)
+            let mut next = Self::from_local(route, self.cache_chunks, self.generation + 1)?;
+            next.local_only = self.local_only;
+            Ok(next)
         } else {
             Self::open_with(&self.path, self.cache_chunks, self.generation + 1)
         }
     }
 
     fn check(&self) -> Result<(), DocError> {
-        if self.local_only {
+        if self.local_only || self.folder_scope().is_some() {
             return self.check_local_source(self.generation);
         }
         if let Some(why) = self.frozen() {
@@ -1013,6 +1056,35 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn csv_and_tsv_local_targets_keep_markdown_origin_and_selected_folder_scope() {
+        let scratch = Scratch::new("local-csv-tsv");
+        let source_path = scratch.0.join("source.md");
+        fs::write(&source_path, b"# Source").unwrap();
+        fs::write(scratch.0.join("data.CSV"), b"a,b\n1,2\n").unwrap();
+        fs::write(scratch.0.join("data.TsV"), b"a\tb\n1\t2\n").unwrap();
+        let root = crate::local::folder::Folder::capture(&scratch.0, "1").unwrap();
+        let mut source = Document::open(&source_path).unwrap();
+        source.bind_folder(&root).unwrap();
+        for name in ["/data.CSV", "/data.TsV"] {
+            let mut target = source.open_local(1, name).unwrap();
+            assert!(target.local_only());
+            assert_eq!(target.folder_scope().unwrap().0, "1");
+            assert!(target.open_local(1, "source.md").is_err(), "CSV/TSV does not become a Markdown link source");
+            target.reload().unwrap();
+            assert!(target.local_only());
+            assert_eq!(target.folder_scope().unwrap().0, "1");
+        }
+        for refused in ["data.csv.exe", "data.tsv:stream", "/../outside.csv", r"\\server\share\data.csv"] {
+            assert!(source.open_local(1, refused).is_err(), "{refused}");
+        }
+        root.close();
+        let target = source.open_local(1, "/data.CSV").unwrap();
+        assert!(target.local_only());
+        assert_eq!(target.folder_scope().unwrap().0, "1");
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn derived_identity_and_reload_refuse_a_pipe_junction_without_connecting() {
         let scratch = Scratch::new("local-pipe-swap");
         let server = PipeServer::new("local-target.txt");
@@ -1088,5 +1160,34 @@ mod tests {
         assert!(matches!(source.local_path(1, "target.txt"), Err(DocError::Refused(_))));
         assert!(matches!(source.open_local(1, "target.txt"), Err(DocError::Refused(_))));
         assert!(!source.local_only());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn saved_routes_keep_no_document_and_never_follow_a_retargeted_pipe_ancestor() {
+        let scratch = Scratch::new("saved-pipe-route");
+        let server = PipeServer::new("saved-target.txt");
+        let sub = scratch.0.join("sub");
+        fs::create_dir(&sub).unwrap();
+        let source_path = scratch.0.join("source.md");
+        fs::write(&source_path, b"# Source").unwrap();
+        fs::write(sub.join(server.name()), b"original").unwrap();
+        let source = Document::open(&source_path).unwrap();
+        assert!(source.local.is_some());
+        assert!(matches!(source.saved_route(1), Err(DocError::Refused(_))));
+        let derived = source.open_local(1, &format!("sub/{}", server.name())).unwrap();
+        let _ = derived.freeze("old generation was frozen".into());
+        let saved = derived.saved_route(1).unwrap();
+        assert!(matches!(derived.saved_route(2), Err(DocError::Stale { .. })));
+        drop(derived);
+        drop(source);
+        fs::write(sub.join(server.name()), b"current bytes").unwrap();
+        let current = crate::raw::Raw::open_saved(&saved).unwrap();
+        assert_eq!(current.page(1, 0, 1).unwrap()[0].text, "current bytes");
+        drop(current);
+        fs::rename(&sub, scratch.0.join("moved")).unwrap();
+        junction(&sub, r"\??\pipe\");
+        assert!(matches!(crate::raw::Raw::open_saved(&saved), Err(DocError::Refused(_))));
+        assert!(!server.connected());
     }
 }

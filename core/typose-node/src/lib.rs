@@ -14,10 +14,15 @@ use typose_core::doc::DocError;
 use typose_core::hooks;
 use typose_core::image_resource::{self, Pending, Resources};
 use typose_core::limits::{self, RANGES};
+use typose_core::local::LocalRoute;
+use typose_core::local::folder;
 use typose_core::md::{self, Rendered};
 use typose_core::pages::{self, LinePiece};
 use typose_core::raw::Raw;
 use typose_core::store::{self, cancellable};
+
+mod csv;
+mod find;
 
 /// Progress is throttled to 10 Hz, except while a first screen of lines is still filling (spec §3.4).
 const FIRST_SCREEN_LINES: u64 = 256;
@@ -26,6 +31,7 @@ const FIRST_SCREEN_LINES: u64 = 256;
 pub enum Code {
     InvalidParams,
     NotFound,
+    NotDirectory,
     PermissionDenied,
     Refused,
     Binary,
@@ -42,6 +48,7 @@ impl AsRef<str> for Code {
         match self {
             Code::InvalidParams => "InvalidParams",
             Code::NotFound => "NotFound",
+            Code::NotDirectory => "NotDirectory",
             Code::PermissionDenied => "PermissionDenied",
             Code::Refused => "Refused",
             Code::Binary => "Binary",
@@ -529,6 +536,181 @@ impl Task for ImageChunk {
     }
 }
 
+/// Pays the native wrapper and its host UUID/entry garbage until finalization, including after release.
+const SAVED_WRAPPER_BYTES: u64 = 16 * 1024;
+#[cfg(feature = "test-hooks")]
+static SAVED_WRAPPERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Session-only route authority. It never owns a Raw, Document, index or page payload.
+#[napi]
+pub struct SavedRoute {
+    route: Option<LocalRoute>,
+    // Remains charged while JS still holds even an empty wrapper; released only by Drop.
+    _wrapper: Reservation,
+}
+
+#[napi(object)]
+pub struct FolderEntry {
+    pub id: u32,
+    pub name: String,
+    pub kind: String,
+    pub hidden: bool,
+}
+#[napi(object)]
+pub struct FolderPage {
+    pub entries: Vec<FolderEntry>,
+    pub cursor: Option<u32>,
+}
+#[napi(object)]
+pub struct FolderContext {
+    pub root: String,
+    pub node: Option<String>,
+    pub label: String,
+    pub segments: Vec<String>,
+}
+
+/// No constructor: only an explicit selected-directory capture creates authority.
+#[napi]
+pub struct FolderRoot {
+    state: Arc<folder::Folder>,
+    // Empty JS wrappers remain paid after close, until NAPI finalizes them.
+    _wrapper: Reservation,
+}
+
+#[napi]
+impl FolderRoot {
+    #[napi(factory)]
+    pub fn capture(path: String, id: String) -> std::result::Result<Self, Error<Code>> {
+        if id.is_empty() || id.len() > 32 || !id.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(Error::new(Code::InvalidParams, "invalid root identity"));
+        }
+        let wrapper = Reservation::new(16 * 1024).map_err(|e| doc_error(DocError::Memory(e)))?;
+        let state = folder::Folder::capture(std::path::Path::new(&path), &id).map_err(|e| {
+            // Explicit CLI arrivals can then try manual-file policy, never after generic capability refusal.
+            #[cfg(windows)]
+            if matches!(&e,DocError::Io(io) if io.raw_os_error()==Some(267)) {
+                return Error::new(Code::NotDirectory, "the selected path is not a directory");
+            }
+            doc_error(e)
+        })?;
+        Ok(Self { state: Arc::new(state), _wrapper: wrapper })
+    }
+    #[napi(getter)]
+    pub fn label(&self) -> std::result::Result<String, Error<Code>> {
+        Ok(self.state.info().map_err(doc_error)?.0)
+    }
+    #[napi(getter)]
+    pub fn path(&self) -> std::result::Result<String, Error<Code>> {
+        Ok(self.state.info().map_err(doc_error)?.1)
+    }
+    #[napi(ts_return_type = "Promise<FolderPage>")]
+    pub fn list(
+        &self,
+        node: f64,
+        cursor: Option<f64>,
+        hidden: bool,
+        cancel: &Cancel,
+    ) -> std::result::Result<AsyncTask<ListFolder>, Error<Code>> {
+        let node = int("start", node)?;
+        if node >= folder::MAX_NODES as u64 {
+            return Err(Error::new(Code::InvalidParams, "invalid folder node"));
+        }
+        let cursor = cursor
+            .map(|x| {
+                int("id", x).and_then(|n| {
+                    u32::try_from(n).map_err(|_| Error::new(Code::InvalidParams, "invalid folder cursor"))
+                })
+            })
+            .transpose()?;
+        let charge = Reservation::new(folder::PAGE_WORK).map_err(|e| doc_error(DocError::Memory(e)))?;
+        Ok(AsyncTask::new(ListFolder {
+            state: self.state.clone(),
+            node: node as u32,
+            cursor,
+            hidden,
+            cancel: cancel.flag.clone(),
+            _charge: charge,
+        }))
+    }
+    #[napi]
+    pub fn open(&self, node: f64) -> std::result::Result<Doc, Error<Code>> {
+        let node = int("start", node)?;
+        if node >= folder::MAX_NODES as u64 {
+            return Err(Error::new(Code::InvalidParams, "invalid folder node"));
+        }
+        let raw = self.state.open(node as u32).map_err(doc_error)?;
+        Ok(Doc {
+            images: None,
+            raw: Some(Arc::new(raw)),
+            built: Built::default(),
+            csv: Arc::default(),
+            find: Arc::default(),
+        })
+    }
+    #[napi]
+    pub fn close(&self) -> bool {
+        self.state.close()
+    }
+}
+
+pub struct ListFolder {
+    state: Arc<folder::Folder>,
+    node: u32,
+    cursor: Option<u32>,
+    hidden: bool,
+    cancel: Arc<AtomicBool>,
+    _charge: Reservation,
+}
+impl Task for ListFolder {
+    type Output = std::result::Result<folder::Page, DocError>;
+    type JsValue = FolderPage;
+    fn compute(&mut self) -> Result<Self::Output> {
+        Ok(self.state.list(self.node, self.cursor, self.hidden, &|| self.cancel.load(Ordering::Relaxed)))
+    }
+    fn resolve(&mut self, env: Env, output: Self::Output) -> Result<FolderPage> {
+        let output = if self.cancel.load(Ordering::Relaxed) { Err(DocError::Cancelled) } else { output };
+        match output {
+            Ok(p) => Ok(FolderPage {
+                entries: p
+                    .entries
+                    .into_iter()
+                    .map(|e| FolderEntry { id: e.id, name: e.name, kind: e.kind.into(), hidden: e.hidden })
+                    .collect(),
+                cursor: p.cursor,
+            }),
+            Err(e) => Err(Error::from(JsError::from(doc_error(e)).into_unknown(env))),
+        }
+    }
+}
+
+#[napi]
+impl SavedRoute {
+    #[napi]
+    pub fn open(&self) -> std::result::Result<Doc, Error<Code>> {
+        let route = self.route.as_ref().ok_or_else(|| Error::new(Code::NoDocument, "the saved route was released"))?;
+        let raw = Raw::open_saved(route).map_err(doc_error)?;
+        Ok(Doc {
+            images: None,
+            raw: Some(Arc::new(raw)),
+            built: Built::default(),
+            csv: Arc::default(),
+            find: Arc::default(),
+        })
+    }
+
+    #[napi]
+    pub fn release(&mut self) -> bool {
+        self.route.take().is_some()
+    }
+}
+
+impl Drop for SavedRoute {
+    fn drop(&mut self) {
+        #[cfg(feature = "test-hooks")]
+        SAVED_WRAPPERS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// An open document in Raw. Offsets and sizes are exact numbers: `Raw::open` refuses files over 2^53 − 1 bytes.
 /// `close` drops it at once; until then it lives as long as the JS object does.
 #[napi]
@@ -537,6 +719,8 @@ pub struct Doc {
     raw: Option<Arc<Raw>>,
     /// The current generation's Markdown build. Reload and close start a new one, and the old drops with its last task.
     built: Built,
+    csv: Arc<csv::Owner>,
+    find: Arc<find::Owner>,
 }
 
 #[napi]
@@ -549,11 +733,36 @@ impl Doc {
             return Err(Error::new(Code::InvalidParams, why));
         }
         let raw = Raw::open(std::path::Path::new(&path)).map_err(doc_error)?;
-        Ok(Doc { images: None, raw: Some(Arc::new(raw)), built: Built::default() })
+        Ok(Doc {
+            images: None,
+            raw: Some(Arc::new(raw)),
+            built: Built::default(),
+            csv: Arc::default(),
+            find: Arc::default(),
+        })
     }
 
     fn raw(&self) -> std::result::Result<&Arc<Raw>, Error<Code>> {
         self.raw.as_ref().ok_or_else(|| Error::new(Code::NoDocument, "the document is closed"))
+    }
+
+    #[napi]
+    pub fn bind_folder(&mut self, root: &FolderRoot) -> std::result::Result<bool, Error<Code>> {
+        let raw = self.raw.as_mut().ok_or_else(|| Error::new(Code::NoDocument, "the document is closed"))?;
+        let raw = Arc::get_mut(raw)
+            .ok_or_else(|| Error::new(Code::Refused, "bind a folder only before document work starts"))?;
+        raw.bind_folder(&root.state).map_err(doc_error)
+    }
+
+    #[napi(getter)]
+    pub fn folder(&self) -> std::result::Result<Option<FolderContext>, Error<Code>> {
+        let raw = self.raw()?;
+        let Some((id, node, label, relative)) = raw.document().folder_scope() else { return Ok(None) };
+        // A maximally fragmented path also allocates one String/array slot per two path units.
+        let _temp =
+            Reservation::new((16 * pages::MAX_PATH_BYTES) as u64).map_err(|e| doc_error(DocError::Memory(e)))?;
+        let segments = relative.split('\\').map(str::to_owned).collect();
+        Ok(Some(FolderContext { root: id.into(), node: node.map(|n| n.to_string()), label: label.into(), segments }))
     }
 
     #[napi(getter)]
@@ -593,13 +802,32 @@ impl Doc {
     /// Spec §4.1: `markdown` for a `.md` or `.markdown` file, else `text`.
     #[napi(getter)]
     pub fn format(&self) -> std::result::Result<String, Error<Code>> {
-        Ok(if md::is_markdown(self.raw()?.document().path()) { "markdown" } else { "text" }.into())
+        let path = self.raw()?.document().path();
+        Ok(if md::is_markdown(path) {
+            "markdown"
+        } else if csv::supported(path) {
+            "csv"
+        } else {
+            "text"
+        }
+        .into())
     }
 
     /// Local-derived documents require an explicit manual selection after a core restart loses this capability.
     #[napi(getter)]
     pub fn local_only(&self) -> std::result::Result<bool, Error<Code>> {
         Ok(self.raw()?.document().local_only())
+    }
+
+    /// Origin and generation are native-owned; unlike local links this also works for derived TXT/frozen sources.
+    #[napi]
+    pub fn save_route(&self, generation: f64) -> std::result::Result<SavedRoute, Error<Code>> {
+        let generation = int("gen", generation)? as u32;
+        let route = self.raw()?.document().saved_route(generation).map_err(doc_error)?;
+        let wrapper = Reservation::new(SAVED_WRAPPER_BYTES).map_err(|e| doc_error(DocError::Memory(e)))?;
+        #[cfg(feature = "test-hooks")]
+        SAVED_WRAPPERS.fetch_add(1, Ordering::Relaxed);
+        Ok(SavedRoute { route: Some(route), _wrapper: wrapper })
     }
 
     #[napi(getter)]
@@ -725,7 +953,13 @@ impl Doc {
     pub fn open_local(&self, generation: f64, target: String) -> std::result::Result<Doc, Error<Code>> {
         let (raw, generation) = self.local_source(generation)?;
         let next = raw.open_local(generation, &target).map_err(doc_error)?;
-        Ok(Doc { images: None, raw: Some(Arc::new(next)), built: Built::default() })
+        Ok(Doc {
+            images: None,
+            raw: Some(Arc::new(next)),
+            built: Built::default(),
+            csv: Arc::default(),
+            find: Arc::default(),
+        })
     }
 
     /// Ctrl+R (spec §3.1): the same path at the next generation, which `startIndex` then indexes. Every page and
@@ -733,6 +967,21 @@ impl Doc {
     #[napi]
     pub fn reload(&mut self) -> std::result::Result<(), Error<Code>> {
         let next = self.raw()?.reload().map_err(doc_error)?;
+        self.csv.close();
+        self.find.close();
+        self.csv = Arc::default();
+        self.clear_images();
+        self.raw = Some(Arc::new(next));
+        self.built = Built::default();
+        Ok(())
+    }
+
+    #[napi]
+    pub fn reload_in_folder(&mut self, root: &FolderRoot) -> std::result::Result<(), Error<Code>> {
+        let next = self.raw()?.reload_in_folder(Some(&root.state)).map_err(doc_error)?;
+        self.csv.close();
+        self.find.close();
+        self.csv = Arc::default();
         self.clear_images();
         self.raw = Some(Arc::new(next));
         self.built = Built::default();
@@ -743,6 +992,8 @@ impl Doc {
     /// stopped, which the core host cancels first. Every later call is `NoDocument`.
     #[napi]
     pub fn close(&mut self) {
+        self.csv.close();
+        self.find.close();
         self.clear_images();
         self.raw = None;
         self.built = Built::default();
@@ -904,6 +1155,24 @@ impl Doc {
 pub mod test_hooks {
     use super::*;
 
+    #[napi(object)]
+    pub struct SavedStats {
+        pub wrappers: f64,
+        pub wrapper_bytes: f64,
+    }
+
+    /// Includes released wrappers that remain reachable or await finalization, not only logical tickets.
+    #[napi]
+    pub fn saved_stats() -> SavedStats {
+        let wrappers = SAVED_WRAPPERS.load(Ordering::Relaxed) as u64;
+        SavedStats { wrappers: wrappers as f64, wrapper_bytes: (wrappers * SAVED_WRAPPER_BYTES) as f64 }
+    }
+
+    #[napi]
+    pub fn saved_route_bytes(route: &SavedRoute) -> f64 {
+        route.route.as_ref().map_or(0, LocalRoute::charged) as f64
+    }
+
     /// The ledger (plan C1): its limit, what's charged now and at most, the pool's share, the renderer cache's.
     #[napi(object)]
     pub struct Ledger {
@@ -965,8 +1234,11 @@ pub mod test_hooks {
         // The held Markdown build's reservation. Raw's itemization does not include it; the sum does.
         let rendered = doc.built.lock().unwrap().as_ref().map(|r| r.charged()).unwrap_or(0);
         let images = doc.images.as_ref().map(|resources| resources.charged()).unwrap_or(0);
+        let csv = doc.csv.charged();
+        let find = doc.find.charged();
         let [hashes, checkpoints, cache, metadata, total] =
-            [c.hashes, c.checkpoints, c.cache, c.metadata, c.total() + rendered + images].map(|n| n as f64);
+            [c.hashes, c.checkpoints, c.cache, c.metadata, c.total() + rendered + images + csv + find]
+                .map(|n| n as f64);
         Ok(Charges { hashes, checkpoints, cache, metadata, total, lines_stopped: raw.lines_stopped() })
     }
 
@@ -991,6 +1263,8 @@ pub mod test_hooks {
 
 impl Drop for Doc {
     fn drop(&mut self) {
+        self.csv.close();
+        self.find.close();
         self.clear_images();
     }
 }

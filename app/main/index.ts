@@ -1,4 +1,4 @@
-import { BrowserWindow, Menu, MessageChannelMain, app, crashReporter, dialog, ipcMain, protocol, screen, session, shell, systemPreferences, utilityProcess } from 'electron'
+import { BrowserWindow, Menu, MessageChannelMain, app, clipboard, crashReporter, dialog, ipcMain, protocol, screen, session, shell, systemPreferences, utilityProcess } from 'electron'
 import type { IpcMainEvent, IpcMainInvokeEvent } from 'electron'
 import { once } from 'node:events'
 import { readFile } from 'node:fs/promises'
@@ -6,6 +6,7 @@ import { extname, join, sep } from 'node:path'
 import coreHostPath from '../core-host/index?modulePath'
 import type { Command } from '../shared/protocol'
 import { openExternal } from './external'
+import { writeClipboardText } from './clipboard'
 import { handoff, launchPaths } from './launch'
 import { startLifecycle } from './lifecycle'
 import { envWhole, isMark, marksHook } from './marks'
@@ -204,8 +205,18 @@ function macMenu(win: BrowserWindow): Menu {
     { role: 'appMenu' },
     { label: 'File', submenu: [
       { label: 'Open File…', click: run('open') },
+      { label: 'Open Folder…', click: run('open-folder') },
+      { label: 'Toggle Sidebar', accelerator: 'Cmd+B', click: run('toggle-sidebar') },
+      { label: 'Split Right', accelerator: 'Cmd+\\', click: run('split-right') },
+      { label: 'Move Tab Right', click: run('move-tab-right') },
+      { label: 'Close Card', click: run('close-card') },
       { label: 'Reload', click: run('reload') },
+      { label: 'Find in File…', accelerator: 'Cmd+F', click: run('find') },
+      { label: 'Next Match', accelerator: 'F3', click: run('find-next') },
+      { label: 'Previous Match', accelerator: 'Shift+F3', click: run('find-previous') },
       { label: 'Close Tab', accelerator: 'Cmd+W', click: run('close-tab') },
+      { label: 'Reopen Closed Tab', accelerator: 'Cmd+Shift+T', click: run('reopen-tab') },
+      { label: 'Clear Recently Closed Tabs', click: run('clear-closed') },
       { role: 'close', accelerator: 'Shift+Cmd+W' }
     ] },
     { role: 'editMenu' },
@@ -290,7 +301,13 @@ void app.whenReady().then(() => {
     const r = await dialog.showOpenDialog(win, { properties: ['openFile'] })
     return r.canceled ? null : (r.filePaths[0] ?? null)
   })
+  handle(win, 'folder-dialog', async () => {
+    const r = await dialog.showOpenDialog(win, { properties: ['openDirectory'] })
+    return r.canceled ? null : (r.filePaths[0] ?? null)
+  })
   ipcMain.handle('open-external', (event: IpcMainInvokeEvent, ...args: unknown[]) => openExternal(win, event, args, (url) => shell.openExternal(url)))
+  ipcMain.handle('write-clipboard', (event: IpcMainInvokeEvent, ...args: unknown[]) =>
+    writeClipboardText(win, event, args, (text) => clipboard.writeText(text)))
   const startupQuery = new URLSearchParams()
   if (mountDelay) startupQuery.set('delayMount', String(mountDelay))
   if (fontDelay) startupQuery.set('delayFonts', String(fontDelay))

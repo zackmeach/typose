@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 # Parser/sanitizer pins (Rendered Markdown slice §2.3) and image codec pins (images.rs allocation inventory).
 ammonia = "=4.2.4"
+csv-core = "=0.1.13"
 encoding_rs = "=0.8.42"
 fdeflate = "=0.3.7"
 gif = { version = "=0.14.2", default-features = false, features = ["std"] }

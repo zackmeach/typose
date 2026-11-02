@@ -8,6 +8,7 @@ use crate::budget::{self, NoSlot, Reservation, Work};
 use crate::doc::{Charges, DocError, Document};
 use crate::encoding::{Sniffed, sniff};
 use crate::index::{IndexConfig, LineIndex, Progress, build};
+use crate::local::LocalRoute;
 use crate::md;
 use crate::pages::{self, Caps, LinePiece, MAX_PATH_BYTES};
 use crate::store::{CHUNK, cancelled};
@@ -66,8 +67,16 @@ impl Raw {
     /// freezes, so its index stops at its next block and its pages and tokens are refused. If the open fails
     /// (the file is gone, say), this generation stays as it was.
     pub fn reload(&self) -> Result<Raw, DocError> {
+        self.reload_in_folder(None)
+    }
+
+    pub fn reload_in_folder(&self, folder: Option<&crate::local::folder::Folder>) -> Result<Raw, DocError> {
         let _temp = Reservation::new(OPEN_TEMP).map_err(DocError::Memory)?;
-        let next = Self::from_document(self.doc.reopened()?)?;
+        let mut doc = self.doc.reopened()?;
+        if let Some(folder) = folder {
+            doc.bind_folder(folder)?;
+        }
+        let next = Self::from_document(doc)?;
         let _ = self.doc.freeze("reloaded".into());
         Ok(next)
     }
@@ -81,8 +90,36 @@ impl Raw {
         Ok(next)
     }
 
+    /// Non-consuming reopen: only a saved route survives, and current bytes get a new verified index.
+    pub fn open_saved(route: &LocalRoute) -> Result<Raw, DocError> {
+        let _temp = Reservation::new(OPEN_TEMP).map_err(DocError::Memory)?;
+        Document::from_saved(route, CACHE_CHUNKS).and_then(Self::from_document).map_err(crate::doc::local_target_error)
+    }
+
     pub fn document(&self) -> &Document {
         &self.doc
+    }
+
+    pub fn csv(
+        &self,
+        generation: u32,
+        revision: u32,
+        options: crate::csv::Options,
+    ) -> Result<crate::csv::Csv, DocError> {
+        crate::csv::Csv::new(&self.doc, generation, revision, options, self.index.read().unwrap().encoding)
+    }
+
+    pub fn line_offset(&self, generation: u32, line: u64) -> Result<Option<u64>, DocError> {
+        let index = self.index.read().unwrap();
+        self.doc.verified(generation, |store| crate::index::locate_line(store, &index, line))
+    }
+
+    pub fn source_encoding(&self) -> &'static Encoding {
+        self.index.read().unwrap().encoding
+    }
+
+    pub fn bind_folder(&mut self, folder: &crate::local::folder::Folder) -> Result<bool, DocError> {
+        self.doc.bind_folder(folder)
     }
 
     /// Generation `generation` as Markdown blocks, from one verified read in Raw's encoding (`md::build`). The store's

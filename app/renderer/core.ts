@@ -91,18 +91,30 @@ export class CoreClient {
     return new Promise((ok, fail) => {
       if (this.gone || !this.port) return fail(new CoreCallError('CoreGone', "Typose's core stopped"))
       const id = this.nextId++
-      this.pending.set(id, { method, ok: ok as (v: unknown) => void, fail })
-      this.port.postMessage({ id, method, params })
-      if (__TEST_HOOKS__ && method === 'page') {
-        const pages = [...this.pending.values()].filter((c) => c.method === 'page').length
-        testHooks.maxPendingPages = Math.max(testHooks.maxPendingPages, pages)
-      }
       const cancel = () => {
         if (!this.pending.has(id)) return // answered already, or its core is gone
         if (__TEST_HOOKS__) testHooks.aborts++
         void this.call('cancel', { id }).catch(() => {})
       }
+      const cleanup = () => signal?.removeEventListener('abort', cancel)
+      this.pending.set(id, { method,
+        ok: (value) => { cleanup(); ok(value as Result<M, P>) },
+        fail: (error) => { cleanup(); fail(error) }
+      })
       signal?.addEventListener('abort', cancel, { once: true })
+      try {
+        this.port.postMessage({ id, method, params })
+      } catch (error) {
+        this.pending.delete(id)
+        cleanup()
+        fail(error)
+        return
+      }
+      if (__TEST_HOOKS__ && method === 'page') {
+        const pages = [...this.pending.values()].filter((c) => c.method === 'page').length
+        testHooks.maxPendingPages = Math.max(testHooks.maxPendingPages, pages)
+      }
+      if (signal?.aborted) cancel()
     })
   }
 

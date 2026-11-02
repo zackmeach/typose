@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["typose-core", "typose-node", "fixtures-gen"]
-exclude = ["vendor/zune-jpeg"]
+exclude = ["vendor/zune-jpeg", "vendor/csv-core"]
 
 [workspace.package]
 version = "0.0.0"
@@ -22,3 +22,4 @@ opt-level = 3
 
 [patch.crates-io]
 zune-jpeg = { path = "vendor/zune-jpeg" }
+csv-core = { path = "vendor/csv-core" }

@@ -1,6 +1,6 @@
 // Plan C7's rejection path in the renderer: the port is taken only from this window, calls are matched by
 // session, and when main reports the core gone every pending call, and every later one, fails with CoreGone.
-import { afterEach, beforeEach, expect, it } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { CoreCallError, CoreClient } from './core'
 
 const ORIGIN = 'typose://app'
@@ -37,6 +37,16 @@ async function connected(): Promise<CoreClient> {
   post({ type: 'core-port', session: 3 }, { ports: [channel.port1] })
   await expect(hello).resolves.toMatchObject({ session: 3 })
   return client
+}
+
+function abortListeners(signal: AbortSignal): () => number {
+  const added = vi.spyOn(signal, 'addEventListener')
+  const removed = vi.spyOn(signal, 'removeEventListener')
+  return () => {
+    const active = new Set(added.mock.calls.filter(([type]) => type === 'abort').map(([, callback]) => callback))
+    for (const [type, callback] of removed.mock.calls) if (type === 'abort') active.delete(callback)
+    return active.size
+  }
 }
 
 it('rejects every pending call with CoreGone when the core goes, and every later call at once', async () => {
@@ -139,4 +149,46 @@ it("a newer session's port that comes before the old one's core-gone still fails
   await expect.poll(() => next.requests.map((r) => r.method)).toEqual(['hello', 'close'])
   expect(gone).toEqual([1])
   next.close()
+})
+
+it('releases shared abort listeners on successful and failed replies across many sequential reads', async () => {
+  const client = await connected()
+  const controller = new AbortController()
+  const listeners = abortListeners(controller.signal)
+  let count = 0
+  channel.port2.onmessage = (event: MessageEvent) => {
+    count++
+    channel.port2.postMessage({ id: event.data.id, session: 3,
+      ...(count % 2 ? { result: true } : { error: { code: 'Refused', message: 'fixture refusal' } }) })
+  }
+  for (let i = 0; i < 64; i++) {
+    await client.call('close', { doc: 1 }, controller.signal).catch(() => {})
+    expect(listeners()).toBe(0)
+  }
+  expect(count).toBe(64)
+})
+
+it('releases abort listeners when a session dies or posting the request fails', async () => {
+  const client = await connected()
+  const controller = new AbortController()
+  const listeners = abortListeners(controller.signal)
+  await expect(client.call('close', { doc: 1, uncloneable: () => {} }, controller.signal)).rejects.toMatchObject({ name: 'DataCloneError' })
+  expect(listeners()).toBe(0)
+  const pending = client.call('close', { doc: 1 }, controller.signal)
+  expect(listeners()).toBe(1)
+  post({ type: 'core-gone', session: 3 })
+  await expect(pending).rejects.toMatchObject({ code: 'CoreGone' })
+  expect(listeners()).toBe(0)
+})
+
+it('sends cancellation for an already-aborted request using the same port protocol', async () => {
+  const client = await connected()
+  const controller = new AbortController()
+  const listeners = abortListeners(controller.signal)
+  controller.abort()
+  const pending = client.call('close', { doc: 1 }, controller.signal)
+  await expect.poll(() => requests.map((r) => r.method)).toEqual(['hello', 'close', 'cancel'])
+  channel.port2.postMessage({ id: requests[1].id, session: 3, error: { code: 'Cancelled', message: 'cancelled' } })
+  await expect(pending).rejects.toMatchObject({ code: 'Cancelled' })
+  expect(listeners()).toBe(0)
 })

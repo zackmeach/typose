@@ -1,4 +1,4 @@
-import type { ErrorCode, MdBuild, Opened } from '../shared/protocol'
+import type { CsvInfo, CsvOptions, ErrorCode, MdBuild, Opened } from '../shared/protocol'
 
 /** Why Rendered stays off, in the switch's tooltip (plan §2.2, Z71, Z34). */
 export const RENDERED_OFF = {
@@ -28,7 +28,10 @@ export type Card =
       refused?: true
       atLine?: number
       /** What's showing. Markdown opens in Raw, then Rendered once its build fits (plan §2.2). */
-      lens?: 'raw' | 'rendered'
+      lens?: 'raw' | 'rendered' | 'grid'
+      csv?: CsvInfo
+      csvOptions?: CsvOptions
+      gridOff?: string
       /** Set once `render` has finished. Pages come from it. */
       build?: MdBuild
       /** Past 50 ms with the build still running, the status says "Rendering…". */
@@ -59,9 +62,9 @@ export interface CardView {
   /** A banner under the header, and its button's label. The button reloads, as Ctrl+R does. */
   banner: { text: string; action: string } | null
   /** The Raw lens, the Rendered lens, or a message with its actions. */
-  body: { raw: true } | { rendered: true } | { message: string; actions: Action[] }
+  body: { raw: true } | { rendered: true } | { grid: true } | { message: string; actions: Action[] }
   /** Markdown's Raw/Rendered switch. `renderedOff` is the disabled tab's tooltip. Null when the file has no switch. */
-  lenses: null | { showing: 'raw' | 'rendered'; renderedOff?: string }
+  lenses: null | { showing: 'raw' | 'rendered' | 'grid'; renderedOff?: string; grid?: true; gridOff?: string }
 }
 
 export const fileName = (path: string): string => path.split(/[\\/]/).pop() || path
@@ -98,6 +101,7 @@ export function view(card: DisplayCard): CardView {
       if (!card.indexed) status = frozen ? `Indexing stopped at ${count}` : `Indexing ${lines(card.lines, (n) => compact.format(n))}…`
       // Plan §2.2: Raw shows "Rendering…" until the build is ready. A freeze already has its own status.
       if (card.rendering && !frozen) status = 'Rendering…'
+      if (opened.format === 'csv' && card.csv) status = `${Math.max(0, card.csv.sourceRecords - (card.csv.header ? 1 : 0)).toLocaleString('en')} rows${card.csv.done ? '' : '…'} · ${card.csv.encoding}`
       const showing = card.lens ?? 'raw'
       const markdown = opened.format === 'markdown' && !opened.blank
       return {
@@ -108,8 +112,9 @@ export function view(card: DisplayCard): CardView {
           : frozen
             ? { text: 'Changed on disk', action: 'Reload (Ctrl+R)' }
             : null,
-        body: opened.blank ? { message: 'Empty file', actions: [] } : showing === 'rendered' ? { rendered: true } : { raw: true },
-        lenses: markdown ? { showing, renderedOff: card.renderedOff ? RENDERED_OFF[card.renderedOff] : undefined } : null
+        body: opened.blank ? { message: 'Empty file', actions: [] } : showing === 'rendered' ? { rendered: true } : showing === 'grid' ? { grid: true } : { raw: true },
+        lenses: markdown ? { showing, renderedOff: card.renderedOff ? RENDERED_OFF[card.renderedOff] : undefined } :
+          opened.format === 'csv' && !opened.blank ? { showing, grid: true, gridOff: card.gridOff } : null
       }
     }
     case 'failed':

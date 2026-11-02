@@ -1,8 +1,16 @@
 import type { Card } from './card'
-import type { Opened, ProgressEvent } from '../shared/protocol'
+import type { CapturedLocation, CsvOptions, Opened, ProgressEvent } from '../shared/protocol'
 
 export type TabId = string
-export type LensChoice = 'raw' | 'rendered' | null
+export type LensChoice = 'raw' | 'rendered' | 'grid' | null
+/** A saved location owns scalar metadata and, for derived files, one native route ticket. */
+export interface SavedLocation {
+  readonly location: CapturedLocation
+  readonly path: string
+  readonly anchor: number
+  readonly lens: LensChoice
+  readonly csvOptions?: Readonly<CsvOptions>
+}
 type OpenCard = Extract<Card, { kind: 'open' }>
 type FinishedCard = Extract<Card, { kind: 'open' | 'failed' }>
 
@@ -24,6 +32,7 @@ export interface WorkspaceTab {
   readonly anchor?: number
   /** Null retains Markdown's automatic first-lens choice; a user choice belongs to this tab. */
   readonly preferredLens: LensChoice
+  readonly back?: readonly SavedLocation[]
 }
 
 export interface WorkspaceSnapshot {
@@ -41,25 +50,33 @@ export interface DocumentRef { readonly session: number; readonly doc: number; r
 
 /** Controller work can wait for native grants; closing the last tab starts a new queue without waiting for them. */
 export class WorkspaceMetadataQueue {
-  private epoch = 0
-  private serial = Promise.resolve()
-  private pendingCount = 0
+  private readonly lanes = new Map<string, { epoch: number; serial: Promise<void>; pending: number }>()
 
-  get pending(): number { return this.pendingCount }
+  get pending(): number { return [...this.lanes.values()].reduce((sum, lane) => sum + lane.pending, 0) }
+  pendingFor(owner: string): number { return this.lanes.get(owner)?.pending ?? 0 }
 
   run<T>(work: (current: () => boolean) => Promise<T>, valid: () => boolean): Promise<T | null> {
-    const epoch = this.epoch
-    this.pendingCount++
-    const current = () => epoch === this.epoch && valid()
-    const result = this.serial.then(() => current() ? work(current) : null).then((value) => current() ? value : null)
-      .finally(() => { this.pendingCount-- })
-    this.serial = result.then(() => {}, () => {})
+    return this.runFor('window', work, valid)
+  }
+
+  runFor<T>(owner: string, work: (current: () => boolean) => Promise<T>, valid: () => boolean): Promise<T | null> {
+    let lane = this.lanes.get(owner)
+    if (!lane) { lane = { epoch: 0, serial: Promise.resolve(), pending: 0 }; this.lanes.set(owner, lane) }
+    const epoch = lane.epoch
+    lane.pending++
+    const current = () => lane!.epoch === epoch && valid()
+    const result = lane.serial.then(() => current() ? work(current) : null).then((value) => current() ? value : null)
+      .finally(() => {
+        lane!.pending--
+        if (lane!.pending === 0 && this.lanes.get(owner) === lane) this.lanes.delete(owner)
+      })
+    lane.serial = result.then(() => {}, () => {})
     return result
   }
 
-  invalidate(): void {
-    this.epoch++
-    this.serial = Promise.resolve()
+  invalidate(owner?: string): void {
+    const targets = owner === undefined ? [...this.lanes.values()] : [this.lanes.get(owner)].filter((lane): lane is NonNullable<typeof lane> => !!lane)
+    for (const lane of targets) { lane.epoch++; lane.serial = Promise.resolve() }
   }
 }
 
@@ -69,9 +86,10 @@ export type OpenRequest =
   | { kind: 'open'; ticket: TabTicket; selection: SelectionTicket }
 
 function retainOpened(opened: StoredOpenCard['opened']): StoredOpenCard['opened'] {
-  const { doc, gen, format, size, encoding, lines, indexed, blank, localOnly, path } = opened
+  const { doc, gen, format, size, encoding, lines, indexed, blank, localOnly, path, folder } = opened
   return Object.freeze({ doc, gen, format, size, encoding, lines, indexed, blank,
-    ...(localOnly ? { localOnly } : {}), ...(path !== undefined ? { path } : {}) })
+    ...(localOnly ? { localOnly } : {}), ...(path !== undefined ? { path } : {}),
+    ...(folder ? { folder: { ...folder, segments: [...folder.segments] } } : {}) })
 }
 
 function retain(card: FinishedCard): StoredCard {
@@ -91,6 +109,8 @@ export class WorkspaceStore {
   private nextTab = 1
   private selectionVersion = 0
 
+  constructor(private readonly prefix = 'tab') {}
+
   readonly getSnapshot = (): WorkspaceSnapshot => this.state
   readonly subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener)
@@ -100,16 +120,18 @@ export class WorkspaceStore {
   tab(id: TabId): WorkspaceTab | undefined { return this.state.tabs.find((tab) => tab.id === id) }
   find(key: string): WorkspaceTab | undefined { return this.state.tabs.find((tab) => tab.key === key) }
 
-  beginOpen(key: string, path: string): OpenRequest {
+  beginOpen(key: string, path: string, index = this.state.tabs.length): OpenRequest {
     if (!this.state.ready) return { kind: 'unavailable' }
     const existing = this.find(key)
     if (existing) return { kind: 'existing', tab: existing.id, selection: this.select(existing.id)! }
-    const id = `tab-${this.nextTab++}`
+    const id = `${this.prefix}-${this.nextTab++}`
     const tab: WorkspaceTab = Object.freeze({ id, key, path, session: this.state.session,
       card: Object.freeze({ kind: 'opening', path, slow: false }), preferredLens: null })
     this.versions.set(id, 1)
     this.selectionVersion++
-    this.publish({ ...this.state, tabs: [...this.state.tabs, tab], selected: id })
+    const tabs = [...this.state.tabs]
+    tabs.splice(Math.max(0, Math.min(index, tabs.length)), 0, tab)
+    this.publish({ ...this.state, tabs, selected: id })
     return { kind: 'open', ticket: { tab: id, version: 1, session: this.state.session }, selection: this.selection()! }
   }
 
@@ -132,15 +154,50 @@ export class WorkspaceStore {
   }
 
   /** False means the caller still owns the returned native resource; the store never closes one. */
-  complete(ticket: TabTicket, key: string, card: FinishedCard): boolean {
+  complete(ticket: TabTicket, key: string, card: FinishedCard, navigation?: { push?: SavedLocation; pop?: boolean; restore?: SavedLocation }): boolean {
     if (!this.current(ticket)) return false
     const collision = this.find(key)
     this.versions.set(ticket.tab, ticket.version + 1)
     if (collision && collision.id !== ticket.tab) return false
     this.change(ticket.tab, (tab) => ({ ...tab, key, path: card.path, session: ticket.session, card: retain(card),
       anchor: card.kind === 'open' && card.atLine !== undefined ? card.atLine : tab.key === key ? tab.anchor : undefined,
-      preferredLens: tab.key === key ? tab.preferredLens : null }))
+      preferredLens: navigation?.restore ? navigation.restore.lens : tab.key === key ? tab.preferredLens : null,
+      ...(navigation ? { back: Object.freeze(navigation.push ? [...(tab.back ?? []), navigation.push] : navigation.pop ? (tab.back ?? []).slice(0, -1) : tab.back ?? []) } : {}) }))
     return true
+  }
+
+  consumeBack(id: TabId, entry: SavedLocation): boolean {
+    const tab = this.tab(id)
+    if (tab?.back?.at(-1) !== entry) return false
+    this.change(id, tab => ({ ...tab, back: Object.freeze(tab.back!.slice(0, -1)) }))
+    return true
+  }
+
+  invalidateWork(): void {
+    for (const id of this.versions.keys()) this.versions.set(id, this.versions.get(id)! + 1)
+    this.selectionVersion++
+  }
+
+  /** Transfer metadata only; the caller separately transfers native ownership while views are detached. */
+  takeTabs(ids = this.state.tabs.map(tab => tab.id)): readonly WorkspaceTab[] {
+    const wanted = new Set(ids)
+    const moved = this.state.tabs.filter(tab => wanted.has(tab.id))
+    const tabs = this.state.tabs.filter(tab => !wanted.has(tab.id))
+    for (const tab of moved) this.versions.delete(tab.id)
+    this.selectionVersion++
+    this.publish({ ...this.state, tabs, selected: tabs.some(tab => tab.id === this.state.selected) ? this.state.selected : tabs[0]?.id ?? null })
+    return moved
+  }
+
+  adoptTabs(incoming: readonly WorkspaceTab[]): void {
+    const keys = new Set(this.state.tabs.map(tab => tab.key))
+    const tabs = incoming.map(tab => {
+      const key = keys.has(tab.key) ? 'moved:' + tab.id + ':' + tab.key : tab.key
+      keys.add(key)
+      this.versions.set(tab.id, 1)
+      return Object.freeze({ ...tab, key })
+    })
+    this.publish({ ...this.state, tabs: [...this.state.tabs, ...tabs], selected: this.state.selected ?? tabs[0]?.id ?? null })
   }
 
   /** Abandon a failed handoff while retaining its source tab. */

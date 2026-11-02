@@ -2,17 +2,20 @@
 // Reload without collecting garbage. Compare each private-byte sample with the ledger held then.
 import { expect } from '@playwright/test'
 import { rmSync } from 'node:fs'
-import { type TestHooks, debugStats, finish, fixture, launch, test, waitOpen, waitIndexed } from './app'
+import { type TestHooks, debugStats, expectReleasedDocuments, finish, fixture, launch, test, waitOpen, waitIndexed } from './app'
 import { mib, processMemory } from './memory'
 
 const CEILING = 8 << 20
+// Qualify full overlap with a declared synthetic hooks budget; default-budget refusal is tested separately.
+const QUALIFICATION_BUDGET = 8 * 2 ** 30
 
 /** These cases qualify replacement/empty intervals; explicitly close the now-inactive permanent tab. */
 async function closeInactive(win: Awaited<ReturnType<typeof launch>>['win']): Promise<void> {
   const inactive = win.locator('.file-pill:not([data-selected])')
-  while (await inactive.count()) {
+  for (let remaining = await inactive.count(); remaining > 0; remaining--) {
     await inactive.first().hover()
     await inactive.first().locator('.file-tab-close').click()
+    await expect(inactive).toHaveCount(remaining - 1)
   }
 }
 
@@ -55,7 +58,7 @@ for (const sampleCase of CASES)
     const slug = sampleCase.name.replaceAll(' ', '-')
     const smallMarkdown = fixture(`memory-small-${slug}.md`, '# Small replacement\n\nA paragraph.\n')
     const text = fixture(`memory-text-${slug}.txt`, 'A plain text replacement.\n')
-    const l = await launch({ hooks: true })
+    const l = await launch({ hooks: true, controlledAccessibility: true })
     const { win } = l
     let stage = 'empty'
     let watching = false
@@ -64,7 +67,11 @@ for (const sampleCase of CASES)
     let discarded = 0
     const samples: { stage: string; private?: number; reserved: number }[] = []
     try {
-      await expect(win.locator('.open-button')).toBeVisible()
+      await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
+      const originalLimit = (await debugStats(win)).ledger.limit
+      const qualification = await debugStats(win, { limit: QUALIFICATION_BUDGET })
+      expect(qualification.ledger.limit).toBe(QUALIFICATION_BUDGET)
+      console.log(`Rendered overlap: default native limit ${originalLimit} bytes; synthetic qualification limit ${qualification.ledger.limit} bytes`)
       const cdp = await win.context().newCDPSession(win)
       // The sole GC: no document or Rendered tree exists yet. Nothing is collected during the measured interval.
       await cdp.send('HeapProfiler.collectGarbage')
@@ -160,9 +167,29 @@ for (const sampleCase of CASES)
         const requested = Date.now()
         await win.locator('.md-scroller').focus()
         await win.keyboard.press('Control+R')
+        if (sampleCase.name === 'dense topology' && gen === 3) {
+          const budgetRefusal = win.locator('.banner').filter({ hasText: "Can't reload: Typose's memory budget is full" })
+          const active = win.locator('[data-lens="rendered"]')
+          await expect.poll(async () => await active.getAttribute('data-gen') === String(gen) || await budgetRefusal.isVisible(), { timeout: 120_000 }).toBe(true)
+          if (await budgetRefusal.isVisible()) {
+            const refused = await debugStats(win)
+            expect(refused.surfaces).toMatchObject({ views: 1, pending: 0 })
+            expect(refused.ledger.limit).toBe(QUALIFICATION_BUDGET)
+            expect(refused.ledger.used).toBeLessThanOrEqual(QUALIFICATION_BUDGET)
+            await expect(active).toHaveAttribute('data-gen', String(gen - 1))
+            // The current and incoming leases must both stay paid until the handoff. Keep the 8 GiB refusal
+            // visible in the evidence, then give the positive probe one additional live-view allowance.
+            const extra = refused.surfaces!.bytes
+            const allowance = QUALIFICATION_BUDGET + extra
+            expect((await debugStats(win, { limit: allowance })).ledger.limit).toBe(allowance)
+            console.log(`Dense handoff refused at ${QUALIFICATION_BUDGET} bytes; retained view ${extra}; positive retry limit ${allowance}`)
+            await win.locator('.md-scroller').focus()
+            await win.keyboard.press('Control+R')
+          }
+        }
         await expect(win.locator('[data-lens="rendered"]')).toHaveAttribute('data-gen', String(gen), { timeout: 120_000 })
         await ready()
-        console.log(`Reload generation ${gen} ready after ${Date.now() - requested} ms; one key command`)
+        console.log(`Reload generation ${gen} ready after ${Date.now() - requested} ms`)
         const current = (await stats())!
         expect(current.retiredReserved).toBe(2 * initial.reserved)
         expect(current.rawReserved).toBeGreaterThan(0)
@@ -202,11 +229,8 @@ for (const sampleCase of CASES)
       watching = false
       await sampling
       await win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.app.close!())
-      await expect(win.locator('.open-button')).toBeVisible()
-      await expect.poll(async () => {
-        const { ledger } = await debugStats(win)
-        return ledger.used - ledger.pool
-      }).toBe(0)
+      await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
+      await expectReleasedDocuments(win)
       stage = 'reopen after Close'
       await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), smallMarkdown)
       await expect(win.locator('.card-name')).toHaveText(`memory-small-${slug}.md`)
@@ -244,6 +268,16 @@ for (const sampleCase of CASES)
         expect(worst.private - baseline.private, `${sampleCase.name}: ${worst.stage}`).toBeLessThanOrEqual(worst.reserved + (32 << 20))
       }
       expect(l.pageErrors).toEqual([])
+    } catch (error) {
+      const state = await win.evaluate(() => ({
+        notices: Array.from(document.querySelectorAll('.banner')).map(banner => banner.textContent),
+        generation: document.querySelector('[data-lens="rendered"]')?.getAttribute('data-gen'),
+        ready: document.querySelector('.md-scroller')?.getAttribute('data-ready'),
+        focus: document.activeElement?.className
+      })).catch(() => null)
+      const ownership = await debugStats(win).catch(() => null)
+      console.log(JSON.stringify({ failedStage: stage, state, ledger: ownership?.ledger, surfaces: ownership?.surfaces }))
+      throw error
     } finally {
       watching = false
       await sampling

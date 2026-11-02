@@ -106,6 +106,31 @@ it('last-close bypasses old queued grants before the DOM is ready to release its
   expect(calls).toHaveLength(3)
 })
 
+it('retries another card from the fresh aggregate after a pending workspace grant is cancelled', async () => {
+  const old = pending()
+  const calls: number[] = []
+  const bank = new WorkspaceBudget({ call: (_, p) => {
+    calls.push(p.bytes)
+    return calls.length === 1 ? old.promise : Promise.resolve(true)
+  } }, 1)
+  const closingCard = bank.hold(4, 40)
+  const otherCard = bank.hold(3, 30)
+  await Promise.resolve()
+  const beforeCancel = bank.reservationEpoch
+  bank.cancelPending()
+  expect(bank.reservationEpoch).toBe(beforeCancel + 1)
+
+  const retry = bank.hold(5, 50) // recomputed aggregate includes the other card and current tabs
+  expect(await retry).toBe(true)
+  const committed = bank.snapshot()
+  expect(committed.peakBytes).toBe(workspaceCharge(5, 50))
+  old.resolve(true)
+  expect(await closingCard).toBe(false)
+  expect(await otherCard).toBe(false)
+  expect(bank.snapshot()).toEqual(committed)
+  expect(calls).toEqual([3 * workspaceCharge(4, 40), 3 * workspaceCharge(5, 50)])
+})
+
 it('core death invalidates old grants without a zero RPC into the next session', async () => {
   const reply = pending()
   const calls: number[] = []
@@ -118,7 +143,7 @@ it('core death invalidates old grants without a zero RPC into the next session',
   reply.resolve(true)
   expect(await holding).toBe(false)
   expect(calls).toHaveLength(1)
-  expect(bank.snapshot().peakBytes).toBe(0)
+  expect(bank.snapshot().peakBytes).toBe(workspaceCharge(1, 10)) // the interrupted request's retained graph must be recharged
 })
 
 it('refuses unsafe sizes before contacting the core', async () => {
@@ -127,4 +152,13 @@ it('refuses unsafe sizes before contacting the core', async () => {
   for (const [count, units] of [[-1, 0], [1.5, 0], [1, Infinity], [1, Number.MAX_SAFE_INTEGER], [0, 1]])
     expect(await bank.hold(count, units)).toBe(false)
   expect(calls).toBe(0)
+})
+
+it('retains charged history and pending page bytes after the last document closes', async () => {
+  const calls: number[] = []
+  const bank = new WorkspaceBudget({ call: async (_, p) => { calls.push(p.bytes); return true } }, 1)
+  expect(await bank.hold(0, 0, 8 << 20)).toBe(true)
+  expect(bank.snapshot().held).toBe(3 * ((6 << 20) + (8 << 20)))
+  expect(await bank.release()).toBe(true)
+  expect(calls.at(-1)).toBe(0)
 })

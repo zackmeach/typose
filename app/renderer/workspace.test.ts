@@ -41,6 +41,21 @@ it('last-close invalidates a held metadata grant and queued requests without blo
   expect(published).toEqual(['C'])
 })
 
+it("cancels one card's metadata lane without invalidating another card's queued work", async () => {
+  const queue = new WorkspaceMetadataQueue()
+  let release!: () => void
+  const grant = new Promise<void>(done => { release = done })
+  const a = queue.runFor('card-a', async current => { await grant; return current() ? 'stale A' : 'cancelled A' }, () => true)
+  const b = queue.runFor('card-b', async current => current() ? 'B' : 'cancelled B', () => true)
+  await Promise.resolve()
+  queue.invalidate('card-a')
+  expect(await b).toBe('B')
+  expect(await queue.runFor('card-a', async current => current() ? 'fresh A' : 'cancelled A', () => true)).toBe('fresh A')
+  release()
+  expect(await a).toBeNull()
+  expect(queue.pending).toBe(0)
+})
+
 it('a session invalidated while a queued metadata callback waits cannot publish afterward', async () => {
   const queue = new WorkspaceMetadataQueue()
   let session = 1
@@ -155,6 +170,33 @@ it('preserves per-tab explicit lens and source anchor on Reload but clears both 
   expect(store.tab(a.tab)).toMatchObject({ anchor: 200, preferredLens: 'raw' })
   store.complete(store.begin(a.tab)!, 'local:2', card('child.md', opened(2, 1, { localOnly: true })))
   expect(store.tab(a.tab)).toMatchObject({ anchor: undefined, preferredLens: null })
+})
+
+it('publishes a saved-location push and Back pop with their document replacement and restores lens/place', () => {
+  const store = ready()
+  const a = begin(store, 'a.md')
+  store.complete(a, 'a.md', card('a.md', opened(1)))
+  const entry = { location: { kind: 'manual' as const, path: 'a.md' }, path: 'a.md', anchor: 120, lens: 'raw' as const }
+  let publications = 0
+  store.subscribe(() => { publications++ })
+  expect(store.complete(store.begin(a.tab)!, 'local:2', card('b.md', opened(2, 1, { localOnly: true })), { push: entry })).toBe(true)
+  expect(publications).toBe(1)
+  expect(store.tab(a.tab)!.back).toEqual([entry])
+  expect(store.complete(store.begin(a.tab)!, 'a.md', { ...card('a.md', opened(3)), atLine: 120 }, { pop: true, restore: entry })).toBe(true)
+  expect(publications).toBe(2)
+  expect(store.tab(a.tab)).toMatchObject({ back: [], anchor: 120, preferredLens: 'raw' })
+})
+
+it('a refused replacement keeps its history and derived authority separate from matching manual paths', () => {
+  const store = ready()
+  const a = begin(store, 'a.md'), b = begin(store, 'b.md')
+  store.complete(a, 'a.md', card('a.md', opened(1)))
+  store.complete(b, 'b.md', card('b.md', opened(2)))
+  const entry = { location: { kind: 'derived' as const, ticket: { session: 1, id: 'saved-route' } }, path: 'a.md', anchor: 12, lens: null }
+  store.complete(store.begin(a.tab)!, 'local:3', card('c.md', opened(3, 1, { localOnly: true })), { push: entry })
+  expect(store.complete(store.begin(a.tab)!, 'b.md', card('b.md', opened(4)), { pop: true, restore: entry })).toBe(false)
+  expect(store.tab(a.tab)!.back).toEqual([entry])
+  expect(store.tab(a.tab)!.path).toBe('c.md')
 })
 
 it('keeps a collision source owned and consumes its completion ticket', () => {

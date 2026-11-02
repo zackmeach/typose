@@ -6,8 +6,10 @@
 
 pub mod budget;
 pub mod bytemap;
+pub mod csv;
 pub mod doc;
 pub mod encoding;
+pub mod find;
 #[cfg(feature = "test-hooks")]
 pub mod hooks;
 pub mod image_resource;

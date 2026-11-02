@@ -50,7 +50,7 @@ test('the accessibility mode comes from main at load and on every change, and on
   test.skip(!MODE, 'Electron has no accessibility-support API on Linux (Z28)')
   const l = await launch()
   const { app, win } = l
-  await expect(win.locator('.open-button')).toBeVisible()
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   const mode = win.locator('html')
   const initial = await app.evaluate(({ app }) => app.isAccessibilitySupportEnabled())
   await expect(mode).toHaveAttribute('data-a11y', initial ? 'on' : 'off')
@@ -92,7 +92,7 @@ test('Raw is a named region whose text leaves out the gutter, and ☰ exposes me
     await expect(win.getByRole('menu')).toBeVisible()
     const open = await axTree(win)
     const [menu] = open.find('menu')
-    expect(open.under(menu).filter((n) => n.role?.value === 'menuitem').map((n) => n.name?.value)).toEqual(['Open file…', 'Reload', 'Close tab', EXIT])
+    expect(open.under(menu).filter((n) => n.role?.value === 'menuitem').map((n) => n.name?.value)).toEqual(['Open file…', 'Open folder…', 'Toggle sidebar', 'Split right', 'Move tab right', 'Close card', 'Reload', 'Find in file…', 'Next match', 'Previous match', 'Close tab', 'Reopen closed tab', 'Clear recently closed tabs', EXIT])
     await win.keyboard.press('Escape')
   }
 
@@ -107,7 +107,7 @@ test('Raw is a named region whose text leaves out the gutter, and ☰ exposes me
     await win.getByRole('button', { name: 'Menu', exact: true }).click()
     await expect(win.getByRole('menu')).toBeVisible()
     const menu = uiaNodes(await uiaTree(app)).find((n) => n.type === 'Menu')
-    expect(menu?.children?.filter((n) => n.type === 'MenuItem').map((n) => n.name)).toEqual(['Open file…', 'Reload', 'Close tab', EXIT])
+    expect(menu?.children?.filter((n) => n.type === 'MenuItem').map((n) => n.name)).toEqual(['Open file…', 'Open folder…', 'Toggle sidebar', 'Split right', 'Move tab right', 'Close card', 'Reload', 'Find in file…', 'Next match', 'Previous match', 'Close tab', 'Reopen closed tab', 'Clear recently closed tabs', EXIT])
     await win.keyboard.press('Escape')
   }
   expect(l.pageErrors).toEqual([])
@@ -190,13 +190,13 @@ test('Reload from the "Changed on disk" banner leaves the focus in Raw', async (
   await finish(l)
 })
 
-/** Presses Tab (or `key`) until `target` has focus, at most 6 times; returns how many presses it took. */
+/** Bounded traversal through the reader chrome, including sidebar and card controls. */
 async function tabTo(win: Page, target: string, key = 'Tab'): Promise<number> {
-  for (let n = 1; n <= 6; n++) {
+  for (let n = 1; n <= 10; n++) {
     await win.keyboard.press(key)
     if (await win.locator(target).evaluate((el) => el === document.activeElement)) return n
   }
-  throw new Error(`${key} didn't reach ${target} in 6 presses`)
+  throw new Error(`${key} didn't reach ${target} in 10 presses`)
 }
 
 /** Blur preserves Chromium's sequential focus position; focus the body to start before the page's first control. */
@@ -217,9 +217,11 @@ test('the keyboard reaches ☰ and Raw, ☰ runs its commands from the keyboard,
   await focusStart(win)
   const stops: [selector: string, ringOffset: string][] = [
     ...(!MAC ? [['.menu-button', '2px'] as [string, string]] : []),
+    ['.sidebar-toggle', '2px'],
     ['.file-tab[aria-selected="true"]', '2px'],
     ['.file-pill[data-selected] .file-tab-close', '2px'],
     ['.card-header .card-status', '2px'],
+    ['.close-card-button', '2px'],
     ['.vl-scroller', '-2px']
   ]
   const atStop = async ([selector, offset]: [string, string]) => {
@@ -249,6 +251,8 @@ async function keyboardMenu(win: Page): Promise<void> {
   await win.keyboard.press('Enter')
   await expect(win.getByRole('menuitem', { name: 'Open file…' })).toBeFocused()
   await win.keyboard.press('ArrowDown')
+  await expect(win.getByRole('menuitem', { name: 'Open folder…' })).toBeFocused()
+  await win.keyboard.type('Reload')
   await expect(win.getByRole('menuitem', { name: 'Reload' })).toBeFocused()
   await win.keyboard.press('Enter')
   await expect(win.getByRole('menu')).toHaveCount(0)
@@ -266,7 +270,7 @@ async function axe(win: Page): Promise<string[]> {
 test('axe finds no violations on the chrome: empty, with Raw, with ☰ open, and at 200% zoom', async () => {
   const report: Record<string, string[]> = {}
   const empty = await launch()
-  await expect(empty.win.locator('.open-button')).toBeVisible()
+  await expect(empty.win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   report.empty = await axe(empty.win)
   await finish(empty)
 
@@ -289,7 +293,7 @@ test('axe finds no violations on the chrome: empty, with Raw, with ☰ open, and
 
 test('axe control: it does flag an unnamed button, so a clean report means something', async () => {
   const l = await launch()
-  await expect(l.win.locator('.open-button')).toBeVisible()
+  await expect(l.win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   await l.win.evaluate(() => document.querySelector('main')!.append(document.createElement('button')))
   expect((await axe(l.win)).join('\n')).toContain('button-name')
   await finish(l)
@@ -324,8 +328,15 @@ test('at 200% zoom in the smallest window, the chrome and Raw stay reachable, an
     }
     await tabTo(win, '.menu-button')
     await win.keyboard.press('Enter')
-    await expect(win.getByRole('menuitem')).toHaveText(['Open file…', 'Reload', 'Close tab', EXIT])
-    for (const item of await win.getByRole('menuitem').all()) expect(await item.evaluate((el) => el.getBoundingClientRect().right <= innerWidth && el.getBoundingClientRect().bottom <= innerHeight)).toBe(true)
+    await expect(win.getByRole('menuitem')).toHaveText(['Open file…', 'Open folder…', 'Toggle sidebar', 'Split right', 'Move tab right', 'Close card', 'Reload', 'Find in file…', 'Next match', 'Previous match', 'Close tab', 'Reopen closed tab', 'Clear recently closed tabs', EXIT])
+    for (const item of await win.getByRole('menuitem').all()) {
+      await expect(item).toBeFocused()
+      expect(await item.evaluate(el => {
+        const rect = el.getBoundingClientRect()
+        return rect.top >= 0 && rect.left >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight
+      })).toBe(true)
+      await win.keyboard.press('ArrowDown')
+    }
     await win.keyboard.press('Escape')
   }
   await tabTo(win, '.vl-scroller')

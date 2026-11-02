@@ -14,6 +14,8 @@ interface Hooks {
   setLimit(bytes: number): void
   resetHigh(): void
   docCharges(doc: Core.Doc): Charges
+  savedStats(): { wrappers: number; wrapperBytes: number }
+  savedRouteBytes(route: Core.SavedRoute): number
 }
 
 /** napi-rs's `--platform` name for each build target (spec §12.1). */
@@ -46,10 +48,12 @@ process.parentPort.once('message', (e) => {
     coreVersion: addon.coreVersion,
     limits: addon.limits,
     openDoc: (path: string) => addon.Doc.open(path),
+    captureFolder: (path: string, id: string) => addon.FolderRoot.capture(path, id),
     cancelFlag: () => new addon.Cancel(),
     reserveCache: addon.reserveCache
   }
-  const hooks = __TEST_HOOKS__ ? { debugStats: addon.debugStats, docCharges: addon.docCharges, gc: exposeGc(), resetHigh: addon.resetHigh, setLimit: addon.setLimit } : {}
+  const hooks = __TEST_HOOKS__ ? { debugStats: addon.debugStats, docCharges: addon.docCharges, savedStats: addon.savedStats,
+    savedRouteBytes: addon.savedRouteBytes, gc: exposeGc(), resetHigh: addon.resetHigh, setLimit: addon.setLimit } : {}
   const dispatch = makeDispatcher({ ...core, ...hooks }, session, (event) => port.postMessage(event))
   port.on('message', ({ data }) => void dispatch(data).then((response) => port.postMessage(response)))
   port.start()

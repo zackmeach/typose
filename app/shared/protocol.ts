@@ -2,7 +2,7 @@
 // `WireMap`, `Limits`) are defined in Rust and exported by napi-rs's typegen as `typose-node`'s index.d.ts, so
 // both sides typecheck against the core's own definitions. This file adds the envelope around them, and the
 // session the core host stamps into continuation tokens.
-import type { Continuation, Limits, MdBuild, MdPage, PageItem as CorePageItem } from 'typose-node'
+import type { Continuation, Limits, MdBuild, MdPage, WireMap, PageItem as CorePageItem } from 'typose-node'
 
 export type { Limits, MdBuild, MdItem, MdPage, WireMap } from 'typose-node'
 
@@ -23,6 +23,8 @@ export interface Page {
 }
 
 export const PROTOCOL = 1
+export const MAX_CLIPBOARD_BYTES = 16 << 20
+export const LARGE_COPY_CONFIRM_BYTES = 10 << 20
 
 /** Typed errors. `CoreGone` is the renderer's own: the core host died with the call pending (plan C7). */
 export type ErrorCode =
@@ -31,6 +33,7 @@ export type ErrorCode =
   | 'Unsupported'
   | 'NoDocument'
   | 'NotFound'
+  | 'NotDirectory'
   | 'PermissionDenied'
   | 'Refused'
   | 'Binary'
@@ -64,7 +67,7 @@ export interface Opened {
   doc: number
   gen: number
   /** Spec §4.1, by the file's extension: `markdown` for `.md` and `.markdown`. */
-  format: 'markdown' | 'text'
+  format: 'markdown' | 'text' | 'csv'
   size: number
   encoding: string
   /** Lines the index has found so far; `firstPage` doesn't wait for it (Z37). */
@@ -75,12 +78,93 @@ export interface Opened {
   firstPage: Page
   /** Plan C1: what the ledger holds for this lens's page cache. A disposed background Reload returns zero. */
   reserved: number
+  /** Exact activation lease. Absent for an inactive fresh-open completion. */
+  view?: ViewRef
   /** Derived local navigation keeps its inherited capability for Reload and later links. */
   localOnly?: true
   path?: string
+  /** Native-proved folder scope; its breadcrumb and leading-slash link base are the same capability. */
+  folder?: { root: string; node?: string; label: string; segments: string[] }
 }
 
+export interface SurfaceRef { session: number; id: number }
+export interface ViewRef { session: number; surface: number; id: number; doc: number; gen: number }
+
+export interface SourceFindRef { view: ViewRef; id: number }
+export interface SourceFindInfo { ref: SourceFindRef; count: number; scannedBytes: number; complete: boolean }
+export interface SourceHit { start: number; end: number; line: number; lineStart: number; text: string; map: WireMap; matchStart: number; matchEnd: number }
+export interface SourceFindPage extends SourceFindInfo { hits: SourceHit[] }
+export interface SourceFindSeek { hit?: SourceHit; wrapped: boolean; ordinal?: number }
+
+export type CsvDelimiter = ',' | '\t' | ';' | '|'
+export interface CsvRef { session: number; doc: number; gen: number; revision: number }
+export interface CsvOrderRef { csv: CsvRef; id: number }
+export interface CsvOrderInfo { order: CsvOrderRef; rows: number; column: number; direction: 'asc' | 'desc' | 'none' }
+export interface CsvFindRef { view: ViewRef; order: CsvOrderRef; id: number }
+export interface CsvFindHit { dataRow: number; sourceRecord: number; column: number; start: number; end: number; text?: string; matchStart?: number; matchEnd?: number }
+export interface CsvFindInfo { ref: CsvFindRef; count: number; scannedBytes: number; complete: boolean }
+export interface CsvFindPage extends CsvFindInfo { hits: CsvFindHit[] }
+export interface CsvFindSeek { hit?: CsvFindHit; ordinal?: number; wrapped: boolean }
+export interface CsvSpan { start: number; end: number }
+export interface CsvOptions { delimiter: 'auto' | CsvDelimiter; header: 'auto' | boolean }
+export interface CsvInfo {
+  ref: CsvRef; status: 'indexing' | 'ready' | 'locked'; reason?: string; delimiter: CsvDelimiter; header: boolean; encoding: string
+  sourceRecords: number; indexedBytes: number; done: boolean; expectedColumns: number; maxColumnsKnown: number; metadataDone: boolean
+}
+export interface CsvContinuation { ref: CsvRef; sourceRecord: number; column: number; offset: number }
+export interface CsvCellPiece {
+  kind: 'value'; sourceRecord: number; column: number; span: CsvSpan; pieceSpan: CsvSpan; text: string; map: WireMap; replacements: number; next?: CsvContinuation
+}
+export type CsvCell = CsvCellPiece | { kind: 'missing'; column: number }
+export interface CsvRow { dataRow: number; sourceRecord: number; sourceLine: number; span: CsvSpan; fieldCount: number; cells: CsvCell[]; complete: boolean }
+export interface CsvPage { ref: CsvRef; rows: CsvRow[]; completeRect: boolean; nextRow?: number; nextColumn?: number; indexing: boolean }
+export interface CsvColumn { column: number; name: string; nameMore: boolean; type: 'text' | 'number' | 'date' | 'boolean' | 'url'; widthUnits: number; pills?: string[] }
+export interface CsvColumnPage { ref: CsvRef; columns: CsvColumn[]; nextColumn?: number; metadataDone: boolean }
+export type CsvLocated = { kind: 'pending' } | { kind: 'located'; dataRow: number; sourceRecord: number; sourceLine: number; span: CsvSpan; column?: number }
+export type CsvSource = { kind: 'pending' } | { kind: 'located'; span: CsvSpan; rawLine: number }
+
+export interface FolderRef { session: number; root: string; node: string }
+export interface FolderRoot { ref: FolderRef; label: string; path: string }
+export interface FolderEntry { ref: FolderRef; name: string; kind: 'directory' | 'file' | 'unsupported'; hidden: boolean }
+export interface FolderPage { entries: FolderEntry[]; cursor?: string }
+
+/** Session-only authority: display paths and caller flags can never reconstruct this ticket. */
+export interface SavedTicket { session: number; id: string }
+export type CapturedLocation = { kind: 'manual'; path: string } | { kind: 'derived'; ticket: SavedTicket }
+
 export interface Methods {
+  sourceFindStart: { params: { view: ViewRef; query: string; matchCase: boolean }; result: SourceFindInfo }
+  sourceFindScan: { params: { ref: SourceFindRef }; result: SourceFindPage }
+  sourceFindSeek: { params: { ref: SourceFindRef; from?: number; direction: 'next' | 'previous' }; result: SourceFindSeek }
+  sourceFindClose: { params: { ref: SourceFindRef }; result: boolean }
+  csvSort: { params: { view: ViewRef; ref: CsvRef; interactionId: string; column: number; direction: 'asc' | 'desc' | 'none' }; result: CsvOrderInfo }
+  /** Retire this Grid instance's current/pending order, including an unobserved sort completion. */
+  csvOrderClose: { params: { view: ViewRef; order: CsvOrderRef; interactionId: string }; result: boolean }
+  csvOrderedPage: { params: { order: CsvOrderRef; rowStart: number; rowCount: number; columnStart: number; columnCount: number }; result: CsvPage }
+  csvOrderLocate: { params: { order: CsvOrderRef; sourceRecord: number }; result: { dataRow: number } }
+  csvFindStart: { params: { view: ViewRef; order: CsvOrderRef; query: string; matchCase: boolean }; result: CsvFindInfo }
+  csvFindScan: { params: { ref: CsvFindRef }; result: CsvFindPage }
+  csvFindSeek: { params: { ref: CsvFindRef; from?: CsvFindHit; direction: 'next' | 'previous' }; result: CsvFindSeek }
+  csvFindClose: { params: { ref: CsvFindRef }; result: boolean }
+  csvConfigure: { params: { surface?: SurfaceRef; doc: number; gen: number; options: CsvOptions }; result: CsvInfo }
+  csvPage: { params: { ref: CsvRef; rowStart: number; rowCount: number; columnStart: number; columnCount: number }; result: CsvPage }
+  csvPiece: { params: { continuation: CsvContinuation }; result: CsvCellPiece }
+  csvCell: { params: { ref: CsvRef; sourceRecord: number; column: number }; result: CsvCell }
+  csvColumns: { params: { ref: CsvRef; start: number; count: number }; result: CsvColumnPage }
+  csvLocate: { params: { ref: CsvRef; rawLine: number } | { ref: CsvRef; sourceOffset: number }; result: CsvLocated }
+  csvSource: { params: { ref: CsvRef; sourceRecord: number; column?: number }; result: CsvSource }
+  createSurface: { params: Record<string, never>; result: SurfaceRef }
+  /** Close native owners after detached-tree retirement has been paid by the window workspace share. */
+  releaseSurface: { params: { surface: SurfaceRef; retiredBytes: number }; result: boolean }
+  /** Move a quiescent tab document; never reopen it or restart its index. */
+  transferDoc: { params: { from: SurfaceRef; to: SurfaceRef; doc: number; gen: number }; result: boolean }
+  /** Explicit user-selected directory. Windows backend; at most 16 roots in this demo slice. */
+  addRoot: { params: { path: string }; result: FolderRoot }
+  /** Omit cursor to refresh. Bounded to 128 entries; caller cannot supply a filesystem path. */
+  listFolder: { params: { folder: FolderRef; cursor?: string; hidden?: boolean }; result: FolderPage }
+  openChild: { params: { surface?: SurfaceRef; entry: FolderRef; count: number; bytes: number }; result: Opened }
+  /** Detach browsing authority; already-open documents and saved locations retain their exact scope. */
+  removeRoot: { params: { root: string; session: number }; result: boolean }
   /** Decode a local image from this generation's held Markdown. Ref carries no path or URL. */
   prepareImage: { params: { doc: number; gen: number; src: string }; result: PreparedImage }
   /** A fixed aligned chunk of canonical PNG bytes, at most 256 KiB. No count. */
@@ -89,11 +173,13 @@ export interface Methods {
   releaseImage: { params: { doc: number; gen: number; ref: ImageRef }; result: boolean }
   hello: { params: { protocol: number }; result: Hello }
   /** `bytes`: the lens's viewport-only cache cap, reserved with the document's floor (plan C1); refused, `Memory`. */
-  open: { params: { path: string; count: number; bytes: number }; result: Opened }
+  open: { params: { surface?: SurfaceRef; path: string; count: number; bytes: number }; result: Opened }
   /** First screen of a retained document, without reopening or restarting its index. One renderer lens is active. */
-  activate: { params: { doc: number; gen: number; count: number; bytes: number }; result: Opened }
+  activate: { params: { surface?: SurfaceRef; activationId?: string; doc: number; gen: number; count: number; bytes: number }; result: Opened }
   /** Dispose a current view or Reload's exact old settled view, retaining the document/index. Pending activation cannot hand it back. */
-  deactivate: { params: { doc: number; gen: number }; result: boolean }
+  deactivate: { params: { view: ViewRef } | { doc: number; gen: number }; result: boolean }
+  /** Revoke only the exact activation token, including after its lease committed but before the caller received it. */
+  deactivateActivation: { params: { surface: SurfaceRef; activationId: string }; result: boolean }
   /** A window of lines of generation `gen`, or the one piece a continuation token names (plan C3). Rendered: a window of
    *  blocks of the generation's Markdown build (`render`). Cancellable. */
   page: {
@@ -109,17 +195,23 @@ export interface Methods {
   /** This generation's held Markdown links: fragments, external URLs, or capability-checked local paths. */
   resolve: { params: { doc: number; gen: number; href: string }; result: LinkTarget }
   /** Open a decoded local target through the source document's inherited capability. Failure keeps its lens. */
-  openLocal: { params: { doc: number; gen: number; target: string; count: number; bytes: number }; result: Opened }
+  openLocal: { params: { surface?: SurfaceRef; doc: number; gen: number; target: string; count: number; bytes: number }; result: Opened }
+  /** Capture only from an owned generation. Manual paths retain manual-open policy; derived locations retain routes. */
+  captureLocation: { params: { doc: number; gen: number }; result: CapturedLocation }
+  /** Non-consuming reopen through saved derived authority; never a manual display-path fallback. */
+  openSaved: { params: { surface?: SurfaceRef; ticket: SavedTicket; count: number; bytes: number }; result: Opened }
+  /** Releases route authority and cancels unpublished reopens; repeated/old-session cleanup is harmless. */
+  releaseSaved: { params: { ticket: SavedTicket }; result: boolean }
   /** Ctrl+R (spec §3.1): the document's next generation, opened again, with its first page. `bytes` as for `open`. */
-  reload: { params: { doc: number; count: number; bytes: number }; result: Opened }
+  reload: { params: { surface?: SurfaceRef; doc: number; count: number; bytes: number }; result: Opened }
   /** Plan C6: cancels the document's index and page reads, and releases it. */
-  close: { params: { doc: number }; result: boolean }
+  close: { params: { surface?: SurfaceRef; doc: number }; result: boolean }
   /** Plan C5: cancels request `id`'s page read. True if it was still running: it then rejects with `Cancelled`. */
   cancel: { params: { id: number }; result: boolean }
   /** Plan C1: sets the ledger's reservation for the page cache of the lens showing generation `gen` of `doc` to
    *  `bytes`. False when the ledger refuses the growth, which leaves the reservation as it was, and for a lens an open
    *  or Reload has replaced. */
-  reserve: { params: { doc: number; gen: number; bytes: number }; result: boolean }
+  reserve: { params: { view: ViewRef; bytes: number } | { doc: number; gen: number; bytes: number }; result: boolean }
   /** Persistent tab UI and scalar metadata, separate from the active lens, in the same native reservation. */
   reserveWorkspace: { params: { bytes: number }; result: boolean }
   /** The test-hooks build only (plan m8): what's alive in the core host. Elsewhere it's `UnknownMethod`. */
@@ -149,6 +241,8 @@ export interface DebugStats {
   /** The core host's `process.memoryUsage()`, after a forced GC when the call asked for one (`{ gc: true }`). With
    *  `{ resetHigh: true }`, the ledger's high-water mark starts again from what's charged; `{ limit }` sets its limit. */
   heap: { rss: number; heapUsed: number; external: number; arrayBuffers: number }
+  saved: { tickets: number; routeBytes: number; wrappers: number; wrapperBytes: number; hostBytes: number; peakEntries: number; candidates: number }
+  surfaces?: { count: number; views: number; pending: number; bytes: number; hostBytes: number; workspaceBytes: number }
 }
 
 /** What one document holds charged (plan C1): its floor and what's grown since. */
@@ -196,8 +290,14 @@ export interface TyposeApi {
   onOpenPath(cb: (path: string) => void): () => void
   /** The OS Open dialog; null when cancelled. */
   openDialog(): Promise<string | null>
+  folderDialog(): Promise<string | null>
   /** A user-activated external link. Main independently checks the app's main frame, size and allowed scheme. */
   openExternal(url: string): Promise<boolean>
+  /** Claim/revoke the one-use token armed by a trusted Grid copy shortcut. */
+  beginClipboardWrite(): string | null
+  cancelClipboardWrite(token: string): void
+  /** A bounded plain-text write. Main independently checks the app's main frame and byte cap; no read API exists. */
+  writeClipboardText(text: string, token: string): Promise<boolean>
   /** A startup mark at a wall-clock time (ms); main records it only under the TYPOSE_MARKS hook (plan C8). */
   mark(name: StartupMark, t: number): void
   /** Called once, when main has shown the window; main only tells the page under the TYPOSE_MARKS hook (plan C8). */
@@ -208,7 +308,7 @@ export interface TyposeApi {
 }
 
 /** The menu's commands (brief §3.2's M1 subset): ☰ on Windows and Linux, the native menu on macOS. */
-export type Command = 'open' | 'reload' | 'close-tab' | 'exit'
+export type Command = 'open' | 'open-folder' | 'toggle-sidebar' | 'refresh-folders' | 'split-right' | 'close-card' | 'move-tab-right' | 'reload' | 'close-tab' | 'reopen-tab' | 'clear-closed' | 'find' | 'find-next' | 'find-previous' | 'exit'
 
 /** The renderer's startup marks (plan C8, §5). */
 export const STARTUP_MARKS = [

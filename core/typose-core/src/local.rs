@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 use crate::budget::{OverBudget, Reservation};
 
+pub mod folder;
+
 const MAX_UNITS: usize = 32_767;
 const MAX_BYTES: usize = 3 * MAX_UNITS;
 const ROUTE_FIXED: u64 = 256;
@@ -49,6 +51,16 @@ struct Root {
     #[cfg(windows)]
     file: File,
     drive: u8,
+    /// Selected directory boundary, absent for the legacy manual-file drive capability.
+    folder: Option<FolderScope>,
+}
+
+#[derive(Debug)]
+struct FolderScope {
+    id: String,
+    base: String,
+    label: String,
+    _charge: Reservation,
 }
 
 #[cfg(all(windows, feature = "test-hooks"))]
@@ -64,6 +76,7 @@ impl Drop for Root {
 pub struct LocalRoute {
     root: Arc<Root>,
     path: PathBuf,
+    node: Option<u32>,
     // Last, so path/root memory is released before its charge.
     charge: Reservation,
 }
@@ -97,7 +110,7 @@ impl LocalRoute {
             }
             #[cfg(feature = "test-hooks")]
             crate::hooks::HANDLES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            Ok(Self::make(Arc::new(Root { file, drive }), normalized, charge))
+            Ok(Self::make(Arc::new(Root { file, drive, folder: None }), normalized, charge))
         }
         #[cfg(not(windows))]
         {
@@ -109,7 +122,12 @@ impl LocalRoute {
     /// Decoded local paths only: URI/scheme/percent classification belongs to the caller. No filesystem access.
     pub fn resolve(&self, target: &str) -> Result<Self, LocalError> {
         let _work = Reservation::new(WORK_BYTES)?;
-        let path = normalize(self.path.to_str().expect("captured Unicode path"), self.root.drive, target)?;
+        let base = self.path.to_str().expect("captured Unicode path");
+        let path = if let Some(folder) = &self.root.folder {
+            scoped_normalize(base, self.root.drive, &folder.base, target)?
+        } else {
+            normalize(base, self.root.drive, target)?
+        };
         let charge = Reservation::new(ROUTE_FIXED + MAX_BYTES as u64)?;
         Ok(Self::make(Arc::clone(&self.root), path, charge))
     }
@@ -118,14 +136,20 @@ impl LocalRoute {
         let mut charge = Reservation::new(self.charge.bytes())?;
         let path = self.path.clone();
         charge.shrink(charge.bytes().saturating_sub(ROUTE_FIXED + path.capacity() as u64));
-        Ok(Self { root: Arc::clone(&self.root), path, charge })
+        Ok(Self { root: Arc::clone(&self.root), path, node: self.node, charge })
     }
 
     /// Rewalk the original route for every initial open, identity check and Reload. Never use `path()` for I/O.
     pub fn open(&self) -> Result<File, LocalError> {
         #[cfg(windows)]
         {
-            native::walk(&self.root.file, self.path.to_str().expect("captured Unicode path"))
+            if let Some(folder) = &self.root.folder {
+                let path = self.path.to_str().expect("captured Unicode path");
+                let relative = relative_to(&folder.base, path)?;
+                native::walk_relative(&self.root.file, relative, false)
+            } else {
+                native::walk(&self.root.file, self.path.to_str().expect("captured Unicode path"))
+            }
         }
         #[cfg(not(windows))]
         {
@@ -135,6 +159,19 @@ impl LocalRoute {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn folder_scope(&self) -> Option<(&str, &str, &str)> {
+        self.root.folder.as_ref().map(|f| (f.id.as_str(), f.label.as_str(), f.base.as_str()))
+    }
+
+    pub fn folder_node(&self) -> Option<u32> {
+        self.node
+    }
+
+    pub fn folder_relative(&self) -> Option<&str> {
+        let (_, _, base) = self.folder_scope()?;
+        relative_to(base, self.path.to_str()?).ok()
     }
 
     /// Compare proved-local handles without truncating ReFS's 128-bit identity to the manual FileId contract.
@@ -157,8 +194,56 @@ impl LocalRoute {
     fn make(root: Arc<Root>, text: String, mut charge: Reservation) -> Self {
         let path = PathBuf::from(text);
         charge.shrink(charge.bytes().saturating_sub(ROUTE_FIXED + path.capacity() as u64));
-        Self { root, path, charge }
+        Self { root, path, node: None, charge }
     }
+}
+
+fn relative_to<'a>(boundary: &str, path: &'a str) -> Result<&'a str, LocalError> {
+    let prefix = boundary.trim_end_matches('\\');
+    if path.len() <= prefix.len()
+        || !path.get(..prefix.len()).is_some_and(|p| p.eq_ignore_ascii_case(prefix))
+        || path.as_bytes()[prefix.len()] != b'\\'
+    {
+        return Err(LocalError::Refused("local path escapes the selected folder"));
+    }
+    Ok(&path[prefix.len() + 1..])
+}
+
+fn scoped_normalize(base: &str, drive: u8, boundary: &str, target: &str) -> Result<String, LocalError> {
+    bounded(target)?;
+    reject_namespace(target)?;
+    let target = target.replace('/', "\\");
+    let boundary = boundary.trim_end_matches('\\');
+    let (mut out, rest) = if target.as_bytes().get(1) == Some(&b':') {
+        if target.as_bytes()[0].to_ascii_uppercase() != drive {
+            return Err(LocalError::Refused("other drives are not supported"));
+        }
+        (boundary.to_owned(), relative_to(boundary, &target)?)
+    } else if let Some(rest) = target.strip_prefix('\\') {
+        (boundary.to_owned(), rest)
+    } else {
+        let parent = base.rfind('\\').ok_or(LocalError::Refused("invalid captured source path"))?;
+        (base[..parent].to_owned(), target.as_str())
+    };
+    for name in rest.split('\\') {
+        match name {
+            "" | "." => {}
+            ".." => {
+                if out.len() <= boundary.len() {
+                    return Err(LocalError::Refused("local path escapes the selected folder"));
+                }
+                out.truncate(out.rfind('\\').expect("selected folder"));
+            }
+            _ => {
+                component(name)?;
+                out.push('\\');
+                out.push_str(name);
+            }
+        }
+    }
+    bounded(&out)?;
+    relative_to(boundary, &out)?;
+    Ok(out)
 }
 
 fn bounded(text: &str) -> Result<(), LocalError> {
@@ -184,6 +269,7 @@ fn reject_namespace(text: &str) -> Result<(), LocalError> {
     Ok(())
 }
 
+#[cfg(windows)]
 fn absolute_drive(text: &str) -> Result<u8, LocalError> {
     bounded(text)?;
     reject_namespace(text)?;
@@ -291,9 +377,10 @@ mod native {
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN,
         FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_DEVICE_DISK, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_NO_RECALL, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_ID_INFO, FILE_READ_ATTRIBUTES,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_TYPE_DISK, FileAttributeTagInfo,
-        FileIdInfo, GetFileInformationByHandleEx, GetFileType, SECURITY_IDENTIFICATION, SYNCHRONIZE,
+        FILE_FLAG_OPEN_NO_RECALL, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_ID_INFO, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_TYPE_DISK,
+        FileAttributeTagInfo, FileIdInfo, GetFileInformationByHandleEx, GetFileType, SECURITY_IDENTIFICATION,
+        SYNCHRONIZE,
     };
     use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
@@ -303,8 +390,18 @@ mod native {
     thread_local! { pub(super) static OPENS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) }; }
 
     pub(super) fn root(drive: u8) -> Result<File, LocalError> {
+        root_access(drive, false)
+    }
+
+    pub(super) fn listing_root(drive: u8) -> Result<File, LocalError> {
+        root_access(drive, true)
+    }
+
+    fn root_access(drive: u8, list: bool) -> Result<File, LocalError> {
         let file = std::fs::OpenOptions::new()
-            .access_mode(FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+            .access_mode(
+                FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE | if list { FILE_LIST_DIRECTORY } else { 0 },
+            )
             .share_mode(SHARE)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_OPEN_NO_RECALL)
             .security_qos_flags(SECURITY_IDENTIFICATION)
@@ -347,12 +444,20 @@ mod native {
     }
 
     pub(super) fn walk(root: &File, path: &str) -> Result<File, LocalError> {
-        let mut names = path[3..].split('\\').peekable();
+        walk_relative(root, &path[3..], false)
+    }
+
+    pub(super) fn walk_relative(root: &File, relative: &str, final_directory: bool) -> Result<File, LocalError> {
+        if relative.is_empty() && final_directory {
+            return Ok(root.try_clone()?);
+        }
+        let mut names = relative.split('\\').peekable();
         let mut parent: Option<File> = None;
         while let Some(name) = names.next() {
-            let directory = names.peek().is_some();
-            let next = child(parent.as_ref().unwrap_or(root), name, directory)?;
-            if !directory {
+            let directory = names.peek().is_some() || final_directory;
+            let next =
+                child(parent.as_ref().unwrap_or(root), name, directory, final_directory && names.peek().is_none())?;
+            if names.peek().is_none() {
                 return Ok(next);
             }
             parent = Some(next);
@@ -360,7 +465,7 @@ mod native {
         Err(LocalError::Refused("a local file is required"))
     }
 
-    fn child(parent: &File, name: &str, directory: bool) -> Result<File, LocalError> {
+    fn child(parent: &File, name: &str, directory: bool, list: bool) -> Result<File, LocalError> {
         component(name)?;
         #[cfg(test)]
         OPENS.with(|opens| opens.borrow_mut().push(name.to_owned()));
@@ -388,7 +493,11 @@ mod native {
         };
         let mut iosb = IO_STATUS_BLOCK::default();
         let mut handle: HANDLE = null_mut();
-        let access = if directory { FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE } else { FILE_GENERIC_READ };
+        let access = if directory {
+            FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE | if list { FILE_LIST_DIRECTORY } else { 0 }
+        } else {
+            FILE_GENERIC_READ
+        };
         let kind = if directory { FILE_DIRECTORY_FILE } else { FILE_NON_DIRECTORY_FILE };
         // Qualified Windows rejects NO_RECALL with DIRECTORY_FILE. OPEN_REPARSE_POINT and the tag check still
         // prevent following a directory reparse; regular files retain NO_RECALL as well.
@@ -537,8 +646,9 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn unsupported_platform_does_not_claim_local_file_support() {
-        let file = File::open(file!()).unwrap();
-        assert!(matches!(LocalRoute::capture(Path::new(file!()), &file), Err(LocalError::Refused(_))));
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/local.rs");
+        let file = File::open(&path).unwrap();
+        assert!(matches!(LocalRoute::capture(&path, &file), Err(LocalError::Refused(_))));
     }
 
     #[cfg(windows)]
@@ -628,6 +738,112 @@ mod tests {
 
         fn trace() -> Vec<String> {
             native::OPENS.with(|opens| std::mem::take(&mut *opens.borrow_mut()))
+        }
+
+        #[test]
+        fn folder_enumeration_is_paged_lazy_and_ids_never_retarget() {
+            let scratch = Scratch::new();
+            fs::create_dir(scratch.0.join("nested")).unwrap();
+            fs::write(scratch.0.join("nested/deep.txt"), "not scanned").unwrap();
+            for n in 0..270 {
+                fs::write(scratch.0.join(format!("row-{n}.csv")), "a,b\n").unwrap();
+            }
+            fs::write(scratch.0.join(".hidden.txt"), "hidden").unwrap();
+            fs::write(scratch.0.join("opaque.exe"), "binary extension").unwrap();
+            let folder = folder::Folder::capture(&scratch.0, "1").unwrap();
+            let mut entries = Vec::new();
+            let mut cursor = None;
+            loop {
+                let page = folder.list(0, cursor, false, &|| false).unwrap();
+                assert!(page.entries.len() <= folder::PAGE_ITEMS);
+                entries.extend(page.entries);
+                cursor = page.cursor;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            assert_eq!(entries.len(), 272);
+            assert!(!entries.iter().any(|e| e.name == "deep.txt" || e.name == ".hidden.txt"));
+            assert_eq!(entries.iter().find(|e| e.name == "opaque.exe").unwrap().kind, "unsupported");
+            let id = entries.iter().find(|e| e.name == "row-0.csv").unwrap().id;
+            let csv = folder.open(id).unwrap();
+            assert!(csv.document().local_only());
+            drop(csv);
+            let again = folder.list(0, None, false, &|| false).unwrap();
+            let mut found = again.entries;
+            let mut c = again.cursor;
+            while !found.iter().any(|e| e.name == "row-0.csv") && c.is_some() {
+                let p = folder.list(0, c, false, &|| false).unwrap();
+                found.extend(p.entries);
+                c = p.cursor;
+            }
+            assert_eq!(found.iter().find(|e| e.name == "row-0.csv").unwrap().id, id);
+            fs::rename(scratch.0.join("row-0.csv"), scratch.0.join("old.csv")).unwrap();
+            fs::write(scratch.0.join("row-0.csv"), "replacement").unwrap();
+            assert!(folder.open(id).is_err());
+            let mut cursor = None;
+            let mut new_id = None;
+            loop {
+                let p = folder.list(0, cursor, false, &|| false).unwrap();
+                new_id = new_id.or_else(|| p.entries.iter().find(|e| e.name == "row-0.csv").map(|e| e.id));
+                cursor = p.cursor;
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            assert_ne!(new_id, Some(id));
+            assert!(folder.open(id).is_err());
+        }
+
+        #[test]
+        fn folder_remove_retains_derived_and_manual_reload_scope_without_widening() {
+            use crate::doc::Document;
+            use crate::raw::Raw;
+            let scratch = Scratch::new();
+            let path = scratch.0.join("source.md");
+            fs::write(&path, "source").unwrap();
+            fs::write(scratch.0.join("next.txt"), "next").unwrap();
+            let folder = folder::Folder::capture(&scratch.0, "1").unwrap();
+            let page = folder.list(0, None, false, &|| false).unwrap();
+            let source_id = page.entries.iter().find(|e| e.name == "source.md").unwrap().id;
+            let derived = folder.open(source_id).unwrap();
+            let saved = derived.document().saved_route(1).unwrap();
+            let mut manual = Document::open(&path).unwrap();
+            assert!(manual.bind_folder(&folder).unwrap());
+            assert!(!manual.local_only());
+            assert!(folder.close());
+            assert!(!folder.close());
+            assert!(matches!(folder.list(0, None, false, &|| false), Err(crate::doc::DocError::Cancelled)));
+            assert!(folder.open(source_id).is_err());
+            manual.reload().unwrap();
+            assert!(!manual.local_only());
+            assert_eq!(manual.folder_scope().unwrap().0, "1");
+            assert_eq!(manual.local_path(2, "/next.txt").unwrap().path(), scratch.0.join("next.txt"));
+            assert!(manual.local_path(2, "../outside.txt").is_err());
+            assert!(manual.local_path(2, "/../outside.txt").is_err());
+            let reopened = Raw::open_saved(&saved).unwrap();
+            assert!(reopened.document().local_only());
+            assert_eq!(reopened.document().folder_scope().unwrap().0, "1");
+            assert!(reopened.document().local_path(1, "../../outside.txt").is_err());
+        }
+
+        #[test]
+        fn folder_refuses_reparse_and_cancelled_listing_releases_cursor() {
+            let scratch = Scratch::new();
+            let outside = Scratch::new();
+            fs::write(outside.0.join("secret.txt"), "must not read").unwrap();
+            let link = scratch.0.join("link");
+            junction(&link, &outside.0);
+            let folder = folder::Folder::capture(&scratch.0, "1").unwrap();
+            assert!(matches!(folder.list(0, None, false, &|| true), Err(crate::doc::DocError::Cancelled)));
+            let page = folder.list(0, None, false, &|| false).unwrap();
+            let entry = page.entries.iter().find(|e| e.name == "link").unwrap();
+            assert_eq!(entry.kind, "unsupported");
+            assert!(folder.open(entry.id).is_err());
+            assert!(folder.list(entry.id, None, false, &|| false).is_err());
+            folder.close();
+            fs::remove_dir(link).unwrap();
+            assert!(folder::Folder::capture(Path::new(r"\\never-contact\share"), "2").is_err());
         }
 
         #[test]

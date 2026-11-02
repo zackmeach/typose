@@ -15,7 +15,7 @@ const center = (r: { x: number; y: number; width: number; height: number }) => (
 async function placed() {
   const l = await launch()
   const { app, win } = l
-  await expect(win.locator('.open-button')).toBeVisible()
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   await app.evaluate(({ BrowserWindow, screen }) => {
     const w = BrowserWindow.getAllWindows()[0]
     const area = screen.getPrimaryDisplay().workArea
@@ -130,7 +130,7 @@ test('macOS: a minimal native menu, and Cmd+R is the page’s Reload', async () 
   // dead-key test below is Windows' and Linux's.)
   const menu = await appMenu(l)
   expect(menu?.map((m) => m.role ?? m.label)).toEqual(['appmenu', 'File', 'editmenu', 'windowmenu'])
-  expect(menu?.[1].items).toEqual(['Open File…', 'Reload', 'Close Tab', 'close'])
+  expect(menu?.[1].items).toEqual(['Open File…', 'Open Folder…', 'Toggle Sidebar', 'Split Right', 'Move Tab Right', 'Close Card', 'Reload', 'Close Tab', 'Reopen Closed Tab', 'Clear Recently Closed Tabs', 'close'])
   await win.evaluate(() => Object.assign(window, { pageLifetime: 'the first page' }))
   await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '1')
   await pressAsOS(l, 'R', ['meta'])
@@ -211,7 +211,7 @@ test('☰ is a menu of Open file…, Reload and Exit, each wired to its command;
   const opened = async () => {
     await trigger.click()
     await expect(win.getByRole('menu')).toBeVisible()
-    await expect(win.getByRole('menuitem')).toHaveText(['Open file…', 'Reload', 'Close tab', exit])
+    await expect(win.getByRole('menuitem')).toHaveText(['Open file…', 'Open folder…', 'Toggle sidebar', 'Split right', 'Move tab right', 'Close card', 'Reload', 'Find in file…', 'Next match', 'Previous match', 'Close tab', 'Reopen closed tab', 'Clear recently closed tabs', exit])
   }
   // Escape closes it and gives focus back to ☰.
   await opened()
@@ -237,7 +237,7 @@ test('☰ is a menu of Open file…, Reload and Exit, each wired to its command;
 test('Ctrl+Q quits on Linux (brief §7.2), as ☰’s Quit does; on Windows it does nothing', async () => {
   test.skip(MAC, 'Cmd+Q is the native app menu’s Quit')
   const l = await launch()
-  await expect(l.win.locator('.open-button')).toBeVisible()
+  await expect(l.win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   // On Linux the page closes on the keydown, before Playwright sends the keyup (PR CI run 40098228365).
   await l.win.keyboard.press('Control+Q').catch(() => {})
   if (process.platform === 'linux') await quitCleanly(l)
