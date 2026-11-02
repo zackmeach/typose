@@ -815,7 +815,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     if (definition?.document) {
       if (!target || !previewRef.current && settingsTabsRef.current[target.id]?.active) return false
       const tab = target.workspace.tab(target.workspace.getSnapshot().selected ?? '')
-      return tab?.card.kind === 'open'
+      return tab?.card.kind === 'open' || command === 'reload' && (tab?.card.kind === 'failed' || tab?.card.kind === 'gone') // Reload retries a missing file
     }
     return true
   }
