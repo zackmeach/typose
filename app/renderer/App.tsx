@@ -492,7 +492,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       return opened
     } catch (error) {
       if (freshPreview) previewCloseRequested.current = true
-      if (error instanceof CoreCallError && error.code === 'Frozen') throw error
+      if (error instanceof CoreCallError && (error.code === 'Frozen' || error.code === 'NotFound')) throw error
       setWorkspaceNotice('Cannot open local link · ' + String(error))
       return false
     } finally {
