@@ -3,7 +3,9 @@
 // the card as continuation rows; and a file the core died reading comes back unopened after a restart.
 import { type Page, expect } from '@playwright/test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
+import { emptySession } from '../app/shared/session'
 import { FIXTURES, type Launched, type TestHooks, debugStats, finish, fixture, launch, lifecycle, test, visibleRows, waitIndexed, waitOpen } from './app'
 import { command, query } from './find-ui'
 
@@ -212,4 +214,29 @@ test("a file the core died reading comes back unopened after a restart, and open
   expect(await finish(second, true)).toEqual({ code: 0, signal: null })
   expect(saved().crashed).toBeUndefined() // opened, so it's no longer marked
   rmSync(second.userData, { recursive: true, force: true })
+})
+
+test('a restored record that names a folder never becomes a root, even replayed after the core dies during restore', async () => {
+  const slow = fixture('open-paths-restore-slow.txt', 'slow\n')
+  const folder = folderFixture('open-paths-restore-dir', { 'inside.md': '# Inside\n' })
+  const userData = mkdtempSync(join(tmpdir(), 'typose-restore-dir-'))
+  // A folder saved as a manual file record, as a refused tab from an older build was.
+  writeFileSync(join(userData, 'session.json'), JSON.stringify({ ...emptySession(), cards: [{ tabs: [
+    { location: { kind: 'manual', path: slow }, anchor: 0, lens: null },
+    { location: { kind: 'manual', path: folder }, anchor: 5, lens: null }
+  ], selected: 0, weight: 1 }] }))
+  // Every chunk read waits 3 s: the core dies while restore opens the first file, so the folder's open is queued.
+  const l = await launch({ hooks: true, userData, env: { TYPOSE_TEST_READ_DELAY: '3000' } })
+  const { win } = l
+  await expect(win.locator('.card-status')).toHaveText('Opening…', { timeout: 30_000 })
+  killCore(l)
+  await expect(win.locator('.card-message p')).toHaveText(`Can't open ${folder} · refused: not a regular file`, { timeout: 30_000 })
+  await win.waitForTimeout(500)
+  await expect(win.getByRole('treeitem')).toHaveCount(0)
+  expect(l.pageErrors).toEqual([])
+  expect(await finish(l, true)).toEqual({ code: 0, signal: null })
+  const saved = JSON.parse(readFileSync(join(userData, 'session.json'), 'utf8'))
+  expect(saved.roots).toEqual([])
+  expect(saved.cards[0].tabs.find((tab: { location: { path: string } }) => tab.location.path === folder).location.kind).toBe('reselect')
+  rmSync(userData, { recursive: true, force: true })
 })

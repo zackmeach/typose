@@ -31,6 +31,10 @@ const markOnce = (name: string) => performance.getEntriesByName(name).length ===
 const firstCount = (l: Limits) => Math.min(l.maxItems, 3 * Math.ceil(window.innerHeight / ROW_HEIGHT) + 1)
 const CSV_OPTIONS: CsvOptions = { delimiter: 'auto', header: 'auto' }
 
+/** The core's manual open refused a folder (or another non-file) before reading anything. */
+const NOT_REGULAR = 'refused: not a regular file'
+const notRegular = (e: unknown) => e instanceof CoreCallError && e.code === 'Refused' && e.message === NOT_REGULAR
+
 const failed = (path: string, e: unknown): Extract<Card, { kind: 'failed' }> => ({
   kind: 'failed',
   path,
@@ -239,7 +243,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   const budget = useRef<LensBudget | null>(null)
   const retiredRendered = useRef(0)
   const rendered = useRef<RetainedRendered | null>(null)
-  const waiting = useRef<string[]>([])
+  const waiting = useRef<{ path: string; atLine?: number; replace?: TabId; named: boolean }[]>([])
   const floorBytes = (l: Limits) => lens.current?.floorBytes() ?? viewportCap(l, 800)
   const path = 'path' in card ? card.path : undefined
   const title = path ? `${fileName(path)} — Typose` : 'Typose'
@@ -382,7 +386,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       activationFailed.current.clear()
       setCard(c => c.kind === 'gone' ? { ...c, ready: true } : c.kind === 'connecting' ? { kind: 'empty' } : c)
       for (const done of readyWaiters.current.splice(0)) done()
-      for (const path of waiting.current.splice(0)) await open(path)
+      for (const queued of waiting.current.splice(0)) await open(queued.path, queued.atLine, queued.replace, queued.named)
     }
     const readyOff = core.onReady(hello => { void ready(hello).catch(e => setWorkspaceNotice(String(e))) })
     if (shared.hello.current) void ready(shared.hello.current).catch(e => setWorkspaceNotice(String(e)))
@@ -651,10 +655,11 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     }
   }
 
-  /** Manual paths create permanent tabs; an equal caller key focuses the existing tab. */
-  async function open(path: string, atLine?: number, replace?: TabId): Promise<void> {
+  /** Manual paths create permanent tabs; an equal caller key focuses the existing tab. `named`: a launch, a second
+   *  instance or a drop named it, so a folder becomes a root instead of a refused tab. */
+  async function open(path: string, atLine?: number, replace?: TabId, named = false): Promise<void> {
     if (!latest.current.limits || !workspace.getSnapshot().ready || !surface.current) {
-      waiting.current.push(path)
+      waiting.current.push({ path, atLine, replace, named }) // the whole request, so a replay can't change what it does
       if (currentSession.current) setWorkspaceNotice('Queued until the core restarts: ' + fileName(path))
       return
     }
@@ -713,9 +718,10 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       else deactivateInactive({ session: ticket.session, doc: opened.doc, gen: opened.gen, view: opened.view })
     } catch (e) {
       if (!workspace.current(ticket) || e instanceof CoreCallError && e.code === 'CoreGone') return
-      // A folder a launch, a second instance or Explorer named (the core's manual open refuses it before reading
-      // anything) becomes a root through Open folder…'s own capture and checks, instead of a refused tab.
-      if (!previous && atLine === undefined && e instanceof CoreCallError && e.code === 'Refused' && e.message === 'refused: not a regular file') {
+      // A folder a launch, a second instance, Explorer or a drop named (the core's manual open refuses it before
+      // reading anything) becomes a root through Open folder…'s own capture and checks, instead of a refused tab.
+      // Never a restored or queued record: only that explicit gesture grants a root.
+      if (named && !previous && notRegular(e)) {
         const wasSelected = workspace.selected(selection)
         workspace.close(ticket.tab)
         if (wasSelected) {
@@ -1129,9 +1135,10 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     await open(chosen, undefined, tab && (c.kind === 'gone' || c.kind === 'failed') && (locate || c.localOnly) ? tab : undefined)
   }
 
+  /** A path a launch, a second instance or a drop named (App's `open`): the explicit gesture a folder root needs. */
   function openNamed(path: string): void {
-    if (!workspace.getSnapshot().ready) { waiting.current.push(path); return }
-    void open(path)
+    if (!workspace.getSnapshot().ready) { waiting.current.push({ path, named: true }); return }
+    void open(path, undefined, undefined, true)
   }
 
   /** Tab ownership closes native documents; changing the displayed card never does. */
@@ -1415,7 +1422,9 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
           if (root?.identity && folder?.segments.length) location = { kind: 'folder', path: tab.path,
             root: { path: root.path, identity: root.identity }, segments: [...folder.segments] }
         }
-      } else if (tab.key === manualKey(tab.path) && (!(tab.card.kind === 'failed' || tab.card.kind === 'gone') || !tab.card.localOnly)) {
+      } else if (tab.key === manualKey(tab.path) && (!(tab.card.kind === 'failed' || tab.card.kind === 'gone') || !tab.card.localOnly)
+        // A refused folder stays a reselect record: a restart must never retry it as a manual open.
+        && !(tab.card.kind === 'failed' && tab.card.code === 'Refused' && tab.card.message === NOT_REGULAR)) {
         location = { kind: 'manual', path: tab.path }
       }
       const visible = tab.id === before.selected && displayed.current === tab.id ? latest.current.card : tab.card
