@@ -16,6 +16,7 @@
     "lint": "oxlint --deny-warnings app e2e",
     "test:hooks": "npm run build:addon:hooks && cargo test --locked --manifest-path core/Cargo.toml --workspace --features typose-node/test-hooks && vitest run --mode test-hooks",
     "e2e": "npm run build:hooks && playwright test -c e2e/playwright.config.ts",
+    "e2e:smoke": "npm run e2e -- shell.e2e chrome.e2e open.e2e rendered.e2e csv-demo.e2e folder-sidebar-demo.e2e link-peek-demo.e2e packaged.e2e netlog.e2e",
     "perf": "playwright test -c e2e/perf/playwright.config.ts",
     "fixtures": "cargo run --release --manifest-path core/Cargo.toml -p fixtures-gen --"
   },
