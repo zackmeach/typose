@@ -266,7 +266,8 @@ export class StructuredLens {
     }
     if (record.root) {
       const tree = await this.treeNode(record.root, 0, '$', record.line, 1)
-      if (panel.parentElement !== wrapper) { this.mounted -= tree.querySelectorAll('.tree-entry').length; return }
+      // The tree's root is a .tree-entry too, and querySelectorAll counts only its descendants.
+      if (panel.parentElement !== wrapper) { this.mounted -= tree.querySelectorAll('.tree-entry').length + 1; return }
       panel.append(tree)
     }
     if (large(record)) {
