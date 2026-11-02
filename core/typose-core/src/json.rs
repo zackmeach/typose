@@ -752,7 +752,9 @@ impl<'o> Scanner<'o> {
         match self.lex {
             Lex::Between | Lex::LineComment => {}
             Lex::Num(Num::Zero | Num::Int | Num::Frac | Num::ExpDigits) => self.end_scalar(end),
-            Lex::Str | Lex::Escape | Lex::Hex(_) => return Err((ErrorKind::Syntax("unterminated string"), self.tok)),
+            Lex::Str | Lex::Escape | Lex::Hex(_) => {
+                return Err((ErrorKind::Syntax("unexpected end of input"), self.tok));
+            }
             Lex::Slash | Lex::BlockComment | Lex::BlockStar => {
                 return Err((ErrorKind::Syntax("unterminated comment"), self.tok));
             }

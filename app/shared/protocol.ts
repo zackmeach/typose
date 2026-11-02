@@ -31,10 +31,10 @@ export const MAX_PRINT_NODES = 100_000
 export type PrintDocumentResult = { kind: 'printed'; pages: number } | { kind: 'cancelled' } | { kind: 'refused'; reason: string }
 
 export type PrintTag = 'p' | 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6' | 'strong' | 'em' | 'del' | 'code' | 'pre' |
-  'ul' | 'ol' | 'li' | 'blockquote' | 'table' | 'thead' | 'tbody' | 'tr' | 'th' | 'td' | 'a' | 'br' | 'hr' | 'span' | 'img'
+  'ul' | 'ol' | 'li' | 'blockquote' | 'table' | 'thead' | 'tbody' | 'tr' | 'th' | 'td' | 'a' | 'br' | 'hr' | 'span' | 'img' | 'math' | 'dl' | 'dt' | 'dd'
 export type PrintNode =
   | { text: string }
-  | { tag: PrintTag; children?: PrintNode[]; href?: string; alt?: string; src?: string }
+  | { tag: PrintTag; children?: PrintNode[]; href?: string; alt?: string; src?: string; math?: import('./math-print').MathPrintNode }
 
 /** Typed errors. `CoreGone` is the renderer's own: the core host died with the call pending (plan C7). */
 export type ErrorCode =

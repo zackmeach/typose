@@ -44,7 +44,9 @@ const CASES = [
   {
     name: 'dense topology',
     make: () => {
-      const body = '*x* `x` [x](#x) ![x](local.png)\n\n'.repeat(8000)
+      // 5,800 rather than 8,000 since source maps (one span per text run) raised the charge by about 37%: the same
+      // charge as before, so the 8 GiB refusal still lands at the third generation.
+      const body = '*x* `x` [x](#x) ![x](local.png)\n\n'.repeat(5800)
       return { path: fixture('rendered-dense-topology.md', body), bytes: Buffer.byteLength(body) }
     }
   }

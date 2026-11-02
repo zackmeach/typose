@@ -76,6 +76,15 @@ it('shows each file state', () => {
   for (const [state, card, want] of rows) expect(view(card), state).toMatchObject(want)
 })
 
+it('counts every JSONL source line once, blank and failed lines included', () => {
+  const info = (done: boolean) => ({ ref: { session: 1, doc: 1, gen: 1, revision: 1 }, format: 'jsonl' as const, status: 'ready' as const, rows: 13, parsed: 11, failed: 2, blank: 1, done, problems: [] })
+  const jsonl = open({ opened: opened({ format: 'jsonl' }), lines: 14, indexed: true, structured: info(true) })
+  expect(view(jsonl).status).toBe('14 lines · 11 parsed · 2 failed · 1 blank')
+  expect(view({ ...jsonl, structured: info(false) }).status).toBe('14 lines · 11 parsed · 2 failed · 1 blank…')
+  expect(view({ ...jsonl, structured: { ...info(false), parsed: 0, failed: 0, blank: 0 } }).status).toBe('14 lines · 0 parsed · 0 failed · 0 blank…')
+  expect(view({ ...jsonl, indexed: false }).status).toBe('Indexing 14 lines…')
+})
+
 it('gives Markdown its switch, and the reasons Rendered stays off', () => {
   const md = open({ opened: opened({ format: 'markdown' }), indexed: true, lens: 'raw' })
   expect(view(md).lenses).toEqual({ showing: 'raw', renderedOff: undefined })

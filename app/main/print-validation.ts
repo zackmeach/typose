@@ -1,12 +1,22 @@
 import { MAX_PRINT_BYTES, MAX_PRINT_NODES, MAX_PRINT_PAGES, type PrintNode, type PrintTag } from '../shared/protocol'
+import { MATH_PRINT_TAGS, validMathAttribute, type MathPrintTag } from '../shared/math-print'
 
-const tags = new Set<PrintTag>(['p','h1','h2','h3','h4','h5','h6','strong','em','del','code','pre','ul','ol','li','blockquote','table','thead','tbody','tr','th','td','a','br','hr','span','img'])
+const tags = new Set<PrintTag>(['p','h1','h2','h3','h4','h5','h6','strong','em','del','code','pre','ul','ol','li','blockquote','table','thead','tbody','tr','th','td','a','br','hr','span','img','math','dl','dt','dd'])
 
 export function validatePrintDocument(title: unknown, blocks: unknown, pages: unknown): { ok: true; title: string; blocks: PrintNode[]; pages: number; json: string } | { ok: false; reason: string } {
   if (typeof title !== 'string' || title.length > 512 || !Array.isArray(blocks)) return { ok: false, reason: 'Invalid print document' }
   if (!Number.isSafeInteger(pages) || (pages as number) < 1 || (pages as number) > MAX_PRINT_PAGES)
     return { ok: false, reason: `Print job exceeds the ${MAX_PRINT_PAGES}-page limit` }
   let nodes = 0, bytes = 0
+  const validMath = (value: unknown, depth: number): boolean => {
+    if (++nodes > MAX_PRINT_NODES || depth > 32 || !value || typeof value !== 'object') return false
+    const node = value as Record<string, unknown>
+    if (typeof node.text === 'string' && Object.keys(node).length === 1) { bytes += Buffer.byteLength(node.text, 'utf8'); return bytes <= MAX_PRINT_BYTES }
+    if (!MATH_PRINT_TAGS.includes(node.tag as MathPrintTag) || Object.keys(node).some(key => !['tag', 'attrs', 'children'].includes(key))) return false
+    if (node.attrs !== undefined && (!node.attrs || typeof node.attrs !== 'object' || Array.isArray(node.attrs) ||
+      Object.entries(node.attrs).some(([key, value]) => typeof value !== 'string' || !validMathAttribute(node.tag as MathPrintTag, key, value)))) return false
+    return Array.isArray(node.children ?? []) && (node.children as unknown[] | undefined ?? []).every(child => validMath(child, depth + 1))
+  }
   const validNodes = (list: unknown, depth: number): list is PrintNode[] => {
     if (!Array.isArray(list) || depth > 32) return false
     for (const node of list) {
@@ -18,6 +28,10 @@ export function validatePrintDocument(title: unknown, blocks: unknown, pages: un
         continue
       }
       if (typeof item.tag !== 'string' || !tags.has(item.tag as PrintTag)) return false
+      if (item.tag === 'math') {
+        if (Object.keys(item).some(key => !['tag', 'math'].includes(key)) || !validMath(item.math, depth + 1)) return false
+        continue
+      }
       if (item.tag === 'img') {
         if (Object.keys(item).some(key => !['tag','src','alt'].includes(key)) || typeof item.src !== 'string' || item.src.length > 2 << 20 || !/^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(item.src)) return false
         if (item.alt !== undefined && typeof item.alt !== 'string') return false

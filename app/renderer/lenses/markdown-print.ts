@@ -1,11 +1,11 @@
 import type { PrintNode, PrintTag } from '../../shared/protocol'
 
-const allowed = new Set<PrintTag>(['p','h1','h2','h3','h4','h5','h6','strong','em','del','code','pre','ul','ol','li','blockquote','table','thead','tbody','tr','th','td','a','br','hr','span','img'])
+const allowed = new Set<PrintTag>(['p','h1','h2','h3','h4','h5','h6','strong','em','del','code','pre','ul','ol','li','blockquote','table','thead','tbody','tr','th','td','a','br','hr','span','img','dl','dt','dd'])
 const voidTags = new Set<PrintTag>(['br','hr'])
 
 /** Converts the native sanitizer's bounded Markdown HTML into a strict, attribute-free print tree. */
 export function markdownPrintNodes(html: string, note?: string): PrintNode[] {
-  if (html.length > 64 << 10) throw new Error('A Markdown block exceeds the print block limit')
+  if (html.length > 256 << 10) throw new Error('A Markdown block exceeds the print block limit')
   const root: PrintNode[] = []
   const stack: Array<{ tag: PrintTag | null; children: PrintNode[] }> = [{ tag: null, children: root }]
   const decode = typeof document === 'undefined' ? null : document.createElement('textarea')

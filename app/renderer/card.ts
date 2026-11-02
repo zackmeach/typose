@@ -89,6 +89,11 @@ export const parentName = (path: string): string => {
 
 const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 })
 const lines = (n: number, format: (n: number) => string) => `${format(n)} line${n === 1 ? '' : 's'}`
+/** Every source line counted once: parsed, failed or blank. Until the JSONL index is done, Raw's count can lead it. */
+export function jsonlCounts({ parsed = 0, failed = 0, blank = 0, done }: Pick<StructuredInfo, 'parsed' | 'failed' | 'blank' | 'done'>, known = 0): string {
+  const n = (value: number) => value.toLocaleString('en')
+  return `${lines(Math.max(known, parsed + failed + blank), n)} · ${n(parsed)} parsed · ${n(failed)} failed · ${n(blank)} blank${done ? '' : '…'}`
+}
 
 /** What the card shows in each state (brief §7.9, §8.2; the memory refusal is plan §7 proposal 1). */
 export function view(card: DisplayCard): CardView {
@@ -112,6 +117,8 @@ export function view(card: DisplayCard): CardView {
       // Plan §2.2: Raw shows "Rendering…" until the build is ready. A freeze already has its own status.
       if (card.rendering && !frozen) status = 'Rendering…'
       if (opened.format === 'csv' && card.csv) status = `${Math.max(0, card.csv.sourceRecords - (card.csv.header ? 1 : 0)).toLocaleString('en')} rows${card.csv.done ? '' : '…'} · ${card.csv.encoding}`
+      // Raw's indexing and freeze statuses stay; once Raw has every line, a JSONL card counts them by kind.
+      if (opened.format === 'jsonl' && card.indexed && !frozen && card.structured?.parsed !== undefined) status = jsonlCounts(card.structured, card.lines)
       const showing = card.lens ?? 'raw'
       const markdown = opened.format === 'markdown' && !opened.blank
       const parseProblem = card.structured?.problems.find(problem => problem.kind === 'parse')

@@ -17,7 +17,9 @@ export default defineConfig(({ mode }) => {
     renderer: {
       root: resolve(__dirname, 'renderer'),
       define,
-      build: { ...outDir('renderer'), rolldownOptions: { input: resolve(__dirname, 'renderer/index.html') } },
+      // Fonts stay files: an inlined data: font (KaTeX's smallest) is refused by the CSP, which has no font-src.
+      build: { ...outDir('renderer'), assetsInlineLimit: (file: string) => /\.(woff2?|ttf)$/.test(file) ? false : undefined,
+        rolldownOptions: { input: resolve(__dirname, 'renderer/index.html') } },
       plugins: [react()]
     }
   }

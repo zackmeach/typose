@@ -3,7 +3,7 @@ import { Button, Dialog, DialogTrigger, Heading, Menu, MenuItem, MenuTrigger, Mo
 import { MAX_PRINT_PAGES, type CapturedLocation, type CsvInfo, type CsvOptions, type HandoffSubject, type Hello, type Limits, type MdBuild, type Methods, type Opened, type SurfaceRef, type ViewRef } from '../shared/protocol'
 import { canOpen, extension, isExecutable } from '../shared/handoff'
 import { type HandoffKind, SHOW_IN_FOLDER, handOff } from './handoff'
-import { type Action, type Card, type LensName, fileName, parentName, view } from './card'
+import { type Action, type Card, type LensName, fileName, jsonlCounts, parentName, view } from './card'
 import { FileIcon } from './file-icon'
 import { type CoreClient, CoreCallError } from './core'
 import { RenderedLens, renderedCharge } from './lenses/rendered'
@@ -792,10 +792,12 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         setWorkspaceNotice('Cannot open local file · ' + (e instanceof Error ? e.message : String(e)))
         if (workspace.selected(selection) && e instanceof CoreCallError && e.code === 'Frozen')
           setCard((d) => d.kind === 'open' && d.opened === source ? { ...d, frozen: d.frozen ?? e.message } : d)
+        if (e instanceof CoreCallError && e.code === 'NotFound') throw e // the source lens marks its link unresolved
         return false
       }
     } catch (e) {
       setWorkspaceNotice('Cannot open local file · ' + (e instanceof Error ? e.message : String(e)))
+      if (e instanceof CoreCallError && e.code === 'NotFound') throw e
       return false
     } finally {
       if (captured) releaseLocation(captured)
@@ -817,6 +819,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         workspace.updateDocument({ session, doc: source.doc, gen: source.gen }, stored => ({ ...stored, frozen: stored.frozen ?? error.message }))
         setCard(card => card.kind === 'open' && card.opened === source ? { ...card, frozen: card.frozen ?? error.message } : card)
       }
+      if (error instanceof CoreCallError && error.code === 'NotFound') throw error // Rendered marks the link unresolved
       return false
     })
   }
@@ -854,6 +857,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     } catch (error) {
       if (error instanceof CoreCallError && error.code === 'Frozen') throw error
       setWorkspaceNotice('Cannot open local file · ' + String(error))
+      if (error instanceof CoreCallError && error.code === 'NotFound') throw error // the source lens marks its link unresolved
       return false
     } finally {
       if (candidate && ownerSession === currentSession.current) void core.call('close', { surface: surface.current!, doc: candidate.doc }).catch(() => {})
@@ -1263,7 +1267,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         <Popover className="csv-info-popover" placement="bottom end"><Dialog aria-label="File info">
           <p>{card.path}</p><p>{card.opened.size.toLocaleString()} bytes · {card.opened.encoding} · {card.lines.toLocaleString()} lines</p>
           {card.structured?.parsedAs ? <p>Parsed as {card.structured.parsedAs === 'jsonc' ? 'JSONC' : 'JSON'}</p> : null}
-          {card.opened.format === 'jsonl' ? <p>{card.structured?.parsed ?? '…'} parsed · {card.structured?.failed ?? 0} failed · {card.structured?.blank ?? 0} blank · {card.structured?.transcript?.adapter ?? 'Generic JSONL'}</p> : null}
+          {card.opened.format === 'jsonl' ? <p>{card.structured?.parsed === undefined ? '…' : jsonlCounts(card.structured, card.lines)} · {card.structured?.transcript?.adapter ?? 'Generic JSONL'}</p> : null}
           {card.structuredOff ? <p>{card.structuredOff}</p> : null}
           <div className="structured-problem-list">{card.structured?.problems.map((problem, index) => <details key={index}><summary>{problem.kind}: {problem.count.toLocaleString()}</summary><button type="button" onClick={() => { jumpTo.current = Math.max(0, (problem.line ?? 1) - 1); onLens('raw') }}>{problem.message} · {problem.line ? `line ${problem.line}` : `byte ${problem.first.start}`}</button></details>)}</div>
         </Dialog></Popover>

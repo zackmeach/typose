@@ -136,7 +136,8 @@ impl Index {
         options: &ScanOptions,
         flag: &AtomicBool,
     ) -> Result<bool, StoreError> {
-        let index = json::scan(store, span.start..span.end, options, flag)?;
+        let body = content(store, span)?;
+        let index = json::scan(store, body.start..body.end, options, flag)?;
         if let Some(error) = index.error {
             match error.kind {
                 json::ErrorKind::Cancelled => return Err(StoreError::Cancelled),
@@ -223,6 +224,17 @@ impl Index {
     }
 }
 
+/// A record without its line terminator, so a line cut off mid-string ends the input instead of holding a raw `\n`.
+pub fn content(store: &ByteStore, span: Span) -> Result<Span, StoreError> {
+    let tail = store.read(span.end.saturating_sub(2).max(span.start), span.end)?;
+    let cut = match tail.as_slice() {
+        [.., b'\r', b'\n'] => 2,
+        [.., b'\n'] => 1,
+        _ => 0,
+    };
+    Ok(Span { start: span.start, end: span.end - cut })
+}
+
 pub fn known_role(role: &str) -> bool {
     matches!(role, "system" | "developer" | "user" | "assistant" | "tool" | "function")
 }
@@ -296,6 +308,27 @@ mod tests {
         let p = index.progress.read().unwrap();
         assert_eq!((p.lines, p.parsed, p.failed, p.blank, p.done), (4, 2, 1, 1, true));
         assert_eq!(index.columns(0, 128).iter().map(|c| c.key.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+    }
+    #[test]
+    fn a_line_cut_off_mid_string_reports_the_end_of_input_not_its_terminator() {
+        let source = b"{\"ts\":\"12:04:13.722\",\"msg\":\"Proposed moving the partn\r\n{\"b\":2}\n\n";
+        let file = temp_file("jsonl-truncated", source);
+        let doc = Document::open(&file).unwrap();
+        let first = Span { start: 0, end: source.iter().position(|&b| b == b'\n').unwrap() as u64 + 1 };
+        let error = doc
+            .verified(1, |store| {
+                let body = content(store, first)?;
+                assert_eq!(body.end, first.end - 2);
+                json::scan(store, body.start..body.end, &ScanOptions::default(), &AtomicBool::new(false))
+            })
+            .unwrap()
+            .error
+            .unwrap();
+        assert_eq!(error.kind, json::ErrorKind::Syntax("unexpected end of input"));
+        let index = Index::new().unwrap();
+        index.build(&doc, 1, &AtomicBool::new(false)).unwrap();
+        let p = index.progress.read().unwrap();
+        assert_eq!((p.lines, p.parsed, p.failed, p.blank), (3, 1, 1, 1));
     }
     #[test]
     fn detects_openai_message_and_dataset_records_without_loading_a_js_ast() {
