@@ -100,6 +100,7 @@ The packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`) holds
 | Z89 | **Open with default app stays an allowlist** of document and media types. Anything else gets Show in Explorer only. (2026-11-02) |
 | Z90 | **Quick-open picks open by absolute path as manual records.** The open is gesture-gated and refuses reparse points. This relaxes "display paths are never opened as manual paths" for quick open only. (2026-11-02) |
 | Z91 | **The Rendered charge growth from source maps is accepted for now.** Inline-heavy Markdown reserves up to about twice as much; recalibrating the per-span cost waits until a real document hits the limit. (2026-11-02) |
+| Z92 | **On Linux the accessibility mode is always on.** Electron reports accessibility support on macOS and Windows only, so on Linux every Markdown block stays in the accessibility tree (no `content-visibility: auto` skipping) whether or not a screen reader runs. (2026-11-02) |
 
 ---
 

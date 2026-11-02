@@ -344,12 +344,13 @@ void app.whenReady().then(() => {
   // even with its bar hidden. ☰ is the menu on Windows and Linux; macOS gets a minimal native one (spec §9).
   Menu.setApplicationMenu(process.platform === 'darwin' ? macMenu(win) : null)
   // Spec §6.2's accessibility mode: Electron's accessibility support, at each load and on every change. Electron has it
-  // on macOS and Windows only, where Z28 gates accessibility.
+  // on macOS and Windows only, where Z28 gates accessibility. Linux can't tell whether a screen reader is on, so its
+  // mode is always on and every Markdown block stays in the accessibility tree (Z92).
   if (process.platform !== 'linux') {
     const sendA11y = () => win.isDestroyed() || win.webContents.send('a11y', app.isAccessibilitySupportEnabled())
     win.webContents.on('did-finish-load', sendA11y)
     app.on('accessibility-support-changed', sendA11y)
-  }
+  } else win.webContents.on('did-finish-load', () => win.isDestroyed() || win.webContents.send('a11y', true))
   // The renderer's startup marks (plan C8): a known name and a whole-ms time, from this window's app page (C4).
   ipcMain.on('mark', (event, name: unknown, t: unknown) => {
     if (!fromApp(win, event) || !isMark(name, t)) return
