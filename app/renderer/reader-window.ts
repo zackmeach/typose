@@ -13,6 +13,7 @@ export interface ReaderHandle {
   ready(): Promise<void>
   open(path: string): void
   openChild(root: string, node: string): Promise<void>
+  openIndexed(entry: import('../shared/protocol').FolderEntry): Promise<void>
   openDerived(source: Opened, target: string, path: string): Promise<boolean>
   navigateLocal(source: Opened, target: string, path: string): Promise<boolean>
   pick(): Promise<void>
@@ -26,6 +27,8 @@ export interface ReaderHandle {
   goTo(): void
   copy(): Promise<boolean>
   print(): void
+  switchLens(): void
+  handOff(kind: 'copy' | 'show' | 'open'): void
   captureSession(): Promise<SessionCard | null>
   restoreSession(card: SessionCard): Promise<void>
   selectTab(id: string): Promise<void>
@@ -42,6 +45,7 @@ export interface ReaderHandle {
 
 /** Window-owned resources shared by the current reader cards; no document payload lives here. */
 export interface ReaderWindow {
+  settings?: import('../shared/settings').Settings
   core: CoreClient
   hello: RefObject<Hello | null>
   groups: RefObject<readonly ReaderGroup[]>

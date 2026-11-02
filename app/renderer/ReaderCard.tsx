@@ -67,11 +67,12 @@ interface RetainedRendered {
   view: RenderedLens
 }
 
-export function ReaderCard({ id, label, workspace, window: shared, fonts, focused, onFocus, onCloseCard, windowNotice, preview, emptyContent }: {
+export function ReaderCard({ id, label, workspace, window: shared, fonts, focused, onFocus, onCloseCard, windowNotice, preview, emptyContent, settings }: {
   id: string; label: number; workspace: WorkspaceStore; window: ReaderWindow; fonts: Promise<void>; focused: boolean
   onFocus(): void; onCloseCard(): void; windowNotice: string
   preview?: { busy: boolean; onTab(): void; onSide(): void; onClose(): void }
   emptyContent?: ReactNode
+  settings?: { active: boolean; content: ReactNode; onSelect(): void; onClose(): void; onFile(): void }
 }) {
   const core = shared.core
   const [fontLayoutReady, setFontLayoutReady] = useState(false)
@@ -401,6 +402,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   // with no "Rendering…". After that, Raw says "Rendering…" and switches when the build fits, unless the reader moved.
   useEffect(() => {
     if (!openedNow || openedNow.format !== 'markdown' || openedNow.blank) return
+    if (picked.current === null && shared.settings?.lens_md === 'raw') picked.current = 'raw'
     const opened = openedNow
     const ac = new AbortController()
     let alive = true
@@ -470,6 +472,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
 
   useEffect(() => {
     if (!openedNow || openedNow.format !== 'csv' || openedNow.blank) return
+    if (picked.current === null && shared.settings?.lens_csv === 'raw') picked.current = 'raw'
     const opened = openedNow, ac = new AbortController()
     let alive = true
     const options = latest.current.card.kind === 'open' ? latest.current.card.csvOptions ?? CSV_OPTIONS : CSV_OPTIONS
@@ -495,10 +498,11 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         if (!active) return
         const info = source.info
         const off = info.status === 'locked' ? info.reason ?? 'Structured view unavailable' : !info.root && info.format !== 'jsonl' ? 'Couldn’t parse · showing Raw' : undefined
-        const preferred: LensName = info.format === 'jsonl' ? 'rows' : 'tree'
+        const configured = info.format === 'jsonl' ? shared.settings?.lens_jsonl : info.format === 'yaml' ? shared.settings?.lens_yaml : shared.settings?.lens_json
+        const preferred: LensName = configured === 'raw' ? 'raw' : info.format === 'jsonl' ? 'rows' : 'tree'
         const current = latest.current.card
         const already = current.kind === 'open' && current.opened === opened && ['tree', 'rows', 'table', 'transcript'].includes(current.lens ?? '')
-        const go = !off && picked.current !== 'raw' && (already || picked.current !== null || !lens.current?.readerMoved())
+        const go = !off && picked.current !== 'raw' && (picked.current !== null || preferred !== 'raw') && (already || picked.current !== null || !lens.current?.readerMoved())
         const chosen = ['tree', 'rows', 'table', 'transcript'].includes(picked.current ?? '') ? picked.current! : already && lens.current?.readerMoved() ? current.lens! : preferred
         setCard(c => c.kind === 'open' && c.opened === opened ? { ...c, structured: info, structuredOff: off, transcriptOff: info.transcript ? 'Transcript graph is not available in this checkpoint · use Rows' : undefined, lens: go && chosen !== 'transcript' ? chosen : 'raw' } : c)
       }
@@ -1517,11 +1521,19 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     const handle: ReaderHandle = {
       ready: () => surface.current || readyError.current ? Promise.resolve() : new Promise<void>(done => readyWaiters.current.push(done)),
       open: openNamed, openChild: openFolderChild, openDerived, navigateLocal: openLocal, pick, reload, back, close: () => close(), reopen: reopenClosed, clearClosed,
+      openIndexed: entry => openFolderChild(entry.ref.root, entry.ref.node, entry),
       cycle: step => { const state = workspace.getSnapshot(); const index = state.tabs.findIndex(tab => tab.id === state.selected); if (state.tabs.length) void selectTab(state.tabs[(index + step + state.tabs.length) % state.tabs.length].id) },
       find: findAction,
       goTo: openGoTo,
       copy: copyAction,
       print: printAction,
+      handOff: cardHandOff,
+      switchLens: () => {
+        const c = latest.current.card
+        if (c.kind !== 'open') return
+        const choices: LensName[] = c.opened.format === 'markdown' ? ['rendered', 'raw'] : c.opened.format === 'csv' ? ['grid', 'raw'] : c.opened.format === 'jsonl' ? ['rows', ...(c.structured && !c.structuredOff && !c.structured.tableOff ? ['table' as const] : []), 'raw'] : ['tree', 'raw']
+        onLens(choices[(choices.indexOf(c.lens ?? 'raw') + 1) % choices.length])
+      },
       captureSession, restoreSession, selectTab,
       capture: async () => {
         const c = latest.current.card
@@ -1587,9 +1599,10 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       if (goToOpen) { setGoToOpen(false); lens.current?.focus(); event.preventDefault(); event.stopPropagation(); return }
       if (findAction('close')) { event.preventDefault(); event.stopPropagation() }
     }}>
-      {preview ? null : <FileTabs panelId={'file-card-' + id} tabs={snapshot.tabs} selected={snapshot.selected} onSelect={(id) => void selectTab(id)} onClose={(id) => close(id)} />}
+      {preview ? null : <FileTabs panelId={'file-card-' + id} tabs={snapshot.tabs} selected={snapshot.selected} settings={settings} onSelect={(id) => { settings?.onFile(); void selectTab(id) }} onClose={(id) => close(id)} />}
       <div className="card">
-        <div className="file-card-panel" id={'file-card-' + id} role={snapshot.selected ? 'tabpanel' : undefined} aria-labelledby={snapshot.selected ? `file-label-${snapshot.selected}` : undefined}>
+        {settings?.active ? <div className="settings-card-panel" role="tabpanel" aria-labelledby={'settings-tab-file-card-' + id}>{settings.content}</div> : null}
+        <div className="file-card-panel" style={settings?.active ? { visibility: 'hidden' } : undefined} inert={settings?.active || undefined} aria-hidden={settings?.active || undefined} id={'file-card-' + id} role={snapshot.selected ? 'tabpanel' : undefined} aria-labelledby={snapshot.selected ? `file-label-${snapshot.selected}` : undefined}>
         {(workspaceNotice || focused && windowNotice) ? <div className="banner" role="status">{workspaceNotice || windowNotice}</div> : null}
         {findOpen ? <FindBar controller={findController} query={findQuery} matchCase={findCase} onQuery={setFindQuery} onCase={setFindCase} onClose={() => findAction('close')} /> : null}
         {goToOpen ? (

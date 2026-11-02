@@ -191,6 +191,7 @@ export interface Methods {
   transferDoc: { params: { from: SurfaceRef; to: SurfaceRef; doc: number; gen: number }; result: boolean }
   /** Explicit user-selected directory. Windows backend; at most 16 roots in this demo slice. */
   addRoot: { params: { path: string }; result: FolderRoot }
+  preferences: { params: { encodingFallback: 'windows-1252' | 'utf-8' }; result: boolean }
   /** Omit cursor to refresh. Bounded to 128 entries; caller cannot supply a filesystem path. */
   listFolder: { params: { folder: FolderRef; cursor?: string; hidden?: boolean }; result: FolderPage }
   openChild: { params: { surface?: SurfaceRef; entry: FolderRef; count: number; bytes: number }; result: Opened }
@@ -325,6 +326,12 @@ export type MainMessage = { type: 'core-port'; session: number } | { type: 'core
 
 /** The page's whole API into main, from the preload. Main validates arguments and sender (C4); external links require the main frame. */
 export interface TyposeApi {
+  loadSettings(): Promise<import('./settings').SettingsSnapshot>
+  changeSetting(key: import('./settings').SettingKey, value: unknown, revision: string): Promise<import('./settings').SettingsSnapshot>
+  exportTheme(name: string, tokens: Record<string, string | number>): Promise<import('./settings').SettingsSnapshot>
+  setChromeTheme(dark: boolean, canvas: string, text: string): Promise<boolean>
+  zoom(action: 'in' | 'out' | 'reset'): void
+  fullScreen(): Promise<boolean>
   loadSession(): Promise<import('./session').SessionWorkspace>
   saveSession(session: import('./session').SessionWorkspace): Promise<boolean>
   onSessionCapture(cb: () => Promise<boolean>): () => void
@@ -359,7 +366,7 @@ export interface TyposeApi {
 }
 
 /** The menu's commands (brief §3.2's M1 subset): ☰ on Windows and Linux, the native menu on macOS. */
-export type Command = 'open' | 'open-folder' | 'toggle-sidebar' | 'refresh-folders' | 'split-right' | 'close-card' | 'move-tab-right' | 'reload' | 'close-tab' | 'reopen-tab' | 'clear-closed' | 'find' | 'find-next' | 'find-previous' | 'go-to' | 'copy' | 'print' | 'exit'
+export type Command = 'open' | 'browse' | 'palette' | 'settings' | 'shortcuts' | 'theme-light' | 'theme-dark' | 'theme-system' | 'zoom-in' | 'zoom-out' | 'zoom-reset' | 'full-screen' | 'wrap-lines' | 'switch-lens' | 'open-folder' | 'toggle-sidebar' | 'refresh-folders' | 'split-right' | 'close-card' | 'move-tab-right' | 'reload' | 'close-tab' | 'reopen-tab' | 'clear-closed' | 'find' | 'find-next' | 'find-previous' | 'go-to' | 'copy' | 'copy-path' | 'show-in-folder' | 'open-default' | 'print' | 'exit'
 
 /** The renderer's startup marks (plan C8, §5). */
 export const STARTUP_MARKS = [

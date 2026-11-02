@@ -83,6 +83,8 @@ test('offline Markdown extras render securely and offscreen math/diagrams reach 
         else root.style.removeProperty('--' + key)
       }
     }, on)
+    await live.win.emulateMedia({ colorScheme: 'dark' }) // the System theme follows the OS; this baseline is the dark one
+    await expect(live.win.locator('html')).toHaveAttribute('data-theme', 'dark')
     const dark = await tokens()
     expect(dark.colors.length).toBeGreaterThan(8)
     expect(dark.min).toBeGreaterThanOrEqual(3)

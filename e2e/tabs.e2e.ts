@@ -259,10 +259,11 @@ test('a delayed replacement after A-B-A displays the new owned document identity
   await tab(win, 'tabs-replace-a.md').click()
   await expect(win.locator('.card-message p')).toContainText('memory budget')
   await stubOpenDialog(l.app, c)
-  if (process.platform === 'darwin') await l.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('command', 'open'))
+  if (process.platform === 'darwin') await l.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('command', 'browse'))
   else {
     await win.getByRole('button', { name: 'Menu', exact: true }).click()
     await win.getByRole('menuitem', { name: 'Open file…' }).click()
+    await win.getByRole('button', { name: 'Browse…', exact: true }).click()
   }
   await expect.poll(() => win.evaluate(() => typeof (window as unknown as { replacementRelease?: () => void }).replacementRelease)).toBe('function')
   await tab(win, 'tabs-replace-b.txt').click()
