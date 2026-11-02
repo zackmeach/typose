@@ -1,7 +1,7 @@
 import { type FormEvent, type ReactNode, type RefObject, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { Button, Dialog, DialogTrigger, Heading, Menu, MenuItem, MenuTrigger, Modal, ModalOverlay, Popover, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
 import { MAX_PRINT_PAGES, type CapturedLocation, type CsvInfo, type CsvOptions, type HandoffSubject, type Hello, type Limits, type MdBuild, type Methods, type Opened, type SurfaceRef, type ViewRef } from '../shared/protocol'
-import { extension, isExecutable } from '../shared/handoff'
+import { canOpen, extension, isExecutable } from '../shared/handoff'
 import { type HandoffKind, SHOW_IN_FOLDER, handOff } from './handoff'
 import { type Action, type Card, type LensName, fileName, parentName, view } from './card'
 import { FileIcon } from './file-icon'
@@ -1624,12 +1624,12 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
                 <p>Scripts and programs are never launched from {sheet.link ? 'a link' : 'Typose'}. You can show the file in its folder instead.</p>
               </> : <>
                 <Heading slot="title" level={2}>Typose doesn't show {extension(sheet.name).slice(1).toUpperCase() || 'these'} files</Heading>
-                <p>You can open it with its default app, or show it in its folder.</p>
+                <p>{canOpen(sheet.name) ? 'You can open it with its default app, or show it in its folder.' : 'You can show it in its folder.'}</p>
               </>}
               {sheet.path ? <code>{sheet.path}</code> : null}
               <div className="handoff-actions">
                 <Button className="open-button" onPress={() => setSheet(null)}>Cancel</Button>
-                {isExecutable(sheet.name) ? null : <Button className="open-button" data-handoff="true" onPress={() => sheetHandOff('open')}>Open with default app</Button>}
+                {isExecutable(sheet.name) || !canOpen(sheet.name) ? null : <Button className="open-button" data-handoff="true" onPress={() => sheetHandOff('open')}>Open with default app</Button>}
                 <Button className="open-button" data-handoff="true" autoFocus onPress={() => sheetHandOff('show')}>{SHOW_IN_FOLDER}</Button>
               </div>
             </Dialog>

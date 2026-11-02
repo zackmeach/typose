@@ -5,6 +5,7 @@ const FILE = 'C:\\work\\notes.txt'
 const TOKEN = '0a1b2c3d-0000-4000-8000-00000000000e'
 const GESTURE = 'Hand-offs need a click or key press on a Typose control'
 const PROGRAM = 'Typose won’t open programs or scripts · show the file in its folder instead'
+const MEDIA_ONLY = 'Typose only hands off documents and media. You can show the file in its folder instead.'
 
 function deps(over: Partial<Pick<HandoffDeps, 'resolve' | 'isDirectory'>> & { open?: HandoffDeps['open'] } = {}) {
   return {
@@ -54,12 +55,17 @@ describe('Z79: a hand-off needs a fresh user gesture', () => {
 
 describe('Z79: only a plain local path reaches the OS', () => {
   for (const path of ['\\\\server\\share\\notes.txt', '//server/share/notes.txt', '\\\\?\\C:\\work\\notes.txt', '\\\\?\\UNC\\server\\share\\x.txt',
-    '\\\\.\\pipe\\x', '\\??\\C:\\x.txt', 'notes.txt', 'C:notes.txt', 'C:\\work\\notes.txt:evil.bat', 'C:\\work\\a\u0007.txt', '', 'C:\\' + 'a'.repeat(32_767)])
+    '\\\\.\\pipe\\x', '\\??\\C:\\x.txt', 'notes.txt', 'C:notes.txt', 'C:\\work\\notes.txt:evil.bat', 'C:\\work\\a\u0007.txt', '', 'C:\\' + 'a'.repeat(32_767),
+    // Shapes Windows rewrites when it opens them: the name it acts on isn't the name checked.
+    'C:\\kit\\setup.bat\\.', 'C:\\kit\\setup.bat\\..', 'C:\\kit\\setup.bat.', 'C:\\kit\\setup.bat ', 'C:\\kit\\setup.bat. .', 'C:\\kit.\\notes.txt',
+    'C:\\kit \\notes.txt', 'C:\\kit\\.\\notes.txt', 'C:\\kit\\..\\notes.txt', 'C:\\kit\\\\notes.txt', 'C:\\kit\\', 'C:\\kit\\ ', 'C:/kit/notes.txt'])
     it('refuses ' + JSON.stringify(path.slice(0, 40)), () => expect(pathRefusal(path, 'win32')).not.toBeNull())
-  it('accepts drive paths on Windows and absolute paths elsewhere', () => {
+  it('accepts normalized drive paths on Windows and absolute paths elsewhere', () => {
     expect(pathRefusal(FILE, 'win32')).toBeNull()
-    expect(pathRefusal('C:/work/notes.txt', 'win32')).toBeNull()
+    expect(pathRefusal('c:\\Work\\NOTES.txt', 'win32')).toBeNull()
+    expect(pathRefusal('C:\\.config\\notes.txt', 'win32')).toBeNull()
     expect(pathRefusal('/home/me/notes.txt', 'linux')).toBeNull()
+    expect(pathRefusal('/home/me/./notes.txt', 'linux')).not.toBeNull()
     expect(pathRefusal('//server/share/notes.txt', 'darwin')).not.toBeNull()
   })
 })
@@ -95,12 +101,15 @@ describe('Z79: the page names only what Typose holds', () => {
     expect(await ask('show', { ...DOC, doc: 9 }, refused)).toEqual({ ok: false, reason: 'Not a file Typose holds · no document 9' })
     const unc = deps({ resolve: vi.fn(async () => '\\\\server\\share\\notes.txt') })
     expect(await ask('show', DOC, unc)).toMatchObject({ ok: false, reason: 'Typose doesn’t hand off network or device paths' })
+    const dotted = deps({ resolve: vi.fn(async () => 'C:\\kit\\setup.bat\\.') })
+    expect(await ask('open', DOC, dotted)).toMatchObject({ ok: false })
     expect(refused.show).not.toHaveBeenCalled()
     expect(unc.show).not.toHaveBeenCalled()
+    expect(dotted.open).not.toHaveBeenCalled()
   })
 })
 
-describe('Z79: Open with default app never runs a program or script', () => {
+describe('Z79: Open with default app hands off only documents and media', () => {
   for (const path of ['C:\\kit\\setup.bat', 'C:\\kit\\SETUP.BAT', 'C:\\kit\\run.ps1', 'C:\\kit\\Tool.lnk', 'C:\\kit\\a.exe', 'C:\\kit\\x.settingcontent-ms',
     'C:\\kit\\help.chm', 'C:\\kit\\.bat', 'C:\\kit\\custom.foo'])
     it('refuses the program or script ' + path, async () => {
@@ -110,6 +119,23 @@ describe('Z79: Open with default app never runs a program or script', () => {
       expect(await ask('show', DOC, d)).toEqual({ ok: true }) // Show in Explorer is allowed for any checked path
       expect(d.show.mock.calls).toEqual([[path]])
     })
+
+  for (const path of ['C:\\kit\\rv-never.jnlp', 'C:\\kit\\x.rdp', 'C:\\kit\\x.wsb', 'C:\\kit\\x.themepack', 'C:\\kit\\page.html', 'C:\\kit\\x.svgz',
+    'C:\\kit\\x.docm', 'C:\\kit\\README', 'C:\\kit\\.gitignore'])
+    it('refuses anything not on the allowlist: ' + path, async () => {
+      const d = deps({ resolve: vi.fn(async () => path) })
+      expect(await ask('open', DOC, d)).toEqual({ ok: false, reason: MEDIA_ONLY })
+      expect(d.open).not.toHaveBeenCalled()
+      expect(await ask('show', DOC, d)).toEqual({ ok: true })
+    })
+
+  it('opens allowlisted documents and media, whatever the extension’s case', async () => {
+    for (const path of ['C:\\kit\\a.pdf', 'C:\\kit\\b.PNG', 'C:\\kit\\c.Jpeg', 'C:\\kit\\d.docx', 'C:\\kit\\e.zip', 'C:\\kit\\f.md', 'C:\\kit\\g.tar.gz']) {
+      const d = deps({ resolve: vi.fn(async () => path) })
+      expect(await ask('open', DOC, d), path).toEqual({ ok: true })
+      expect(d.open.mock.calls).toEqual([[path]])
+    }
+  })
 
   it('refuses a folder, and reports what the OS refused', async () => {
     const folder = deps({ isDirectory: vi.fn(async () => true) })

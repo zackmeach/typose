@@ -1,6 +1,7 @@
 // Z79's hand-offs to the OS: Show in Explorer and Open with default app. The page only names what Typose holds; main
 // (or the core host, for main) turns that into a path, and checks the path before any shell call.
-import { isExecutable } from '../shared/handoff'
+import { posix, win32 } from 'node:path'
+import { canOpen, isExecutable } from '../shared/handoff'
 import type { HandoffResult } from '../shared/protocol'
 
 export type HandoffAction = 'show' | 'open'
@@ -24,12 +25,20 @@ export interface HandoffDeps {
 // oxlint-disable-next-line no-control-regex -- Control characters never reach the OS.
 const controls = /[\u0000-\u001f\u007f-\u009f]/
 
-/** Why a path can't go to the OS at all, or null: only a plain local absolute path can (no UNC, `\\?\`, `\\.\` or stream). */
+/**
+ * Why a path can't go to the OS at all, or null: only a plain local absolute path can (no UNC, `\\?\`, `\\.\` or stream),
+ * already in normal form. Windows resolves `.` and `..` and drops a name's trailing dots and spaces when it opens a path,
+ * so `setup.bat\.` or `setup.bat. ` would run as `setup.bat`: the name the OS acts on must be the name checked.
+ */
 export function pathRefusal(path: string, platform: NodeJS.Platform): string | null {
   if (path.length === 0 || path.length > 32_767 || controls.test(path)) return 'Typose can’t hand off this path'
   if (/^[\\/]{2}/.test(path)) return 'Typose doesn’t hand off network or device paths'
-  const local = platform === 'win32' ? /^[a-z]:[\\/]/i.test(path) && !path.includes(':', 2) : path.startsWith('/')
-  return local ? null : 'Typose hands off only local paths'
+  const windows = platform === 'win32'
+  const local = windows ? /^[a-z]:[\\/]/i.test(path) && !path.includes(':', 2) : path.startsWith('/')
+  if (!local) return 'Typose hands off only local paths'
+  const names = path.slice(windows ? 3 : 1).split(windows ? /[\\/]/ : '/')
+  const odd = names.some((name) => !name.trim() || name === '.' || name === '..' || (windows && /[. ]$/.test(name)))
+  return odd || (windows ? win32 : posix).normalize(path).toLowerCase() !== path.toLowerCase() ? 'Typose hands off only plain file paths' : null
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
@@ -67,8 +76,10 @@ export async function handOff(action: HandoffAction, args: unknown[], deps: Hand
     try { path = await deps.resolve(entry !== undefined ? { entry } : { session, doc, gen, target }) }
     catch (e) { return refuse(`Not a file Typose holds · ${message(e)}`) }
   }
-  const why = pathRefusal(path, deps.platform) ??
-    (action === 'open' && isExecutable(path, deps.pathext) ? 'Typose won’t open programs or scripts · show the file in its folder instead' : null)
+  // Open with default app takes only the allowlist; the program and script list stays as a second check with its own message.
+  const why = pathRefusal(path, deps.platform) ?? (action === 'show' ? null
+    : isExecutable(path, deps.pathext) ? 'Typose won’t open programs or scripts · show the file in its folder instead'
+      : canOpen(path) ? null : 'Typose only hands off documents and media. You can show the file in its folder instead.')
   if (why) return refuse(why)
   try {
     if (action === 'show') deps.show(path)

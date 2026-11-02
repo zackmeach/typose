@@ -56,6 +56,7 @@ async function viaGesture(win: Page, action: 'showInFolder' | 'openWithDefault',
 }
 
 const notice = (win: Page) => win.locator('.reader-card .banner[role="status"]')
+const MEDIA_ONLY = 'Typose only hands off documents and media. You can show the file in its folder instead.'
 async function fileAction(win: Page, name: string): Promise<void> {
   await win.getByRole('button', { name: 'File actions', exact: true }).click()
   await win.getByRole('menuitem', { name, exact: true }).click()
@@ -124,6 +125,25 @@ test('a hand-off from page script without a user gesture is refused, and a trust
   expect(await calls()).toEqual([])
   await fileAction(win, SHOW)
   await expect.poll(calls).toEqual([{ action: 'show', path: file }])
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+test('Open with default app hands off only documents and media: .jnlp and a trailing \\. are refused', async () => {
+  const jnlp = fixture('rv-never.jnlp', '<jnlp codebase="https://example.invalid/"></jnlp>\n')
+  const bat = fixture('trailing.bat', '@echo off\n')
+  const l = await launch({ hooks: true, file: jnlp, env: RECORD })
+  const { win } = l
+  const calls = await shellCalls(l.app)
+  await waitOpen(win)
+  await fileAction(win, 'Open with default app')
+  await expect(notice(win)).toHaveText(MEDIA_ONLY)
+  // The core opens any path the page names (pre-existing), so a page can hold `trailing.bat\.`: main refuses its shape.
+  const held = await win.evaluate((path) => (window as unknown as { typoseTest: { core: { call(method: string, params: object): Promise<unknown> } } })
+    .typoseTest.core.call('open', { path, count: 1, bytes: 100 }), bat + '\\.') as { doc: number; gen: number }
+  expect(await viaGesture(win, 'openWithDefault', { session: 1, doc: held.doc, gen: held.gen })).toEqual({ ok: false, reason: 'Typose hands off only plain file paths' })
+  expect(await viaGesture(win, 'showInFolder', { session: 1, doc: held.doc, gen: held.gen })).toEqual({ ok: false, reason: 'Typose hands off only plain file paths' })
+  expect(await calls()).toEqual([])
   expect(l.pageErrors).toEqual([])
   await finish(l)
 })
