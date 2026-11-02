@@ -525,7 +525,7 @@ impl Doc {
         }))
     }
     #[napi(ts_return_type = "Promise<StructuredChildren>")]
-    #[allow(clippy::too_many_arguments)] // The record parameter scopes JSONL container IDs to their physical line.
+    #[allow(clippy::too_many_arguments, reason = "napi page request carries exact owner, range, cancel and record")]
     pub fn structured_children(
         &self,
         generation: f64,

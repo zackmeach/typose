@@ -30,7 +30,7 @@ test('a missing file shows where it was looked for, with Locate… and Close', a
   await expect(win.locator('.card-message p')).toHaveText(`File not found at ${missing}`)
   await expect(win.locator('.card-message .open-button')).toHaveText(['Locate…', 'Close'])
   await win.getByRole('button', { name: 'Close', exact: true }).click()
-  await expect(win.locator('.card-message .open-button')).toHaveText(['Open file…'])
+  await expect(win.locator('.card-message .open-button')).toHaveText([/^Open file…/, 'Open folder…'])
   await finish(l)
 })
 

@@ -476,7 +476,7 @@ for (const size of ['1 GiB', '10 GiB'] as const) {
     test.setTimeout(10 * 60_000)
     const path =
       size === '1 GiB'
-        ? join(FIXTURES, 'memory-1gib.jsonl')
+        ? join(FIXTURES, 'memory-1gib.txt') // .txt: a .jsonl name would open in Rows, and this reads Raw
         : sparseFixture('memory-10gib.txt', 10 * GIB, HEAD) // sparse: what's indexed is real, the disk holds little
     try {
       if (size === '1 GiB')
