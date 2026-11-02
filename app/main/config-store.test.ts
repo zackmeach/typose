@@ -59,3 +59,22 @@ it('theme export stays in its fixed directory and rejects traversal, duplicate n
   writeFileSync(join(path, 'themes', 'future.toml'), 'version = 99\nname = "Future"\nscheme = "dark"\n')
   expect(config.snapshot().themes).toHaveLength(1)
 })
+
+it('keeps a CRLF file CRLF through a UI write', () => {
+  const { file, store: config } = store('crlf')
+  writeFileSync(file, '# note\r\ntheme_mode = "dark"\r\n')
+  expect(config.update('show_hidden', true, config.snapshot().revision).error).toBeUndefined()
+  const text = readFileSync(file, 'utf8')
+  expect(text).toContain('show_hidden = true')
+  expect(text.replace(/\r\n/g, '')).not.toContain('\n')
+})
+
+it('treats invalid UTF-8 as a parse error that blocks writing and leaves the bytes alone', () => {
+  const { file, store: config } = store('utf8')
+  const bytes = Buffer.concat([Buffer.from('theme_mode = "dark"\n# caf'), Buffer.from([0xe9]), Buffer.from('\n')])
+  writeFileSync(file, bytes)
+  const snapshot = config.snapshot()
+  expect(snapshot.parse).toMatchObject({ line: 2, column: 6, path: file })
+  expect(config.update('theme_mode', 'light', snapshot.revision).parse).toBeDefined()
+  expect(readFileSync(file)).toEqual(bytes)
+})
