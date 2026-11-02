@@ -46,6 +46,30 @@ window.addEventListener('keydown', event => {
   setTimeout(() => { clipboardGesture = false }, 0)
 }, { capture: true })
 
+// Z79: a hand-off needs user activation. A trusted primary-button release, or Enter/Space, on a `data-handoff` control
+// arms one token, which main spends on the next hand-off within a second. Both listeners run in the capture phase,
+// before React Aria's press handlers call the bridge. Page script can't make a trusted event or read the token.
+let handoffToken: string | undefined
+const armHandoff = (event: Event) => {
+  if (!event.isTrusted || !(event.target instanceof Element)) return
+  // A combobox (the palette) names its highlighted row with aria-activedescendant; Enter there is that row's activation.
+  const active = event instanceof KeyboardEvent && event.key === 'Enter' ? event.target.getAttribute('aria-activedescendant') : null
+  if (!(active ? document.getElementById(active) : event.target)?.closest('[data-handoff="true"]')) return
+  if (event instanceof PointerEvent && event.button !== 0) return
+  if (event instanceof KeyboardEvent && (event.repeat || event.isComposing || (event.key !== 'Enter' && event.key !== ' '))) return
+  const token = crypto.randomUUID()
+  handoffToken = token
+  ipcRenderer.send('handoff-gesture', token)
+  setTimeout(() => { if (handoffToken === token) handoffToken = undefined }, 1000)
+}
+window.addEventListener('pointerup', armHandoff, { capture: true })
+window.addEventListener('keydown', armHandoff, { capture: true })
+const takeHandoff = () => {
+  const token = handoffToken
+  handoffToken = undefined
+  return token
+}
+
 const typose: TyposeApi = {
   loadSettings: () => ipcRenderer.invoke('load-settings'),
   changeSetting: (key, value, revision) => ipcRenderer.invoke('change-setting', key, value, revision),
@@ -70,6 +94,8 @@ const typose: TyposeApi = {
   openDialog: () => ipcRenderer.invoke('open-dialog'),
   folderDialog: () => ipcRenderer.invoke('folder-dialog'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  showInFolder: (subject) => ipcRenderer.invoke('show-in-folder', subject, takeHandoff()),
+  openWithDefault: (subject) => ipcRenderer.invoke('open-with-default', subject, takeHandoff()),
   beginClipboardWrite: () => {
     if (!clipboardGesture) return null
     clipboardGesture = false

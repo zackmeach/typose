@@ -224,6 +224,7 @@ test('the keyboard reaches ☰ and Raw, ☰ runs its commands from the keyboard,
     ['.file-tab[aria-selected="true"]', '2px'],
     ['.file-pill[data-selected] .file-tab-close', '2px'],
     ['.card-header .card-status', '2px'],
+    ['.file-actions-button', '2px'],
     ['.close-card-button', '2px'],
     ['.vl-scroller', '-2px']
   ]
@@ -334,7 +335,8 @@ test('at 200% zoom in the smallest window, the chrome and Raw stay reachable, an
     await expect(win.getByRole('menuitem')).toHaveText(menuLabels(EXIT))
     for (const item of await win.getByRole('menuitem').all()) {
       await expect(item).toBeFocused()
-      expect(await item.evaluate(el => {
+      // The menu scrolls the focused item into view after focus lands, so poll rather than read once.
+      await expect.poll(() => item.evaluate(el => {
         const rect = el.getBoundingClientRect()
         return rect.top >= 0 && rect.left >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight
       })).toBe(true)

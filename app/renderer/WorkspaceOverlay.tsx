@@ -60,7 +60,7 @@ export function WorkspaceOverlay({ mode, indexes, recents, close, browse, choose
           return <div key={section.title} role="group" aria-label={section.title}>
             <div className="workspace-heading" aria-hidden="true">{section.title}</div>
             {section.rows.map((result, at) => <div key={result.id} id={`workspace-result-${first + at}`} role="option" aria-selected={first + at === current}
-              className="workspace-result" onPointerMove={() => setSelected(first + at)} onClick={event => activate(first + at, event.shiftKey)} data-clipboard-copy={result.command === 'copy' ? 'true' : undefined}>
+              className="workspace-result" onPointerMove={() => setSelected(first + at)} onClick={event => activate(first + at, event.shiftKey)} data-clipboard-copy={result.command === 'copy' ? 'true' : undefined} data-handoff={result.command === 'show-in-folder' || result.command === 'open-default' ? 'true' : undefined}>
               <strong>{result.label}</strong><small>{result.path}</small>{result.badge ? <em className="workspace-badge">{result.badge}</em> : null}
             </div>)}
           </div>

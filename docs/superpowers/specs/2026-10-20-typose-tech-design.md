@@ -68,7 +68,7 @@ The packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`) holds
 | Z57 | **Merge authority:** the implementer merges each PR once its review is clean and CI is green, within an approved milestone plan. |
 | Z58 | **M1 stays open while its Mac acceptance is pending** [Z55]. It doesn't close on Windows alone (§13.2). |
 | Z59 | **A missed cold-startup target blocks M1 closure** until it's fixed or Zack explicitly changes the budget [Z54] (§10.2, §13.2). |
-| Z60 | **CI on the private repo:** Windows and Linux run on every PR; macOS runs weekly on `main` (Mondays 06:00 UTC) plus `workflow_dispatch` [PR #16, Z65], until the repo goes public (§11.2). |
+| Z60 | **CI on the private repo:** Windows and Linux run on every PR; macOS runs weekly on `main` (Mondays 06:00 UTC) plus `workflow_dispatch` [PR #16, Z65], until the repo goes public (§11.2) (narrowed by Z85). |
 | Z61 | **No spending until after launch, once Typose is working.** Everything uses free resources:<br>• GitHub Free for the private repo. Actions stay within the included minutes, with a $0 spending limit, so overage pauses CI rather than billing.<br>• A loaned or borrowed Mac only [Z55]; nothing is bought.<br>• No paid subscriptions.<br>Consequence: §12.1's paid signing (Azure Trusted Signing, the Apple Developer Program) can't start before launch, so how the launch builds are signed is open (§15). |
 | Z62 | **The 16.7 ms / ≥ 99% frame gate (§10.2, plan §5, OQ-6) judges cadence: every presented frame after the first in a demanded interval.** The first frame after an input is judged by responsiveness: the 50 ms stall rule and plan §5's 50 ms input-latency gate. A run whose demands each produce one frame (discrete keypresses) reports the frame gate as not applicable, never as passed. |
 | Z63 | **Change detection checks the path's size, modified time and file identity after every lazy read, against the identity taken at open (it was before and after).** Reads go through the handle opened at open, so any change before or during a read fails the after-check and freezes the document. The before-check only narrowed a change-then-revert window on a chunk's first read, which §3.1's content verification already concedes metadata can't close. Measured 64 KiB fetch p95 at the napi layer: before and after 2.91–3.03 ms; after only 2.52–2.55 ms. (2026-10-23; §3.1, brief §7.9) |
@@ -77,11 +77,23 @@ The packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`) holds
 | Z66 | **Raw lines wrap at 2,048 UTF-16 units into ↪ continuation rows** (plan PR 6b). This is a deliberate deviation from brief §5.1 for lines of 2,049–10,000 units. (2026-10-24; brief §5.1) |
 | Z67 | **The PC's shell-visible cold budget is < 400ms, provisional.**<br>• Z29's half-budget rule doesn't apply to this row: the GPU process's start (driver device creation, measured at 175–196ms per process in M1's PR 10 review) doesn't scale with CPU.<br>• It's measured with an existing profile, on an unlocked, displayed session (an addition to Z49).<br>• The final number is set after a real cold batch of OS restarts [Z54].<br>Amends Z54's < 200ms PC target. (2026-10-24; §10.2, §10.3) |
 | Z68 | **The first formatted lens is rendered Markdown,** built end to end before M2. (2026-10-24; §13.2) |
-| Z69 | **Merge on the full local Windows gate** until GitHub Actions minutes reset. Included minutes were exhausted ~18:00Z 2026-10-24; the spending limit stays $0 [Z61], so hosted CI pauses rather than billing. (2026-10-24) |
+| Z69 | **Merge on the full local Windows gate** until GitHub Actions minutes reset. Included minutes were exhausted ~18:00Z 2026-10-24; the spending limit stays $0 [Z61], so hosted CI pauses rather than billing. (2026-10-24; narrowed by Z85) |
 | Z70 | **The default menu's keys go with it** (M1 plan §7 proposal 6, accepted): on Windows and Linux, Undo, Redo, Cut, Copy, Paste, Select All, Reload, Force Reload, developer tools, page zoom (Actual Size, Zoom In, Zoom Out), Full Screen, Minimize and Close; on Linux, Quit (Ctrl+Q) too; on macOS, the View menu's Reload, Force Reload, developer tools, page zoom and Full Screen keys, with the app, Edit and Window menus and File's Close Window unchanged. Zoom, full screen, Minimize and Close on Windows and Linux, and zoom and full screen on macOS, return in M2; Force Reload and developer tools are gone for good. (2026-10-24; M1 plan §7) |
 | Z71 | **Rendered's size ceiling is 8MiB of source** in the first Markdown slice. Above it, the file opens in Raw with Rendered disabled and the reason in its tooltip. (2026-10-24; §4.6; the slice's plan, §4) |
 | Z72 | **Rendered uses native `content-visibility` over all of its blocks** in the first Markdown slice, within Z71's ceiling, instead of the virtualizer: a temporary departure from Z26. (2026-10-24; §5.3; the slice's plan, §2.2) |
 | Z73 | **A relative link to a supported file replaces the card's file** ("open it in the window"). There's no Back until M2. (2026-10-24; §5.4; the slice's plan, §2.4) |
+| Z74 | **Land #40 now as a merge commit** (it contains #29–#39); close #30–#39 as landed through #40. (2026-11-01) |
+| Z75 | **The next milestone is a Windows daily driver:** an installed build Zack uses every day. No signing and no Mac/Linux qualification yet. It supersedes the "feature-complete candidate" as the near-term target. (2026-11-01) |
+| Z76 | **The Typose UI prototype is directional:** fix the defects plus the deltas a user notices in the first hour. Code-level divergences (glyphs, wording) are accepted. (2026-11-01) |
+| Z77 | **The 9379bca snapshot is split into PRs that land after #41.** The transcript lens is deferred until after the daily driver; until then, session files use Raw/Rows/Table. (2026-11-01) |
+| Z78 | **The core-crash policy stays security-first:** after a core restart, folder roots need re-picking. Restore never automatically reopens a document that crashed the core. (2026-11-01) |
+| Z79 | **Daily-driver must-haves:**<br>• drag-and-drop of files and folders;<br>• a folder from argv or Explorer becomes a sidebar root;<br>• hand-off actions (Show in Explorer, Open with default app, Copy path, binary and executable sheets);<br>• JSONL Rows as a scrolling list;<br>• Wrap lines wraps Raw. (2026-11-01) |
+| Z80 | **Daily-driver polish:**<br>• light-theme code highlighting and find colours;<br>• the unresolved-link style;<br>• JSONL Rows summaries, type colours and times;<br>• Settings and palette polish (segmented mode, Files tab, TOML banner, Ctrl+,, grouped palette). (2026-11-01) |
+| Z81 | **Quick open keeps the bounded walk;** the native 50k index is deferred. (2026-11-01) |
+| Z82 | **Install the build once,** at the end of the milestone. (2026-11-01) |
+| Z83 | **Cleanup of merged worktrees and the landed draft chain is authorized.** (2026-11-01) |
+| Z84 | **Each PR lands on main before the next stacks,** at most one layer deep. Claude is PM with Opus/Sonnet lanes; review is lean. (2026-11-01) |
+| Z85 | **The merge bar is the full local Windows gate.** Per-PR hosted CI is slim: lint, typecheck, Vitest, cargo and an e2e smoke (`npm run e2e:smoke`). Full Linux e2e runs weekly (Mondays 07:00 UTC, `weekly-linux.yml`), and macOS stays weekly. (2026-11-01) |
 
 ---
 
@@ -591,7 +603,7 @@ Nothing can expose DOM that doesn't exist (§14, D5). The design:
 
 ### 11.2 CI (GitHub Actions)
 - **Every push:** a matrix of `windows-latest`, `macos-latest` and `ubuntu-latest`, running `cargo fmt`, `clippy` and `test`; npm `typecheck`, `lint` and `vitest`; and a Playwright smoke run including the network check.
-  - **While the repo is private** [Z60, Z61]: Windows and Linux run on every PR; macOS runs weekly on `main` (Mondays 06:00 UTC) plus `workflow_dispatch` [PR #16, Z65], all within the free included minutes. The full matrix on every push applies once the repo is public.
+  - **While the repo is private** [Z60, Z61]: Windows and Linux run on every PR; macOS runs weekly on `main` (Mondays 06:00 UTC) plus `workflow_dispatch` [PR #16, Z65] (PR runs narrowed to a smoke e2e by Z85), all within the free included minutes. The full matrix on every push applies once the repo is public.
 - **Tags:** the same, plus signed installers built and attached to a draft GitHub Release (§12).
 
 ---

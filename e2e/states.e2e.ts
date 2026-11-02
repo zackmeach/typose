@@ -16,9 +16,10 @@ test('an empty file and a whitespace-only one show "Empty file"', async () => {
   }
 })
 
-test('a binary file shows the message only', async () => {
+test('a binary file shows the message, why, and the hand-off (Z79)', async () => {
   const l = await launch({ file: fixture('binary.zip', Buffer.from('PK\x03\x04\0\0\0\0binary', 'latin1')) })
-  await expect(l.win.locator('.card-message')).toHaveText('Binary file · not shown')
+  await expect(l.win.locator('.card-message p')).toHaveText(['Binary file · not shown', 'It contains NUL bytes in the first 8 KB.'])
+  await expect(l.win.locator('.card-message .open-button')).toHaveText(['Open with default app', /^Show in (Explorer|Finder|folder)$/])
   await finish(l)
 })
 
@@ -30,7 +31,7 @@ test('a missing file shows where it was looked for, with Locate… and Close', a
   await expect(win.locator('.card-message p')).toHaveText(`File not found at ${missing}`)
   await expect(win.locator('.card-message .open-button')).toHaveText(['Locate…', 'Close'])
   await win.getByRole('button', { name: 'Close', exact: true }).click()
-  await expect(win.locator('.card-message .open-button')).toHaveText(['Open file…'])
+  await expect(win.locator('.card-message .open-button')).toHaveText([/^Open file…/, 'Open folder…'])
   await finish(l)
 })
 

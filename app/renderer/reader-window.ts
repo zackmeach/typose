@@ -28,6 +28,7 @@ export interface ReaderHandle {
   copy(): Promise<boolean>
   print(): void
   switchLens(): void
+  handOff(kind: 'copy' | 'show' | 'open'): void
   captureSession(): Promise<SessionCard | null>
   restoreSession(card: SessionCard): Promise<void>
   selectTab(id: string): Promise<void>

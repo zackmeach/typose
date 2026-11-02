@@ -162,6 +162,8 @@ test('palette groups commands under LENS, VIEW and FILE; quick open separates RE
   await expect(palette.getByText('Commands apply to the focused card', { exact: true })).toBeVisible()
   await expect(palette.getByRole('group').nth(0).getByRole('option', { name: /Switch lens/ })).toBeVisible()
   await expect(palette.getByRole('group').nth(2).getByRole('option', { name: /Open folder/ })).toBeVisible()
+  await expect(palette.getByRole('group').nth(2).getByRole('option', { name: /Show in folder/ })).toBeVisible()
+  await expect(palette.getByRole('group').nth(2).getByRole('option', { name: /Open with default app/ })).toBeVisible()
   await live.win.keyboard.press('Escape')
   await live.app.evaluate(({ ipcMain }, path) => { ipcMain.removeHandler('folder-dialog'); ipcMain.handle('folder-dialog', () => path) }, root)
   await live.win.getByRole('button', { name: 'Menu', exact: true }).click()

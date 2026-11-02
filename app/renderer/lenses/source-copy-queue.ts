@@ -8,14 +8,15 @@ export class SourceCopyQueue {
     this.epoch++
     if (this.active) { this.active.controller.abort(); this.cancelWrite(this.active.token); this.active = undefined }
   }
-  run(operation: (current: () => boolean, signal: AbortSignal, token: string) => Promise<boolean>, release: () => Promise<void>): Promise<boolean> {
+  /** `token` is the preload's, from `beginClipboardWrite` in the trusted Copy gesture: no other token can write. */
+  run(token: string, operation: (current: () => boolean, signal: AbortSignal) => Promise<boolean>, release: () => Promise<void>): Promise<boolean> {
     this.cancel()
-    const epoch = this.epoch, controller = new AbortController(), token = crypto.randomUUID()
+    const epoch = this.epoch, controller = new AbortController()
     this.active = { controller, token }
     const current = () => epoch === this.epoch && !controller.signal.aborted
     const job = this.tail.then(async () => {
       if (!current()) return false
-      try { return await operation(current, controller.signal, token) }
+      try { return await operation(current, controller.signal) }
       finally { this.cancelWrite(token); await release(); if (this.active?.token === token) this.active = undefined }
     })
     this.tail = job.then(() => {}, () => {})

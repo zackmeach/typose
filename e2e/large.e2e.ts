@@ -5,7 +5,7 @@ import { closeSync, openSync, readSync, rmSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { FIXTURES, finish, launch, test, visibleRows, waitIndexed, waitOpen } from './app'
 
-const GIB = join(FIXTURES, '1gib.jsonl')
+const GIB = join(FIXTURES, '1gib.txt') // .txt: a .jsonl name would open in Rows, and this exercises Raw
 const LINE = 200
 
 test.afterAll(() => rmSync(GIB, { force: true })) // generated fixtures are deleted when done

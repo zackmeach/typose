@@ -10,6 +10,16 @@ use crate::budget::{OverBudget, Reservation};
 use crate::local::{LocalError, LocalRoute};
 use crate::store::{ByteStore, NotRegular, StoreError, refusal, route_refusal};
 
+thread_local! {
+    /// The document whose identity check `Document::batch` holds to the end of its page, on this thread.
+    static BATCHED: std::cell::Cell<*const Document> = const { std::cell::Cell::new(std::ptr::null()) };
+}
+#[cfg(test)]
+thread_local! {
+    /// Identity checks (a route walk and an open of the path each) made on this thread.
+    pub(crate) static CHECKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// What change detection compares, taken from a freshly opened path or inherited local route (spec §3.3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileId {
@@ -287,7 +297,27 @@ impl Document {
             return Err(DocError::Frozen(why));
         }
         let out = reads(&self.store).map_err(|e| self.fail(e))?;
-        self.check()?;
+        if !std::ptr::eq(BATCHED.get(), self) {
+            self.check()?;
+        }
+        Ok(out)
+    }
+
+    /// One page of many small reads (a Rows page, a Tree page): every `verified` inside, on this thread, still
+    /// checks the generation, the freeze and each chunk's hash, but the identity check, a route walk and an open of
+    /// the path, runs once, after the page (plan PR 1: per page). Nothing `page` returns is returned unless it passes.
+    pub fn batch<T>(&self, generation: u32, page: impl FnOnce() -> Result<T, DocError>) -> Result<T, DocError> {
+        struct Restore(*const Document);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                BATCHED.set(self.0); // also on a panic: a pooled thread must not keep skipping checks
+            }
+        }
+        let restore = Restore(BATCHED.replace(self));
+        let out = page();
+        drop(restore);
+        let out = out?;
+        self.verified(generation, |_| Ok(()))?;
         Ok(out)
     }
 
@@ -379,7 +409,16 @@ impl Document {
         Ok(next)
     }
 
+    /// Any extension: the hand-off sheet shows where a program or script is, and nothing here opens it.
+    pub fn link_path(&self, generation: u32, target: &str) -> Result<LocalRoute, DocError> {
+        self.link_target(generation, target, false)
+    }
+
     fn local_target(&self, generation: u32, target: &str) -> Result<LocalRoute, DocError> {
+        self.link_target(generation, target, true)
+    }
+
+    fn link_target(&self, generation: u32, target: &str, supported_only: bool) -> Result<LocalRoute, DocError> {
         if generation != self.generation {
             return Err(DocError::Stale { current: self.generation, asked: generation });
         }
@@ -402,7 +441,7 @@ impl Document {
                 || s.eq_ignore_ascii_case("csv")
                 || s.eq_ignore_ascii_case("tsv")
         });
-        if !supported {
+        if supported_only && !supported {
             return Err(DocError::Refused("local links support only Markdown, TXT, CSV and TSV files".into()));
         }
         self.check_local_source(generation)?;
@@ -473,6 +512,8 @@ impl Document {
     }
 
     fn check(&self) -> Result<(), DocError> {
+        #[cfg(test)]
+        CHECKS.set(CHECKS.get() + 1);
         if self.local_only || self.folder_scope().is_some() {
             return self.check_local_source(self.generation);
         }
@@ -542,6 +583,29 @@ mod tests {
         doc.reload().unwrap();
         assert!(matches!(doc.read(1, 10, 20), Err(DocError::Stale { current: 2, asked: 1 })));
         assert_eq!(doc.read(2, 3 * CHUNK as u64, 3 * CHUNK as u64 + 4).unwrap(), b"more");
+    }
+
+    #[test]
+    fn a_batch_checks_identity_once_after_its_page_and_returns_nothing_after_a_change() {
+        let path = temp_file("doc-batch", &pattern(CHUNK, 2));
+        let doc = Document::open(&path).unwrap();
+        let before = CHECKS.get();
+        let page = doc.batch(1, || (0..10).map(|i| doc.read(1, i, i + 1)).collect::<Result<Vec<_>, _>>());
+        assert_eq!(page.unwrap().len(), 10);
+        assert_eq!(CHECKS.get() - before, 1);
+        let changed = doc.batch(1, || {
+            let bytes = doc.read(1, 0, 4)?;
+            OpenOptions::new().append(true).open(&path).unwrap().write_all(b"more").unwrap();
+            Ok(bytes)
+        });
+        assert!(matches!(changed, Err(DocError::Frozen(_))));
+        // After the batch, every read checks again.
+        let before = CHECKS.get();
+        assert!(matches!(doc.read(1, 0, 4), Err(DocError::Frozen(_))));
+        let other_path = temp_file("doc-batch-after", b"abc");
+        let other = Document::open(&other_path).unwrap();
+        other.read(1, 0, 3).unwrap();
+        assert_eq!(CHECKS.get() - before, 1);
     }
 
     /// Spec §13.1 Spike C: an in-place, same-size write just before the read, with the timestamp restored, is caught
@@ -891,6 +955,36 @@ mod tests {
             let ok = unsafe { DefineDosDeviceW(flags, self.name.as_ptr(), self.target.as_ptr()) };
             assert!(ok != 0 || std::thread::panicking(), "removing the drive: {}", io::Error::last_os_error());
         }
+    }
+
+    /// Brief §4.6: session restore leaves network shares unopened. UNC forms, and drive letters the redirector serves
+    /// directly or through a subst, are network; a local drive, a relative path and a subst'd folder aren't.
+    #[cfg(windows)]
+    #[test]
+    fn network_routes_are_recognized_without_opening_them() {
+        use crate::store::network;
+        for path in
+            [r"\\example.invalid\share\x.md", "//example.invalid/share/x.md", r"\\?\UNC\example.invalid\share\x"]
+        {
+            assert!(network(Path::new(path)), "{path}");
+        }
+        for path in [r"C:\Windows\x.md", "relative.md"] {
+            assert!(!network(Path::new(path)), "{path}");
+        }
+        let _turn = DRIVES.lock().unwrap_or_else(|e| e.into_inner());
+        let letter = DosDevice::free_letter();
+        let path = PathBuf::from(format!(r"{letter}:\x.md"));
+        for target in [
+            r"\Device\Mup\example.invalid\share",
+            r"\Device\LanmanRedirector\;Q:0000000000001234\example.invalid\share",
+            r"\??\UNC\example.invalid\share",
+        ] {
+            let _drive = DosDevice::define(letter, target, true);
+            assert!(network(&path), "{letter}: -> {target}");
+        }
+        let scratch = Scratch::new("network-subst");
+        let _drive = DosDevice::define(letter, &scratch.0.to_string_lossy(), false);
+        assert!(!network(&path));
     }
 
     /// Plan PR 4 (PR 1's known limit 2): a drive letter mapped onto the pipe namespace, by `DefineDosDeviceW` as any

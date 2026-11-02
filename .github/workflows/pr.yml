@@ -1,6 +1,8 @@
-# Windows and Linux on every non-draft PR (Z60); drafts never run. Within GitHub Free's included minutes and its
-# 500 MB of artifact storage (Z61, plan PR 2): caches keyed per lockfile and OS, docs-only PRs skipped, a newer push
-# cancelling the older run, fmt and lint on Linux only, every job time-boxed, and bounded evidence only on failure.
+# Windows and Linux on every non-draft PR (Z60); drafts never run. The e2e step is a smoke subset (`npm run e2e:smoke`,
+# Z85): the merge bar is the full local Windows gate, and the full Linux suite runs weekly (weekly-linux.yml). Within
+# GitHub Free's included minutes and its 500 MB of artifact storage (Z61, plan PR 2): caches keyed per lockfile and OS,
+# docs-only PRs skipped, a newer push cancelling the older run, fmt and lint on Linux only, every job time-boxed, and
+# bounded evidence only on failure.
 name: pr
 
 on:
@@ -67,7 +69,7 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25 # Windows e2e allows 15 minutes after setup, with room for the evidence upload
+    timeout-minutes: 25 # the smoke e2e allows 8 minutes after setup, with room for the evidence upload
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: rust
@@ -125,16 +127,16 @@ jobs:
         name: Package the fused --dir build (packaged.e2e.ts drives it)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: npm run package
-      - name: e2e and the NetLog assertion (Linux, under xvfb, with the sandbox on)
+      - name: e2e smoke and the NetLog assertion (Linux, under xvfb, with the sandbox on)
         if: ${{ !cancelled() && steps.package.outcome == 'success' && steps.electron.outcome == 'success' && runner.os == 'Linux' }}
-        timeout-minutes: 12 # past the longest test's own limit (10 min, large and long-line; the config's is 5)
+        timeout-minutes: 8 # the smoke is about a minute and a half of tests; the rest is the hooks build
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          xvfb-run -a npm run e2e
-      - name: e2e and the NetLog assertion (Windows)
+          xvfb-run -a npm run e2e:smoke
+      - name: e2e smoke and the NetLog assertion (Windows)
         if: ${{ !cancelled() && steps.package.outcome == 'success' && steps.electron.outcome == 'success' && runner.os == 'Windows' }}
-        timeout-minutes: 15 # the full Windows suite took 12.5 minutes at 82de093
-        run: npm run e2e
+        timeout-minutes: 8
+        run: npm run e2e:smoke
       # Failure evidence (plan C9): kept 5 days, for the orchestrator to copy into .evidence/m1/ci/ before it expires.
       - name: Collect the failure evidence (bounded)
         if: failure()

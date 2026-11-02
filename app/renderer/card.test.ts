@@ -54,7 +54,8 @@ it('shows each file state', () => {
       { banner: { text: "Can't reload: Typose's memory budget is full", action: 'Retry (Ctrl+R)' }, body: { raw: true } }
     ],
     ['changed on disk mid-index', open({ frozen: 'changed on disk (chunk 3)' }), { status: 'Indexing stopped at 1,234,567 lines', progress: null }],
-    ['binary', failed('Binary', 'binary file'), { body: { message: 'Binary file · not shown', actions: [] } }],
+    ['binary', failed('Binary', 'binary file'), { body: { message: 'Binary file · not shown', detail: 'It has a .jsonl name but contains NUL bytes in the first 8 KB.', actions: ['Open with default app', 'Show in folder'] } }],
+    ['binary, not a text name', { kind: 'failed', path: 'C:\\x\\archive.zip', code: 'Binary', message: '' }, { body: { message: 'Binary file · not shown', detail: 'It contains NUL bytes in the first 8 KB.', actions: ['Open with default app', 'Show in folder'] } }],
     ['missing', failed('NotFound', 'io: not found'), { body: { message: `File not found at ${PATH}`, actions: ['Locate…', 'Close'] } }],
     [
       'permission denied',
@@ -73,6 +74,15 @@ it('shows each file state', () => {
     ['core stopped with no file, a new one up', { kind: 'gone', ready: true }, { body: { message: "Typose's core stopped", actions: ['Open file…'] } }]
   ]
   for (const [state, card, want] of rows) expect(view(card), state).toMatchObject(want)
+})
+
+it('counts every JSONL source line once, blank and failed lines included', () => {
+  const info = (done: boolean) => ({ ref: { session: 1, doc: 1, gen: 1, revision: 1 }, format: 'jsonl' as const, status: 'ready' as const, rows: 13, parsed: 11, failed: 2, blank: 1, done, problems: [] })
+  const jsonl = open({ opened: opened({ format: 'jsonl' }), lines: 14, indexed: true, structured: info(true) })
+  expect(view(jsonl).status).toBe('14 lines · 11 parsed · 2 failed · 1 blank')
+  expect(view({ ...jsonl, structured: info(false) }).status).toBe('14 lines · 11 parsed · 2 failed · 1 blank…')
+  expect(view({ ...jsonl, structured: { ...info(false), parsed: 0, failed: 0, blank: 0 } }).status).toBe('14 lines · 0 parsed · 0 failed · 0 blank…')
+  expect(view({ ...jsonl, indexed: false }).status).toBe('Indexing 14 lines…')
 })
 
 it('gives Markdown its switch, and the reasons Rendered stays off', () => {

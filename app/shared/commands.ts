@@ -24,6 +24,9 @@ export const COMMANDS: readonly CommandDefinition[] = [
   { id: 'find-previous', label: 'Previous match', shortcut: 'Shift+F3', document: true },
   { id: 'go-to', label: 'Go to line / row…', shortcut: 'Ctrl+G', document: true },
   { id: 'copy', label: 'Copy selection', shortcut: 'Ctrl+C', document: true },
+  { id: 'copy-path', label: 'Copy path', document: true },
+  { id: 'show-in-folder', label: 'Show in folder', document: true },
+  { id: 'open-default', label: 'Open with default app', document: true },
   { id: 'print', label: 'Print…', shortcut: 'Ctrl+P', document: true },
   { id: 'close-tab', label: 'Close tab', shortcut: 'Ctrl+W' },
   { id: 'reopen-tab', label: 'Reopen closed tab', shortcut: 'Ctrl+Shift+T' },
@@ -39,5 +42,5 @@ export function commandShortcut(shortcut: string | undefined, mac = false): stri
 export const COMMAND_GROUPS: readonly { title: 'LENS' | 'VIEW' | 'FILE'; ids: readonly Command[] }[] = [
   { title: 'LENS', ids: ['switch-lens', 'wrap-lines', 'find', 'find-next', 'find-previous', 'go-to', 'copy'] },
   { title: 'VIEW', ids: ['settings', 'shortcuts', 'toggle-sidebar', 'split-right', 'move-tab-right', 'close-card', 'zoom-in', 'zoom-out', 'zoom-reset', 'full-screen', 'theme-light', 'theme-dark', 'theme-system', 'refresh-folders'] },
-  { title: 'FILE', ids: ['open', 'browse', 'open-folder', 'reload', 'print', 'close-tab', 'reopen-tab', 'clear-closed', 'exit'] }
+  { title: 'FILE', ids: ['open', 'browse', 'open-folder', 'reload', 'print', 'copy-path', 'show-in-folder', 'open-default', 'close-tab', 'reopen-tab', 'clear-closed', 'exit'] }
 ]

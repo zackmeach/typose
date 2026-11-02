@@ -31,10 +31,10 @@ export const MAX_PRINT_NODES = 100_000
 export type PrintDocumentResult = { kind: 'printed'; pages: number } | { kind: 'cancelled' } | { kind: 'refused'; reason: string }
 
 export type PrintTag = 'p' | 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6' | 'strong' | 'em' | 'del' | 'code' | 'pre' |
-  'ul' | 'ol' | 'li' | 'blockquote' | 'table' | 'thead' | 'tbody' | 'tr' | 'th' | 'td' | 'a' | 'br' | 'hr' | 'span' | 'img'
+  'ul' | 'ol' | 'li' | 'blockquote' | 'table' | 'thead' | 'tbody' | 'tr' | 'th' | 'td' | 'a' | 'br' | 'hr' | 'span' | 'img' | 'math' | 'dl' | 'dt' | 'dd'
 export type PrintNode =
   | { text: string }
-  | { tag: PrintTag; children?: PrintNode[]; href?: string; alt?: string; src?: string }
+  | { tag: PrintTag; children?: PrintNode[]; href?: string; alt?: string; src?: string; math?: import('./math-print').MathPrintNode }
 
 /** Typed errors. `CoreGone` is the renderer's own: the core host died with the call pending (plan C7). */
 export type ErrorCode =
@@ -206,6 +206,8 @@ export interface Methods {
   hello: { params: { protocol: number }; result: Hello }
   /** `bytes`: the lens's viewport-only cache cap, reserved with the document's floor (plan C1); refused, `Memory`. */
   open: { params: { surface?: SurfaceRef; path: string; count: number; bytes: number }; result: Opened }
+  /** Whether a path reaches a network share, judged without opening it: restore leaves those for a click (brief §4.6). */
+  networkPath: { params: { path: string }; result: boolean }
   /** First screen of a retained document, without reopening or restarting its index. One renderer lens is active. */
   activate: { params: { surface?: SurfaceRef; activationId?: string; doc: number; gen: number; count: number; bytes: number }; result: Opened }
   /** Dispose a current view or Reload's exact old settled view, retaining the document/index. Pending activation cannot hand it back. */
@@ -251,6 +253,16 @@ export interface Methods {
 }
 
 export type LinkTarget = { kind: 'heading'; line: number } | { kind: 'external'; url: string } | { kind: 'local'; target: string; path: string } | { kind: 'inert' }
+  /** A program or script: never opened, only shown where it is (Z79). */
+  | { kind: 'executable'; target: string; path: string }
+
+/**
+ * What the page asks main to hand to the OS: never a bare path of its own. `path` only matches what main itself handed
+ * the page (a launch, Open file…); the others name what the core host holds, which turns them into the path. `href` is
+ * a program or script link of that document, exactly as its `data-href` reads; the native build must hold it.
+ */
+export type HandoffSubject = { path: string } | { entry: FolderRef } | { session: number; doc: number; gen: number; href?: string }
+export type HandoffResult = { ok: true } | { ok: false; reason: string }
 
 /** The test-hooks build's debug stats (plan C5, C6): the core's live jobs, tasks and file handles, the longest a chunk
  *  read's delay actually waited since the delay was set (`delayMs`), the documents the core host holds, and how its
@@ -334,6 +346,9 @@ export interface TyposeApi {
   folderDialog(): Promise<string | null>
   /** A user-activated external link. Main independently checks the app's main frame, size and allowed scheme. */
   openExternal(url: string): Promise<boolean>
+  /** Z79's hand-offs. Main resolves and checks the subject; Open with default app refuses programs, scripts and folders. */
+  showInFolder(subject: HandoffSubject): Promise<HandoffResult>
+  openWithDefault(subject: HandoffSubject): Promise<HandoffResult>
   /** Claim/revoke the one-use token armed by a trusted Grid copy shortcut. */
   beginClipboardWrite(): string | null
   cancelClipboardWrite(token: string): void
@@ -351,7 +366,7 @@ export interface TyposeApi {
 }
 
 /** The menu's commands (brief §3.2's M1 subset): ☰ on Windows and Linux, the native menu on macOS. */
-export type Command = 'open' | 'browse' | 'palette' | 'settings' | 'shortcuts' | 'theme-light' | 'theme-dark' | 'theme-system' | 'zoom-in' | 'zoom-out' | 'zoom-reset' | 'full-screen' | 'wrap-lines' | 'switch-lens' | 'open-folder' | 'toggle-sidebar' | 'refresh-folders' | 'split-right' | 'close-card' | 'move-tab-right' | 'reload' | 'close-tab' | 'reopen-tab' | 'clear-closed' | 'find' | 'find-next' | 'find-previous' | 'go-to' | 'copy' | 'print' | 'exit'
+export type Command = 'open' | 'browse' | 'palette' | 'settings' | 'shortcuts' | 'theme-light' | 'theme-dark' | 'theme-system' | 'zoom-in' | 'zoom-out' | 'zoom-reset' | 'full-screen' | 'wrap-lines' | 'switch-lens' | 'open-folder' | 'toggle-sidebar' | 'refresh-folders' | 'split-right' | 'close-card' | 'move-tab-right' | 'reload' | 'close-tab' | 'reopen-tab' | 'clear-closed' | 'find' | 'find-next' | 'find-previous' | 'go-to' | 'copy' | 'copy-path' | 'show-in-folder' | 'open-default' | 'print' | 'exit'
 
 /** The renderer's startup marks (plan C8, §5). */
 export const STARTUP_MARKS = [
