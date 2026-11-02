@@ -204,31 +204,43 @@ const wide = (cp: number): boolean => cp >= 0x1100 && (cp <= 0x115f || cp === 0x
   cp >= 0xfe30 && cp <= 0xfe6f || cp >= 0xff00 && cp <= 0xff60 || cp >= 0xffe0 && cp <= 0xffe6 ||
   cp >= 0x1f300 && cp <= 0x1faff || cp >= 0x20000 && cp <= 0x3fffd)
 
+const space = /^\s$/
+
 /**
  * Raw's Wrap lines: where `text` breaks into rows of at most `cols` columns, a wide character or an emoji presentation
- * (VS16) two, and a tab on to the next multiple of 8, only between graphemes, so a surrogate pair or a cluster never
- * splits. A row also stays within `WRAP` units, so what a row costs stays within `rowCost`: a grapheme longer than
- * that is cut as `rowBreaks` cuts one, never inside a surrogate pair. Returns the rows' starts, then the text's length.
+ * (VS16) two, and a tab on to the next multiple of 8 from the row's start, only between graphemes, so a surrogate pair
+ * or a cluster never splits. A row breaks just after its last whitespace when a word came before it, so the word that
+ * overflows moves whole to the next row; a row with no such place (one word longer than the row, or only indentation so
+ * far) breaks at the grapheme that overflows. A row also stays within `WRAP` units, so what a row costs stays within
+ * `rowCost`: a grapheme longer than that is cut as `rowBreaks` cuts one, never inside a surrogate pair. Returns the
+ * rows' starts, then the text's length.
  */
 export function wrapBreaks(text: string, cols: number): number[] {
   if (2 * text.length <= cols && !text.includes('\t')) return [0, text.length]
   const out = [0]
-  let start = 0, width = 0
+  // `soft` is where the row breaks after its last whitespace that follows a word (0 for none), `tail` the columns past
+  // it, which hold no whitespace, and `word` whether the row has a non-whitespace grapheme yet.
+  let start = 0, width = 0, soft = 0, tail = 0, word = false
   for (const { index, segment } of graphemes.segment(text)) {
-    const tab = segment === '\t'
-    let w = tab ? 8 - width % 8 : wide(segment.codePointAt(0)!) || segment.includes('\uFE0F') ? 2 : 1
-    if (index > start && (width + w > cols || index + segment.length - start > WRAP)) {
-      out.push(index)
-      start = index
-      width = 0
-      if (tab) w = 8 // a row starts on a tab stop
+    const end = index + segment.length, tab = segment === '\t'
+    const cells = wide(segment.codePointAt(0)!) || segment.includes('\uFE0F') ? 2 : 1
+    let w = tab ? 8 - width % 8 : cells
+    while (index > start && (width + w > cols || end - start > WRAP)) {
+      start = soft || index // the row's last word starts the next row, and a tab stop is measured from there
+      out.push(start)
+      width = soft ? tail : 0
+      word = width > 0
+      soft = tail = 0
+      w = tab ? 8 - width % 8 : cells
     }
-    while (index + segment.length - start > WRAP) {
+    while (end - start > WRAP) {
       const at = start + WRAP - (/[\uDC00-\uDFFF]/.test(text[start + WRAP]) ? 1 : 0)
       out.push(at)
       start = at
     }
     width += w
+    if (!space.test(segment)) { word = true; tail += w }
+    else if (word) { soft = end; tail = 0 }
   }
   out.push(text.length)
   return out

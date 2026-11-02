@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { finish, fixture, launch, stubOpenDialog, test } from './app'
+import { SHOW } from './menu-fixture'
 import { emptySession } from '../app/shared/session'
 
 test('quick open browses through the real command surface and opens fuzzy root results to a side card', async () => {
@@ -162,7 +163,7 @@ test('palette groups commands under LENS, VIEW and FILE; quick open separates RE
   await expect(palette.getByText('Commands apply to the focused card', { exact: true })).toBeVisible()
   await expect(palette.getByRole('group').nth(0).getByRole('option', { name: /Switch lens/ })).toBeVisible()
   await expect(palette.getByRole('group').nth(2).getByRole('option', { name: /Open folder/ })).toBeVisible()
-  await expect(palette.getByRole('group').nth(2).getByRole('option', { name: /Show in folder/ })).toBeVisible()
+  await expect(palette.getByRole('group').nth(2).getByRole('option', { name: SHOW })).toBeVisible()
   await expect(palette.getByRole('group').nth(2).getByRole('option', { name: /Open with default app/ })).toBeVisible()
   await live.win.keyboard.press('Escape')
   await live.app.evaluate(({ ipcMain }, path) => { ipcMain.removeHandler('folder-dialog'); ipcMain.handle('folder-dialog', () => path) }, root)
@@ -339,6 +340,68 @@ test('zoom shortcuts clamp at 50% and 200% and reset, and F11 toggles full scree
   await expect.poll(async () => (await state()).fullScreen).toBe(true)
   await live.win.keyboard.press('F11')
   await expect.poll(async () => (await state()).fullScreen).toBe(false)
+  expect(live.pageErrors).toEqual([])
+  expect(await finish(live)).toEqual({ code: 0, signal: null })
+})
+
+test('Copy path confirms for 3 s; Settings names the window; the palette says Show in Explorer and Wrap lines’ state; Quick open’s status sits clear of its list', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'typose-polish-root-'))
+  for (let i = 0; i < 40; i++) writeFileSync(join(root, `file-${String(i).padStart(2, '0')}.md`), '# x\n')
+  const live = await launch({ file: fixture('polish-doc.md', '# Polish doc\n') })
+  const { win } = live
+  await expect(win.getByRole('heading', { name: 'Polish doc' })).toBeVisible()
+  const palette = win.getByRole('dialog', { name: 'Command palette' })
+  const command = async (name: string) => { await win.keyboard.press('Control+K'); await win.getByRole('combobox', { name: 'Search commands' }).fill(name); await win.keyboard.press('Enter') }
+
+  // Copy path's confirmation goes by itself: the clipboard is stubbed, so nothing reaches the OS clipboard.
+  await win.evaluate(() => { navigator.clipboard.writeText = async () => {} })
+  await command('Copy path')
+  const banner = win.locator('.reader-card .banner[role="status"]')
+  await expect(banner).toHaveText('Path copied')
+  await expect(banner).toHaveCount(0, { timeout: 6_000 })
+
+  // The title bar and the window say Settings while it shows, and the file again once its tab is selected.
+  await expect(win).toHaveTitle('polish-doc.md — Typose')
+  await win.keyboard.press('Control+,')
+  await expect(win).toHaveTitle('Settings — Typose')
+  await expect(win.locator('.titlebar .title')).toHaveText('Settings — Typose')
+  await win.getByRole('tab', { name: 'polish-doc.md', exact: true }).click()
+  await expect(win).toHaveTitle('polish-doc.md — Typose')
+  await expect(win.locator('.titlebar .title')).toHaveText('polish-doc.md — Typose')
+
+  // The palette and ☰ use the platform's name for revealing a file, and the palette shows Wrap lines' state.
+  await win.keyboard.press('Control+K')
+  await expect(palette.getByRole('option', { name: SHOW, exact: true })).toBeVisible()
+  await expect(palette.getByRole('option', { name: 'Wrap lines, Off', exact: true }).locator('.workspace-badge')).toHaveText('Off')
+  await win.getByRole('combobox', { name: 'Search commands' }).fill(SHOW.split(' ').at(-1)!.toLowerCase())
+  await expect(palette.getByRole('option', { name: SHOW, exact: true })).toBeVisible()
+  await win.keyboard.press('Escape')
+  await command('Wrap lines')
+  await expect(win.locator('html')).toHaveAttribute('data-wrap-lines', 'true')
+  await win.keyboard.press('Control+K')
+  await expect(palette.getByRole('option', { name: 'Wrap lines, On', exact: true }).locator('.workspace-badge')).toHaveText('On')
+  await win.keyboard.press('Escape')
+  if (process.platform !== 'darwin') {
+    await win.getByRole('button', { name: 'Menu', exact: true }).click()
+    await expect(win.getByRole('menuitem', { name: SHOW, exact: true })).toBeVisible()
+    await win.keyboard.press('Escape')
+  }
+
+  // Quick open's status is a row of its own below the list, not against the list's last, partly visible result.
+  await live.app.evaluate(({ ipcMain }, path) => { ipcMain.removeHandler('folder-dialog'); ipcMain.handle('folder-dialog', () => path) }, root)
+  await win.getByRole('button', { name: 'Menu', exact: true }).click()
+  await win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
+  await expect(win.getByRole('treeitem', { name: 'file-39.md', exact: true })).toBeVisible()
+  await win.keyboard.press('Control+O')
+  await expect(win.getByRole('status').filter({ hasText: '40 files' })).toBeVisible()
+  const layout = await win.evaluate(() => {
+    const list = document.querySelector('.workspace-results')!, status = document.querySelector('.index-status')!, text = document.createRange()
+    text.selectNodeContents(status)
+    return { scrolls: list.scrollHeight > list.clientHeight, overlap: list.getBoundingClientRect().bottom - status.getBoundingClientRect().top, gap: text.getBoundingClientRect().top - list.getBoundingClientRect().bottom }
+  })
+  expect(layout.scrolls).toBe(true)
+  expect(layout.overlap).toBeLessThanOrEqual(0)
+  expect(layout.gap).toBeGreaterThanOrEqual(6)
   expect(live.pageErrors).toEqual([])
   expect(await finish(live)).toEqual({ code: 0, signal: null })
 })

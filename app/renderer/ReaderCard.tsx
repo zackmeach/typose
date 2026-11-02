@@ -2,7 +2,7 @@ import { type FormEvent, type ReactNode, type RefObject, useEffect, useRef, useS
 import { Button, Dialog, DialogTrigger, Heading, Menu, MenuItem, MenuTrigger, Modal, ModalOverlay, Popover, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
 import { MAX_PRINT_PAGES, type CapturedLocation, type CsvInfo, type CsvOptions, type HandoffSubject, type Hello, type Limits, type MdBuild, type Methods, type Opened, type SurfaceRef, type ViewRef } from '../shared/protocol'
 import { canOpen, extension, isExecutable } from '../shared/handoff'
-import { type HandoffKind, SHOW_IN_FOLDER, handOff } from './handoff'
+import { type HandoffKind, SHOW_IN_FOLDER, handOff, useHandOffNotice } from './handoff'
 import { type Action, type Card, type LensName, fileName, jsonlCounts, parentName, view } from './card'
 import { FileIcon } from './file-icon'
 import { type CoreClient, CoreCallError } from './core'
@@ -85,6 +85,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   const [card, setCardState] = useState<Card>({ kind: 'connecting' })
   const [limits, setLimits] = useState<Limits | null>(null)
   const [workspaceNotice, setWorkspaceNotice] = useState('')
+  const handOffNotice = useHandOffNotice(setWorkspaceNotice)
   const closed = shared.closed
   const navigating = useRef(false)
   const [navigationBusy, setNavigationBusy] = useState(false)
@@ -1219,12 +1220,12 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     const c = latest.current.card
     if (c.kind !== 'open' && (c.kind !== 'failed' || c.localOnly)) return
     const subject: HandoffSubject = c.kind === 'open' ? { session: currentSession.current, doc: c.opened.doc, gen: c.opened.gen } : { path: c.path }
-    void handOff(kind, subject, c.path).then(message => { if (message) setWorkspaceNotice(message) })
+    void handOff(kind, subject, c.path).then(handOffNotice)
   }
   function sheetHandOff(kind: 'show' | 'open'): void {
     if (!sheet) return
     setSheet(null)
-    void handOff(kind, sheet.subject, sheet.path ?? sheet.name).then(message => { if (message) setWorkspaceNotice(message) })
+    void handOff(kind, sheet.subject, sheet.path ?? sheet.name).then(handOffNotice)
   }
   const actions: Record<Action, () => void> = {
     'Open with default app': () => cardHandOff('open'),

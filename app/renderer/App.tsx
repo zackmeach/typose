@@ -11,7 +11,7 @@ import { WorkspaceStore, WorkspaceMetadataQueue, type WorkspaceTab } from './wor
 import { WorkspaceBudget } from './workspace-budget'
 import { FolderSidebar } from './folder-sidebar'
 import { entryView, folderNode, foldersCharge, nodePath, rootView, updateFolder, type RootView } from './folders'
-import { handOff } from './handoff'
+import { handOff, useHandOffNotice } from './handoff'
 import type { ClosedLocation, LocalGesture, ReaderGroup, ReaderHandle, ReaderWindow } from './reader-window'
 import './split-cards.css'
 import './link-preview.css'
@@ -57,6 +57,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   const [title, setTitle] = useState('Typose')
   const [activeNode, setActiveNode] = useState<string>()
   const [workspaceNotice, setWorkspaceNotice] = useState('')
+  const handOffNotice = useHandOffNotice(setWorkspaceNotice)
   const [folderRoots, setFolderRoots] = useState<readonly RootView[]>([])
   const folders = useRef<readonly RootView[]>([])
   const folderRequests = useRef(new Map<string, number>())
@@ -275,7 +276,8 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     }
   }
 
-  useEffect(() => { document.title = title }, [title])
+  const windowTitle = !preview && settingsTabs[focused]?.active ? 'Settings — Typose' : title
+  useEffect(() => { document.title = windowTitle }, [windowTitle])
   useEffect(() => { void settings.refresh().catch(error => setWorkspaceNotice('Cannot load settings · ' + String(error))) }, [settings])
   useEffect(() => { if (hello.current) void core.call('preferences', { encodingFallback: config.values.encoding_fallback }).catch(error => setWorkspaceNotice('Cannot apply file preferences · ' + String(error))) }, [core, config.values.encoding_fallback])
   const rootSignature = folderRoots.filter(root => !root.unavailable).map(root => root.id + ':' + root.ref.session).join(',')
@@ -927,7 +929,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       <span className="titlebar-start">{MAC ? null : <><AppIcon /><AppMenu run={run} enabled={commandEnabled} /></>}
         <Button className="sidebar-toggle" aria-label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'} onPress={() => setSidebarOpen(open => !open)}>»</Button>
       </span>
-      <span className="title" {...{ elementtiming: 'titlebar' }}>{title}</span>
+      <span className="title" {...{ elementtiming: 'titlebar' }}>{windowTitle}</span>
     </header>
     <div className="workspace-canvas" style={{ '--sidebar-offset': `${sidebarOpen && !sidebarOverlay ? sidebarWidth + 16 : 0}px` } as CSSProperties}>
       {sidebarOpen ? <FolderSidebar roots={folderRoots} width={sidebarWidth} overlay={sidebarOverlay} activeNode={activeNode}
@@ -937,7 +939,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
         onLocate={root => void pickFolder(root, folders.current.find(item => item.id === root && item.network)?.path)}
         onHandoff={(rootId, nodeId, kind) => {
           const root = folders.current.find(item => item.id === rootId), node = root && folderNode(root, nodeId)
-          if (root && node) void handOff(kind, { entry: node.ref }, nodePath(root, nodeId) ?? node.name).then(message => { if (message) setWorkspaceNotice(message) })
+          if (root && node) void handOff(kind, { entry: node.ref }, nodePath(root, nodeId) ?? node.name).then(handOffNotice)
         }} /> : null}
       <main className="card-row" ref={row}>
         {groups.map((group, index) => <div className="card-slot" style={{ flexGrow: group.weight }} key={group.id}>
@@ -974,6 +976,6 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
         </Modal>
       </ModalOverlay> : null}
     </div>
-    {overlay ? <WorkspaceOverlay key={overlay} mode={overlay} indexes={Object.values(indexes)} recents={recents} close={() => showOverlay(null)} browse={() => run('browse')} choose={(choice, side) => void chooseQuick(choice, side)} run={run} enabled={commandEnabled} /> : null}
+    {overlay ? <WorkspaceOverlay key={overlay} mode={overlay} indexes={Object.values(indexes)} recents={recents} close={() => showOverlay(null)} browse={() => run('browse')} choose={(choice, side) => void chooseQuick(choice, side)} run={run} enabled={commandEnabled} wrapLines={config.values.wrap_lines} /> : null}
   </>
 }

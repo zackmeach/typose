@@ -6,6 +6,7 @@ import type { RecentLocation } from '../shared/session'
 import type { QuickFile, QuickIndex } from './workspace-search'
 import { fuzzyScore } from './workspace-search'
 import { fileName } from './card'
+import { SHOW_IN_FOLDER } from './handoff'
 export type QuickChoice = { recent: RecentLocation } | { file: QuickFile }
 interface Result { id: string; label: string; path: string; score: number; badge?: string; command?: Command; choice?: QuickChoice }
 interface Section { title: string; rows: Result[] }
@@ -16,9 +17,9 @@ const byScore = (a: Result, b: Result) => b.score - a.score
 /** Non-empty sections, the best-matching one first (ties keep their natural order), so the first row is always the best match. */
 const ranked = (sections: Section[]): Section[] => sections.map(section => ({ ...section, rows: section.rows.filter(row => row.score > -Infinity).sort(byScore) }))
   .filter(section => section.rows.length).sort((a, b) => b.rows[0].score - a.rows[0].score)
-export function WorkspaceOverlay({ mode, indexes, recents, close, browse, choose, run, enabled }: {
+export function WorkspaceOverlay({ mode, indexes, recents, close, browse, choose, run, enabled, wrapLines }: {
   mode: 'open' | 'palette'; indexes: readonly QuickIndex[]; recents: readonly RecentLocation[]; close(): void; browse(): void
-  choose(choice: QuickChoice, side: boolean): void; run(command: Command): void; enabled(command: Command): boolean
+  choose(choice: QuickChoice, side: boolean): void; run(command: Command): void; enabled(command: Command): boolean; wrapLines: boolean
 }) {
   const [query, setQuery] = useState(''), [selected, setSelected] = useState(0)
   const input = useRef<HTMLInputElement>(null)
@@ -26,9 +27,12 @@ export function WorkspaceOverlay({ mode, indexes, recents, close, browse, choose
   const recentRows: Result[] = recents.map(recent => ({ id: recent.kind + ':' + recent.path, label: fileName(recent.path), path: recent.path, badge: badge(recent.path, recent.kind === 'folder'),
     choice: { recent } as QuickChoice, score: fuzzyScore(query, recent.path) }))
   const recentFiles = new Set(recents.filter(recent => recent.kind === 'file').map(recent => sameFile(recent.path)))
+  const states: Partial<Record<Command, string>> = { 'wrap-lines': wrapLines ? 'On' : 'Off' } // a setting's state, shown after its command
   const sections = ranked(mode === 'palette' ? COMMAND_GROUPS.map(group => ({ title: group.title, rows: group.ids.flatMap(id => {
     const command = COMMANDS.find(item => item.id === id)
-    return command && enabled(id) ? [{ id, label: command.label, path: commandShortcut(command.shortcut, navigator.platform.startsWith('Mac')), command: id, score: fuzzyScore(query, command.label) }] : []
+    if (!command || !enabled(id)) return []
+    const label = id === 'show-in-folder' ? SHOW_IN_FOLDER : command.label
+    return [{ id, label, path: commandShortcut(command.shortcut, navigator.platform.startsWith('Mac')), badge: states[id], command: id, score: fuzzyScore(query, label) }]
   }) })) : [
     { title: 'RECENT', rows: recentRows },
     { title: 'IN OPEN FOLDERS', rows: indexes.flatMap(index => index.files).filter(file => !recentFiles.has(sameFile(file.absolute))).map(file => ({ id: file.ref.session + ':' + file.ref.root + ':' + file.ref.node,
@@ -59,7 +63,7 @@ export function WorkspaceOverlay({ mode, indexes, recents, close, browse, choose
           offset += section.rows.length
           return <div key={section.title} role="group" aria-label={section.title}>
             <div className="workspace-heading" aria-hidden="true">{section.title}</div>
-            {section.rows.map((result, at) => <div key={result.id} id={`workspace-result-${first + at}`} role="option" aria-selected={first + at === current}
+            {section.rows.map((result, at) => <div key={result.id} id={`workspace-result-${first + at}`} role="option" aria-selected={first + at === current} aria-label={result.command && result.badge ? `${result.label}, ${result.badge}` : undefined}
               className="workspace-result" onPointerMove={() => setSelected(first + at)} onClick={event => activate(first + at, event.shiftKey)} data-clipboard-copy={result.command === 'copy' ? 'true' : undefined} data-handoff={result.command === 'show-in-folder' || result.command === 'open-default' ? 'true' : undefined}>
               <strong>{result.label}</strong><small>{result.path}</small>{result.badge ? <em className="workspace-badge">{result.badge}</em> : null}
             </div>)}

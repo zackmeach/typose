@@ -180,9 +180,10 @@ test('Raw wraps a 10,000-character line and CJK to the card when Wrap lines is o
   await expect.poll(() => rows(1).count()).toBeGreaterThan(5)
   await expect.poll(overflow).toBeLessThanOrEqual(0)
   const shown = await texts(1)
-  const cols = shown[0].length
-  expect(cols).toBeGreaterThan(20)
-  expect(shown.every((row, i) => row === long.slice(i * cols, (i + 1) * cols))).toBe(true) // ASCII fills each row
+  const whole = shown[0].length // as many whole 10-character segments as fit: a row breaks after a space, never inside a segment
+  expect(whole).toBeGreaterThan(20)
+  expect(whole % 10).toBe(0)
+  expect(shown.every((row, i) => row === long.slice(i * whole, (i + 1) * whole))).toBe(true)
   await expect(rows(1).first().locator('.more')).toHaveText('↪') // Z66's continuation marker: the line goes on
   const charged = await cache()
   expect(charged.charged).toBeGreaterThan(0)
@@ -200,8 +201,8 @@ test('Raw wraps a 10,000-character line and CJK to the card when Wrap lines is o
   const wide = await texts(2)
   expect(wide.join('')).toBe(cjk.slice(0, wide.join('').length))
   for (const row of wide.slice(0, -1)) {
-    expect([...row].length * 2, row).toBeLessThanOrEqual(cols) // two columns each
-    expect([...row].length * 2, row).toBeGreaterThanOrEqual(cols - 1)
+    expect([...row].length * 2, row).toBeLessThan(whole + 10) // two columns each; the card holds from whole to whole + 9 columns
+    expect([...row].length * 2, row).toBeGreaterThanOrEqual(whole)
     expect(row, 'no surrogate pair split').not.toMatch(/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/)
   }
 
@@ -216,13 +217,13 @@ test('Raw wraps a 10,000-character line and CJK to the card when Wrap lines is o
     const box = document.querySelector('.vl-scroller')!.getBoundingClientRect()
     const top = els.map(el => ({ el: el as HTMLElement, at: el.getBoundingClientRect().top })).filter(r => r.at >= box.top - 1).sort((a, b) => a.at - b.at)[0]
     return `${top.el.dataset.line}:${top.el.dataset.sub}`
-  }))).toBe(`1:${Math.floor(9990 / cols)}`)
+  }))).toBe(`1:${Math.floor(9990 / whole)}`)
   await win.keyboard.press('Escape')
 
   // A narrower window wraps again, narrower.
   await l.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(900, 700))
   await goTo(2)
-  await expect.poll(async () => (await texts(1))[0]?.length).toBeLessThan(cols)
+  await expect.poll(async () => (await texts(1))[0]?.length).toBeLessThan(whole)
   await expect.poll(overflow).toBeLessThanOrEqual(0)
 
   // Off again: back to Z66's rows.
