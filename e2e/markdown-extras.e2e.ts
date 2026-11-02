@@ -2,6 +2,7 @@ import { type Page, expect } from '@playwright/test'
 import { join } from 'node:path'
 import { HOSTILE_HTML, HOSTILE_MERMAID, HOSTILE_TEX, MATH_BOMB, MATH_BOMB_3 } from '../app/renderer/math/hostile'
 import { FIXTURES, type TestHooks, assertNetLog, finish, fixture, launch, test, waitIndexed } from './app'
+import { processMemory } from './memory'
 
 /**
  * Until the returned stop: the worst eval round-trip from the test, the renderer's longest task, and the most a 25 ms
@@ -208,6 +209,46 @@ test('math bombs, oversized formulas and hostile sanitizer input stay bounded an
     expect(live.pageErrors).toEqual([])
   } finally { await finish(live) }
   expect(assertNetLog(netlog)).toContain('PASS: no Chromium network-stack activity')
+})
+
+test('dense highlighting pays for its spans before inserting them, and never stalls the reader', async () => {
+  const json = (seed: number) => {
+    const lines = ['[']
+    for (let i = 0, length = 2; length < 31_000; i++) {
+      const line = `  {"id": ${seed * 1000 + i}, "ok": true, "n": null, "v": [1, 2.5, -3], "s": "x${i}", "k": {"a": "b"}},`
+      lines.push(line)
+      length += line.length + 1
+    }
+    return [...lines, '  {}', ']'].join('\n')
+  }
+  const blocks = Array.from({ length: 8 }, (_, i) => json(i))
+  const markdown = (language: string, ts: string) => ['# Dense', '', ...blocks.flatMap(block => ['```' + language, block, '```', '']),
+    '```' + ts, Array(3).fill('a'.repeat(9990)).join('\n'), '```', ''].join('\n')
+  const measure = async (name: string, source: string, highlighted: number) => {
+    const live = await launch({ file: fixture(name, source), hooks: true, controlledAccessibility: process.env.A11Y_OFF === '1' })
+    try {
+      const stop = await responsiveness(live.win)
+      await expect(live.win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 60_000 })
+      await expect(live.win.locator('code[data-highlighted="1"]')).toHaveCount(highlighted, { timeout: 60_000 })
+      await live.win.waitForTimeout(2000) // the TS block's watchdog, or its plain result
+      const timing = await stop()
+      const spans = await live.win.locator('.tp-token').count()
+      const memory = (await processMemory(live.app)).find(p => p.type === 'Tab')!.private ?? 0
+      expect(live.pageErrors).toEqual([])
+      return { ...timing, spans, memory, extras: await extrasReserved(live.win) }
+    } finally { await finish(live) }
+  }
+  const plain = await measure('markdown-extras-dense-plain.md', markdown('text', 'text'), 0)
+  expect(plain.extras).toBe(0) // unlabeled blocks pay nothing
+  const lit = await measure('markdown-extras-dense.md', markdown('json', 'ts'), 8)
+  const grew = lit.memory - plain.memory
+  console.log(`dense highlighting: ${lit.spans} spans, renderer private +${(grew / 2 ** 20).toFixed(1)} MiB against ${(lit.extras / 2 ** 20).toFixed(1)} MiB reserved; ` +
+    `worst eval round-trip ${lit.worstRoundTrip} ms, longest renderer task ${Math.round(lit.longestTask)} ms, page timer late ${lit.timerLate} ms`)
+  expect(lit.spans).toBe(8 * 2000) // the span cap; each block's rest stays plain text
+  expect(grew).toBeLessThan(lit.extras)
+  expect(lit.worstRoundTrip).toBeLessThan(1000)
+  expect(lit.longestTask).toBeLessThan(250)
+  expect(lit.timerLate).toBeLessThan(250)
 })
 
 test('blocks that cannot highlight pay nothing, so a formula after a thousand of them still renders', async () => {

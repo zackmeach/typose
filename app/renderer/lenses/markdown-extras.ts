@@ -1,7 +1,7 @@
 import { parseDocument, stringify } from 'yaml'
 import { renderMath } from '../math/math'
 import { renderDiagram } from '../mermaid/diagram'
-import { OFFLINE_LANGUAGES, tokenizeOffline } from './syntax'
+import { HIGHLIGHT_MAX_CHARS, OFFLINE_LANGUAGES, tokenizeOffline } from './syntax'
 
 const CALLOUTS: Record<string, string> = {
   note: 'blue', info: 'blue', todo: 'blue', tip: 'green', success: 'green', important: 'purple',
@@ -9,19 +9,24 @@ const CALLOUTS: Record<string, string> = {
   bug: 'pink', failure: 'pink', quote: 'neutral', abstract: 'neutral'
 }
 
-async function highlight(code: HTMLElement): Promise<void> {
-  const lang = [...code.classList].find(name => name.startsWith('language-'))?.slice(9)
-  if (!lang || !OFFLINE_LANGUAGES.has(lang)) return
+/**
+ * Highlighting's renderer bytes, charged before the work: per source character up front (the worker's tokenizing heap
+ * and the pieces' transit), then per span before the DOM sees any. Eight dense 32 KB JSON blocks plus a 30 KB TS block
+ * raised the renderer's private bytes by 82 MiB at a 1,000-span cap, 91–115 MiB over ten runs at 2,000 and 114–135
+ * MiB at 4,000. GC noise defeats a linear fit, so the pair covers the worst run by a quarter: 154.5 MiB at 2,000.
+ */
+export const HIGHLIGHT_CHAR_BYTES = 320
+export const HIGHLIGHT_SPAN_BYTES = 3968
+
+async function highlight(code: HTMLElement, lang: string, reserve: (bytes: number) => Promise<boolean>): Promise<void> {
   const original = code.textContent ?? ''
-  if (original.length > 32 << 10) return
   try {
-    const tokens = await tokenizeOffline(original, lang)
-    if (!tokens) return
+    const pieces = await tokenizeOffline(original, lang)
+    if (!pieces || !code.isConnected || code.textContent !== original) return
+    if (!await reserve(pieces.filter(([, light, dark]) => light || dark).length * HIGHLIGHT_SPAN_BYTES)) { code.title = 'Highlighting skipped · rendering budget exceeded'; return }
     if (!code.isConnected || code.textContent !== original) return
     // Color spans sit INSIDE each native provenance span, so source selections remain mapped.
-    let cursor = 0
-    const pieces: Array<{ content: string; variants: Record<string, { color?: string }> }> =
-      tokens.flatMap((line, index) => [...line, ...(index < tokens.length - 1 ? [{ content: '\n', variants: {} }] : [])])
+    let spans = 0
     const walker = document.createTreeWalker(code, NodeFilter.SHOW_TEXT)
     const nodes: Text[] = []
     while (walker.nextNode()) nodes.push(walker.currentNode as Text)
@@ -30,25 +35,27 @@ async function highlight(code: HTMLElement): Promise<void> {
       const fragment = document.createDocumentFragment()
       let offset = 0
       while (offset < node.length && tokenIndex < pieces.length) {
-        const token = pieces[tokenIndex]
-        const count = Math.min(node.length - offset, token.content.length - tokenOffset)
+        const [content, light, dark] = pieces[tokenIndex]
+        const count = Math.min(node.length - offset, content.length - tokenOffset)
         if (count === 0) { tokenIndex++; tokenOffset = 0; continue }
-        const span = document.createElement('span')
-        span.textContent = node.data.slice(offset, offset + count)
-        // Both themes' colors ride as custom properties; markdown-extras.css picks the app theme's, so a switch repaints.
-        span.className = 'tp-token'
-        for (const scheme of ['light', 'dark']) {
-          const color = token.variants[scheme]?.color
-          if (color && /^#[\da-f]{6,8}$/i.test(color)) span.style.setProperty('--tp-' + scheme, color)
-        }
-        fragment.append(span)
-        offset += count; cursor += count; tokenOffset += count
-        if (tokenOffset === token.content.length) { tokenIndex++; tokenOffset = 0 }
+        const text = node.data.slice(offset, offset + count)
+        if (light || dark) {
+          const span = document.createElement('span')
+          span.textContent = text
+          // Both themes' colors ride as custom properties; markdown-extras.css picks the app theme's, so a switch repaints.
+          span.className = 'tp-token'
+          if (/^#[\da-f]{6,8}$/i.test(light)) span.style.setProperty('--tp-light', light)
+          if (/^#[\da-f]{6,8}$/i.test(dark)) span.style.setProperty('--tp-dark', dark)
+          fragment.append(span)
+          spans++
+        } else fragment.append(text)
+        offset += count; tokenOffset += count
+        if (tokenOffset === content.length) { tokenIndex++; tokenOffset = 0 }
       }
       if (offset < node.length) fragment.append(node.data.slice(offset))
       node.replaceWith(fragment)
     }
-    if (cursor) code.dataset.highlighted = '1'
+    if (spans) code.dataset.highlighted = '1'
   } catch (error) { code.title = error instanceof Error ? error.message : 'Syntax highlighting unavailable' }
 }
 
@@ -137,9 +144,9 @@ export function markdownExtras(root: HTMLElement, current: () => boolean, reserv
       // Only a block that can highlight pays: unlabeled, unsupported and oversized blocks stay plain for nothing.
       const lang = [...code.classList].find(name => name.startsWith('language-'))?.slice(9)
       const length = code.textContent?.length ?? 0
-      if (lang && OFFLINE_LANGUAGES.has(lang) && length <= 32 << 10) pending.push(async () => {
-        if (!current() || !await reserve((1 << 20) + length * 64)) return
-        await highlight(code)
+      if (lang && OFFLINE_LANGUAGES.has(lang) && length <= HIGHLIGHT_MAX_CHARS) pending.push(async () => {
+        if (!current() || !await reserve((1 << 20) + length * HIGHLIGHT_CHAR_BYTES)) return
+        await highlight(code, lang, bytes => current() ? reserve(bytes) : Promise.resolve(false))
       })
     }
   }
