@@ -11,20 +11,28 @@ const SHARED_LIMIT = 1_500
 export async function indexRoot(core: CoreClient, root: RootView, hidden: boolean, excludes: readonly string[], changed: (result: QuickIndex) => void, signal: AbortSignal): Promise<void> {
   let scratch: FolderRoot | undefined
   try { scratch = await core.call('addRoot', { path: root.path }, signal) } catch { /* at the 16-root limit: walk the shared root, shallowly */ }
-  if (signal.aborted) { release(core, scratch); return }
+  if (signal.aborted) { void release(core, scratch); return }
+  if (scratch && root.identity && scratch.identity !== root.identity) {
+    await release(core, scratch)
+    changed({ files: [], state: `Quick open skipped ${root.node.name} · the folder changed since it was added` })
+    return
+  }
   const start = scratch?.ref ?? root.ref, limit = scratch ? SCRATCH_LIMIT : SHARED_LIMIT
   const files: QuickFile[] = [], queue = [{ ref: start, prefix: root.node.name, absolute: root.path.replace(/[\\/]+$/, '') }]
   const excluded = new Set(excludes.map(s => s.toLowerCase()))
   const partial = () => `Quick open shows the first ${limit.toLocaleString()} entries of ${root.node.name}`
-  let visited = 0
+  let visited = 0, unreadable = 0
   try {
     for (let at = 0; at < queue.length; at++) {
       const directory = queue[at]
       let cursor: string | undefined
       do {
         if (signal.aborted) return
+        // An unreadable subfolder is skipped; only the root itself failing ends the walk.
         const page = await core.call('listFolder', { folder: directory.ref, hidden, ...(cursor ? { cursor } : {}) }, signal)
+          .catch(error => { if (at === 0 || signal.aborted) throw error; return undefined })
         if (signal.aborted) return
+        if (!page) { unreadable++; break }
         for (const entry of page.entries) {
           if (excluded.has(entry.name.toLowerCase())) continue
           const path = directory.prefix + '/' + entry.name
@@ -37,12 +45,13 @@ export async function indexRoot(core: CoreClient, root: RootView, hidden: boolea
         changed({ files: [...files], state: `Indexing ${root.node.name} · ${files.length.toLocaleString()} files` })
       } while (cursor)
     }
-    changed({ files, state: `${root.node.name} · ${files.length.toLocaleString()} files` })
-  } catch (error) { if (!signal.aborted) changed({ files, state: files.length ? partial() : `Quick open could not read ${root.node.name} · ${error instanceof Error ? error.message : String(error)}` }) }
-  finally { release(core, scratch) }
+    changed({ files, state: `${root.node.name} · ${files.length.toLocaleString()} files` + (unreadable ? ` · ${unreadable.toLocaleString()} unreadable folder${unreadable === 1 ? '' : 's'} skipped` : '') })
+  } catch (error) { if (!signal.aborted) changed({ files, state: `Quick open could not read ${root.node.name} · ${error instanceof Error ? error.message : String(error)}` }) }
+  finally { await release(core, scratch) }
 }
-function release(core: CoreClient, scratch: FolderRoot | undefined): void {
-  if (scratch) void core.call('removeRoot', { root: scratch.ref.root, session: scratch.ref.session }).catch(() => {})
+/** Awaited so a sequential walk frees each scratch root before the next one claims a slot. */
+async function release(core: CoreClient, scratch: FolderRoot | undefined): Promise<void> {
+  if (scratch) await core.call('removeRoot', { root: scratch.ref.root, session: scratch.ref.session }).catch(() => {})
 }
 export function fuzzyScore(query: string, value: string): number {
   const text = value.toLowerCase(), needle = query.trim().toLowerCase()

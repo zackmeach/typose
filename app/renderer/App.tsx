@@ -271,9 +271,15 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     const controller = new AbortController()
     setIndexes({})
     if (!quickUsed) return
-    for (const root of folders.current.filter(root => !root.unavailable)) void indexRoot(core, root, config.values.show_hidden, config.values.excludes, result => {
-      if (!controller.signal.aborted) setIndexes(before => ({ ...before, [root.id]: result }))
-    }, controller.signal)
+    // One root at a time, so the walk holds at most one scratch root against the 16-root limit.
+    void (async () => {
+      for (const root of folders.current.filter(root => !root.unavailable)) {
+        if (controller.signal.aborted) return
+        await indexRoot(core, root, config.values.show_hidden, config.values.excludes, result => {
+          if (!controller.signal.aborted) setIndexes(before => ({ ...before, [root.id]: result }))
+        }, controller.signal)
+      }
+    })()
     return () => controller.abort()
   }, [core, quickUsed, rootSignature, config.values.show_hidden, config.values.excludes.join('\n')])
   useEffect(() => {

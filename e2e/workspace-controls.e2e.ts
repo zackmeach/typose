@@ -1,5 +1,6 @@
 import { expect } from '@playwright/test'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { finish, fixture, launch, stubOpenDialog, test } from './app'
@@ -228,6 +229,35 @@ test('quick open walks lazily with its own root, so it never spends the sidebar 
   await expect(live.win.getByText(/refused|demo limit/i)).toHaveCount(0)
   expect(live.pageErrors).toEqual([])
   expect(await finish(live)).toEqual({ code: 0, signal: null })
+})
+
+test('quick open skips a root whose folder was replaced, and lists past an unreadable subfolder', async () => {
+  test.skip(process.platform !== 'win32', 'the unreadable folder uses a Windows deny ACE')
+  const base = mkdtempSync(join(tmpdir(), 'typose-quick-swap-')), swapped = join(base, 'swapped'), mixed = join(base, 'mixed')
+  mkdirSync(swapped); writeFileSync(join(swapped, 'original.md'), '# original\n')
+  for (const d of ['a', 'b', 'c']) { mkdirSync(join(mixed, d), { recursive: true }); for (let i = 0; i < 3; i++) writeFileSync(join(mixed, d, d + 'file' + i + '.md'), '# x\n') }
+  const deny = spawnSync('icacls', [join(mixed, 'b'), '/deny', '*S-1-1-0:(OI)(CI)(RX)'], { encoding: 'utf8' })
+  expect(deny.status).toBe(0)
+  try {
+    const live = await launch()
+    await expect(live.win.getByRole('button', { name: /^Open file/ })).toBeVisible()
+    for (const [root, row] of [[swapped, 'original.md'], [mixed, 'c']]) {
+      await live.app.evaluate(({ ipcMain }, path) => { ipcMain.removeHandler('folder-dialog'); ipcMain.handle('folder-dialog', () => path) }, root)
+      await live.win.getByRole('button', { name: 'Menu', exact: true }).click()
+      await live.win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
+      await expect(live.win.getByRole('treeitem', { name: row, exact: true })).toBeVisible()
+    }
+    renameSync(swapped, swapped + '-moved'); mkdirSync(swapped); writeFileSync(join(swapped, 'impostor.md'), '# impostor\n')
+    await live.win.keyboard.press('Control+O')
+    await expect(live.win.getByRole('status').filter({ hasText: 'Quick open skipped swapped · the folder changed since it was added' })).toBeVisible({ timeout: 30_000 })
+    await expect(live.win.getByRole('status').filter({ hasText: 'mixed · 6 files · 1 unreadable folder skipped' })).toBeVisible({ timeout: 30_000 })
+    await live.win.getByRole('combobox', { name: 'Search files' }).fill('file')
+    await expect(live.win.getByRole('option').filter({ hasText: 'cfile0.md' })).toHaveCount(1)
+    await live.win.getByRole('combobox', { name: 'Search files' }).fill('impostor')
+    await expect(live.win.getByRole('option').filter({ hasText: 'impostor.md' })).toHaveCount(0)
+    expect(live.pageErrors).toEqual([])
+    expect(await finish(live)).toEqual({ code: 0, signal: null })
+  } finally { spawnSync('icacls', [join(mixed, 'b'), '/remove:d', '*S-1-1-0']) }
 })
 
 test('a setting changes and saves while config.toml is open in a Typose tab', async () => {
