@@ -136,14 +136,15 @@ test('a Markdown file opens in Rendered, and Raw keeps the top line within one b
   await expect(win.locator('main a')).toHaveAttribute('title', 'https://example.invalid/a')
   await expect(win.getByRole('tablist', { name: 'Lens' })).toBeVisible()
   await expect(win.getByRole('tab', { name: 'Rendered', exact: true })).toHaveAttribute('aria-selected', 'true')
-  // Offscreen blocks stay mounted and skip their paint, except a heading's (plan §2.2).
+  // Offscreen blocks stay mounted and skip their paint, except a heading's (plan §2.2). Linux's accessibility mode is
+  // always on, so there every block paints (Z92).
   const visibility = await win.evaluate(() => {
     const blocks = [...document.querySelectorAll<HTMLElement>('.md-block')]
     const below = blocks.find((b) => b.getBoundingClientRect().top > innerHeight && !b.querySelector('h1, h2, h3, h4, h5, h6'))
     return { count: blocks.length, below: below ? getComputedStyle(below).contentVisibility : '' }
   })
   expect(visibility.count).toBeGreaterThan(10)
-  expect(visibility.below).toBe('auto')
+  expect(visibility.below).toBe(process.platform === 'linux' ? 'visible' : 'auto')
 
   const scroller = win.locator('.md-scroller')
   await scroller.evaluate((el) => {
