@@ -263,6 +263,8 @@ export class PageCache {
   cap = ELASTIC
   /** The Raw lens's wrap width in columns, or 0 for Z66's rows: a mounted row is charged for the units it shows. */
   cols = 0
+  /** Told each key eviction drops, so the lens can forget that line's rows. */
+  onEvict?: (key: Key) => void
 
   constructor(private readonly bounds: Bounds) {}
 
@@ -345,6 +347,7 @@ export class PageCache {
       if (this.mountedKeys.has(key)) continue
       this.items.delete(key)
       this.cached -= charge(item)
+      this.onEvict?.(key)
     }
   }
 }
