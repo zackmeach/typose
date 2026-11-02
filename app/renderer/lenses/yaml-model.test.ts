@@ -33,6 +33,11 @@ describe('YAML 1.2 CST projection', () => {
     expect(all.filter(node => node.kind === 'comment').map(node => node.text)).toEqual(['# top', '# end'])
     expect(all.some(node => node.kind === 'string' && node.text.includes('# literal'))).toBe(true)
   })
+  it('keeps a lone document as the root, with its leading comment as its first row', () => {
+    const model = yamlModel('# launch plan\nname: pier\nsteps: [a, b]\n')
+    expect(model.root.kind).toBe('object')
+    expect(children(model).map(node => node.kind === 'comment' ? node.text : node.key)).toEqual(['# launch plan', 'name', 'steps'])
+  })
   it('retains document separation and reports parse error source locations', () => {
     const model = yamlModel('a: 1\n---\nb: [bad\n')
     expect(children(model).filter(node => node.kind === 'object')).toHaveLength(2)

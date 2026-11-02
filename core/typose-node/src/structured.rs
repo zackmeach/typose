@@ -410,6 +410,7 @@ impl Task for Children {
                 }
                 let range = record_range(&self.raw, self.entry.generation, record)?
                     .ok_or_else(|| DocError::Invalid("JSONL record is outside the document".into()))?;
+                let range = record_body(&self.raw, self.entry.generation, range)?;
                 record_tree = core_structured::JsonTree::build_range(
                     self.raw.document(),
                     self.entry.generation,
@@ -593,6 +594,10 @@ fn record_range(raw: &Raw, generation: u32, line: u64) -> std::result::Result<Op
     };
     Ok(Some(json::Span { start, end }))
 }
+/// What the parser reads of a record: its range without the line terminator.
+fn record_body(raw: &Raw, generation: u32, range: json::Span) -> std::result::Result<json::Span, DocError> {
+    raw.document().verified(generation, |store| jsonl::content(store, range))
+}
 
 #[napi(object)]
 pub struct StructuredRow {
@@ -633,7 +638,8 @@ fn row(
     range: json::Span,
     flag: &AtomicBool,
 ) -> std::result::Result<Option<StructuredRow>, DocError> {
-    let tree = core_structured::JsonTree::build_range(raw.document(), generation, range.start..range.end, false, flag)?;
+    let body = record_body(raw, generation, range)?;
+    let tree = core_structured::JsonTree::build_range(raw.document(), generation, body.start..body.end, false, flag)?;
     if tree.index.root.is_none() && tree.index.error.is_none() {
         return Ok(None);
     }

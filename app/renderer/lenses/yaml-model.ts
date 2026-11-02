@@ -126,6 +126,13 @@ export function yamlModel(source: string, encoding = 'utf-8', bom = 0) {
     if (owner) { const children = containers.get(owner.container!)!; children.push(entry); children.sort((a, b) => a.span.start - b.span.start); owner.children = children.length }
     else roots.push(entry)
   }
+  // One document keeps its top-level keys at the root; comments outside its value become its first or last rows.
+  const content = roots.filter(node => node.kind !== 'comment')
+  if (roots.length > 1 && content.length === 1 && content[0]!.kind !== 'alias' && content[0]!.container !== undefined) {
+    const single = content[0]!, children = containers.get(single.container!)!
+    children.push(...roots.filter(node => node.kind === 'comment')); children.sort((a, b) => a.span.start - b.span.start)
+    single.children = children.length; roots.splice(0, roots.length, single)
+  }
   const root: StructuredNode = roots.length === 1 ? roots[0]! : { ordinal: 0, kind: 'array', span: span(0, source.length), text: 'Documents', more: false, container: ++serial, children: roots.length }
   if (roots.length !== 1) containers.set(root.container!, roots.sort((a, b) => a.span.start - b.span.start))
   return {

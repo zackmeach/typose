@@ -49,11 +49,43 @@ test('YAML worker Tree retains tags, comments, 1.2 strings and an on-demand recu
     await expect(card.locator('.tree-string').filter({ hasText: /^on$/ })).toBeVisible()
     await expect(card.locator('.tree-string').filter({ hasText: '!Ref thing' })).toBeVisible()
     await expect(card.locator('.tree-comment')).toHaveText('# top')
-    await card.getByRole('button', { name: 'Expand recursive', exact: true }).click()
+    // The map is the root (no Documents wrapper for one document), so its second level opens with it.
+    await expect(card.getByRole('button', { name: 'Expand recursive', exact: true })).toHaveText('⌄')
     await expect(card.locator('.tree-alias')).toHaveText('*r')
     await expect(card.locator('.tree-alias')).toBeVisible()
     await expectDistinctRows(card, '.tree-row')
     await screenshot(live.win, 'yaml-tree')
+    expect(live.pageErrors).toEqual([])
+  } finally { await finish(live) }
+})
+
+test('YAML with a leading comment keeps its top-level keys at the root, the comment as their first row', async () => {
+  const file = fixture('structured-leading-comment.yaml', '# launch plan\nname: pier\nsteps:\n  - survey\n  - move\n')
+  const live = await launch({ hooks: true, file })
+  try {
+    const card = live.win.getByRole('region', { name: 'Reader card 1' })
+    await expect(card.locator('[data-lens="tree"]')).toBeVisible({ timeout: 30_000 })
+    const top = card.locator('.tree-row[aria-level="2"]')
+    await expect(top).toHaveCount(3)
+    await expect(top.nth(0).locator('.tree-comment')).toHaveText('# launch plan')
+    await expect(top.nth(1).locator('.tree-key')).toHaveText('name: ')
+    await expect(top.nth(2).locator('.tree-key')).toHaveText('steps: ')
+    await expect(card.locator('.tree-row[aria-level="1"]')).toHaveText(/\{ 3 items \}/)
+    expect(live.pageErrors).toEqual([])
+  } finally { await finish(live) }
+})
+
+test('JSONL counts every source line once and reports a line cut off mid-string as the end of its input', async () => {
+  const valid = Array.from({ length: 11 }, (_, index) => JSON.stringify({ ts: `12:04:${String(index).padStart(2, '0')}.100`, type: 'model', msg: `step ${index + 1}` }))
+  const source = [...valid.slice(0, 5), '', ...valid.slice(5), '{"ts":"12:04:13.722","type":"model","msg":"Proposed moving the partn'].join('\n') + '\n'
+  const live = await launch({ hooks: true, file: fixture('structured-truncated.jsonl', source) })
+  try {
+    const card = live.win.getByRole('region', { name: 'Reader card 1' })
+    await expect(card.locator('[data-lens="rows"]')).toBeVisible({ timeout: 30_000 })
+    await expect(card.locator('.card-status')).toHaveText('13 lines · 11 parsed · 1 failed · 1 blank')
+    const failed = card.locator('.jsonl-entry[data-line="12"]')
+    await expect(failed).toContainText('unexpected end of input')
+    await expect(failed).not.toContainText('unescaped control')
     expect(live.pageErrors).toEqual([])
   } finally { await finish(live) }
 })
