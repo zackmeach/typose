@@ -40,8 +40,11 @@ export class SettingsController {
     for (const [key, value] of Object.entries(theme.tokens)) if (['canvas', 'surface', 'surface_raised', 'border', 'text', 'text_secondary', 'accent'].includes(key))
       element.style.setProperty('--' + (key === 'text_secondary' ? 'text2' : key.replaceAll('_', '-')), String(value))
     if (settings.accent) element.style.setProperty('--accent', settings.accent)
-    element.style.setProperty('--font-ui', `${JSON.stringify(settings.ui_font)}, Inter, system-ui, sans-serif`)
-    element.style.setProperty('--font-mono', `${JSON.stringify(settings.mono_font)}, 'JetBrains Mono', Consolas, monospace`)
+    // Inter and JetBrains Mono are bundled and load late. style.css swaps them in only once they have loaded
+    // (`data-fonts`), so a slow load never changes metrics later. Choosing one keeps that gated stack; another font leads it.
+    const stack = (font: string, bundled: string, base: string) => font === bundled ? `var(${base})` : `${JSON.stringify(font)}, var(${base})`
+    element.style.setProperty('--font-ui', stack(settings.ui_font, 'Inter', '--font-ui-base'))
+    element.style.setProperty('--font-mono', stack(settings.mono_font, 'JetBrains Mono', '--font-mono-base'))
     element.style.setProperty('--ui-size', settings.ui_size + 'px'); element.style.setProperty('--mono-size', settings.mono_size + 'px')
     element.style.setProperty('--size-mono', settings.mono_size + 'px')
     element.style.setProperty('--text-secondary', 'var(--text2)'); element.style.setProperty('--hairline', 'var(--border)'); element.style.setProperty('--guide', 'var(--border)')
