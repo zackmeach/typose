@@ -45,3 +45,18 @@ it('propagates a changed verified source as Frozen and releases the model reserv
   await expect(prepareStructured(core, opened(), budget, new AbortController().signal)).rejects.toMatchObject({ code: 'Frozen' })
   expect(budget.snapshot().total).toBe(10)
 })
+it('terminates a YAML build that runs past its watchdog and locks the Tree with the reason', async () => {
+  vi.useFakeTimers()
+  try {
+    const stuck: WorkerStub[] = []
+    vi.stubGlobal('Worker', class extends WorkerStub { constructor() { super(); stuck.push(this) } postMessage() {} })
+    const budget = new LensBudget({ call: async () => true }, 1, 1, 1, 10, 10)
+    const core = { call: async (method: string) => method === 'sourceBytes' ? new TextEncoder().encode('a: 1') : true } as unknown as CoreClient
+    const pending = prepareStructured(core, opened(), budget, new AbortController().signal)
+    await vi.advanceTimersByTimeAsync(5000)
+    const source = await pending
+    expect(source.info).toMatchObject({ status: 'locked', reason: expect.stringContaining('longer than 5 s') })
+    expect(stuck.map(worker => worker.stopped)).toEqual([true])
+    expect(budget.snapshot().total).toBe(10)
+  } finally { vi.useRealTimers() }
+})

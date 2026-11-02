@@ -114,6 +114,7 @@ export function yamlModel(source: string, encoding = 'utf-8', bom = 0) {
     while (low < high) { const mid = (low + high) >>> 1; if ((end ? items[mid]!.span.end : items[mid]!.span.start) <= position) low = mid + 1; else high = mid }
     return items[low - 1]
   }
+  const commented = new Set<StructuredNode>()
   for (const comment of comments) {
     if (++count > MAX_NODES) throw new Error('YAML Tree structural limit exceeded')
     const lineStart = source.lastIndexOf('\n', comment.offset - 1) + 1
@@ -125,8 +126,13 @@ export function yamlModel(source: string, encoding = 'utf-8', bom = 0) {
     const entry: StructuredNode = { ordinal: 0, kind: 'comment', span: span(comment.offset, comment.offset + comment.source.length), text: comment.source.slice(0, 4096), more: comment.source.length > 4096 }
     let owner = preceding(values, entry.span.start, false)
     while (owner && (owner.container === undefined || owner.kind === 'alias' || owner.span.end < entry.span.end)) owner = parents.get(owner)
-    if (owner) { const children = containers.get(owner.container!)!; children.push(entry); children.sort((a, b) => a.span.start - b.span.start); owner.children = children.length }
+    if (owner) { containers.get(owner.container!)!.push(entry); commented.add(owner) }
     else roots.push(entry)
+  }
+  // Once per container: re-sorting per comment is quadratic in a comment-heavy container.
+  for (const owner of commented) {
+    const children = containers.get(owner.container!)!
+    children.sort((a, b) => a.span.start - b.span.start); owner.children = children.length
   }
   const root: StructuredNode = roots.length === 1 ? roots[0]! : { ordinal: 0, kind: 'array', span: span(0, source.length), text: 'Documents', more: false, container: ++serial, children: roots.length }
   if (roots.length !== 1) containers.set(root.container!, roots.sort((a, b) => a.span.start - b.span.start))

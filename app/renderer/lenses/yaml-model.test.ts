@@ -35,6 +35,17 @@ describe('YAML 1.2 CST projection', () => {
     expect(nodes[1]!.keySpan).toEqual({ start: 13, end: 19 })
     expect(nodes[1]!.span).toEqual({ start: 21, end: 26 })
   })
+  it('places 18,000 comments in one sequence in source order without re-sorting per comment', () => {
+    const source = 'items:\n' + Array.from({ length: 18_000 }, (_, i) => `  # note ${i}\n  - ${i}\n`).join('')
+    expect(source.length).toBeGreaterThan(360_000)
+    const started = performance.now(), model = yamlModel(source)
+    expect(performance.now() - started).toBeLessThan(3000) // 5.5 s when each comment re-sorted its container
+    // The first note precedes the sequence's own span, so the mapping holds it; the rest sit between items.
+    const sequence = children(model).find(node => node.kind === 'array')!, items = children(model, sequence)
+    expect(sequence.children).toBe(35_999)
+    expect(items.slice(0, 4).map(node => node.text)).toEqual(['0', '# note 1', '1', '# note 2'])
+    expect(items.every((node, i) => i === 0 || items[i - 1]!.span.start < node.span.start)).toBe(true)
+  })
   it('uses CST comments so block-scalar hash lines remain scalar content', () => {
     const model = yamlModel('# top\nbody: |\n  # literal\n  hello\n# end\n')
     const walk = (node: StructuredNode): StructuredNode[] => [node, ...(node.container === undefined ? [] : children(model, node).flatMap(walk))]
