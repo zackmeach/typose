@@ -273,7 +273,8 @@ describe('wrapBreaks (Wrap lines)', () => {
     expect(wrapped('ab語cd語ef', 4)).toEqual(['ab語', 'cd語', 'ef'])
   })
   it('takes a tab on to the next multiple of 8, and counts emoji and VS16 presentations two columns', () => {
-    expect(wrapped('ab\tcdef', 10)).toEqual(['ab\tcd', 'ef'])
+    expect(wrapped('\tcdef', 10)).toEqual(['\tcd', 'ef'])
+    expect(wrapped('ab\tcdef', 10)).toEqual(['ab\t', 'cdef']) // a tab is whitespace, so the word after it moves whole
     expect(wrapped('abcdefghi\tx', 10)).toEqual(['abcdefghi', '\tx']) // a tab past the edge starts the next row
     expect(wrapped('\u{1FAE0}'.repeat(6), 4).map(r => r.length)).toEqual([4, 4, 4]) // U+1FA00 block: two emoji a row
     expect(wrapped('\u2764\uFE0F'.repeat(4), 4)).toEqual(['\u2764\uFE0F\u2764\uFE0F', '\u2764\uFE0F\u2764\uFE0F'])
@@ -284,6 +285,37 @@ describe('wrapBreaks (Wrap lines)', () => {
       const b = wrapBreaks(text, cols)
       for (const at of b.slice(1, -1)) expect(clusters(text).has(at), `cols ${cols} at ${at}`).toBe(true)
       expect(wrapped(text, cols).join('')).toBe(text)
+    }
+  })
+  it('breaks after the last whitespace in a row, so the word that overflows moves whole to the next row', () => {
+    expect(wrapped('aaa bbb ccc', 8)).toEqual(['aaa bbb ', 'ccc'])
+    expect(wrapped('aaa bbbbb ccc', 8)).toEqual(['aaa ', 'bbbbb ', 'ccc'])
+    expect(wrapped('aaaaaaaa bbb', 8)).toEqual(['aaaaaaaa', ' bbb']) // a space that overflows starts the next row
+    expect(wrapped('aa bb\u00a0cccc', 8)).toEqual(['aa ', 'bb\u00a0cccc']) // never after a no-break space
+    expect(wrapped('語語語 語語語', 8)).toEqual(['語語語 ', '語語語'])
+  })
+  it('breaks at the overflowing grapheme when the row has no whitespace after a word: one word longer than the row, or indentation', () => {
+    expect(wrapped('abcdefghij klm', 4)).toEqual(['abcd', 'efgh', 'ij ', 'klm'])
+    expect(wrapped('    abcdefgh', 6)).toEqual(['    ab', 'cdefgh'])
+  })
+  it('measures a tab from the row it lands in once a break has moved the row start', () => {
+    expect(wrapped('abcdefg h\tij', 10)).toEqual(['abcdefg ', 'h\tij']) // h and its tab stop move together: 1 + 7 columns
+  })
+  it('holds its invariants over random text: rows within cols, whole, and ending after whitespace unless they have none to end after', () => {
+    let seed = 7
+    const next = (n: number) => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return (seed >>> 8) % n }
+    const alphabet = ['a', 'b', 'c', 'd', 'e', 'f', ' ', ' ', '\t', '語', '\u{20000}']
+    const columns = (row: string) => [...row].reduce((width, ch) => width + (ch === '\t' ? 8 - width % 8 : ch.codePointAt(0)! >= 0x2e80 ? 2 : 1), 0)
+    for (let n = 0; n < 500; n++) {
+      const text = Array.from({ length: 1 + next(120) }, () => alphabet[next(alphabet.length)]).join('')
+      const cols = 8 + next(30)
+      const b = wrapBreaks(text, cols)
+      expect([b[0], b.at(-1)]).toEqual([0, text.length])
+      b.slice(1).forEach((at, i) => expect(at, `${JSON.stringify(text)} at ${cols}`).toBeGreaterThan(b[i]))
+      const rows = wrapped(text, cols)
+      expect(rows.join('')).toBe(text)
+      for (const row of rows) expect(columns(row), `${JSON.stringify(text)} at ${cols}: ${JSON.stringify(row)}`).toBeLessThanOrEqual(cols)
+      for (const row of rows.slice(0, -1)) expect(/\s$/.test(row) || !/\S\s/.test(row), `${JSON.stringify(text)} at ${cols}: ${JSON.stringify(row)}`).toBe(true)
     }
   })
   it('keeps every row within 2,048 units, cutting one grapheme longer than that outside its surrogate pairs', () => {

@@ -9,7 +9,7 @@
 .workspace-result small { color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-result[aria-selected=true] { background: var(--surface-raised); outline: 1px solid var(--accent); outline-offset: -1px; }
 .workspace-search footer { display: flex; align-items: center; gap: 16px; justify-content: space-between; padding: 10px 16px; border-top: 1px solid var(--border); color: var(--text2); font-size: 11px; }
-.index-status { color: var(--text2); font-size: 11px; padding: 0 16px 8px; max-height: 48px; overflow: auto; }
+.index-status { color: var(--text2); font-size: 11px; padding: 6px 16px; border-top: 1px solid var(--border); max-height: 48px; overflow: auto; }
 .settings-card-panel { position: absolute; inset: 0; overflow: auto; z-index: 2; background: var(--surface); border-radius: inherit; }
 .settings-panel { min-height: 100%; }
 .settings-panel .card-header { position: sticky; top: 0; background: var(--surface); z-index: 1; }
