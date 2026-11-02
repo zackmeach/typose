@@ -10,6 +10,16 @@ use crate::budget::{OverBudget, Reservation};
 use crate::local::{LocalError, LocalRoute};
 use crate::store::{ByteStore, NotRegular, StoreError, refusal, route_refusal};
 
+thread_local! {
+    /// The document whose identity check `Document::batch` holds to the end of its page, on this thread.
+    static BATCHED: std::cell::Cell<*const Document> = const { std::cell::Cell::new(std::ptr::null()) };
+}
+#[cfg(test)]
+thread_local! {
+    /// Identity checks (a route walk and an open of the path each) made on this thread.
+    pub(crate) static CHECKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// What change detection compares, taken from a freshly opened path or inherited local route (spec §3.3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileId {
@@ -287,7 +297,27 @@ impl Document {
             return Err(DocError::Frozen(why));
         }
         let out = reads(&self.store).map_err(|e| self.fail(e))?;
-        self.check()?;
+        if !std::ptr::eq(BATCHED.get(), self) {
+            self.check()?;
+        }
+        Ok(out)
+    }
+
+    /// One page of many small reads (a Rows page, a Tree page): every `verified` inside, on this thread, still
+    /// checks the generation, the freeze and each chunk's hash, but the identity check, a route walk and an open of
+    /// the path, runs once, after the page (plan PR 1: per page). Nothing `page` returns is returned unless it passes.
+    pub fn batch<T>(&self, generation: u32, page: impl FnOnce() -> Result<T, DocError>) -> Result<T, DocError> {
+        struct Restore(*const Document);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                BATCHED.set(self.0); // also on a panic: a pooled thread must not keep skipping checks
+            }
+        }
+        let restore = Restore(BATCHED.replace(self));
+        let out = page();
+        drop(restore);
+        let out = out?;
+        self.verified(generation, |_| Ok(()))?;
         Ok(out)
     }
 
@@ -473,6 +503,8 @@ impl Document {
     }
 
     fn check(&self) -> Result<(), DocError> {
+        #[cfg(test)]
+        CHECKS.set(CHECKS.get() + 1);
         if self.local_only || self.folder_scope().is_some() {
             return self.check_local_source(self.generation);
         }
@@ -542,6 +574,29 @@ mod tests {
         doc.reload().unwrap();
         assert!(matches!(doc.read(1, 10, 20), Err(DocError::Stale { current: 2, asked: 1 })));
         assert_eq!(doc.read(2, 3 * CHUNK as u64, 3 * CHUNK as u64 + 4).unwrap(), b"more");
+    }
+
+    #[test]
+    fn a_batch_checks_identity_once_after_its_page_and_returns_nothing_after_a_change() {
+        let path = temp_file("doc-batch", &pattern(CHUNK, 2));
+        let doc = Document::open(&path).unwrap();
+        let before = CHECKS.get();
+        let page = doc.batch(1, || (0..10).map(|i| doc.read(1, i, i + 1)).collect::<Result<Vec<_>, _>>());
+        assert_eq!(page.unwrap().len(), 10);
+        assert_eq!(CHECKS.get() - before, 1);
+        let changed = doc.batch(1, || {
+            let bytes = doc.read(1, 0, 4)?;
+            OpenOptions::new().append(true).open(&path).unwrap().write_all(b"more").unwrap();
+            Ok(bytes)
+        });
+        assert!(matches!(changed, Err(DocError::Frozen(_))));
+        // After the batch, every read checks again.
+        let before = CHECKS.get();
+        assert!(matches!(doc.read(1, 0, 4), Err(DocError::Frozen(_))));
+        let other_path = temp_file("doc-batch-after", b"abc");
+        let other = Document::open(&other_path).unwrap();
+        other.read(1, 0, 3).unwrap();
+        assert_eq!(CHECKS.get() - before, 1);
     }
 
     /// Spec §13.1 Spike C: an in-place, same-size write just before the read, with the timestamp restored, is caught
