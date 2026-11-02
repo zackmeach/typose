@@ -653,7 +653,8 @@ fn row(
         summary: raw.source_encoding().decode_without_bom_handling(&bytes).0.trim().into(),
         root: None,
         problem: None,
-        more: range.end - range.start > 4096,
+        // A failed row's summary is its first 4,096 bytes: `more` says that clipped it.
+        more: body.end - body.start > 4096,
     };
     if let Some(error) = tree.index.error {
         result.problem = Some(
@@ -720,6 +721,10 @@ type Reads<T> = std::result::Result<T, store::StoreError>;
 
 fn scalar(raw: &Raw, store: &store::ByteStore, child: &json::Child) -> Reads<String> {
     jsonl::read_string_encoding(store, child.value, raw.source_encoding())
+}
+/// Whether a string's preview was cut short: the read takes 4,096 bytes from the opening quote, so 4,095 of content.
+fn cut(value: json::Span) -> bool {
+    (value.end - value.start).saturating_sub(2) > 4095
 }
 fn clip(text: &str, limit: usize) -> String {
     let mut chars = text.chars();
@@ -798,9 +803,7 @@ fn gist(
         jsonl::visit_members(store, index, container, |child| {
             seen += 1;
             found = match (child.kind, child.container) {
-                (json::Kind::String, _) => {
-                    Some(Gist::Said(scalar(raw, store, &child)?, child.value.end - child.value.start > 4096))
-                }
+                (json::Kind::String, _) => Some(Gist::Said(scalar(raw, store, &child)?, cut(child.value))),
                 (json::Kind::Object, Some(block)) => gist(raw, store, index, block, depth + 1)?,
                 _ => None,
             };
@@ -813,7 +816,7 @@ fn gist(
     let fields = jsonl::named_fields(store, index, container, &names)?;
     for key in MESSAGE_KEYS {
         if let Some(child) = fields.get(key).filter(|c| c.kind == json::Kind::String) {
-            return Ok(Some(Gist::Said(scalar(raw, store, child)?, child.value.end - child.value.start > 4096)));
+            return Ok(Some(Gist::Said(scalar(raw, store, child)?, cut(child.value))));
         }
     }
     let kind =

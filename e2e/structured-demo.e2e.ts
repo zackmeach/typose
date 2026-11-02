@@ -169,6 +169,21 @@ test('opening a 17th row closes the oldest, above the view, without moving the r
   } finally { await finish(live) }
 })
 
+test('a record over 4 KiB offers Copy record in its detail, whatever its summary', async () => {
+  const big = JSON.stringify({ level: 'info', msg: 'short', blob: 'x'.repeat(5 << 20) })
+  const live = await launch({ hooks: true, file: fixture('structured-rows-big.jsonl', `${big}\n{"msg":"after"}\n`) })
+  try {
+    const card = live.win.getByRole('region', { name: 'Reader card 1' }), row = (line: number) => card.locator(`.jsonl-entry[data-line="${line}"]`)
+    await expect(row(0).locator('.text')).toHaveText('short', { timeout: 30_000 })
+    await card.getByRole('button', { name: 'Expand row 1', exact: true }).click()
+    await expect(row(0).getByRole('button', { name: /^Copy record · [\d,. ]+ source bytes$/ })).toBeVisible()
+    await card.getByRole('button', { name: 'Expand row 2', exact: true }).click()
+    await expect(row(1).locator('.jsonl-detail .tree-row')).toHaveCount(2)
+    await expect(row(1).getByRole('button', { name: /^Copy record/ })).toHaveCount(0)
+    expect(live.pageErrors).toEqual([])
+  } finally { await finish(live) }
+})
+
 test('JSONL Rows compose readable summaries, tinted type pills and clock times, never the raw record', async () => {
   const records = [
     { ts: '2026-11-01T12:04:13.722Z', type: 'tool', name: 'read_file', input: { path: 'docs/launch-plan.md' } },

@@ -24,6 +24,8 @@ const clock = (value = ''): string => {
   const time = /^(?:\d{4}-\d{2}-\d{2}[T ])?(\d{2}):(\d{2}):(\d{2})(?:[.,](\d+))?(?:Z|[+-]\d{2}(?::?\d{2})?)?$/.exec(value)
   return time ? `${time[1]}:${time[2]}:${time[3]}.${(time[4] ?? '').padEnd(3, '0').slice(0, 3)}` : value
 }
+/** A record past 4 KiB offers Copy record in its detail, whether or not its summary was clipped (`more`). */
+const large = (record: StructuredRow): boolean => record.more || record.span.end - record.span.start > 4096
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, text?: string, className?: string): HTMLElementTagNameMap[K] => {
   const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node
 }
@@ -267,7 +269,7 @@ export class StructuredLens {
       if (panel.parentElement !== wrapper) { this.mounted -= tree.querySelectorAll('.tree-entry').length; return }
       panel.append(tree)
     }
-    if (record.more) {
+    if (large(record)) {
       const copy = el('button', `Copy record · ${(record.span.end - record.span.start).toLocaleString()} source bytes`); copy.type = 'button'
       copy.onclick = () => { void this.copySpan(record.span) }; panel.append(copy)
     }
@@ -364,7 +366,7 @@ export class StructuredLens {
     const chosen = this.selected?.start === record.span.start && this.selected.end === record.span.end
     line.tabIndex = 0; line.setAttribute('role', 'row'); line.setAttribute('aria-selected', String(chosen)); wrapper.dataset.line = String(record.line); wrapper.dataset.state = 'ready'
     const closed = record.status === 'failed' ? '!' : '›', expand = el('button', closed, 'jsonl-expand')
-    expand.type = 'button'; expand.dataset.closed = closed; expand.disabled = !record.root && !record.more; expand.setAttribute('aria-label', `Expand row ${record.line + 1}`); expand.setAttribute('aria-expanded', 'false')
+    expand.type = 'button'; expand.dataset.closed = closed; expand.disabled = !record.root && !large(record); expand.setAttribute('aria-label', `Expand row ${record.line + 1}`); expand.setAttribute('aria-expanded', 'false')
     const time = el('time', clock(record.timestamp), 'jsonl-time'), type = el('span', record.type ?? '', 'jsonl-type csv-value-pill')
     if (record.timestamp) time.title = record.timestamp
     if (record.type) type.dataset.tint = tint(record.type)
