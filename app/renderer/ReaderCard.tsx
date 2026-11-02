@@ -1392,8 +1392,8 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         frozen={frozen !== undefined}
         mode="rendered"
         build={card.build}
-        onExecutable={(target, path) => setSheet({ name: fileName(path), path, link: true,
-          subject: { session: currentSession.current, doc: card.opened.doc, gen: card.opened.gen, target } })}
+        onExecutable={(href, path) => setSheet({ name: fileName(path), path, link: true,
+          subject: { session: currentSession.current, doc: card.opened.doc, gen: card.opened.gen, href } })}
         onFrozen={(why) => setCard((c) => (c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c))}
         notice={message => shared.notice(message)}
         onShowRaw={(line) => {
@@ -1721,7 +1721,7 @@ interface LensHostProps {
   onShowRaw(line: number): void
   onOpenLocal(target: string, path: string, gesture: LocalGesture): Promise<boolean>
   /** Rendered's link to a program or script (Z79). */
-  onExecutable?(target: string, path: string): void
+  onExecutable?(href: string, path: string): void
   onDisposed(opened: Opened): void
 }
 
@@ -1765,7 +1765,7 @@ function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place
         const made = new RenderedLens(host.current!, core, opened, build, limits, {
           onFrozen: onFrozenHere, atLine: at, onShowRaw: (line) => onShowRawNow.current(line),
           onOpenLocal: (target, path, gesture) => onOpenLocalNow.current(target, path, gesture), budget: budget ?? undefined,
-          onExecutable: (target, path) => onExecutableNow.current?.(target, path)
+          onExecutable: (href, path) => onExecutableNow.current?.(href, path)
         })
         retained.current = { session, doc: opened.doc, gen: opened.gen, view: made }
         view = made

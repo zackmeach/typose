@@ -123,6 +123,7 @@ windows('Z79: real host turns only held documents, listed entries and program li
   writeFileSync(join(path, 'source.md'), '# Source\n[Setup](setup.bat)\n')
   writeFileSync(join(path, 'cover.png'), 'not a png')
   writeFileSync(join(path, 'setup.bat'), '@echo off\n')
+  writeFileSync(join(path, 'other.bat'), '@echo off\n')
   const dispatch = makeDispatcher({ limits, coreVersion: () => 'test', openDoc: (p) => Doc.open(p),
     captureFolder: (p, id) => FolderRoot.capture(p, id), cancelFlag: () => new Cancel(), reserveCache }, 7, () => {})
   let next = 1
@@ -144,8 +145,12 @@ windows('Z79: real host turns only held documents, listed entries and program li
   await call('render', { doc, gen: 1 })
   expect(dispatch.handoffPath({ session: 7, doc, gen: 1 })).toBe(join(path, 'source.md'))
   expect(await call('resolve', { doc, gen: 1, href: 'setup.bat' })).toMatchObject({ result: { kind: 'executable', target: 'setup.bat', path: join(path, 'setup.bat') } })
-  expect(dispatch.handoffPath({ session: 7, doc, gen: 1, target: 'setup.bat' })).toBe(join(path, 'setup.bat'))
-  for (const subject of [{ session: 7, doc, gen: 1, target: 'cover.png' }, { session: 7, doc, gen: 1, target: '/../outside.bat' }, { session: 6, doc, gen: 1 },
+  expect(dispatch.handoffPath({ session: 7, doc, gen: 1, href: 'setup.bat' })).toBe(join(path, 'setup.bat'))
+  // An existing program the document doesn't link to: the native build has no such link.
+  expect(await call('resolve', { doc, gen: 1, href: 'other.bat' })).toMatchObject({ error: { code: 'Refused' } })
+  expect(() => dispatch.handoffPath({ session: 7, doc, gen: 1, href: 'other.bat' })).toThrow('the document doesn\'t link to this target')
+  for (const subject of [{ session: 7, doc, gen: 1, href: 'cover.png' }, { session: 7, doc, gen: 1, href: '/../outside.bat' }, { session: 6, doc, gen: 1 },
+    { session: 7, doc, gen: 1, href: './setup.bat' }, { session: 7, doc, gen: 1, href: 7 },
     { session: 7, doc, gen: 2 }, { session: 7, doc: doc + 1, gen: 1 }, { path: join(path, 'source.md') }, null])
     expect(() => dispatch.handoffPath(subject), JSON.stringify(subject)).toThrow()
   await call('close', { doc })

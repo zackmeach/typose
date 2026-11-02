@@ -88,11 +88,13 @@ describe('Z79: the page names only what Typose holds', () => {
 
   it('asks the core host for everything else, with only the fields it reads', async () => {
     const d = deps()
-    expect(await ask('open', { ...DOC, path2: 'x', extra: { big: true } }, d)).toEqual({ ok: true })
-    expect(d.resolve.mock.calls).toEqual([[{ ...DOC, target: undefined }]])
+    expect(await ask('open', { ...DOC, target: 'x.bat', extra: { big: true } }, d)).toEqual({ ok: true })
+    expect(d.resolve.mock.calls).toEqual([[{ ...DOC, href: undefined }]])
     const entry = { session: 1, root: '1', node: '4' }
     await ask('show', { entry, doc: 9 }, d)
     expect(d.resolve).toHaveBeenLastCalledWith({ entry })
+    await ask('show', { ...DOC, href: 'setup.bat' }, d)
+    expect(d.resolve).toHaveBeenLastCalledWith({ ...DOC, href: 'setup.bat' })
     expect(d.open.mock.calls).toEqual([[FILE]])
   })
 

@@ -255,9 +255,10 @@ export type LinkTarget = { kind: 'heading'; line: number } | { kind: 'external';
 
 /**
  * What the page asks main to hand to the OS: never a bare path of its own. `path` only matches what main itself handed
- * the page (a launch, Open file…); the others name what the core host holds, which turns them into the path.
+ * the page (a launch, Open file…); the others name what the core host holds, which turns them into the path. `href` is
+ * a program or script link of that document, exactly as its `data-href` reads; the native build must hold it.
  */
-export type HandoffSubject = { path: string } | { entry: FolderRef } | { session: number; doc: number; gen: number; target?: string }
+export type HandoffSubject = { path: string } | { entry: FolderRef } | { session: number; doc: number; gen: number; href?: string }
 export type HandoffResult = { ok: true } | { ok: false; reason: string }
 
 /** The test-hooks build's debug stats (plan C5, C6): the core's live jobs, tasks and file handles, the longest a chunk

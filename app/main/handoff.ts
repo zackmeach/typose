@@ -72,8 +72,8 @@ export async function handOff(action: HandoffAction, args: unknown[], deps: Hand
     if (typeof subject.path !== 'string' || !deps.granted.has(subject.path)) return refuse('Not a file Typose holds')
     path = subject.path
   } else {
-    const { entry, session, doc, gen, target } = subject // only the fields the core host reads cross to it
-    try { path = await deps.resolve(entry !== undefined ? { entry } : { session, doc, gen, target }) }
+    const { entry, session, doc, gen, href } = subject // only the fields the core host reads cross to it
+    try { path = await deps.resolve(entry !== undefined ? { entry } : { session, doc, gen, href }) }
     catch (e) { return refuse(`Not a file Typose holds · ${message(e)}`) }
   }
   // Open with default app takes only the allowlist; the program and script list stays as a second check with its own message.

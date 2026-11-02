@@ -1445,7 +1445,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       if (target !== null) {
         try {
           // A link never launches a program or script (Z79): the page shows where it is instead.
-          if (isExecutable(target)) return { kind: 'executable', target, path: doc.linkPath(gen, target) }
+          if (isExecutable(target)) return { kind: 'executable', target, path: doc.linkPath(gen, target, p.href) }
           return { kind: 'local', target, path: doc.localPath(gen, target) }
         }
         catch (e) {
@@ -1549,7 +1549,8 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
 
   /**
    * Z79's hand-off, asked by main and never by the page's port: the path of an entry a sidebar root lists, a document
-   * this session holds, or a program or script one of its Markdown links names. Anything else is a Refusal.
+   * this session holds, or a program or script one of its Markdown links names (`href`, which the native build must
+   * hold as a link). Anything else is a Refusal.
    */
   const handoffPath = (value: unknown): string => {
     if (!isRecord(value)) throw new Refusal('InvalidParams', 'a hand-off names a held document, folder entry or link')
@@ -1561,11 +1562,12 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     const [id, gen] = [int(value, 'doc'), int(value, 'gen')]
     const doc = getDoc(id)
     if (doc.generation !== gen) throw new Refusal('Stale', `generation ${gen} was replaced`)
-    if (value.target === undefined) return doc.path
+    if (value.href === undefined) return doc.path
     // Only the executable sheet asks for a link's path; every other link target opens through openLocal.
-    if (typeof value.target !== 'string' || !decodedLocalTarget(value.target, !!doc.folder) || !isExecutable(value.target))
-      throw new Refusal('InvalidParams', 'target must be a program or script this document links to', 'target')
-    return doc.linkPath(gen, value.target)
+    const target = boundedLink(value.href) ? localTarget(value.href, !!doc.folder) : null
+    if (target === null || !isExecutable(target))
+      throw new Refusal('InvalidParams', 'href must be a link to a program or script', 'href')
+    return doc.linkPath(gen, target, value.href as string)
   }
 
   return Object.assign(async (data: unknown): Promise<Response> => {

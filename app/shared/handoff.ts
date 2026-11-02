@@ -20,7 +20,7 @@ export function extension(path: string): string {
   return dot >= 0 ? name.slice(dot).toLowerCase() : '' // Windows reads `.bat` alone as a .bat file
 }
 
-/** Z79: all that Open with default app hands to the OS, by the extension of a path main has already normalized. */
+/** Z79: all that Open with default app hands to the OS, by extension. Main asks only after `pathRefusal` accepts the path. */
 const OPENABLE = new Set([
   '.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.svg', '.ico',
   '.mp3', '.wav', '.flac', '.ogg', '.m4a', '.mp4', '.mov', '.mkv', '.webm', '.avi',

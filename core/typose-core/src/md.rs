@@ -45,6 +45,27 @@ const OPTIONS: Options = Options::ENABLE_TABLES
     .union(Options::ENABLE_STRIKETHROUGH)
     .union(Options::ENABLE_TASKLISTS);
 
+/// Whether a serialized attribute value reads as `want` once decoded, as the DOM decodes it. Only the entities the
+/// sanitizer's serializer writes are decoded; any other `&` stays literal, so an unexpected form compares unequal.
+fn attribute_is(raw: &str, want: &str) -> bool {
+    const ENTITIES: [(&str, char); 5] =
+        [("&amp;", '&'), ("&quot;", '"'), ("&lt;", '<'), ("&gt;", '>'), ("&nbsp;", '\u{a0}')];
+    let (mut raw, mut want) = (raw, want);
+    while let Some(c) = raw.chars().next() {
+        let (decoded, len) = match c {
+            '&' => ENTITIES.iter().find(|(e, _)| raw.starts_with(e)).map_or(('&', 1), |&(e, ch)| (ch, e.len())),
+            c => (c, c.len_utf8()),
+        };
+        let Some(w) = want.chars().next() else { return false };
+        if w != decoded {
+            return false;
+        }
+        raw = &raw[len..];
+        want = &want[w.len_utf8()..];
+    }
+    want.is_empty()
+}
+
 /// Spec §4.1: the format is the file's extension's. `md` and `markdown` are Markdown, in any case.
 pub fn is_markdown(path: &Path) -> bool {
     path.extension().is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
@@ -134,6 +155,24 @@ impl Rendered {
                 .map(|item| item.line);
         }
         self.items.iter().find(|item| item.slug.as_deref() == Some(fragment)).map(|item| item.line)
+    }
+
+    /// Whether a link in this build targets exactly `href`, as the page reads its `data-href` (Z79: the executable sheet
+    /// reveals only what the document links to). No allocation: each attribute is decoded as it's compared.
+    pub fn links_to(&self, href: &str) -> bool {
+        const ATTR: &str = "data-href=\"";
+        self.items.iter().any(|item| {
+            let mut rest = &*item.html;
+            while let Some(at) = rest.find(ATTR) {
+                rest = &rest[at + ATTR.len()..];
+                let Some(end) = rest.find('"') else { return false };
+                if attribute_is(&rest[..end], href) {
+                    return true;
+                }
+                rest = &rest[end..];
+            }
+            false
+        })
     }
 
     /// The UTF-16 units of the sanitized HTML's text. Generated note labels are counted separately.
@@ -885,6 +924,22 @@ mod tests {
         assert!(r.items()[2].html.contains("data-href=\"#typose-footnote:a%2520b\""));
         assert!(r.items()[3].html.contains("<sup>1</sup>"));
         assert!(r.items()[4].html.contains("<sup>2</sup>"));
+    }
+
+    /// Z79: the executable sheet reveals only a target the document links to, compared as the page reads `data-href`.
+    #[test]
+    fn links_to_matches_only_hrefs_the_build_links() {
+        let r =
+            render("Run [it](setup.bat), [and](x&y\"z.bat) [this](<sp ace.bat>).\n\n<a href=\"raw<>.cmd\">raw</a>\n");
+        for href in ["setup.bat", "x&y\"z.bat", "sp ace.bat", "raw<>.cmd"] {
+            assert!(r.links_to(href), "{href}");
+        }
+        for href in ["other.bat", "setup.ba", "setup.bat2", "", "x&amp;y\"z.bat", "x&y&quot;z.bat", "#"] {
+            assert!(!r.links_to(href), "{href}");
+        }
+        assert!(attribute_is("a&amp;b&quot;&lt;&gt;&nbsp;&x;", "a&b\"<>\u{a0}&x;"));
+        assert!(!attribute_is("a&amp;b", "a&amp;b"));
+        assert!(!attribute_is("ab", "abc"));
     }
 
     /// Plan §1: a GitHub alert, math and a wikilink stay literal text until M4.

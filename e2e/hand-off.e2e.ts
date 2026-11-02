@@ -203,7 +203,7 @@ test('the bridge refuses paths Typose never held, other sessions’ documents, a
   const results: unknown[] = []
   for (const subject of [{ path: elsewhere }, { path: 'C:\\Windows\\notepad.exe' }, { path: '\\\\example.invalid\\share\\x.txt' }, { path: '//example.invalid/share/x.txt' },
     { path: held.toUpperCase() }, held, [held], null, { session: 1, doc: 999, gen: 1 }, { session: 999, doc: 1, gen: 1 }, { session: 1, doc: 1, gen: 999 },
-    { session: 1, doc: 1, gen: 1, target: '..\\..\\Windows\\notepad.exe' }, { entry: { session: 1, root: '1', node: '0' } }])
+    { session: 1, doc: 1, gen: 1, href: '..\\..\\Windows\\notepad.exe' }, { entry: { session: 1, root: '1', node: '0' } }])
     for (const action of ['showInFolder', 'openWithDefault'] as const) results.push(await viaGesture(win, action, subject))
   expect(results.every((r) => (r as { ok: boolean }).ok === false), JSON.stringify(results)).toBe(true)
   expect(await viaGesture(win, 'showInFolder', { path: held })).toEqual({ ok: true }) // the control: the probe's gesture is accepted
@@ -316,6 +316,11 @@ test('a Rendered link to a script shows the executable sheet, never opens it, an
   await expect.poll(calls).toEqual([{ action: 'show', path: script }])
   await expect(win.getByRole('dialog', { name: 'Link preview' })).toHaveCount(0)
   await expect(win.locator('.card-name')).toHaveText('handoff-links.md')
+  // Only a program the document actually links to: an unlinked target is refused even with a real gesture.
+  for (const href of ['other.bat', '..\\..\\Windows\\notepad.exe'])
+    expect(await viaGesture(win, 'showInFolder', { session: 1, doc: 1, gen: 1, href, target: href }), href).toMatchObject({ ok: false })
+  expect(await viaGesture(win, 'showInFolder', { session: 1, doc: 1, gen: 1, href: 'setup.bat' })).toEqual({ ok: true })
+  expect(await calls()).toEqual([{ action: 'show', path: script }, { action: 'show', path: script }])
   expect(l.pageErrors).toEqual([])
   await finish(l)
 })
