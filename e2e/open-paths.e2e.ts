@@ -136,6 +136,27 @@ test('a folder named on the command line becomes a sidebar root, and a file besi
   await finish(l)
 })
 
+test('a second-instance open while Settings shows switches the card back to the opened file, and Wrap lines is a palette command', async () => {
+  const first = fixture('open-paths-settings-a.txt', 'first' + String.fromCharCode(10))
+  const second = fixture('open-paths-settings-b.txt', 'second' + String.fromCharCode(10))
+  const l = await launch({ file: first })
+  const { win, app } = l
+  await waitOpen(win)
+  await win.keyboard.press('Control+,')
+  const settings = win.getByRole('tab', { name: '⚙ Settings', exact: true })
+  await expect(settings).toHaveAttribute('aria-selected', 'true')
+  // main's second-instance handler sends exactly this for a path named on a later command line.
+  await app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), second)
+  await expect(win.getByRole('tab', { name: 'open-paths-settings-b.txt' })).toHaveAttribute('aria-selected', 'true')
+  await expect(settings).toHaveAttribute('aria-selected', 'false')
+  await win.keyboard.press('Control+K')
+  await win.getByRole('combobox', { name: 'Search commands' }).fill('Wrap lines')
+  await win.keyboard.press('Enter')
+  await expect(win.locator('html')).toHaveAttribute('data-wrap-lines', 'true')
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
 test('Raw wraps a 10,000-character line and CJK to the card when Wrap lines is on, and Find and Go to land on the line', async () => {
   // Line 2: 1,000 ten-character segments. Line 3: CJK, wide and astral, 600 graphemes of 1,200 columns.
   const long = Array.from({ length: 1000 }, (_, i) => `seg${String(i).padStart(6, '0')} `).join('')

@@ -120,6 +120,8 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     setActiveNode(reports.current.get(id)?.node)
   }
   function focusedReader(): ReaderHandle | undefined { return handles.current.get(focusedRef.current) }
+  /** An argv, drop or queued open shows its file, so a card showing Settings switches back to its file tabs. */
+  function openInFocused(path: string): void { settingsTab(focusedRef.current, 'file'); focusedReader()?.open(path) }
 
   function rememberRecent(entry: RecentLocation): void {
     const next = [entry, ...recentRef.current.filter(item => item.kind !== entry.kind || item.path !== entry.path)].slice(0, 8)
@@ -263,7 +265,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     if (!allGroups.current.some(group => group.id === id)) return () => {}
     handles.current.set(id, handle)
     for (const waiter of readerWaiters.current) if (waiter.id === id) waiter.start(handle)
-    if (id === focusedRef.current) for (const path of waiting.current.splice(0)) handle.open(path)
+    if (id === focusedRef.current) for (const path of waiting.current.splice(0)) openInFocused(path)
     return () => {
       if (handles.current.get(id) === handle) {
         handles.current.delete(id)
@@ -336,7 +338,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     const openPath = (path: string) => {
       const reader = focusedReader()
       if (previewRef.current || !reader) waiting.current.push(path)
-      else reader.open(path)
+      else openInFocused(path)
     }
     const offOpen = window.typose.onOpenPath(openPath)
     // A drop is the dialogs' explicit choice: files open as tabs in the focused card, folders become roots, in order.
@@ -587,7 +589,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       pendingHistory.current.delete(group.id)
       setPreview(null)
       restorePreviewFocus(group)
-      requestAnimationFrame(() => { if (!previewRef.current) for (const path of waiting.current.splice(0)) focusedReader()?.open(path) })
+      requestAnimationFrame(() => { if (!previewRef.current) for (const path of waiting.current.splice(0)) openInFocused(path) })
       releaseEmptyWorkspace()
     } catch (error) {
       setWorkspaceNotice('Cannot close preview · ' + String(error))
@@ -636,7 +638,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       setPreview(null)
       focusCard(destination.id)
       focusReader(destination.id)
-      requestAnimationFrame(() => { if (!previewRef.current) for (const path of waiting.current.splice(0)) focusedReader()?.open(path) })
+      requestAnimationFrame(() => { if (!previewRef.current) for (const path of waiting.current.splice(0)) openInFocused(path) })
     } catch (error) {
       setWorkspaceNotice('Cannot promote preview · ' + String(error))
       if (detached && !moved) await handle.resume()
