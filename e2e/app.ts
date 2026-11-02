@@ -48,8 +48,22 @@ export const cleanups = new Set<() => Promise<unknown>>()
 export const test = base.extend<{ finishLaunches: void }>({
   finishLaunches: [
     // oxlint-disable-next-line no-empty-pattern -- Playwright reads fixture dependencies from this pattern
-    async ({}, use) => {
+    async ({}, use, testInfo) => {
       await use()
+      // A failed test keeps what each still-running window showed, and its size, display and focus, for hosted runs.
+      if (testInfo.status !== testInfo.expectedStatus) {
+        let n = 0
+        for (const l of running) {
+          const at = n++
+          await l.win.screenshot({ path: testInfo.outputPath(`failure-${at}.png`), timeout: 5000 }).catch(() => {})
+          const page = await l.win.evaluate(() => ({ inner: [innerWidth, innerHeight], screen: [screen.width, screen.height], ratio: devicePixelRatio, focus: document.hasFocus() })).catch((e: unknown) => String(e))
+          const main = await l.app.evaluate(({ BrowserWindow, screen }) => {
+            const w = BrowserWindow.getAllWindows()[0]
+            return { bounds: w?.getBounds(), content: w?.getContentBounds(), focused: w?.isFocused(), workArea: screen.getPrimaryDisplay().workArea, scale: screen.getPrimaryDisplay().scaleFactor }
+          }).catch((e: unknown) => String(e))
+          writeFileSync(testInfo.outputPath(`failure-${at}.json`), JSON.stringify({ page, main }, null, 2))
+        }
+      }
       try {
         for (const l of running) await finish(l)
       } finally {
