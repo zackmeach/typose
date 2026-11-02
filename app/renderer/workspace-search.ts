@@ -1,12 +1,21 @@
 import type { CoreClient } from './core'
-import type { FolderRef } from '../shared/protocol'
+import type { FolderRef, FolderRoot } from '../shared/protocol'
 import type { RootView } from './folders'
 export interface QuickFile { ref: FolderRef; name: string; path: string; absolute: string }
 export interface QuickIndex { files: readonly QuickFile[]; state: string }
-/** Capability-only traversal; display paths are never opened as manual paths. */
+/** The core gives each root a 4,096-node table. The walk uses its own throwaway root so it can't spend the sidebar's. */
+const SCRATCH_LIMIT = 3_500
+/** Without a scratch root the walk shares the sidebar's table, so it leaves most of it free. */
+const SHARED_LIMIT = 1_500
+/** Traversal by capability; results are opened by their absolute path, since the scratch root is released when the walk ends. */
 export async function indexRoot(core: CoreClient, root: RootView, hidden: boolean, excludes: readonly string[], changed: (result: QuickIndex) => void, signal: AbortSignal): Promise<void> {
-  const files: QuickFile[] = [], queue = [{ ref: root.ref, prefix: root.node.name, absolute: root.path.replace(/[\\/]+$/, '') }]
+  let scratch: FolderRoot | undefined
+  try { scratch = await core.call('addRoot', { path: root.path }, signal) } catch { /* at the 16-root limit: walk the shared root, shallowly */ }
+  if (signal.aborted) { release(core, scratch); return }
+  const start = scratch?.ref ?? root.ref, limit = scratch ? SCRATCH_LIMIT : SHARED_LIMIT
+  const files: QuickFile[] = [], queue = [{ ref: start, prefix: root.node.name, absolute: root.path.replace(/[\\/]+$/, '') }]
   const excluded = new Set(excludes.map(s => s.toLowerCase()))
+  const partial = () => `Quick open shows the first ${limit.toLocaleString()} entries of ${root.node.name}`
   let visited = 0
   try {
     for (let at = 0; at < queue.length; at++) {
@@ -22,14 +31,18 @@ export async function indexRoot(core: CoreClient, root: RootView, hidden: boolea
           if (entry.kind === 'directory') queue.push({ ref: entry.ref, prefix: path, absolute: directory.absolute + '/' + entry.name })
           else if (entry.kind === 'file') files.push({ ref: entry.ref, name: entry.name, path, absolute: directory.absolute + '/' + entry.name })
           visited++
-          if (visited >= 50_000) { changed({ files, state: `Index capped at 50,000 entries in ${root.node.name}` }); return }
+          if (visited >= limit) { changed({ files, state: partial() }); return }
         }
         cursor = page.cursor
         changed({ files: [...files], state: `Indexing ${root.node.name} · ${files.length.toLocaleString()} files` })
       } while (cursor)
     }
     changed({ files, state: `${root.node.name} · ${files.length.toLocaleString()} files` })
-  } catch (error) { if (!signal.aborted) changed({ files, state: `Index incomplete in ${root.node.name} · ${error instanceof Error ? error.message : String(error)}` }) }
+  } catch (error) { if (!signal.aborted) changed({ files, state: files.length ? partial() : `Quick open could not read ${root.node.name} · ${error instanceof Error ? error.message : String(error)}` }) }
+  finally { release(core, scratch) }
+}
+function release(core: CoreClient, scratch: FolderRoot | undefined): void {
+  if (scratch) void core.call('removeRoot', { root: scratch.ref.root, session: scratch.ref.session }).catch(() => {})
 }
 export function fuzzyScore(query: string, value: string): number {
   const text = value.toLowerCase(), needle = query.trim().toLowerCase()

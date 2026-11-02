@@ -37,6 +37,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   const [settingsTabs, setSettingsTabs] = useState<Record<string, { active: boolean; section: SettingsSection }>>({})
   const settingsTabsRef = useRef(settingsTabs)
   const [indexes, setIndexes] = useState<Record<string, QuickIndex>>({})
+  const [quickUsed, setQuickUsed] = useState(false) // the walk starts at the first quick open, never when a folder is added
   const [groups, setGroups] = useState<readonly ReaderGroup[]>(() => [{ id: 'card-1', workspace: new WorkspaceStore('card-1-tab'), weight: 1 }])
   const groupRef = useRef(groups)
   const [preview, setPreviewState] = useState<LinkPreview | null>(null)
@@ -269,11 +270,12 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   useEffect(() => {
     const controller = new AbortController()
     setIndexes({})
+    if (!quickUsed) return
     for (const root of folders.current.filter(root => !root.unavailable)) void indexRoot(core, root, config.values.show_hidden, config.values.excludes, result => {
       if (!controller.signal.aborted) setIndexes(before => ({ ...before, [root.id]: result }))
     }, controller.signal)
     return () => controller.abort()
-  }, [core, rootSignature, config.values.show_hidden, config.values.excludes.join('\n')])
+  }, [core, quickUsed, rootSignature, config.values.show_hidden, config.values.excludes.join('\n')])
   useEffect(() => {
     const off = groups.map(group => group.workspace.subscribe(scheduleSession))
     const capture = window.typose.onSessionCapture(() => captureNow.current())
@@ -799,7 +801,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       splitBusy.current = false
     }
   }
-  function showOverlay(value: 'open' | 'palette' | null): void { overlayRef.current = value; setOverlay(value) }
+  function showOverlay(value: 'open' | 'palette' | null): void { overlayRef.current = value; setOverlay(value); if (value === 'open') setQuickUsed(true) }
   function settingsTab(id: string, action: 'show' | 'file' | 'close', section: SettingsSection = 'Appearance'): void {
     const next = { ...settingsTabsRef.current }
     if (action === 'file' && !next[id]) return
@@ -829,7 +831,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     try {
       const target = await waitForReader(destination.id)
       settingsTab(destination.id, 'file'); focusCard(destination.id)
-      if ('file' in choice) await target.openIndexed({ ref: choice.file.ref, name: choice.file.name, kind: 'file', hidden: false })
+      if ('file' in choice) target.open(choice.file.absolute)
       else target.open(choice.recent.path)
     } catch (error) { setWorkspaceNotice('Cannot open file · ' + String(error)) }
   }

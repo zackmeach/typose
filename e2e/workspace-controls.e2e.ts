@@ -205,3 +205,27 @@ test('a file or folder that failed to open is not recorded as a recent', async (
   expect(recents.map(recent => recent.path)).not.toContain(missingFolder)
   expect(recents.some(recent => recent.kind === 'folder' && recent.path.toLowerCase().includes('typose-recents-good-'))).toBe(true)
 })
+
+test('quick open walks lazily with its own root, so it never spends the sidebar node table on a 4,800-file folder', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'typose-quick-big-'))
+  for (let d = 0; d < 16; d++) {
+    const dir = join(root, 'd' + String(d).padStart(2, '0'))
+    mkdirSync(dir)
+    for (let f = 0; f < 300; f++) writeFileSync(join(dir, 'f' + String(f).padStart(3, '0') + '.txt'), 'x\n')
+  }
+  const live = await launch()
+  await expect(live.win.getByRole('button', { name: /^Open file/ })).toBeVisible()
+  await live.app.evaluate(({ ipcMain }, path) => { ipcMain.removeHandler('folder-dialog'); ipcMain.handle('folder-dialog', () => path) }, root)
+  await live.win.getByRole('button', { name: 'Menu', exact: true }).click()
+  await live.win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
+  await expect(live.win.getByRole('treeitem', { name: 'd15', exact: true })).toBeVisible()
+  await live.win.keyboard.press('Control+O')
+  await expect(live.win.getByRole('status').filter({ hasText: /Quick open shows the first [\d,]+ entries of / })).toBeVisible({ timeout: 60_000 })
+  await expect(live.win.getByText(/refused/i)).toHaveCount(0)
+  await live.win.keyboard.press('Escape')
+  await live.win.getByRole('treeitem', { name: 'd15', exact: true }).click()
+  await expect(live.win.getByRole('treeitem', { name: 'f000.txt', exact: true })).toBeVisible()
+  await expect(live.win.getByText(/refused|demo limit/i)).toHaveCount(0)
+  expect(live.pageErrors).toEqual([])
+  expect(await finish(live)).toEqual({ code: 0, signal: null })
+})
