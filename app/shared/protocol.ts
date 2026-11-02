@@ -205,6 +205,8 @@ export interface Methods {
   hello: { params: { protocol: number }; result: Hello }
   /** `bytes`: the lens's viewport-only cache cap, reserved with the document's floor (plan C1); refused, `Memory`. */
   open: { params: { surface?: SurfaceRef; path: string; count: number; bytes: number }; result: Opened }
+  /** Whether a path reaches a network share, judged without opening it: restore leaves those for a click (brief §4.6). */
+  networkPath: { params: { path: string }; result: boolean }
   /** First screen of a retained document, without reopening or restarting its index. One renderer lens is active. */
   activate: { params: { surface?: SurfaceRef; activationId?: string; doc: number; gen: number; count: number; bytes: number }; result: Opened }
   /** Dispose a current view or Reload's exact old settled view, retaining the document/index. Pending activation cannot hand it back. */

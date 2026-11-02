@@ -365,10 +365,10 @@ impl Task for Build {
                         let _job = job;
                         let result =
                             cancellable(&flag, || index.build_reserved(raw.document(), generation, &flag, temp));
-                        if let Err(error) = result {
-                            if !matches!(error, DocError::Cancelled) {
-                                index.progress.write().unwrap().error = Some(error.to_string());
-                            }
+                        if let Err(error) = result
+                            && !matches!(error, DocError::Cancelled)
+                        {
+                            index.progress.write().unwrap().error = Some(error.to_string());
                         }
                     })
                     .map_err(DocError::Io)?;
@@ -403,51 +403,54 @@ impl Task for Children {
                 NoSlot::Cancelled => DocError::Cancelled,
                 NoSlot::Budget(e) => DocError::Memory(e),
             })?);
-            let record_tree;
-            let tree = if let Some(record) = self.record {
-                if self.entry.format != "jsonl" {
-                    return Err(DocError::Invalid("Record scope is only valid for JSONL".into()));
-                }
-                let range = record_range(&self.raw, self.entry.generation, record)?
-                    .ok_or_else(|| DocError::Invalid("JSONL record is outside the document".into()))?;
-                record_tree = core_structured::JsonTree::build_range(
+            // One identity check for the page, not one per node key and value.
+            self.raw.document().batch(self.entry.generation, || {
+                let record_tree;
+                let tree = if let Some(record) = self.record {
+                    if self.entry.format != "jsonl" {
+                        return Err(DocError::Invalid("Record scope is only valid for JSONL".into()));
+                    }
+                    let range = record_range(&self.raw, self.entry.generation, record)?
+                        .ok_or_else(|| DocError::Invalid("JSONL record is outside the document".into()))?;
+                    record_tree = core_structured::JsonTree::build_range(
+                        self.raw.document(),
+                        self.entry.generation,
+                        range.start..range.end,
+                        false,
+                        &flag,
+                    )?;
+                    &record_tree
+                } else {
+                    self.entry
+                        .tree
+                        .as_ref()
+                        .ok_or_else(|| DocError::Invalid("This structured document has no JSON Tree".into()))?
+                };
+                let children = tree.children(
                     self.raw.document(),
                     self.entry.generation,
-                    range.start..range.end,
-                    false,
+                    self.container,
+                    self.start,
+                    self.count,
                     &flag,
                 )?;
-                &record_tree
-            } else {
-                self.entry
-                    .tree
-                    .as_ref()
-                    .ok_or_else(|| DocError::Invalid("This structured document has no JSON Tree".into()))?
-            };
-            let children = tree.children(
-                self.raw.document(),
-                self.entry.generation,
-                self.container,
-                self.start,
-                self.count,
-                &flag,
-            )?;
-            let mut nodes = Vec::with_capacity(children.len());
-            let mut bytes = 1024;
-            for (ordinal, child, duplicate) in children {
-                let value = node(&self.raw, self.entry.generation, &tree.index, ordinal, child, duplicate)?;
-                let cost = 512
-                    + 6 * (value.text.encode_utf16().count()
-                        + value.key.as_ref().map_or(0, |k| k.encode_utf16().count()));
-                if bytes + cost > 256 << 10 {
-                    break;
+                let mut nodes = Vec::with_capacity(children.len());
+                let mut bytes = 1024;
+                for (ordinal, child, duplicate) in children {
+                    let value = node(&self.raw, self.entry.generation, &tree.index, ordinal, child, duplicate)?;
+                    let cost = 512
+                        + 6 * (value.text.encode_utf16().count()
+                            + value.key.as_ref().map_or(0, |k| k.encode_utf16().count()));
+                    if bytes + cost > 256 << 10 {
+                        break;
+                    }
+                    bytes += cost;
+                    nodes.push(value);
                 }
-                bytes += cost;
-                nodes.push(value);
-            }
-            let next = self.start + nodes.len() as u64;
-            let total = tree.index.containers.get(self.container as usize).map_or(0, |c| c.children);
-            Ok(StructuredChildren { nodes, next: (next < total).then_some(next as f64) })
+                let next = self.start + nodes.len() as u64;
+                let total = tree.index.containers.get(self.container as usize).map_or(0, |c| c.children);
+                Ok(StructuredChildren { nodes, next: (next < total).then_some(next as f64) })
+            })
         }))
     }
     fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -502,10 +505,10 @@ impl Doc {
         } else {
             self.structured.epoch.fetch_add(1, Ordering::Relaxed) + 1
         };
-        if existing.is_none() {
-            if let Some(flag) = self.structured.pending.lock().unwrap().replace(cancel.flag.clone()) {
-                flag.store(true, Ordering::Relaxed);
-            }
+        if existing.is_none()
+            && let Some(flag) = self.structured.pending.lock().unwrap().replace(cancel.flag.clone())
+        {
+            flag.store(true, Ordering::Relaxed);
         }
         Ok(AsyncTask::new(Build {
             raw: raw.clone(),
@@ -524,6 +527,7 @@ impl Doc {
         }))
     }
     #[napi(ts_return_type = "Promise<StructuredChildren>")]
+    #[allow(clippy::too_many_arguments, reason = "napi page request carries exact owner, range, cancel and record")]
     pub fn structured_children(
         &self,
         generation: f64,
@@ -741,43 +745,46 @@ impl Task for Rows {
             if self.entry.format != "jsonl" || self.entry.jsonl.is_none() {
                 return Err(DocError::Refused("Rows are unavailable for this document".into()));
             }
-            let (mut at, mut scanned, mut source_bytes, mut wire) = (self.start, 0, 0, 1024);
-            let mut rows = Vec::with_capacity(self.count);
-            let mut done = false;
-            while rows.len() < self.count && scanned < 512 && source_bytes < 4 << 20 {
-                if store::cancelled() {
-                    return Err(DocError::Cancelled);
-                }
-                let range = match record_range(&self.raw, self.entry.generation, at) {
-                    Ok(Some(range)) => range,
-                    Ok(None) => {
-                        done = self.raw.lines_known().1;
+            // One identity check for the page, not several per record.
+            self.raw.document().batch(self.entry.generation, || {
+                let (mut at, mut scanned, mut source_bytes, mut wire) = (self.start, 0, 0, 1024);
+                let mut rows = Vec::with_capacity(self.count);
+                let mut done = false;
+                while rows.len() < self.count && scanned < 512 && source_bytes < 4 << 20 {
+                    if store::cancelled() {
+                        return Err(DocError::Cancelled);
+                    }
+                    let range = match record_range(&self.raw, self.entry.generation, at) {
+                        Ok(Some(range)) => range,
+                        Ok(None) => {
+                            done = self.raw.lines_known().1;
+                            break;
+                        }
+                        Err(DocError::Refused(_)) => break,
+                        Err(error) => return Err(error),
+                    };
+                    source_bytes += range.end - range.start;
+                    scanned += 1;
+                    if let Some(value) = row(&self.raw, self.entry.generation, at, range, &flag)? {
+                        let cost = 1024
+                            + 6 * (value.summary.encode_utf16().count()
+                                + value.root.as_ref().map_or(0, |n| n.text.encode_utf16().count())
+                                + value.timestamp.as_ref().map_or(0, |s| s.encode_utf16().count())
+                                + value.r#type.as_ref().map_or(0, |s| s.encode_utf16().count()));
+                        if wire + cost > 256 << 10 {
+                            break;
+                        }
+                        wire += cost;
+                        rows.push(value);
+                    }
+                    at += 1;
+                    if range.end == self.raw.document().len() {
+                        done = true;
                         break;
                     }
-                    Err(DocError::Refused(_)) => break,
-                    Err(error) => return Err(error),
-                };
-                source_bytes += range.end - range.start;
-                scanned += 1;
-                if let Some(value) = row(&self.raw, self.entry.generation, at, range, &flag)? {
-                    let cost = 1024
-                        + 6 * (value.summary.encode_utf16().count()
-                            + value.root.as_ref().map_or(0, |n| n.text.encode_utf16().count())
-                            + value.timestamp.as_ref().map_or(0, |s| s.encode_utf16().count())
-                            + value.r#type.as_ref().map_or(0, |s| s.encode_utf16().count()));
-                    if wire + cost > 256 << 10 {
-                        break;
-                    }
-                    wire += cost;
-                    rows.push(value);
                 }
-                at += 1;
-                if range.end == self.raw.document().len() {
-                    done = true;
-                    break;
-                }
-            }
-            Ok(StructuredRows { rows, next_line: (!done).then_some(at as f64), done })
+                Ok(StructuredRows { rows, next_line: (!done).then_some(at as f64), done })
+            })
         }))
     }
     fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Self::JsValue> {

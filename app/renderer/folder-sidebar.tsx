@@ -20,6 +20,8 @@ export interface FolderRootView {
   path: string
   node: FolderNodeView
   unavailable?: boolean
+  /** A network share left unopened at launch: Locate reconnects its path. */
+  network?: boolean
 }
 
 export interface FolderSidebarProps {
@@ -129,8 +131,8 @@ export function FolderSidebar(props: FolderSidebarProps) {
         </span> : null}
       </div>
       {node.error ? <div className="folder-error" role="status">
-        {root.unavailable && level === 1 ? 'Folder not found · ' : ''}{node.error}
-        {level === 1 ? <><Button className="folder-inline" onPress={() => props.onLocate(root.id)}>Locate…</Button><Button className="folder-inline" onPress={() => props.onRemove(root.id)}>Remove</Button></> : null}
+        {root.unavailable && !root.network && level === 1 ? 'Folder not found · ' : ''}{node.error}
+        {level === 1 ? <><Button className="folder-inline" onPress={() => props.onLocate(root.id)}>{root.network ? 'Reconnect' : 'Locate…'}</Button><Button className="folder-inline" onPress={() => props.onRemove(root.id)}>Remove</Button></> : null}
       </div> : null}
       {node.expanded ? <div role="group">
         {node.children?.map(child => nodeView(root, child, level + 1, node.id))}

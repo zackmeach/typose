@@ -473,16 +473,17 @@ impl Query for ColumnsQuery {
     type Output = CsvColumnPage;
     type JsValue = CsvColumnPage;
     fn run(&self, c: &Context) -> std::result::Result<Self::Output, DocError> {
-        let (width, metadata_done) = {
+        let (width, header_fields, metadata_done) = {
             let index = c.state.csv.index.read().unwrap();
-            (index.max_columns, index.metadata.done)
+            (index.max_columns, index.expected_columns, index.metadata.done)
         };
         let mut columns = Vec::with_capacity(self.count);
         for column in self.start..self.start.saturating_add(self.count as u64).min(width) {
             if store::cancelled() {
                 return Err(DocError::Cancelled);
             }
-            let (name, name_more) = if c.state.csv.header {
+            // A ragged row's extra fields have no header cell to name them.
+            let (name, name_more) = if c.state.csv.header && column < header_fields {
                 let p = c.state.csv.piece(c.raw.document(), 0, column, None)?;
                 let mut units = 0;
                 let name: String = p

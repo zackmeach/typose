@@ -1001,11 +1001,12 @@ pub fn unescape(tok: &[u8]) -> Cow<'_, [u8]> {
             other => other as u32,
         };
         i += if e == b'u' { 6 } else { 2 };
-        if (0xD800..0xDC00).contains(&cp) && s.get(i..i + 2) == Some(&b"\\u"[..]) {
-            if let Some(lo @ 0xDC00..=0xDFFF) = hex(i + 2) {
-                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                i += 6;
-            }
+        if (0xD800..0xDC00).contains(&cp)
+            && s.get(i..i + 2) == Some(&b"\\u"[..])
+            && let Some(lo @ 0xDC00..=0xDFFF) = hex(i + 2)
+        {
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+            i += 6;
         }
         push_utf8(&mut out, cp);
     }
