@@ -291,6 +291,7 @@ describe('wrapBreaks (Wrap lines)', () => {
     expect(wrapped('aaa bbb ccc', 8)).toEqual(['aaa bbb ', 'ccc'])
     expect(wrapped('aaa bbbbb ccc', 8)).toEqual(['aaa ', 'bbbbb ', 'ccc'])
     expect(wrapped('aaaaaaaa bbb', 8)).toEqual(['aaaaaaaa', ' bbb']) // a space that overflows starts the next row
+    expect(wrapped('aa bb\u00a0cccc', 8)).toEqual(['aa ', 'bb\u00a0cccc']) // never after a no-break space
     expect(wrapped('語語語 語語語', 8)).toEqual(['語語語 ', '語語語'])
   })
   it('breaks at the overflowing grapheme when the row has no whitespace after a word: one word longer than the row, or indentation', () => {

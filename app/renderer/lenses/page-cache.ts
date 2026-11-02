@@ -204,7 +204,8 @@ const wide = (cp: number): boolean => cp >= 0x1100 && (cp <= 0x115f || cp === 0x
   cp >= 0xfe30 && cp <= 0xfe6f || cp >= 0xff00 && cp <= 0xff60 || cp >= 0xffe0 && cp <= 0xffe6 ||
   cp >= 0x1f300 && cp <= 0x1faff || cp >= 0x20000 && cp <= 0x3fffd)
 
-const space = /^\s$/
+/** Whitespace a row may break after: not a no-break space, which exists to keep its neighbours together. */
+const space = /^[^\S\u00a0\u2007\u202f]$/
 
 /**
  * Raw's Wrap lines: where `text` breaks into rows of at most `cols` columns, a wide character or an emoji presentation
