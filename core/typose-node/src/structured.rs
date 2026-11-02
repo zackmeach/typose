@@ -677,41 +677,201 @@ fn row(
                 false,
             )?);
         }
-        if kind == json::Kind::Object && tree.index.error.is_none() {
-            let mut summary_found = false;
+        if tree.index.error.is_none() {
+            let mut shown = Vec::new();
             raw.document().verified(generation, |store| {
-                jsonl::visit_members(store, &tree.index, 0, |child| {
-                    let Some(key) = child.key.filter(|key| key.end - key.start <= 4096) else {
-                        return Ok(true);
-                    };
-                    let key = jsonl::read_string_encoding(store, key, raw.source_encoding())?;
-                    if result.timestamp.is_none()
-                        && matches!(key.as_str(), "ts" | "time" | "timestamp" | "created_at")
-                        && matches!(child.kind, json::Kind::String | json::Kind::Number)
-                    {
-                        result.timestamp =
-                            Some(jsonl::read_string_encoding(store, child.value, raw.source_encoding())?);
-                    }
-                    if result.r#type.is_none()
-                        && matches!(key.as_str(), "type" | "role" | "level" | "event")
-                        && child.kind == json::Kind::String
-                    {
-                        result.r#type = Some(jsonl::read_string_encoding(store, child.value, raw.source_encoding())?);
-                    }
-                    if !summary_found
-                        && matches!(key.as_str(), "message" | "msg" | "text" | "content" | "summary")
-                        && child.kind == json::Kind::String
-                    {
-                        result.summary = jsonl::read_string_encoding(store, child.value, raw.source_encoding())?;
-                        result.more = child.value.end - child.value.start > 4096;
-                        summary_found = true;
-                    }
-                    Ok(!(summary_found && result.timestamp.is_some() && result.r#type.is_some()))
-                })
+                if kind == json::Kind::Object {
+                    jsonl::visit_members(store, &tree.index, 0, |child| {
+                        let Some(key) = child.key.filter(|key| key.end - key.start <= 4096) else {
+                            return Ok(true);
+                        };
+                        let key = jsonl::read_string_encoding(store, key, raw.source_encoding())?;
+                        if result.timestamp.is_none()
+                            && matches!(key.as_str(), "ts" | "time" | "timestamp" | "created_at")
+                            && matches!(child.kind, json::Kind::String | json::Kind::Number)
+                        {
+                            result.timestamp = Some(scalar(raw, store, &child)?);
+                            shown.push(key);
+                        } else if result.r#type.is_none()
+                            && matches!(key.as_str(), "type" | "role" | "level" | "event")
+                            && child.kind == json::Kind::String
+                        {
+                            result.r#type = Some(scalar(raw, store, &child)?);
+                            shown.push(key);
+                        }
+                        Ok(!(result.timestamp.is_some() && result.r#type.is_some()))
+                    })?;
+                }
+                (result.summary, result.more) =
+                    compose(raw, store, &tree.index, kind, value, body.end - body.start, &shown)?;
+                Ok(())
             })?;
         }
     }
     Ok(Some(result))
+}
+
+const MESSAGE_KEYS: [&str; 5] = ["message", "msg", "text", "content", "summary"];
+const NAME_KEYS: [&str; 3] = ["name", "tool", "tool_name"];
+const ARGUMENT_KEYS: [&str; 6] = ["input", "arguments", "args", "params", "parameters", "tool_input"];
+const PATH_KEYS: [&str; 10] =
+    ["file_path", "path", "file", "filename", "filePath", "notebook_path", "uri", "url", "target", "cwd"];
+type Reads<T> = std::result::Result<T, store::StoreError>;
+
+fn scalar(raw: &Raw, store: &store::ByteStore, child: &json::Child) -> Reads<String> {
+    jsonl::read_string_encoding(store, child.value, raw.source_encoding())
+}
+fn clip(text: &str, limit: usize) -> String {
+    let mut chars = text.chars();
+    let head: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_some() { head + "…" } else { head }
+}
+fn size(bytes: u64) -> String {
+    match bytes {
+        0..1024 => format!("{bytes} B"),
+        1024..1_048_576 => format!("{:.1} KB", bytes as f64 / 1024.0),
+        _ => format!("{:.1} MB", bytes as f64 / 1_048_576.0),
+    }
+}
+enum Gist {
+    Said(String, bool),
+    Tool(String),
+}
+/// Z80: a readable line, never the record's JSON. The first message-like string, looked for in a nested message and
+/// its first content blocks too; else a tool call's name, path-like argument and the record's size; else the first
+/// scalar pairs. Bounded: four levels, four blocks per array.
+fn compose(
+    raw: &Raw,
+    store: &store::ByteStore,
+    index: &json::JsonIndex,
+    kind: json::Kind,
+    value: json::Span,
+    bytes: u64,
+    shown: &[String],
+) -> Reads<(String, bool)> {
+    match kind {
+        json::Kind::Object | json::Kind::Array => {}
+        _ => {
+            let root = json::Child { key: None, value, kind, container: None, text: Vec::new() };
+            return Ok((clip(&scalar(raw, store, &root)?, 4096), false));
+        }
+    }
+    match gist(raw, store, index, 0, 0)? {
+        Some(Gist::Said(text, more)) => return Ok((text, more)),
+        Some(Gist::Tool(call)) => return Ok((format!("{call} · {}", size(bytes)), false)),
+        None => {}
+    }
+    if kind == json::Kind::Array {
+        let items = index.containers.get(0).map_or(0, |c| c.children);
+        return Ok((format!("[ {items} items ]"), false));
+    }
+    let mut pairs = Vec::new();
+    jsonl::visit_members(store, index, 0, |child| {
+        let Some(key) = child.key.filter(|key| key.end - key.start <= 4096) else {
+            return Ok(true);
+        };
+        let key = jsonl::read_string_encoding(store, key, raw.source_encoding())?;
+        if !shown.contains(&key) {
+            let text = match child.kind {
+                json::Kind::Object => "{…}".into(),
+                json::Kind::Array => "[…]".into(),
+                _ => clip(&scalar(raw, store, &child)?, 80),
+            };
+            pairs.push(format!("{}: {text}", clip(&key, 40)));
+        }
+        Ok(pairs.len() < 3)
+    })?;
+    Ok((pairs.join(" · "), false))
+}
+fn gist(
+    raw: &Raw,
+    store: &store::ByteStore,
+    index: &json::JsonIndex,
+    container: u32,
+    depth: u32,
+) -> Reads<Option<Gist>> {
+    if depth > 4 {
+        return Ok(None);
+    }
+    if index.containers.get(container as usize).is_some_and(|c| c.kind == json::Kind::Array) {
+        let (mut found, mut seen) = (None, 0);
+        jsonl::visit_members(store, index, container, |child| {
+            seen += 1;
+            found = match (child.kind, child.container) {
+                (json::Kind::String, _) => {
+                    Some(Gist::Said(scalar(raw, store, &child)?, child.value.end - child.value.start > 4096))
+                }
+                (json::Kind::Object, Some(block)) => gist(raw, store, index, block, depth + 1)?,
+                _ => None,
+            };
+            Ok(found.is_none() && seen < 4)
+        })?;
+        return Ok(found);
+    }
+    let names: Vec<&str> =
+        MESSAGE_KEYS.iter().chain(&NAME_KEYS).chain(&ARGUMENT_KEYS).chain(["type"].iter()).copied().collect();
+    let fields = jsonl::named_fields(store, index, container, &names)?;
+    for key in MESSAGE_KEYS {
+        if let Some(child) = fields.get(key).filter(|c| c.kind == json::Kind::String) {
+            return Ok(Some(Gist::Said(scalar(raw, store, child)?, child.value.end - child.value.start > 4096)));
+        }
+    }
+    let kind =
+        fields.get("type").filter(|c| c.kind == json::Kind::String).map(|c| scalar(raw, store, c)).transpose()?;
+    let arguments = ARGUMENT_KEYS.iter().find_map(|key| fields.get(*key));
+    let tool_like = arguments.is_some() || kind.is_some_and(|kind| kind.contains("tool") || kind.contains("function"));
+    if let Some(name) = NAME_KEYS.iter().find_map(|key| fields.get(*key)).filter(|c| c.kind == json::Kind::String)
+        && tool_like
+    {
+        let mut call = clip(&scalar(raw, store, name)?, 80);
+        let places = arguments.and_then(|c| c.container).into_iter().chain([container]);
+        for place in places {
+            if let Some(path) = path_argument(raw, store, index, place)? {
+                call = format!(
+                    "{call} {}",
+                    clip(path.rsplit(['/', '\\']).find(|part| !part.is_empty()).unwrap_or(&path), 80)
+                );
+                break;
+            }
+        }
+        return Ok(Some(Gist::Tool(call)));
+    }
+    for key in MESSAGE_KEYS {
+        if let Some(inner) = fields.get(key).and_then(|c| c.container)
+            && let Some(found) = gist(raw, store, index, inner, depth + 1)?
+        {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
+}
+/// A known path key's string, else the first string that looks like a path: no whitespace, with a separator.
+fn path_argument(
+    raw: &Raw,
+    store: &store::ByteStore,
+    index: &json::JsonIndex,
+    container: u32,
+) -> Reads<Option<String>> {
+    if index.containers.get(container as usize).is_none_or(|c| c.kind != json::Kind::Object) {
+        return Ok(None);
+    }
+    let (mut named, mut looks, mut seen) = (None, None, 0);
+    jsonl::visit_members(store, index, container, |child| {
+        seen += 1;
+        if child.kind == json::Kind::String
+            && let Some(key) = child.key.filter(|key| key.end - key.start <= 4096)
+        {
+            let key = jsonl::read_string_encoding(store, key, raw.source_encoding())?;
+            let text = scalar(raw, store, &child)?;
+            if PATH_KEYS.contains(&key.as_str()) {
+                named = Some(text);
+            } else if looks.is_none() && text.contains(['/', '\\']) && !text.contains(char::is_whitespace) {
+                looks = Some(text);
+            }
+        }
+        Ok(named.is_none() && seen < 32)
+    })?;
+    Ok(named.or(looks))
 }
 fn check_read(raw: &Raw, owner: &Owner, entry: &Arc<Entry>, flag: &AtomicBool) -> std::result::Result<(), DocError> {
     if flag.load(Ordering::Relaxed) {

@@ -6,8 +6,24 @@ import type { StructuredSource } from './structured-source'
 import { copySourceSpan } from './source-copy'
 import { SourceCopyQueue } from './source-copy-queue'
 import { PRINT_LINES_PER_PAGE, type PrintPayload, type PrintPlan } from '../print'
+import { spacerHeight, toLogical, toNative } from '../virtual/scrollmath'
 
 export type StructuredMode = 'tree' | 'rows' | 'table' | 'transcript'
+/** Rows (Z79): fixed 32 px lines, plus each expanded line's measured detail. Mounted: the viewport and OVERSCAN each way.
+ *  Cached: at most CACHE lines' records near the viewport, and at most EXPANDED open details, so memory stays bounded. */
+const ROW = 32, OVERSCAN = 20, CACHE = 512, EXPANDED = 16
+/** Z80: one stable tint per type, from the CSV pills' six; severities keep their colour. */
+const SEVERITY: Record<string, string> = { error: '4', fatal: '4', warn: '3', warning: '3' }
+const tint = (type: string): string => {
+  let hash = 0
+  for (const char of type) hash = (hash * 31 + char.codePointAt(0)!) >>> 0
+  return SEVERITY[type.toLowerCase()] ?? String(hash % 6)
+}
+/** Z80: HH:MM:SS.mmm, as written, from an ISO-8601 or time-of-day value; anything else unchanged. */
+const clock = (value = ''): string => {
+  const time = /^(?:\d{4}-\d{2}-\d{2}[T ])?(\d{2}):(\d{2}):(\d{2})(?:[.,](\d+))?(?:Z|[+-]\d{2}(?::?\d{2})?)?$/.exec(value)
+  return time ? `${time[1]}:${time[2]}:${time[3]}.${(time[4] ?? '').padEnd(3, '0').slice(0, 3)}` : value
+}
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, text?: string, className?: string): HTMLElementTagNameMap[K] => {
   const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node
 }
@@ -40,6 +56,18 @@ export class StructuredLens {
   private readonly unsubscribe?: () => void
   private readonly toggles = new WeakMap<HTMLButtonElement, () => Promise<void>>()
   private columnStart = 0
+  /** Rows: records by source line (null: blank), mounted lines, open details and their heights beyond ROW. */
+  private readonly records = new Map<number, StructuredRow | null>()
+  private readonly mountedRows = new Map<number, HTMLElement>()
+  private readonly expanded = new Map<number, HTMLElement>()
+  private readonly extra = new Map<number, number>()
+  private resize?: ResizeObserver
+  private frame = 0
+  private filling = false
+  private refill = false
+  private retryAt = 0
+  private focusLine = 0
+  private anchor?: number
 
   constructor(host: HTMLElement, private readonly core: CoreClient, private readonly opened: Opened,
     private readonly source: StructuredSource, private readonly mode: StructuredMode, private readonly options: Options) {
@@ -49,8 +77,12 @@ export class StructuredLens {
     this.find = new SourceFind(host, this.element, core, opened, options.budget ?? undefined, (line, hit) => this.reveal(line, hit?.start), options.onFrozen)
     this.element.addEventListener('keydown', this.key)
     this.element.addEventListener('pointerdown', () => { this.moved = true })
-    this.element.addEventListener('scroll', () => { this.moved = true }, { passive: true })
-    this.unsubscribe = source.subscribe?.(() => { if (!this.stopped && this.mode !== 'tree') void this.page(this.line).catch(error => this.error(error)) })
+    this.element.addEventListener('scroll', () => { this.moved = true; if (this.mode === 'rows') this.schedule() }, { passive: true })
+    this.unsubscribe = source.subscribe?.(() => {
+      if (this.stopped || this.mode === 'tree') return
+      if (this.mode === 'rows') this.schedule()
+      else void this.page(this.line).catch(error => this.error(error))
+    })
     void this.start(options.atLine ?? 0)
   }
   private async start(at: number): Promise<void> {
@@ -64,8 +96,174 @@ export class StructuredLens {
           if (!this.stopped) this.content.append(row)
         }
         this.showProblems()
-      } else await this.page(at)
+      } else if (this.mode === 'rows') this.startRows(at)
+      else await this.page(at)
     } catch (error) { this.error(error) }
+  }
+  private startRows(at: number): void {
+    this.content.classList.add('jsonl-list')
+    this.content.addEventListener('focusin', event => {
+      const entry = (event.target as HTMLElement).closest<HTMLElement>('.jsonl-entry')
+      if (entry) this.focusLine = Number(entry.dataset.line)
+    })
+    this.resize = new ResizeObserver(entries => {
+      for (const { target } of entries) {
+        const line = Number((target as HTMLElement).dataset.line)
+        // A detached detail measures 0: keep the height it had while mounted.
+        if (target !== this.element && target.isConnected && this.expanded.get(line) === target) this.extra.set(line, Math.max(0, (target as HTMLElement).offsetHeight - ROW))
+      }
+      this.schedule()
+    })
+    this.resize.observe(this.element)
+    this.focusLine = this.anchor = Math.max(0, at)
+    this.renderRows()
+  }
+  private schedule(): void {
+    if (!this.frame && !this.stopped) this.frame = requestAnimationFrame(() => { this.frame = 0; this.renderRows() })
+  }
+  /** Every line either index has seen: Raw's line count leads while the JSONL index catches up, and rows read ahead of it. */
+  private total(): number {
+    const info = this.source.info
+    return Math.max(this.lines, (info.parsed ?? 0) + (info.failed ?? 0) + (info.blank ?? 0))
+  }
+  /** A line's top in list pixels: ROW per line, plus the open details above it. */
+  private top(line: number): number {
+    let y = line * ROW
+    for (const [at, px] of this.extra) if (at < line) y += px
+    return y
+  }
+  private lineAt(y: number): number {
+    let shift = 0
+    for (const at of [...this.extra.keys()].sort((a, b) => a - b)) {
+      const start = at * ROW + shift, px = this.extra.get(at)!
+      if (y < start) break
+      if (y < start + ROW + px) return at
+      shift += px
+    }
+    return Math.max(0, Math.floor((y - shift) / ROW))
+  }
+  /** List pixels map 1:1 onto scrollTop up to the spacer cap; past it, proportionally (scrollmath's logical scrolling).
+   *  ponytail: past the cap a wheel notch moves proportionally further; intercept wheel as VirtualList does if that bites. */
+  private geometry() { return { total: this.top(this.total()), viewport: this.element.clientHeight } }
+  private scrollToLine(line: number, from: number): void {
+    const geometry = this.geometry()
+    this.content.style.height = `${spacerHeight(geometry.total)}px`
+    this.element.scrollTop = toNative(Math.max(0, this.top(line) - from), geometry)
+    this.renderRows()
+  }
+  private renderRows(): void {
+    if (this.stopped) return
+    // A start or Go to line past what's indexed waits until that line exists.
+    if (this.anchor !== undefined && this.anchor < this.total()) {
+      const at = this.anchor
+      this.anchor = undefined
+      this.scrollToLine(at, 0)
+      return
+    }
+    const total = this.total(), geometry = this.geometry(), native = this.element.scrollTop
+    const y = toLogical(native, geometry), shift = native - y
+    this.content.style.height = `${spacerHeight(geometry.total)}px`
+    this.content.style.setProperty('--jsonl-digits', String(String(total).length))
+    const first = Math.max(0, this.lineAt(y) - OVERSCAN), last = Math.min(total, this.lineAt(y + geometry.viewport) + 1 + OVERSCAN)
+    let refocus: number | undefined
+    for (const [line, node] of this.mountedRows) {
+      if (line >= first && line < last && (node.dataset.state !== 'pending' || !this.records.has(line))) continue
+      if (node.contains(document.activeElement)) { refocus = line; this.element.focus({ preventScroll: true }) }
+      node.remove(); this.mountedRows.delete(line)
+    }
+    let previous: HTMLElement | undefined
+    for (let line = first; line < last; line++) {
+      let node = this.mountedRows.get(line)
+      if (!node) {
+        node = this.expanded.get(line) ?? this.rowAt(line)
+        this.mountedRows.set(line, node)
+        if (previous) previous.after(node); else this.content.prepend(node)
+        if (line === refocus) node.querySelector<HTMLElement>('.jsonl-row')?.focus({ preventScroll: true })
+      }
+      node.style.top = `${this.top(line) + shift}px`
+      previous = node
+    }
+    if (total) this.line = Math.min(total - 1, this.lineAt(y))
+    if (performance.now() >= this.retryAt) void this.fill()
+  }
+  /** One structuredRows page at a time, for the first unread line in view; repeats while the view has unread lines. */
+  private async fill(): Promise<void> {
+    if (this.filling) { this.refill = true; return }
+    this.filling = true
+    try {
+      for (let pass = 0; pass < 32 && !this.stopped; pass++) {
+        this.refill = false
+        const lines = [...this.mountedRows.keys()].sort((a, b) => a - b)
+        const start = lines.find(line => !this.records.has(line))
+        if (start === undefined) break
+        const result = await this.core.call('structuredRows', { ref: this.source.info.ref, start, count: 128 }, this.abort.signal)
+        if (this.stopped) return
+        // Read lines without a record are blank; `done` read through to the end of the file.
+        const end = result.nextLine ?? (result.done ? Math.max(this.total(), (result.rows.at(-1)?.line ?? start) + 1) : start)
+        // Not indexed that far yet: the next index update or line count asks again.
+        if (end <= start && !result.rows.length) { this.refill = false; break }
+        for (const row of result.rows) this.records.set(row.line, row)
+        for (let line = start; line < end; line++) if (!this.records.has(line)) this.records.set(line, null)
+        if (this.records.size > CACHE) {
+          const low = lines[0]! - CACHE / 2, high = lines.at(-1)! + CACHE / 2
+          for (const line of this.records.keys()) if ((line < low || line > high) && !this.expanded.has(line)) this.records.delete(line)
+        }
+        this.renderRows()
+      }
+    } catch (error) {
+      this.retryAt = performance.now() + 1000
+      if (!this.stopped) { if (error instanceof CoreCallError && error.code === 'Frozen') this.error(error); else this.options.notice(String(error)) }
+    } finally {
+      this.filling = false
+      if (this.refill) this.schedule()
+    }
+  }
+  private rowAt(line: number): HTMLElement {
+    const record = this.records.get(line)
+    if (record) return this.row(record)
+    const wrapper = el('div', undefined, 'jsonl-entry'), row = el('div', undefined, `jsonl-row ${record === null ? 'jsonl-blank' : 'jsonl-pending'}`)
+    wrapper.dataset.line = String(line); wrapper.dataset.state = record === null ? 'blank' : 'pending'
+    row.tabIndex = 0; row.setAttribute('role', 'row')
+    row.append(el('span', undefined, 'jsonl-gap'), el('span', String(line + 1), 'jsonl-number'), el('span', record === null ? 'blank line' : '…', 'text'))
+    wrapper.append(row); return wrapper
+  }
+  /** Keyboard (Z79): focus moves by line, page or to either end, and the list follows it. */
+  private focusRow(target: number): void {
+    const total = this.total()
+    if (!total) return
+    const line = Math.max(0, Math.min(total - 1, target)), y = toLogical(this.element.scrollTop, this.geometry()), top = this.top(line)
+    this.focusLine = line
+    if (top < y) this.scrollToLine(line, 0)
+    else if (top + ROW > y + this.element.clientHeight) this.scrollToLine(line, this.element.clientHeight - ROW)
+    else this.renderRows()
+    this.mountedRows.get(line)?.querySelector<HTMLElement>('.jsonl-row')?.focus({ preventScroll: true })
+  }
+  private async toggleRow(record: StructuredRow, wrapper: HTMLElement, expand: HTMLButtonElement): Promise<void> {
+    if (wrapper.querySelector(':scope > .jsonl-detail')) { this.collapse(record.line, wrapper); return }
+    const panel = el('div', undefined, 'jsonl-detail')
+    wrapper.append(panel); expand.textContent = '⌄'; expand.setAttribute('aria-expanded', 'true')
+    if (this.mode === 'rows') {
+      this.expanded.set(record.line, wrapper); this.resize?.observe(wrapper)
+      for (const [line, open] of this.expanded) if (this.expanded.size > EXPANDED && line !== record.line) this.collapse(line, open)
+    }
+    if (record.root) {
+      const tree = await this.treeNode(record.root, 0, '$', record.line, 1)
+      if (panel.parentElement !== wrapper) { this.mounted -= tree.querySelectorAll('.tree-entry').length; return }
+      panel.append(tree)
+    }
+    if (record.more) {
+      const copy = el('button', `Copy record · ${(record.span.end - record.span.start).toLocaleString()} source bytes`); copy.type = 'button'
+      copy.onclick = () => { void this.copySpan(record.span) }; panel.append(copy)
+    }
+  }
+  private collapse(line: number, wrapper: HTMLElement): void {
+    const panel = wrapper.querySelector(':scope > .jsonl-detail'), expand = wrapper.querySelector<HTMLElement>('.jsonl-expand')
+    if (panel) { this.mounted -= panel.querySelectorAll('.tree-entry').length; panel.remove() }
+    if (expand) { expand.textContent = expand.dataset.closed ?? '›'; expand.setAttribute('aria-expanded', 'false') }
+    if (this.expanded.get(line) !== wrapper) return
+    this.expanded.delete(line); this.extra.delete(line); this.resize?.unobserve(wrapper)
+    if (!this.mountedRows.has(line)) wrapper.remove()
+    this.schedule()
   }
   private error(error: unknown): void {
     if (this.stopped) return
@@ -147,22 +345,22 @@ export class StructuredLens {
   }
   private row(record: StructuredRow): HTMLElement {
     const wrapper = el('div', undefined, 'jsonl-entry'), line = el('div', undefined, `jsonl-row ${record.status === 'failed' ? 'structured-problem' : ''}`)
-    line.tabIndex = 0; line.setAttribute('role', 'row'); line.setAttribute('aria-selected', 'false'); wrapper.dataset.line = String(record.line)
-    const expand = el('button', record.status === 'failed' ? '!' : '›'); expand.disabled = !record.root; expand.setAttribute('aria-label', `Expand row ${record.line + 1}`)
-    line.append(expand, el('span', String(record.line + 1), 'jsonl-number'), el('time', record.timestamp ?? ''), el('span', record.type ?? '', 'jsonl-type'), el('span', record.summary + (record.more ? ' … (preview; copy record for full source)' : ''), 'text'))
+    const chosen = this.selected?.start === record.span.start && this.selected.end === record.span.end
+    line.tabIndex = 0; line.setAttribute('role', 'row'); line.setAttribute('aria-selected', String(chosen)); wrapper.dataset.line = String(record.line); wrapper.dataset.state = 'ready'
+    const closed = record.status === 'failed' ? '!' : '›', expand = el('button', closed, 'jsonl-expand')
+    expand.type = 'button'; expand.dataset.closed = closed; expand.disabled = !record.root && !record.more; expand.setAttribute('aria-label', `Expand row ${record.line + 1}`); expand.setAttribute('aria-expanded', 'false')
+    const time = el('time', clock(record.timestamp), 'jsonl-time'), type = el('span', record.type ?? '', 'jsonl-type csv-value-pill')
+    if (record.timestamp) time.title = record.timestamp
+    if (record.type) type.dataset.tint = tint(record.type)
+    line.append(expand, el('span', String(record.line + 1), 'jsonl-number'), time, type)
+    if (record.problem) line.append(el('span', `! ${record.problem}`, 'jsonl-problem'))
+    line.append(el('span', record.summary + (record.more ? ' … (preview; copy record for full source)' : ''), 'text'))
     line.addEventListener('click', () => { this.select(line, record.span); this.line = record.line })
     line.addEventListener('keydown', event => {
       if (event.key === ' ' && event.shiftKey || event.key === 'Enter') { event.preventDefault(); this.select(line, record.span); this.line = record.line }
-      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-        event.preventDefault(); const sibling = event.key === 'ArrowDown' ? wrapper.nextElementSibling : wrapper.previousElementSibling
-        sibling?.querySelector<HTMLElement>('.jsonl-row')?.focus()
-      }
     })
-    let tree: HTMLElement | undefined
-    expand.onclick = () => { void (async () => { if (tree) { tree.hidden = !tree.hidden; return }; if (!record.root) return; tree = await this.treeNode(record.root, 0, '$', record.line, 1); wrapper.append(tree) })().catch(e => this.error(e)) }
-    if (record.problem) wrapper.append(el('p', record.problem, 'structured-problem'))
-    if (record.more) { const copy = el('button', `Copy record · ${(record.span.end - record.span.start).toLocaleString()} source bytes`); copy.onclick = () => { void this.copySpan(record.span) }; wrapper.append(copy) }
-    wrapper.prepend(line); return wrapper
+    expand.onclick = event => { event.stopPropagation(); void this.toggleRow(record, wrapper, expand).catch(e => this.error(e)) }
+    wrapper.append(line); return wrapper
   }
   private async fields(row: StructuredRow, charge?: { bytes: number }): Promise<StructuredNode[]> {
     if (row.root?.container === undefined) return []
@@ -282,6 +480,12 @@ export class StructuredLens {
   private readonly key = (event: KeyboardEvent) => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c') { event.preventDefault(); void this.copy() }
     if (event.key === ' ' && this.mode !== 'transcript') event.preventDefault()
+    const target = event.target as HTMLElement
+    if (this.mode === 'rows' && !event.altKey && (target === this.element || target.classList.contains('jsonl-row'))) {
+      const page = Math.max(1, Math.floor(this.element.clientHeight / ROW) - 1)
+      const step = ({ ArrowDown: 1, ArrowUp: -1, PageDown: page, PageUp: -page, Home: -Infinity, End: Infinity } as Record<string, number>)[event.key]
+      if (step !== undefined) { event.preventDefault(); this.focusRow(this.focusLine + step); return }
+    }
     if (event.key === 'PageDown' || event.key === 'PageUp') { event.preventDefault(); this.element.scrollBy({ top: (event.key === 'PageDown' ? 1 : -1) * this.element.clientHeight }) }
     if (event.key === 'Escape') this.context?.remove()
   }
@@ -294,6 +498,7 @@ export class StructuredLens {
   }
   private reveal(line: number, offset?: number): void {
     this.line = line
+    if (this.mode === 'rows') { this.focusLine = this.anchor = line; this.renderRows(); return }
     if (this.mode !== 'tree') { void this.page(line).catch(e => this.error(e)); return }
     const view = this.opened.view
     if (!view) return
@@ -313,12 +518,12 @@ export class StructuredLens {
   readerMoved(): boolean { return this.moved }
   floorBytes(): number { return 32 << 20 }
   focus(): void { this.element.focus() }
-  setLineCount(lines: number): void { this.lines = lines }
-  indexDone(): void { this.indexed = true }
+  setLineCount(lines: number): void { this.lines = lines; if (this.mode === 'rows') this.schedule() }
+  indexDone(): void { this.indexed = true; if (this.mode === 'rows') this.schedule() }
   freeze(): void { this.stopped = true; this.abort.abort(); this.copies.cancel(); this.find.freeze('source changed') }
   yieldReservation(): void { this.copies.cancel() }
   resumeReservation(): void {}
-  dispose(): void { this.stopped = true; this.unsubscribe?.(); this.abort.abort(); this.copies.cancel(); this.find.destroy(); this.context?.remove(); this.element.remove() }
+  dispose(): void { this.stopped = true; cancelAnimationFrame(this.frame); this.resize?.disconnect(); this.unsubscribe?.(); this.abort.abort(); this.copies.cancel(); this.find.destroy(); this.context?.remove(); this.element.remove() }
   printPlan(): PrintPlan { const pages = Math.ceil(this.lines / PRINT_LINES_PER_PAGE); return { unit: 'line', total: this.lines, current: this.line, indexed: this.indexed, totalPages: pages, allFits: pages <= MAX_PRINT_PAGES && this.opened.size <= MAX_PRINT_BYTES } }
   async printRange(start: number, end: number, signal: AbortSignal): Promise<PrintPayload> {
     const view = this.opened.view, owner = this.options.budget

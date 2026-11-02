@@ -110,6 +110,108 @@ test('generic JSONL Rows retains malformed lines and Table exposes source values
   } finally { await finish(live) }
 })
 
+test('JSONL Rows is one scrolling list: End reaches line 5,000 and Home line 1, with only the viewport mounted', async () => {
+  const lines = Array.from({ length: 5000 }, (_, index) => JSON.stringify({ ts: `2026-11-01T09:${String(Math.floor(index / 60) % 60).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}.${String(index % 1000).padStart(3, '0')}Z`, level: index % 2 ? 'info' : 'debug', msg: `entry ${index + 1}` }))
+  const live = await launch({ hooks: true, file: fixture('structured-rows-5000.jsonl', lines.join('\n') + '\n') })
+  try {
+    const card = live.win.getByRole('region', { name: 'Reader card 1' }), row = (line: number) => card.locator(`.jsonl-entry[data-line="${line}"]`)
+    await expect(card.locator('[data-lens="rows"]')).toBeVisible({ timeout: 30_000 })
+    await expect(row(0).locator('.text')).toHaveText('entry 1')
+    await expect(row(0).locator('.jsonl-time')).toHaveText('09:00:00.000')
+    await expect(card.getByRole('button', { name: /^(Previous|Next) rows$/ })).toHaveCount(0)
+    await expect(card.locator('.card-status')).toHaveText('5,000 lines · 5,000 parsed · 0 failed · 0 blank', { timeout: 30_000 })
+    await row(0).locator('.jsonl-row').click()
+    await live.win.keyboard.press('End')
+    await expect(row(4999).locator('.text')).toHaveText('entry 5000')
+    await expect(row(4999).locator('.jsonl-row')).toBeFocused()
+    await expect(row(4999)).toBeInViewport()
+    expect(await card.locator('.jsonl-entry').count()).toBeLessThan(120)
+    await live.win.keyboard.press('Home')
+    await expect(row(0).locator('.jsonl-row')).toBeFocused()
+    await expect(row(0)).toBeInViewport()
+    await live.win.keyboard.press('ArrowDown')
+    await expect(row(1).locator('.jsonl-row')).toBeFocused()
+    await live.win.keyboard.press('PageDown')
+    await expect(card.locator('.jsonl-row:focus')).not.toHaveText(/entry 2$/)
+    // The scrollbar reaches the end too, reading rows as they come into view.
+    await card.locator('.structured-view').evaluate(view => { view.scrollTop = view.scrollHeight })
+    await expect(row(4999).locator('.text')).toHaveText('entry 5000')
+    await expect(row(4999)).toBeInViewport()
+    expect(await card.locator('.jsonl-entry').count()).toBeLessThan(120)
+    await screenshot(live.win, 'jsonl-rows-end')
+    expect(live.pageErrors).toEqual([])
+  } finally { await finish(live) }
+})
+
+test('JSONL Rows compose readable summaries, tinted type pills and clock times, never the raw record', async () => {
+  const records = [
+    { ts: '2026-11-01T12:04:13.722Z', type: 'tool', name: 'read_file', input: { path: 'docs/launch-plan.md' } },
+    { time: '12:04:14.5', level: 'info', user: 42, ok: true, detail: { nested: 1 } },
+    { created_at: 1730462653, event: 'note', summary: 'Pier survey booked' },
+    { level: 'error', msg: 'Crane offline' }
+  ]
+  const live = await launch({ hooks: true, file: fixture('structured-summaries.jsonl', records.map(record => JSON.stringify(record)).join('\n') + '\n') })
+  try {
+    const card = live.win.getByRole('region', { name: 'Reader card 1' }), row = (line: number) => card.locator(`.jsonl-entry[data-line="${line}"]`)
+    await expect(card.locator('[data-lens="rows"]')).toBeVisible({ timeout: 30_000 })
+    await expect(row(0).locator('.text')).toHaveText(`read_file launch-plan.md · ${Buffer.byteLength(JSON.stringify(records[0]))} B`)
+    await expect(row(0).locator('.jsonl-time')).toHaveText('12:04:13.722')
+    await expect(row(0).locator('.jsonl-type')).toHaveText('tool')
+    await expect(row(0).locator('.jsonl-type')).toHaveAttribute('data-tint', /^[0-5]$/)
+    await expect(row(1).locator('.text')).toHaveText('user: 42 · ok: true · detail: {…}')
+    await expect(row(1).locator('.jsonl-time')).toHaveText('12:04:14.500')
+    await expect(row(2).locator('.text')).toHaveText('Pier survey booked')
+    await expect(row(2).locator('.jsonl-time')).toHaveText('1730462653')
+    await expect(row(3).locator('.jsonl-type')).toHaveAttribute('data-tint', '4')
+    await expect(row(3).locator('.text')).toHaveText('Crane offline')
+    await expect(card.locator('.jsonl-row .text').filter({ hasText: '{"' })).toHaveCount(0)
+    const expand = card.getByRole('button', { name: 'Expand row 1', exact: true })
+    expect(await expand.evaluate(button => [getComputedStyle(button).backgroundColor, getComputedStyle(button).borderStyle])).toEqual(['rgba(0, 0, 0, 0)', 'none'])
+    await expand.click()
+    await expect(row(0).locator('.jsonl-detail .tree-string').filter({ hasText: '"read_file"' })).toBeVisible()
+    // The next line moves below the open detail once it is measured.
+    await expect.poll(async () => {
+      const detail = await row(0).boundingBox(), next = await row(1).boundingBox()
+      return next!.y - (detail!.y + detail!.height)
+    }).toBeGreaterThanOrEqual(-0.5)
+    expect((await row(0).boundingBox())!.height).toBeGreaterThan(64)
+    await expect(card.locator('.card-status')).toHaveText('4 lines · 4 parsed · 0 failed · 0 blank')
+    await screenshot(live.win, 'jsonl-rows-summaries')
+    expect(live.pageErrors).toEqual([])
+  } finally { await finish(live) }
+})
+
+test('a Claude-session-shaped JSONL reads in Rows, Table and Raw without stopping the core', async () => {
+  const records = [
+    { type: 'user', uuid: 'u1', parentUuid: null, sessionId: 's1', timestamp: '2026-11-01T09:00:00.000Z', message: { role: 'user', content: 'Read the launch plan and summarise it' } },
+    { type: 'assistant', uuid: 'a1', parentUuid: 'u1', sessionId: 's1', timestamp: '2026-11-01T09:00:01.250Z', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: 'C:\\work\\pulse\\launch-plan.md' } }] } },
+    { type: 'user', uuid: 'u2', parentUuid: 'a1', sessionId: 's1', timestamp: '2026-11-01T09:00:01.900Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: '# Launch plan\nMove the pier on Tuesday.' }] } },
+    { type: 'assistant', uuid: 'a2', parentUuid: 'u2', sessionId: 's1', timestamp: '2026-11-01T09:00:03.000Z', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'Short plan.' }, { type: 'text', text: 'The plan moves the pier on Tuesday.' }] } },
+    { type: 'summary', summary: 'Launch plan review', leafUuid: 'a2' }
+  ]
+  const live = await launch({ hooks: true, file: fixture('structured-claude-shaped.jsonl', records.map(record => JSON.stringify(record)).join('\n') + '\n') })
+  try {
+    const card = live.win.getByRole('region', { name: 'Reader card 1' }), row = (line: number) => card.locator(`.jsonl-entry[data-line="${line}"]`)
+    await expect(card.locator('[data-lens="rows"]')).toBeVisible({ timeout: 30_000 })
+    await expect(row(0).locator('.text')).toHaveText('Read the launch plan and summarise it')
+    await expect(row(1).locator('.text')).toHaveText(`Read launch-plan.md · ${Buffer.byteLength(JSON.stringify(records[1]))} B`)
+    await expect(row(2).locator('.text')).toHaveText('# Launch plan Move the pier on Tuesday.')
+    await expect(row(3).locator('.text')).toHaveText('The plan moves the pier on Tuesday.')
+    await expect(row(4).locator('.text')).toHaveText('Launch plan review')
+    await expect(row(1).locator('.jsonl-type')).toHaveText('assistant')
+    await expect(row(1).locator('.jsonl-time')).toHaveText('09:00:01.250')
+    await expect(card.locator('.card-status')).toHaveText('5 lines · 5 parsed · 0 failed · 0 blank')
+    await card.getByRole('tab', { name: 'Table', exact: true }).click()
+    await expect(card.locator('.jsonl-table')).toBeVisible()
+    await card.getByRole('tab', { name: 'Raw', exact: true }).click()
+    await expect(card.locator('[data-lens="raw"]')).toBeVisible()
+    await card.getByRole('tab', { name: 'Rows', exact: true }).click()
+    await expect(row(4).locator('.text')).toHaveText('Launch plan review')
+    await expect(live.win.getByText("Typose's core stopped")).toHaveCount(0)
+    expect(live.pageErrors).toEqual([])
+  } finally { await finish(live) }
+})
+
 test('JSONL Table discovers a global key after line 1,000 and retains original source row navigation', async () => {
   const lines = Array.from({ length: 1001 }, (_, index) => `{"common":"row ${index + 1}"}`)
   lines.push('{"common":"last row","late":"revealed"}')
