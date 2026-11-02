@@ -41,11 +41,14 @@ const extrasReserved = (win: Page) => win.evaluate(() => {
   return r.reserved - ((6 << 20) + 128 * (r.units + r.noteUnits) + 16384 * r.nodes + 2 * r.htmlBytes)
 })
 
+/** Common TeX whose MathML carries attributes the print tree refuses (width, mathbackground, columnlines, style). */
+const PRINT_FALLBACK_TEX = [String.raw`x \tag{1}`, String.raw`\rule{1em}{1em}`, String.raw`\begin{array}{|c|c|}\hline a & b \\ \hline\end{array}`, String.raw`\fcolorbox{red}{yellow}{x}`]
+
 test('offline Markdown extras render securely and offscreen math/diagrams reach normalized print', async () => {
   const source = ['---', 'title: Markdown candidate', 'owner: Zack', 'tags: [alpha, beta]', '---', '# Markdown extras', '',
     '[Top](#markdown-extras) [Gone](#no-such-heading) [Risks](markdown-extras-risks.md) [[Team roster]]', '',
     '> [!NOTE]', '> A native callout.', '', '## Formatted code', '', '```typescript', 'const answer = 42', "const config = { key: 'value', list: [1, 2] }", '```', '',
-    '$x^2 + y^2$', '', '```mermaid', 'flowchart LR', '  A[Source] --> B[Reader]', '```', '',
+    '$x^2 + y^2$', '', ...PRINT_FALLBACK_TEX.flatMap(tex => ['$$' + tex + '$$', '']), '```mermaid', 'flowchart LR', '  A[Source] --> B[Reader]', '```', '',
     '<iframe src="data:text/html,<script>top.location=\'https://example.invalid/\'</script>"></iframe>', '',
     ...Array.from({ length: 60 }, (_, index) => `Offscreen paragraph ${index}.\n`),
     '## Offscreen math', '', '$$\\frac{1}{2} + \\sqrt{x}$$', ''].join('\n')
@@ -89,7 +92,7 @@ test('offline Markdown extras render securely and offscreen math/diagrams reach 
     expect(lit.colors).not.toEqual(dark.colors)
     await light(false)
     expect((await tokens()).colors).toEqual(dark.colors)
-    await expect(live.win.locator('.tp-math .katex')).toHaveCount(2, { timeout: 30_000 })
+    await expect(live.win.locator('.tp-math .katex')).toHaveCount(2 + PRINT_FALLBACK_TEX.length, { timeout: 30_000 })
     const frame = live.win.locator('.md-diagram iframe')
     await expect(frame).toHaveAttribute('sandbox', '', { timeout: 30_000 })
     await expect(frame).toHaveAttribute('title', 'Mermaid diagram')
@@ -99,11 +102,11 @@ test('offline Markdown extras render securely and offscreen math/diagrams reach 
     await expect(live.win.getByRole('navigation', { name: 'Document outline' }).getByRole('button', { name: 'Offscreen math' })).toBeVisible()
     await live.win.locator('.md-outline summary').click()
     await live.app.evaluate(({ BrowserWindow }) => {
-      const state = globalThis as unknown as { richPrint?: { math: number; namespace: string | null; images: number; external: number } }
+      const state = globalThis as unknown as { richPrint?: { math: number; namespace: string | null; images: number; external: number; text: string } }
       const proto = Object.getPrototypeOf(BrowserWindow.getAllWindows()[0].webContents)
       const original = proto.printToPDF
       proto.printToPDF = async function (options: unknown) {
-        state.richPrint = await this.executeJavaScript(`({math:document.querySelectorAll('math').length,namespace:document.querySelector('math')?.namespaceURI,images:document.images.length,external:document.querySelectorAll('[href],[src^="http"],iframe,script').length})`)
+        state.richPrint = await this.executeJavaScript(`({math:document.querySelectorAll('math').length,namespace:document.querySelector('math')?.namespaceURI,images:document.images.length,external:document.querySelectorAll('[href],[src^="http"],iframe,script').length,text:document.body.textContent})`)
         return original.call(this, options)
       }
     })
@@ -112,8 +115,10 @@ test('offline Markdown extras render securely and offscreen math/diagrams reach 
     await sheet.getByRole('radio', { name: 'All' }).check()
     await sheet.getByRole('button', { name: 'Continue to print…' }).click()
     await expect(live.win.getByRole('status').filter({ hasText: 'Print job sent' })).toBeVisible({ timeout: 60_000 })
-    const printed = await live.app.evaluate(() => (globalThis as unknown as { richPrint: unknown }).richPrint)
+    const { text, ...printed } = await live.app.evaluate(() => (globalThis as unknown as { richPrint: { text: string } }).richPrint)
     expect(printed).toEqual({ math: 2, namespace: 'http://www.w3.org/1998/Math/MathML', images: 1, external: 0 })
+    // MathML the strict print tree refuses prints as that formula's TeX; the rest of the document still prints.
+    for (const tex of PRINT_FALLBACK_TEX) expect(text).toContain(tex)
     const windows = await live.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)
     const refused = await live.win.evaluate(async () => {
       const api = (window as unknown as { typose: { printDocument(title: string, blocks: unknown[], pages: number, confirmed: boolean): Promise<{ kind: string }> } }).typose

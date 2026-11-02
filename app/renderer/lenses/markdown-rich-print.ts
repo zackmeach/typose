@@ -51,6 +51,8 @@ export async function markdownRichPrintNodes(html: string, note: string | undefi
   staging.setAttribute('aria-hidden', 'true')
   staging.innerHTML = html
   document.body.append(staging)
+  // Each formula's TeX, before KaTeX replaces it: the print fallback for MathML the strict print tree can't carry.
+  const sources = new Map([...staging.querySelectorAll('.tp-math')].map(math => [math, math.textContent ?? '']))
   try {
     await markdownExtras(staging, current, reserve)
     if (!current()) throw new Error('Markdown print source changed')
@@ -60,7 +62,11 @@ export async function markdownRichPrintNodes(html: string, note: string | undefi
       const generated = math.querySelector('math')
       if (!generated) continue
       const key = `TYPOSE_PRINT_RICH_${next++}_END`
-      rich.set(key, { tag: 'math', math: mathPrintTree(generated) })
+      let printed: PrintNode
+      // \tag, \rule, \hline and \fcolorbox emit attributes the print tree refuses (width, mathbackground, columnlines,
+      // style): that one formula prints as its source, not the whole document failing.
+      try { printed = { tag: 'math', math: mathPrintTree(generated) } } catch { printed = { text: sources.get(math) ?? '' } }
+      rich.set(key, printed)
       math.replaceWith(document.createTextNode(key))
     }
     for (const frame of staging.querySelectorAll('iframe')) {
