@@ -1,7 +1,7 @@
 import { type FormEvent, type ReactNode, type RefObject, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { Button, Dialog, DialogTrigger, Menu, MenuItem, MenuTrigger, Popover, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
 import { MAX_PRINT_PAGES, type CapturedLocation, type CsvInfo, type CsvOptions, type Hello, type Limits, type MdBuild, type Methods, type Opened, type SurfaceRef, type ViewRef } from '../shared/protocol'
-import { type Action, type Card, type LensName, fileName, parentName, view } from './card'
+import { type Action, type Card, type LensName, fileName, jsonlCounts, parentName, view } from './card'
 import { FileIcon } from './file-icon'
 import { type CoreClient, CoreCallError } from './core'
 import { RenderedLens, renderedCharge } from './lenses/rendered'
@@ -1249,7 +1249,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         <Popover className="csv-info-popover" placement="bottom end"><Dialog aria-label="File info">
           <p>{card.path}</p><p>{card.opened.size.toLocaleString()} bytes · {card.opened.encoding} · {card.lines.toLocaleString()} lines</p>
           {card.structured?.parsedAs ? <p>Parsed as {card.structured.parsedAs === 'jsonc' ? 'JSONC' : 'JSON'}</p> : null}
-          {card.opened.format === 'jsonl' ? <p>{card.structured?.parsed ?? '…'} parsed · {card.structured?.failed ?? 0} failed · {card.structured?.blank ?? 0} blank · {card.structured?.transcript?.adapter ?? 'Generic JSONL'}</p> : null}
+          {card.opened.format === 'jsonl' ? <p>{card.structured?.parsed === undefined ? '…' : jsonlCounts(card.structured, card.lines)} · {card.structured?.transcript?.adapter ?? 'Generic JSONL'}</p> : null}
           {card.structuredOff ? <p>{card.structuredOff}</p> : null}
           <div className="structured-problem-list">{card.structured?.problems.map((problem, index) => <details key={index}><summary>{problem.kind}: {problem.count.toLocaleString()}</summary><button type="button" onClick={() => { jumpTo.current = Math.max(0, (problem.line ?? 1) - 1); onLens('raw') }}>{problem.message} · {problem.line ? `line ${problem.line}` : `byte ${problem.first.start}`}</button></details>)}</div>
         </Dialog></Popover>

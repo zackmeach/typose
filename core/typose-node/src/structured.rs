@@ -412,6 +412,7 @@ impl Task for Children {
                     }
                     let range = record_range(&self.raw, self.entry.generation, record)?
                         .ok_or_else(|| DocError::Invalid("JSONL record is outside the document".into()))?;
+                    let range = record_body(&self.raw, self.entry.generation, range)?;
                     record_tree = core_structured::JsonTree::build_range(
                         self.raw.document(),
                         self.entry.generation,
@@ -596,6 +597,10 @@ fn record_range(raw: &Raw, generation: u32, line: u64) -> std::result::Result<Op
     };
     Ok(Some(json::Span { start, end }))
 }
+/// What the parser reads of a record: its range without the line terminator.
+fn record_body(raw: &Raw, generation: u32, range: json::Span) -> std::result::Result<json::Span, DocError> {
+    raw.document().verified(generation, |store| jsonl::content(store, range))
+}
 
 #[napi(object)]
 pub struct StructuredRow {
@@ -636,7 +641,8 @@ fn row(
     range: json::Span,
     flag: &AtomicBool,
 ) -> std::result::Result<Option<StructuredRow>, DocError> {
-    let tree = core_structured::JsonTree::build_range(raw.document(), generation, range.start..range.end, false, flag)?;
+    let body = record_body(raw, generation, range)?;
+    let tree = core_structured::JsonTree::build_range(raw.document(), generation, body.start..body.end, false, flag)?;
     if tree.index.root.is_none() && tree.index.error.is_none() {
         return Ok(None);
     }
@@ -650,7 +656,8 @@ fn row(
         summary: raw.source_encoding().decode_without_bom_handling(&bytes).0.trim().into(),
         root: None,
         problem: None,
-        more: range.end - range.start > 4096,
+        // A failed row's summary is its first 4,096 bytes: `more` says that clipped it.
+        more: body.end - body.start > 4096,
     };
     if let Some(error) = tree.index.error {
         result.problem = Some(
@@ -674,41 +681,232 @@ fn row(
                 false,
             )?);
         }
-        if kind == json::Kind::Object && tree.index.error.is_none() {
-            let mut summary_found = false;
+        if tree.index.error.is_none() {
+            let mut shown = Vec::new();
             raw.document().verified(generation, |store| {
-                jsonl::visit_members(store, &tree.index, 0, |child| {
-                    let Some(key) = child.key.filter(|key| key.end - key.start <= 4096) else {
-                        return Ok(true);
-                    };
-                    let key = jsonl::read_string_encoding(store, key, raw.source_encoding())?;
-                    if result.timestamp.is_none()
-                        && matches!(key.as_str(), "ts" | "time" | "timestamp" | "created_at")
-                        && matches!(child.kind, json::Kind::String | json::Kind::Number)
-                    {
-                        result.timestamp =
-                            Some(jsonl::read_string_encoding(store, child.value, raw.source_encoding())?);
-                    }
-                    if result.r#type.is_none()
-                        && matches!(key.as_str(), "type" | "role" | "level" | "event")
-                        && child.kind == json::Kind::String
-                    {
-                        result.r#type = Some(jsonl::read_string_encoding(store, child.value, raw.source_encoding())?);
-                    }
-                    if !summary_found
-                        && matches!(key.as_str(), "message" | "msg" | "text" | "content" | "summary")
-                        && child.kind == json::Kind::String
-                    {
-                        result.summary = jsonl::read_string_encoding(store, child.value, raw.source_encoding())?;
-                        result.more = child.value.end - child.value.start > 4096;
-                        summary_found = true;
-                    }
-                    Ok(!(summary_found && result.timestamp.is_some() && result.r#type.is_some()))
-                })
+                if kind == json::Kind::Object {
+                    jsonl::visit_members(store, &tree.index, 0, |child| {
+                        let Some(key) = child.key.filter(|key| key.end - key.start <= 4096) else {
+                            return Ok(true);
+                        };
+                        let key = jsonl::read_string_encoding(store, key, raw.source_encoding())?;
+                        if result.timestamp.is_none()
+                            && matches!(key.as_str(), "ts" | "time" | "timestamp" | "created_at")
+                            && matches!(child.kind, json::Kind::String | json::Kind::Number)
+                        {
+                            result.timestamp = Some(scalar(raw, store, &child)?);
+                            shown.push(key);
+                        } else if result.r#type.is_none()
+                            && matches!(key.as_str(), "type" | "role" | "level" | "event")
+                            && child.kind == json::Kind::String
+                        {
+                            result.r#type = Some(scalar(raw, store, &child)?);
+                            shown.push(key);
+                        }
+                        Ok(!(result.timestamp.is_some() && result.r#type.is_some()))
+                    })?;
+                }
+                (result.summary, result.more) =
+                    compose(raw, store, &tree.index, kind, value, body.end - body.start, &shown)?;
+                Ok(())
             })?;
         }
     }
     Ok(Some(result))
+}
+
+const MESSAGE_KEYS: [&str; 5] = ["message", "msg", "text", "content", "summary"];
+const NAME_KEYS: [&str; 3] = ["name", "tool", "tool_name"];
+const ARGUMENT_KEYS: [&str; 6] = ["input", "arguments", "args", "params", "parameters", "tool_input"];
+const PATH_KEYS: [&str; 10] =
+    ["file_path", "path", "file", "filename", "filePath", "notebook_path", "uri", "url", "target", "cwd"];
+type Reads<T> = std::result::Result<T, store::StoreError>;
+
+fn scalar(raw: &Raw, store: &store::ByteStore, child: &json::Child) -> Reads<String> {
+    jsonl::read_string_encoding(store, child.value, raw.source_encoding())
+}
+/// Whether a string's preview was cut short: the read takes 4,096 bytes from the opening quote, so 4,095 of content.
+fn cut(value: json::Span) -> bool {
+    (value.end - value.start).saturating_sub(2) > 4095
+}
+fn clip(text: &str, limit: usize) -> String {
+    let mut chars = text.chars();
+    let head: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_some() { head + "…" } else { head }
+}
+fn size(bytes: u64) -> String {
+    match bytes {
+        0..1024 => format!("{bytes} B"),
+        1024..1_048_576 => format!("{:.1} KB", bytes as f64 / 1024.0),
+        _ => format!("{:.1} MB", bytes as f64 / 1_048_576.0),
+    }
+}
+enum Gist {
+    Said(String, bool),
+    Tool(String),
+}
+/// Z80: a readable line, never the record's JSON. The first message-like string, looked for in a nested message and
+/// its first content blocks too; else a tool call's name, path-like argument and the record's size; else the first
+/// scalar pairs. Bounded: five object levels (arrays between them don't count), four blocks per array.
+fn compose(
+    raw: &Raw,
+    store: &store::ByteStore,
+    index: &json::JsonIndex,
+    kind: json::Kind,
+    value: json::Span,
+    bytes: u64,
+    shown: &[String],
+) -> Reads<(String, bool)> {
+    match kind {
+        json::Kind::Object | json::Kind::Array => {}
+        _ => {
+            let root = json::Child { key: None, value, kind, container: None, text: Vec::new() };
+            return Ok((clip(&scalar(raw, store, &root)?, 4096), false));
+        }
+    }
+    match gist(raw, store, index, 0, 0)? {
+        Some(Gist::Said(text, more)) => return Ok((text, more)),
+        Some(Gist::Tool(call)) => return Ok((format!("{call} · {}", size(bytes)), false)),
+        None => {}
+    }
+    if kind == json::Kind::Array {
+        let items = index.containers.get(0).map_or(0, |c| c.children);
+        return Ok((format!("[ {items} items ]"), false));
+    }
+    let mut pairs = Vec::new();
+    jsonl::visit_members(store, index, 0, |child| {
+        let Some(key) = child.key.filter(|key| key.end - key.start <= 4096) else {
+            return Ok(true);
+        };
+        let key = jsonl::read_string_encoding(store, key, raw.source_encoding())?;
+        if !shown.contains(&key) {
+            let text = match child.kind {
+                json::Kind::Object => "{…}".into(),
+                json::Kind::Array => "[…]".into(),
+                _ => clip(&scalar(raw, store, &child)?, 80),
+            };
+            pairs.push(format!("{}: {text}", clip(&key, 40)));
+        }
+        Ok(pairs.len() < 3)
+    })?;
+    Ok((pairs.join(" · "), false))
+}
+fn gist(
+    raw: &Raw,
+    store: &store::ByteStore,
+    index: &json::JsonIndex,
+    container: u32,
+    depth: u32,
+) -> Reads<Option<Gist>> {
+    if depth > 4 {
+        return Ok(None);
+    }
+    if index.containers.get(container as usize).is_some_and(|c| c.kind == json::Kind::Array) {
+        let (mut found, mut seen) = (None, 0);
+        jsonl::visit_members(store, index, container, |child| {
+            seen += 1;
+            found = match (child.kind, child.container) {
+                (json::Kind::String, _) => Some(Gist::Said(scalar(raw, store, &child)?, cut(child.value))),
+                (json::Kind::Object, Some(block)) => gist(raw, store, index, block, depth + 1)?,
+                _ => None,
+            };
+            Ok(found.is_none() && seen < 4)
+        })?;
+        return Ok(found);
+    }
+    let names: Vec<&str> =
+        MESSAGE_KEYS.iter().chain(&NAME_KEYS).chain(&ARGUMENT_KEYS).chain(["type"].iter()).copied().collect();
+    let fields = jsonl::named_fields(store, index, container, &names)?;
+    for key in MESSAGE_KEYS {
+        if let Some(child) = fields.get(key).filter(|c| c.kind == json::Kind::String) {
+            return Ok(Some(Gist::Said(scalar(raw, store, child)?, cut(child.value))));
+        }
+    }
+    let kind =
+        fields.get("type").filter(|c| c.kind == json::Kind::String).map(|c| scalar(raw, store, c)).transpose()?;
+    let arguments = ARGUMENT_KEYS.iter().find_map(|key| fields.get(*key));
+    let tool_like = arguments.is_some() || kind.is_some_and(|kind| kind.contains("tool") || kind.contains("function"));
+    if let Some(name) = NAME_KEYS.iter().find_map(|key| fields.get(*key)).filter(|c| c.kind == json::Kind::String)
+        && tool_like
+    {
+        let mut call = clip(&scalar(raw, store, name)?, 80);
+        // JSON-encoded arguments (OpenAI's `arguments` string) are searched for a path key, never shown.
+        let mut path = match arguments.filter(|c| c.kind == json::Kind::String) {
+            Some(encoded) => embedded_path(&scalar(raw, store, encoded)?),
+            None => None,
+        };
+        for place in arguments.and_then(|c| c.container).into_iter().chain([container]) {
+            if path.is_some() {
+                break;
+            }
+            path = path_argument(raw, store, index, place)?;
+        }
+        if let Some(path) = path {
+            call =
+                format!("{call} {}", clip(path.rsplit(['/', '\\']).find(|part| !part.is_empty()).unwrap_or(&path), 80));
+        }
+        return Ok(Some(Gist::Tool(call)));
+    }
+    for key in MESSAGE_KEYS {
+        // Only object levels count toward the bound: an array of blocks is a list, not a level.
+        if let Some(inner) = fields.get(key).and_then(|c| c.container)
+            && let Some(found) =
+                gist(raw, store, index, inner, depth + u32::from(fields[key].kind == json::Kind::Object))?
+        {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
+}
+/// Never JSON: a path candidate that opens like an object or array, or holds a quote, is encoded data.
+fn plausible(text: &str) -> bool {
+    !text.is_empty() && !text.starts_with(['{', '[']) && !text.contains('"')
+}
+/// A known path key's string inside JSON-encoded arguments, found textually (`"key"`, `:`, then a string), so no
+/// second parser runs on the record; `\\` and `\/` are the only escapes a basename needs undone.
+fn embedded_path(text: &str) -> Option<String> {
+    PATH_KEYS.iter().find_map(|key| {
+        let at = text.find(&format!("\"{key}\""))? + key.len() + 2;
+        let value = text[at..].trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+        let mut escaped = false;
+        let (end, _) = value.char_indices().find(|&(_, c)| {
+            let quote = c == '"' && !escaped;
+            escaped = c == '\\' && !escaped;
+            quote
+        })?;
+        Some(value[..end].replace("\\\\", "\\").replace("\\/", "/")).filter(|path| plausible(path))
+    })
+}
+/// A known path key's string, else the first string that looks like a path: no whitespace, with a separator.
+fn path_argument(
+    raw: &Raw,
+    store: &store::ByteStore,
+    index: &json::JsonIndex,
+    container: u32,
+) -> Reads<Option<String>> {
+    if index.containers.get(container as usize).is_none_or(|c| c.kind != json::Kind::Object) {
+        return Ok(None);
+    }
+    let (mut named, mut looks, mut seen) = (None, None, 0);
+    jsonl::visit_members(store, index, container, |child| {
+        seen += 1;
+        if child.kind == json::Kind::String
+            && let Some(key) = child.key.filter(|key| key.end - key.start <= 4096)
+        {
+            let key = jsonl::read_string_encoding(store, key, raw.source_encoding())?;
+            let text = scalar(raw, store, &child)?;
+            if !plausible(&text) {
+                return Ok(seen < 32);
+            }
+            if PATH_KEYS.contains(&key.as_str()) {
+                named = Some(text);
+            } else if looks.is_none() && text.contains(['/', '\\']) && !text.contains(char::is_whitespace) {
+                looks = Some(text);
+            }
+        }
+        Ok(named.is_none() && seen < 32)
+    })?;
+    Ok(named.or(looks))
 }
 fn check_read(raw: &Raw, owner: &Owner, entry: &Arc<Entry>, flag: &AtomicBool) -> std::result::Result<(), DocError> {
     if flag.load(Ordering::Relaxed) {
