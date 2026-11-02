@@ -215,6 +215,7 @@ async function focusStart(win: Page): Promise<void> {
 test('the keyboard reaches ☰ and Raw, ☰ runs its commands from the keyboard, and the focus ring shows', async () => {
   const l = await opened()
   const { win } = l
+  await win.emulateMedia({ colorScheme: 'dark' }) // the ring is the dark accent; the default theme follows the OS
   await focusStart(win)
   const stops: [selector: string, ringOffset: string][] = [
     ...(!MAC ? [['.menu-button', '2px'] as [string, string]] : []),

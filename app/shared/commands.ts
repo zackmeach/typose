@@ -6,7 +6,7 @@ export const COMMANDS: readonly CommandDefinition[] = [
   { id: 'browse', label: 'Browse…' },
   { id: 'open-folder', label: 'Open folder…' },
   { id: 'palette', label: 'Command palette', shortcut: 'Ctrl+K' },
-  { id: 'settings', label: 'Settings' },
+  { id: 'settings', label: 'Settings', shortcut: 'Ctrl+,' },
   { id: 'toggle-sidebar', label: 'Toggle sidebar', shortcut: 'Ctrl+B' },
   { id: 'split-right', label: 'Split right', shortcut: 'Ctrl+\\' },
   { id: 'move-tab-right', label: 'Move tab right', document: true },
@@ -35,3 +35,9 @@ export const COMMANDS: readonly CommandDefinition[] = [
   { id: 'exit', label: 'Exit' }
 ]
 export function commandShortcut(shortcut: string | undefined, mac = false): string { return shortcut?.replaceAll('Ctrl+', mac ? '⌘' : 'Ctrl+') ?? '' }
+/** The palette's section headings; ids not listed here (the palette itself) are not offered. */
+export const COMMAND_GROUPS: readonly { title: 'LENS' | 'VIEW' | 'FILE'; ids: readonly Command[] }[] = [
+  { title: 'LENS', ids: ['switch-lens', 'wrap-lines', 'find', 'find-next', 'find-previous', 'go-to', 'copy'] },
+  { title: 'VIEW', ids: ['settings', 'shortcuts', 'toggle-sidebar', 'split-right', 'move-tab-right', 'close-card', 'zoom-in', 'zoom-out', 'zoom-reset', 'full-screen', 'theme-light', 'theme-dark', 'theme-system', 'refresh-folders'] },
+  { title: 'FILE', ids: ['open', 'browse', 'open-folder', 'reload', 'print', 'close-tab', 'reopen-tab', 'clear-closed', 'exit'] }
+]

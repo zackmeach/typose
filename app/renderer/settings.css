@@ -21,7 +21,6 @@
 .settings-content label { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .settings-content input, .settings-content select { color: var(--text); background: var(--surface-raised); border: 1px solid var(--border); border-radius: 5px; font: inherit; padding: 6px 8px; max-width: 65%; }
 .settings-content input[type=number] { width: 65px; }
-.settings-content input[type=checkbox] { margin-right: auto; }
 .settings-content p { color: var(--text2); margin: 0; }
 .settings-preview { padding: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; line-height: 1.7; }
 .settings-preview h2 { margin: 0 0 10px; }
@@ -45,3 +44,14 @@ body { font-size: var(--ui-size, 13px); }
 :root[data-frame=flush] .card-row { gap: 1px; left: var(--sidebar-offset, 0px); right: 0; bottom: 0; }
 :root[data-frame=flush] .card { border-radius: 0; }
 :root[data-theme=light] .card { box-shadow: 0 1px 2px #0000000a; }
+.workspace-heading { color: var(--text2); font-size: 10px; font-weight: 600; letter-spacing: .08em; padding: 8px 12px 4px; }
+.workspace-badge { flex: none; margin-left: auto; font-style: normal; font-size: 10px; line-height: 1; padding: 3px 6px; border: 1px solid var(--border); border-radius: 4px; color: var(--text2); }
+.settings-content label.settings-check { justify-content: flex-start; gap: 8px; }
+.settings-content label.settings-check input { max-width: none; margin: 0; }
+.settings-content .segmented { display: flex; align-items: center; justify-content: space-between; gap: 16px; border: 0; margin: 0; padding: 0; }
+.settings-content .segmented > div { display: inline-flex; }
+.settings-panel .segmented button { border-radius: 0; margin-left: -1px; }
+.settings-panel .segmented button:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+.settings-panel .segmented button:last-child { border-radius: 0 6px 6px 0; }
+.settings-panel .config-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.settings-panel .config-banner strong { display: block; }

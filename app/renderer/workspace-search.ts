@@ -1,11 +1,11 @@
 import type { CoreClient } from './core'
 import type { FolderRef } from '../shared/protocol'
 import type { RootView } from './folders'
-export interface QuickFile { ref: FolderRef; name: string; path: string }
+export interface QuickFile { ref: FolderRef; name: string; path: string; absolute: string }
 export interface QuickIndex { files: readonly QuickFile[]; state: string }
 /** Capability-only traversal; display paths are never opened as manual paths. */
 export async function indexRoot(core: CoreClient, root: RootView, hidden: boolean, excludes: readonly string[], changed: (result: QuickIndex) => void, signal: AbortSignal): Promise<void> {
-  const files: QuickFile[] = [], queue = [{ ref: root.ref, prefix: root.node.name }]
+  const files: QuickFile[] = [], queue = [{ ref: root.ref, prefix: root.node.name, absolute: root.path.replace(/[\\/]+$/, '') }]
   const excluded = new Set(excludes.map(s => s.toLowerCase()))
   let visited = 0
   try {
@@ -19,8 +19,8 @@ export async function indexRoot(core: CoreClient, root: RootView, hidden: boolea
         for (const entry of page.entries) {
           if (excluded.has(entry.name.toLowerCase())) continue
           const path = directory.prefix + '/' + entry.name
-          if (entry.kind === 'directory') queue.push({ ref: entry.ref, prefix: path })
-          else if (entry.kind === 'file') files.push({ ref: entry.ref, name: entry.name, path })
+          if (entry.kind === 'directory') queue.push({ ref: entry.ref, prefix: path, absolute: directory.absolute + '/' + entry.name })
+          else if (entry.kind === 'file') files.push({ ref: entry.ref, name: entry.name, path, absolute: directory.absolute + '/' + entry.name })
           visited++
           if (visited >= 50_000) { changed({ files, state: `Index capped at 50,000 entries in ${root.node.name}` }); return }
         }

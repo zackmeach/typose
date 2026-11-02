@@ -21,7 +21,8 @@ export interface Settings {
   wrap_lines: boolean
 }
 export interface Theme { id: string; name: string; scheme: 'light' | 'dark'; tokens: Record<string, string | number> }
-export interface SettingsSnapshot { values: Settings; revision: string; error?: string; themes: Theme[] }
+export interface ConfigParseProblem { line: number; column: number; message: string; path: string }
+export interface SettingsSnapshot { values: Settings; revision: string; error?: string; parse?: ConfigParseProblem; themes: Theme[] }
 export type SettingKey = keyof Settings
 export const DEFAULT_SETTINGS: Settings = { theme_mode: 'system', light_theme: 'Typose Light', dark_theme: 'Typose Dark', ui_font: 'Inter', mono_font: 'JetBrains Mono',
   ui_size: 13, mono_size: 13, density: 'default', frame: 'card', accent: '', show_hidden: false, encoding_fallback: 'windows-1252', excludes: DEFAULT_EXCLUDES,

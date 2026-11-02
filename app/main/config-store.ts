@@ -1,12 +1,20 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import { DEFAULT_SETTINGS, settingValue, settingsValues, type SettingsSnapshot, type Theme } from '../shared/settings'
+import { DEFAULT_SETTINGS, settingValue, settingsValues, type ConfigParseProblem, type SettingsSnapshot, type Theme } from '../shared/settings'
 
 export interface TomlCodec { configParse(source: string): string; configEdit(source: string, key: string, encoded: string): string }
 const LIMIT = 256 << 10
 const themeColors = ['canvas', 'surface', 'surface_raised', 'border', 'text', 'text_secondary', 'accent']
 function read(file: string): string { if (!existsSync(file)) return ''; if (statSync(file).size > LIMIT) throw new Error('Config exceeds 256 KiB'); return readFileSync(file, 'utf8') }
+/** The TOML editor's "TOML parse error at line L, column C" text, split into a position and its message. */
+function parseProblem(error: string, path: string): ConfigParseProblem | undefined {
+  const head = /^TOML parse error at line (\d+), column (\d+)\n/.exec(error)
+  if (!head) return undefined
+  const rest = error.slice(head[0].length).split('\n'), caret = rest.findIndex(line => /^\s*\|\s*\^/.test(line))
+  const message = caret < 0 ? '' : rest.slice(caret + 1).join(' ').trim().replace(/\.$/, '')
+  return { line: Number(head[1]), column: Number(head[2]), message: message || 'invalid TOML', path }
+}
 function revision(text: string): string { return createHash('sha256').update(text).digest('hex') }
 function atomic(file: string, text: string): void {
   const temp = `${file}.${process.pid}.tmp`
@@ -18,10 +26,11 @@ export class ConfigStore {
   private good = structuredClone(DEFAULT_SETTINGS)
   constructor(private readonly directory: string, private readonly codec: TomlCodec) {}
   snapshot(): SettingsSnapshot {
-    let source = '', error: string | undefined
-    try { source = read(join(this.directory, 'config.toml')); this.good = settingsValues(JSON.parse(this.codec.configParse(source))) }
-    catch (e) { error = e instanceof Error ? e.message : String(e) }
-    return { values: structuredClone(this.good), revision: revision(source), ...(error ? { error } : {}), themes: this.themes() }
+    let source = '', error: string | undefined, parse: ConfigParseProblem | undefined
+    const file = join(this.directory, 'config.toml')
+    try { source = read(file); this.good = settingsValues(JSON.parse(this.codec.configParse(source))) }
+    catch (e) { error = e instanceof Error ? e.message : String(e); parse = parseProblem(error, file) }
+    return { values: structuredClone(this.good), revision: revision(source), ...(error ? { error } : {}), ...(parse ? { parse } : {}), themes: this.themes() }
   }
   update(key: unknown, value: unknown, expected: unknown): SettingsSnapshot {
     if (typeof key !== 'string' || !settingValue(key, value) || typeof expected !== 'string') return { ...this.snapshot(), error: 'Invalid settings change' }
@@ -34,7 +43,7 @@ export class ConfigStore {
       mkdirSync(this.directory, { recursive: true }); atomic(file, next)
       this.good = { ...latest, [key]: value }
       return this.snapshot()
-    } catch (e) { return { ...this.snapshot(), error: e instanceof Error ? e.message : String(e) } }
+    } catch (e) { const now = this.snapshot(); return now.parse ? now : { ...now, error: e instanceof Error ? e.message : String(e) } }
   }
   exportTheme(name: unknown, tokens: unknown): SettingsSnapshot {
     try {

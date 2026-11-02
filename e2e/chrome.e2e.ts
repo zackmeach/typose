@@ -164,8 +164,7 @@ test('Electron’s default menu is gone: Force Reload and its other accelerators
   await win.locator('.vl-scroller').focus()
   await pressAsOS(l, 'R', ['control', 'shift']) // Force Reload
   await pressAsOS(l, 'I', ['control', 'shift']) // Toggle Developer Tools
-  await pressAsOS(l, 'Plus', ['control']) // Zoom In
-  await pressAsOS(l, 'F11', []) // Toggle Full Screen
+  // Zoom In (Ctrl+=) and Full Screen (F11) are now Typose's own commands, shared with the palette, so they are no longer expected to be dead.
   await win.waitForTimeout(1000) // a page reload, the dev tools or a zoom would have begun by now
   expect(await presses()).toBe(1)
   expect(await lifetime(l)).toBe('the first page')

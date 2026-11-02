@@ -39,11 +39,14 @@ it('keeps the entire last good state on parse errors or invalid values and refus
   writeFileSync(file, 'theme_mode = "dark"\nshow_hidden = true\n')
   expect(config.snapshot().values.show_hidden).toBe(true)
   writeFileSync(file, 'theme_mode = [unfinished\n')
-  expect(config.snapshot()).toMatchObject({ values: { theme_mode: 'dark', show_hidden: true }, error: expect.stringMatching(/line 1/) })
+  expect(config.snapshot()).toMatchObject({ values: { theme_mode: 'dark', show_hidden: true }, error: expect.stringMatching(/line 1/),
+    parse: { line: 1, column: expect.any(Number), message: expect.not.stringContaining('\n'), path: file } })
+  expect(config.update('theme_mode', 'light', config.snapshot().revision).parse).toMatchObject({ line: 1 })
   expect(config.update('theme_mode', 'light', config.snapshot().revision).error).toBeTruthy()
   expect(readFileSync(file, 'utf8')).toBe('theme_mode = [unfinished\n')
   writeFileSync(file, 'theme_mode = "light"\nui_size = 999\n')
   expect(config.snapshot()).toMatchObject({ values: { theme_mode: 'dark', show_hidden: true }, error: 'Invalid value for ui_size' })
+  expect(config.snapshot().parse).toBeUndefined()
 })
 
 it('theme export stays in its fixed directory and rejects traversal, duplicate names and unknown versions', () => {

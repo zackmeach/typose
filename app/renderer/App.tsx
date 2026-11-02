@@ -138,7 +138,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       if (groupRef.current !== before || before.some((group, index) => group.workspace.getSnapshot() !== snapshots[index])) return false
       const focused = Math.max(0, before.findIndex(group => group.id === focusedRef.current))
       const selected = cards[focused]?.tabs[cards[focused].selected]
-      if (selected?.location.kind === 'manual' && lastRecent.current !== selected.location.path) {
+      if (selected?.location.kind === 'manual' && snapshots[focused]?.tabs.find(tab => tab.id === snapshots[focused].selected)?.card.kind === 'open' && lastRecent.current !== selected.location.path) {
         lastRecent.current = selected.location.path
         rememberRecent({ kind: 'file', path: selected.location.path })
       }
@@ -280,7 +280,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     window.addEventListener('scroll', scheduleSession, true)
     return () => { off.forEach(unsubscribe => unsubscribe()); capture(); window.removeEventListener('scroll', scheduleSession, true); clearTimeout(sessionTimer.current) }
   }, [groups])
-  useEffect(() => { scheduleSession() }, [sidebarOpen, sidebarWidth, focused, folderRoots])
+  useEffect(() => { scheduleSession() }, [sidebarOpen, sidebarWidth, focused, folderRoots, recents])
   useEffect(() => { refreshFolders() }, [config.values.show_hidden])
   useLayoutEffect(() => markPainted('titlebarPainted'), [])
   useEffect(() => {
@@ -327,6 +327,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       const textControl = event.target instanceof Element && event.target.closest('input,textarea,select,[contenteditable="true"],[role="textbox"]')
       if (command && !event.shiftKey && !event.altKey && ['o', 'k'].includes(event.key.toLowerCase())) { event.preventDefault(); run(event.key.toLowerCase() === 'o' ? 'open' : 'palette'); return }
       if (overlayRef.current) return
+      if (command && !event.shiftKey && !event.altKey && event.key === ',') { event.preventDefault(); run('settings'); return }
       if (command && !event.altKey && ['=', '+', '-', '0'].includes(event.key)) { event.preventDefault(); run(event.key === '0' ? 'zoom-reset' : event.key === '-' ? 'zoom-out' : 'zoom-in'); return }
       if (event.key === 'F11') { event.preventDefault(); run('full-screen'); return }
       if (command && event.key.toLowerCase() === 'c' && !event.shiftKey && !event.altKey && !textControl) { event.preventDefault(); run('copy'); return }
@@ -377,8 +378,11 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       added = undefined
       if (replace && replace !== next.id) void core.call('removeRoot', { root: replace, session: ownerSession }).catch(() => {})
       setSidebarOpen(true)
-      rememberRecent({ kind: 'folder', path })
-      void listDirectory(next.id, next.node.id)
+      // A folder that cannot be listed (refused or gone) is not a recent.
+      void listDirectory(next.id, next.node.id).then(() => {
+        const listed = folders.current.find(root => root.id === next.id)
+        if (listed && !listed.unavailable && !listed.node.error) rememberRecent({ kind: 'folder', path })
+      })
     } catch (e) {
       setWorkspaceNotice('Cannot add folder · ' + (e instanceof Error ? e.message : String(e)))
     } finally {
@@ -901,7 +905,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
         {groups.map((group, index) => <div className="card-slot" style={{ flexGrow: group.weight }} key={group.id}>
           <ReaderCard id={group.id} label={index + 1} workspace={group.workspace} window={shared} fonts={fonts} focused={focused === group.id}
             onFocus={() => focusCard(group.id)} onCloseCard={() => void closeCard(group.id)} windowNotice={workspaceNotice}
-            settings={settingsTabs[group.id] ? { active: settingsTabs[group.id].active, content: <SettingsPanel controller={settings} initial={settingsTabs[group.id].section} />, onSelect: () => settingsTab(group.id, 'show', settingsTabs[group.id].section), onClose: () => settingsTab(group.id, 'close'), onFile: () => settingsTab(group.id, 'file') } : undefined}
+            settings={settingsTabs[group.id] ? { active: settingsTabs[group.id].active, content: <SettingsPanel controller={settings} initial={settingsTabs[group.id].section} openFile={path => { settingsTab(group.id, 'file'); focusCard(group.id); handles.current.get(group.id)?.open(path) }} />, onSelect: () => settingsTab(group.id, 'show', settingsTabs[group.id].section), onClose: () => settingsTab(group.id, 'close'), onFile: () => settingsTab(group.id, 'file') } : undefined}
             emptyContent={<div className="workspace-empty">
               <h1>Drop files or folders anywhere</h1>
               <div className="workspace-empty-actions"><Button className="open-button" onPress={() => { focusCard(group.id); run('open') }}>Open file… <kbd>{MAC ? '⌘O' : 'Ctrl+O'}</kbd></Button>
