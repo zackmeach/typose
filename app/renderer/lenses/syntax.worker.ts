@@ -13,11 +13,14 @@ import python from '@shikijs/langs/python'
 import rust from '@shikijs/langs/rust'
 import typescript from '@shikijs/langs/typescript'
 import yaml from '@shikijs/langs/yaml'
+import { WORKER_READY } from '../worker-jobs'
 import type { Piece } from './syntax'
 
 const highlighter = createHighlighterCore({
   engine: createJavaScriptRegexEngine(), themes: [dark, light], langs: [bash, css, html, javascript, json, python, rust, typescript, yaml]
 })
+// Building the grammars is cold start, not a job: the caller's watchdog waits for this.
+void highlighter.then(() => self.postMessage(WORKER_READY))
 
 self.onmessage = async (e: MessageEvent<{ source: string; language: string; maxSpans: number }>) => {
   const { source, language, maxSpans } = e.data
