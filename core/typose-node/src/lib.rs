@@ -21,8 +21,8 @@ use typose_core::pages::{self, LinePiece};
 use typose_core::raw::Raw;
 use typose_core::store::{self, cancellable};
 
-mod csv;
 pub mod config;
+mod csv;
 mod find;
 mod source;
 mod structured;
