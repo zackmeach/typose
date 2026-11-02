@@ -73,10 +73,16 @@ const CSP =
 
 /** Files queued before the page asks for them; subsequent opens are delivered individually. */
 let pendingPaths = launchPaths(process.argv, process.cwd(), !!process.defaultApp)
-/** Z79: every path main hands the page, which a hand-off may name as it is. */
-const granted = new Set(pendingPaths)
+/** Z79: the newest 1,024 paths main handed the page, which a hand-off may name as they are. */
+const granted = new Set<string>()
+const grant = (path: string) => {
+  granted.delete(path) // re-granting makes it the newest
+  granted.add(path)
+  if (granted.size > 1024) granted.delete(granted.values().next().value!)
+}
+pendingPaths.forEach(grant)
 let newest = pendingPaths.at(-1) ?? null
-let deliver = (path: string) => { granted.add(path); newest = path; pendingPaths.push(path) }
+let deliver = (path: string) => { grant(path); newest = path; pendingPaths.push(path) }
 // macOS names files through open-file, not argv: before ready for the file a launch opens, and after.
 app.on('open-file', (event, path) => {
   event.preventDefault()
@@ -355,6 +361,7 @@ void app.whenReady().then(() => {
   })
   const liveDelivery = () => {
     deliver = (path) => {
+      grant(path)
       newest = path
       if (!win.isDestroyed()) win.webContents.send('open-path', path)
     }
@@ -373,7 +380,7 @@ void app.whenReady().then(() => {
   handle(win, 'open-dialog', async () => {
     const r = await dialog.showOpenDialog(win, { properties: ['openFile'] })
     const chosen = r.canceled ? null : (r.filePaths[0] ?? null)
-    if (chosen) granted.add(chosen)
+    if (chosen) grant(chosen)
     return chosen
   })
   handle(win, 'folder-dialog', async () => {

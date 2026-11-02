@@ -148,6 +148,22 @@ test('Open with default app hands off only documents and media: .jnlp and a trai
   await finish(l)
 })
 
+test('a binary file a second instance hands over opens with its default app', async () => {
+  const file = fixture('second-report.csv', Buffer.from('id,amount\n1,\0\0\x01\n', 'latin1'))
+  const l = await launch({ hooks: true, env: RECORD })
+  const { win } = l
+  const calls = await shellCalls(l.app)
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
+  // Electron's second-instance event, as a second launch would raise it (the dev layout's argv: electron, app, file).
+  await l.app.evaluate(({ app }, path) => app.emit('second-instance', {}, [], process.cwd(), { argv: [process.execPath, '.', path], cwd: process.cwd() }), file)
+  const message = win.locator('.card-message')
+  await expect(message.locator('p').first()).toHaveText('Binary file · not shown')
+  await message.getByRole('button', { name: 'Open with default app', exact: true }).click()
+  await expect.poll(calls).toEqual([{ action: 'open', path: file }])
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
 test('Open with default app refuses programs, scripts and shortcuts with a message, and Show still works', async () => {
   const bat = fixture('setup.bat', '@echo off\necho hi\n')
   const ps1 = fixture('run.ps1', 'Write-Output hi\n')
