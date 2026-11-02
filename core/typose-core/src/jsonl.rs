@@ -118,10 +118,10 @@ impl Index {
                 at += bytes.len() as u64;
                 self.progress.write().unwrap().bytes = at;
             }
-            if from < store.len() {
-                if !self.record(store, Span { start: from, end: store.len() }, line, &options, flag)? {
-                    return Ok(false);
-                }
+            if from < store.len()
+                && !self.record(store, Span { start: from, end: store.len() }, line, &options, flag)?
+            {
+                return Ok(false);
             }
             Ok(true)
         })?;
@@ -183,13 +183,11 @@ impl Index {
             if matches!(value("type")?.as_deref(), Some("user" | "assistant"))
                 && fields.contains_key("uuid")
                 && fields.contains_key("parentUuid")
-            {
-                if let Some(container) =
+                && let Some(container) =
                     fields.get("message").filter(|c| c.kind == Kind::Object).and_then(|c| c.container)
-                {
-                    let message = named_fields(store, &index, container, &["role", "content"])?;
-                    claude = message.contains_key("role") && message.contains_key("content");
-                }
+            {
+                let message = named_fields(store, &index, container, &["role", "content"])?;
+                claude = message.contains_key("role") && message.contains_key("content");
             }
             let openai_message = value("role")?.is_some_and(|role| known_role(&role)) && fields.contains_key("content");
             let mut dataset = false;
