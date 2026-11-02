@@ -51,13 +51,19 @@ function abortListeners(signal: AbortSignal): () => number {
 
 it('rejects every pending call with CoreGone when the core goes, and every later call at once', async () => {
   const client = await connected()
-  const pending = [client.call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 10 }), client.call('close', { doc: 1 })]
-  await expect.poll(() => requests.length).toBe(3)
+  const busy: unknown[] = []
+  client.onGone(working => busy.push(working))
+  const pending = [client.call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 10 }), client.call('close', { doc: 2 }),
+    client.call('open', { path: 'C:\\x.md', count: 1, bytes: 1 }), client.call('csvPage', { ref: { session: 3, doc: 4, gen: 1, revision: 1 }, rowStart: 0, rowCount: 1, columnStart: 0, columnCount: 1 })]
+  await expect.poll(() => requests.length).toBe(5)
   post({ type: 'core-gone', session: 2 }) // an older session's death changes nothing
+  expect(busy).toEqual([])
   post({ type: 'core-gone', session: 3 })
+  // Z78: what it was reading or opening, at any depth; closing doc 2 reads nothing.
+  expect(busy).toEqual([{ docs: new Set([1, 4]), paths: new Set(['C:\\x.md']) }])
   for (const p of pending) await expect(p).rejects.toMatchObject({ code: 'CoreGone' })
   await expect(client.call('close', { doc: 1 })).rejects.toBeInstanceOf(CoreCallError)
-  expect(requests).toHaveLength(3) // nothing more was sent
+  expect(requests).toHaveLength(5) // nothing more was sent
 })
 
 it("drops a response from another session, and resolves its own session's", async () => {

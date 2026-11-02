@@ -13,7 +13,7 @@ export default defineConfig(({ mode }) => {
   const outDir = (part: string) => (hooks ? { outDir: resolve(__dirname, 'out-hooks', part) } : {})
   return {
     main: { define, build: { ...outDir('main'), rolldownOptions: { input: { index: resolve(__dirname, 'main/index.ts') } } } },
-    preload: { build: { ...outDir('preload'), rolldownOptions: { input: { index: resolve(__dirname, 'preload/index.ts') } } } },
+    preload: { define, build: { ...outDir('preload'), rolldownOptions: { input: { index: resolve(__dirname, 'preload/index.ts') } } } },
     renderer: {
       root: resolve(__dirname, 'renderer'),
       define,

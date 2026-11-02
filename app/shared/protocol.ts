@@ -308,6 +308,9 @@ export interface ProgressEvent {
   error?: string
 }
 
+/** A drop on the window, as main checked it: local files, local folders, and what it refused unopened. */
+export interface DroppedPaths { files: string[]; folders: string[]; refused: string[] }
+
 /** What the preload forwards from main to the page, with `window.postMessage` to its own origin. */
 export type MainMessage = { type: 'core-port'; session: number } | { type: 'core-gone'; session: number }
 
@@ -325,6 +328,8 @@ export interface TyposeApi {
   /** The OS Open dialog; null when cancelled. */
   openDialog(): Promise<string | null>
   folderDialog(): Promise<string | null>
+  /** Called with each drop of files or folders on the window, once main has checked its paths. Returns the unsubscribe. */
+  onDrop(cb: (drop: DroppedPaths) => void): () => void
   /** A user-activated external link. Main independently checks the app's main frame, size and allowed scheme. */
   openExternal(url: string): Promise<boolean>
   /** Claim/revoke the one-use token armed by a trusted Grid copy shortcut. */

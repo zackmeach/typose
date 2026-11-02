@@ -6,6 +6,8 @@ export interface SessionTab {
   anchor: number
   lens: 'raw' | 'rendered' | 'grid' | 'tree' | 'rows' | 'table' | 'transcript' | null
   csvOptions?: CsvOptions
+  /** Z78: the core stopped while this file was opening or being read. A restart restores it unopened. */
+  crashed?: true
 }
 export interface SessionCard { tabs: SessionTab[]; selected: number; weight: number }
 export interface RecentLocation { kind: 'file' | 'folder'; path: string }
@@ -50,7 +52,8 @@ export function sessionWorkspace(value: unknown): SessionWorkspace | null {
     const tabs: SessionTab[] = []
     for (const tab of card.tabs) {
       if (!record(tab) || !record(tab.location) || !['manual', 'reselect', 'folder'].includes(tab.location.kind as string) || !path(tab.location.path)
-        || !integer(tab.anchor, 0, Number.MAX_SAFE_INTEGER) || ![null, 'raw', 'rendered', 'grid', 'tree', 'rows', 'table', 'transcript'].includes(tab.lens as null | string)) return null
+        || !integer(tab.anchor, 0, Number.MAX_SAFE_INTEGER) || ![null, 'raw', 'rendered', 'grid', 'tree', 'rows', 'table', 'transcript'].includes(tab.lens as null | string)
+        || tab.crashed !== undefined && tab.crashed !== true) return null
       let csvOptions: CsvOptions | undefined
       if (tab.csvOptions !== undefined) {
         if (!record(tab.csvOptions) || !['auto', ',', '\t', ';', '|'].includes(tab.csvOptions.delimiter as string)
@@ -66,7 +69,7 @@ export function sessionWorkspace(value: unknown): SessionWorkspace | null {
         location = { kind: 'folder', path: tab.location.path, root: { path: tab.location.root.path, identity: tab.location.root.identity }, segments: [...tab.location.segments] }
       }
       tabs.push({ location, anchor: tab.anchor,
-        lens: tab.lens as SessionTab['lens'], ...(csvOptions ? { csvOptions } : {}) })
+        lens: tab.lens as SessionTab['lens'], ...(csvOptions ? { csvOptions } : {}), ...(tab.crashed ? { crashed: true } : {}) })
     }
     cards.push({ tabs, selected: card.selected, weight: card.weight })
   }

@@ -340,11 +340,15 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   useEffect(() => {
     let alive = true
     let requestedSession = 0
-    const gone = core.onGone(() => {
+    const gone = core.onGone(busy => {
+      // Z78: which files the core may have died on. No call names the culprit, so every file it was opening or
+      // reading (an open, a page or other read, or an index still running) is marked, and a restart won't reopen it.
+      const crashed = new Set(workspace.getSnapshot().tabs.filter(tab => tab.card.kind === 'opening' || busy.paths.has(tab.path) ||
+        tab.card.kind === 'open' && (!tab.card.indexed || busy.docs.has(tab.card.opened.doc))).map(tab => tab.id))
       leave()
       surface.current = null
       abort.current.abort()
-      workspace.coreGone(currentSession.current)
+      workspace.coreGone(currentSession.current, crashed)
       const selected = workspace.getSnapshot().selected
       const tab = selected ? workspace.tab(selected) : undefined
       display(selected, tab?.card.kind === 'gone' ? tab.card : { kind: 'gone', ready: false })
@@ -709,6 +713,19 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       else deactivateInactive({ session: ticket.session, doc: opened.doc, gen: opened.gen, view: opened.view })
     } catch (e) {
       if (!workspace.current(ticket) || e instanceof CoreCallError && e.code === 'CoreGone') return
+      // A folder a launch, a second instance or Explorer named (the core's manual open refuses it before reading
+      // anything) becomes a root through Open folder…'s own capture and checks, instead of a refused tab.
+      if (!previous && atLine === undefined && e instanceof CoreCallError && e.code === 'Refused' && e.message === 'refused: not a regular file') {
+        const wasSelected = workspace.selected(selection)
+        workspace.close(ticket.tab)
+        if (wasSelected) {
+          const next = workspace.getSnapshot().selected
+          display(null, { kind: 'empty' })
+          if (next) void selectTab(next)
+        }
+        void shared.addFolder(path)
+        return
+      }
       const error = failed(path, e)
       // Reopen/Locate keeps an already owned document on failure; a new tab keeps the bounded error metadata.
       if (previous?.card.kind === 'open') workspace.cancel(ticket)
@@ -1187,6 +1204,10 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     Reopen: () => {
       const id = workspace.getSnapshot().selected
       if (id && card.kind === 'gone' && !card.localOnly && card.path) void open(card.path, card.line, id)
+    },
+    'Open anyway': () => {
+      const id = workspace.getSnapshot().selected
+      if (id && card.kind === 'crashed') void open(card.path, card.line, id)
     }
   }
   const frozen = card.kind === 'open' ? card.frozen : undefined
@@ -1400,7 +1421,9 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       const visible = tab.id === before.selected && displayed.current === tab.id ? latest.current.card : tab.card
       tabs.push({ location, anchor: tab.id === before.selected && displayed.current === tab.id ? lens.current?.topLine() ?? tab.anchor ?? 0 : tab.anchor ?? 0,
         lens: (tab.id === before.selected ? picked.current : tab.preferredLens) ?? (visible.kind === 'open' ? visible.lens ?? 'raw' : null),
-        ...(tab.card.kind === 'open' && tab.card.csvOptions ? { csvOptions: tab.card.csvOptions } : {}) })
+        ...(tab.card.kind === 'open' && tab.card.csvOptions ? { csvOptions: tab.card.csvOptions } : {}),
+        // Z78: still marked while Open anyway runs, since its card changes only once that open succeeds.
+        ...(location.kind === 'manual' && (tab.card.kind === 'crashed' || tab.card.kind === 'gone' && tab.card.crashed) ? { crashed: true } : {}) })
     }
     if (workspace.getSnapshot() !== before) return null
     return { tabs, selected: before.tabs.findIndex(tab => tab.id === before.selected), weight: 1 }
@@ -1442,7 +1465,19 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     const restored: TabId[] = []
     for (const entry of saved.tabs) {
       let restoredTab: WorkspaceTab | undefined
-      if (entry.location.kind === 'manual') {
+      if (entry.location.kind === 'manual' && entry.crashed) {
+        // Z78: the core stopped while reading it. It comes back unopened, so a file that crashes the core can't do it
+        // again at every launch; only Open anyway opens it.
+        const path = entry.location.path
+        if (!await metadata(current => chargeWorkspace([...workspace.getSnapshot().tabs, { key: manualKey(path), path }], current))) continue
+        leave()
+        const requested = workspace.beginOpen(manualKey(path), path)
+        if (requested.kind !== 'open') continue
+        const stopped: Extract<Card, { kind: 'crashed' }> = { kind: 'crashed', path, line: entry.anchor }
+        workspace.complete(requested.ticket, manualKey(path), stopped)
+        display(requested.ticket.tab, stopped)
+        restoredTab = workspace.tab(requested.ticket.tab)
+      } else if (entry.location.kind === 'manual') {
         await open(entry.location.path, entry.anchor)
         restoredTab = workspace.find(manualKey(entry.location.path))
       } else if (entry.location.kind === 'folder') restoredTab = await restoreFolderEntry(entry)

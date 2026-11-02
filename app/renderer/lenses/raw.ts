@@ -2,7 +2,7 @@ import { MAX_PRINT_BYTES, MAX_PRINT_PAGES, type Limits, type Opened, type PageIt
 import { type CoreClient, CoreCallError, testHooks } from '../core'
 import { inputMark, markPainted, setPaintProbe } from '../perf'
 import { VirtualList } from '../virtual/virtual-list'
-import { type Key, type Mounted, PageCache, ROW_HEIGHT, capFor, rowsFor, rowsOf, viewportCap } from './page-cache'
+import { type Key, type Mounted, PageCache, ROW_HEIGHT, WRAP, capFor, rowsFor, rowsOf, viewportCap } from './page-cache'
 import type { LensBudget } from './lens-budget'
 import { SourceFind } from './source-find'
 import { copySourceSpan } from './source-copy'
@@ -53,16 +53,23 @@ const size = (bytes: number) => (bytes >= 1e6 ? `${mb.format(bytes / 1e6)} MB` :
 
 /**
  * Raw (brief §5.1) on the virtualizer: a labelled, focusable region whose gutter is hidden from assistive tech
- * (plan §7 proposal 4). Rows wider than the card scroll horizontally; wrapping is M4, but a row shows at most 2,048
- * units, and a longer piece goes on in the next rows (Z66). A line longer than a piece shows its first piece with a
- * marker; expanding it mounts the further pieces' rows, fetched with the core's continuation tokens as they come into
- * view, up to the line's first 1 MiB (plan C3).
+ * (plan §7 proposal 4). Rows wider than the card scroll horizontally, but a row shows at most 2,048 units, and a
+ * longer piece goes on in the next rows (Z66); with Wrap lines on (`<html data-wrap-lines="true">`), a row shows at
+ * most the card's width, and the line goes on in the next rows the same way. A line longer than a piece shows its first
+ * piece with a marker; expanding it mounts the further pieces' rows, fetched with the core's continuation tokens as they
+ * come into view, up to the line's first 1 MiB (plan C3).
  */
 export class RawLens {
   readonly list: VirtualList
   readonly find: SourceFind
   private readonly cache: PageCache
+  /** ponytail: with Wrap lines, most lines seen keep an entry here, uncharged (~100 bytes each) and never dropped;
+   *  drop a line's entry with its evicted item if scrolling through millions of wrapped lines makes that matter. */
   private readonly long = new Map<number, LongLine>()
+  /** Wrap lines' width in columns, or 0 for Z66's rows. */
+  private cols = 0
+  private readonly wrapSetting: MutationObserver
+  private readonly wrapWidth: ResizeObserver
   /** The long lines, ascending, and each one's rows past one in the lines before it: rows are found by bisection. */
   private longLines: number[] = []
   private before: number[] = []
@@ -119,13 +126,13 @@ export class RawLens {
     for (const item of opened.firstPage.items) this.setRows(item.line, 0, rowsOf(item).length - 1)
     this.reindex()
     this.list = new VirtualList(host, ROW_HEIGHT, (i, el) => this.paint(i, el), (r) => this.want(r), this.coveredRows())
-    this.find = new SourceFind(host, this.list.element, core, opened, options.budget, line => {
+    this.find = new SourceFind(host, this.list.element, core, opened, options.budget, (line, hit) => {
       this.moved = true
       this.atLine = line
       this.findLineFloor = Math.max(this.findLineFloor, line + 1)
       this.lineCount = Math.max(this.lineCount, this.findLineFloor)
       this.list.setRowCount(this.rowCount())
-      this.list.scrollToRow(this.rowOf(line))
+      this.list.scrollToRow(this.rowOf(line) + (hit ? this.wrappedRowAt(line, hit.start) : 0))
       this.shownLine = line
     }, options.onFrozen)
     if (__TEST_HOOKS__) {
@@ -165,6 +172,12 @@ export class RawLens {
         { passive: true }
       )
     setPaintProbe(() => this.paintedKey())
+    // Wrap lines: wrapped now, and again as the setting, the fonts or the card's width change.
+    this.wrapSetting = new MutationObserver(() => this.rewrap())
+    this.wrapSetting.observe(document.documentElement, { attributes: true, attributeFilter: ['data-wrap-lines', 'data-fonts'] })
+    this.wrapWidth = new ResizeObserver(() => this.rewrap())
+    this.wrapWidth.observe(host)
+    this.rewrap()
     markPainted('rawUsable') // the first bounded piece is on screen and scrollable (Z37)
     // Z37's first screen: the first frame that shows the first page has painted (rAF, then a task). Once per open.
     if (opened.firstPage.items.length > 0 && performance.getEntriesByName('typose:first-screen').length === 0)
@@ -314,7 +327,7 @@ export class RawLens {
       const textNode = span.firstChild
       const inText = container === textNode ? offset : container === span ? (side === 'start' ? 0 : textNode?.textContent?.length ?? 0) : null
       if (inText === null) return null
-      const bounds = rowsOf(item)
+      const bounds = rowsOf(item, this.cols)
       const unit = bounds[sub] + inText
       return sourceByteAt(item.map, unit, side)
     }
@@ -426,6 +439,8 @@ export class RawLens {
    * it here would race the hold. Close releases it with the document.
    */
   dispose(release = true): void {
+    this.wrapSetting.disconnect()
+    this.wrapWidth.disconnect()
     this.cancelCopy()
     document.removeEventListener('selectionchange', this.selectionChanged)
     this.find.destroy()
@@ -456,6 +471,67 @@ export class RawLens {
     if (l.rows[piece] === rows) return false
     l.rows[piece] = rows
     return true
+  }
+
+  /** Wrap lines' width in columns: the scroller's width past a row's gutter, its text's end padding and a ↪, in the
+   *  mono font's advance, measured on a hidden row. */
+  private wrapColumns(): number {
+    const probe = Object.assign(document.createElement('div'), { className: 'vl-row' })
+    probe.style.visibility = 'hidden'
+    const gutter = Object.assign(document.createElement('span'), { className: 'gutter', textContent: String(Math.max(1, this.lineCount)) })
+    const text = Object.assign(document.createElement('span'), { className: 'text', textContent: '0'.repeat(100) })
+    probe.append(gutter, text)
+    this.list.element.append(probe)
+    const range = document.createRange()
+    range.selectNodeContents(text)
+    const advance = range.getBoundingClientRect().width / 100
+    const room = this.list.element.clientWidth - gutter.getBoundingClientRect().width - (text.getBoundingClientRect().width - 100 * advance) - advance
+    probe.remove()
+    return advance > 0 ? Math.max(2, Math.min(WRAP, Math.floor(room / advance))) : 0
+  }
+
+  /** With Wrap lines on, which of `line`'s rows shows source byte `byte`, when its first piece is here and holds it;
+   *  else 0, its first row. */
+  private wrappedRowAt(line: number, byte: number): number {
+    const item = this.cache.get(line)
+    if (!this.cols || !item || byte < item.map.start || byte >= item.map.end) return 0
+    let [lo, hi] = [0, item.text.length] // the last unit that starts at or before `byte`
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1
+      if (sourceByteAt(item.map, mid, 'start') <= byte) lo = mid
+      else hi = mid - 1
+    }
+    const b = rowsOf(item, this.cols)
+    let sub = 0
+    while (sub + 2 < b.length && b[sub + 1] <= lo) sub++
+    return sub
+  }
+
+  /** Wrap lines went on or off, or its width changed: the rows of every line here are counted again, and the view
+   *  keeps the text that was at its top. A hidden card keeps its rows until it's shown. Off, nothing is measured. */
+  private rewrap(): void {
+    const on = document.documentElement.dataset.wrapLines === 'true'
+    if (!on && !this.cols || this.list.element.clientWidth === 0) return
+    const cols = on ? this.wrapColumns() : 0
+    if (cols === this.cols) return
+    const was = this.place()
+    const top = this.cache.get(was.at.key)
+    const unit = top ? rowsOf(top, this.cols)[was.at.sub] ?? 0 : 0
+    this.cols = this.cache.cols = cols
+    for (const [line, l] of this.long) {
+      if (l.tokens.length) l.rows = l.rows.map(() => 1) // an expanded line keeps its pieces
+      else this.long.delete(line)
+    }
+    for (const [key, item] of this.cache.all()) {
+      const [line, piece] = typeof key === 'number' ? [key, 0] : key.split(':').map(Number)
+      this.setRows(line, piece, rowsOf(item, cols).length - 1)
+    }
+    const b = top ? rowsOf(top, cols) : [0, 0]
+    let sub = 0
+    while (sub + 2 < b.length && b[sub + 1] <= unit) sub++
+    this.list.resetWidth()
+    this.placeRows(true, { at: { ...was.at, sub }, into: was.into })
+    this.list.refresh()
   }
 
   /** Rebuilds the long lines' order and their rows before each. */
@@ -651,7 +727,7 @@ export class RawLens {
       this.cache.add(items)
       const was = this.place()
       let changed = false
-      for (const item of items) changed = this.setRows(item.line, 0, rowsOf(item).length - 1) || changed
+      for (const item of items) changed = this.setRows(item.line, 0, rowsOf(item, this.cols).length - 1) || changed
       this.placeRows(changed, was)
       this.list.refresh()
     } finally {
@@ -669,7 +745,7 @@ export class RawLens {
       if (this.stopped || q.abort.signal.aborted || !item || item.gen !== this.opened.gen) return
       this.cache.addPiece(String(s.key), item)
       const was = this.place()
-      let changed = this.setRows(s.line, s.piece, rowsOf(item).length - 1)
+      let changed = this.setRows(s.line, s.piece, rowsOf(item, this.cols).length - 1)
       if (item.next && expansion.tokens.length === s.piece) {
         expansion.tokens.push(item.next) // the line goes on: one more piece below this one
         expansion.rows.push(1)
@@ -711,7 +787,7 @@ export class RawLens {
     Object.assign(el.dataset, { line: String(s.line), piece: String(s.piece), sub: String(s.sub) })
     const item = this.cache.get(s.key)
     if (!item) return
-    const b = rowsOf(item)
+    const b = rowsOf(item, this.cols)
     if (s.sub + 1 >= b.length) return
     el.append(Object.assign(document.createElement('span'), { className: 'text', textContent: item.text.slice(b[s.sub], b[s.sub + 1]) }))
     // Z66: a piece's rows but its last go on in the next row (brief §5.1's ↪ continuation marker), which assistive tech

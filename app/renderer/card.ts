@@ -49,10 +49,13 @@ export type Card =
       /** Inactive activation froze, but this tab still owns the native document and its Reload capability. */
       reloadable?: true
     }
-  /** Plan C7: the core died. `line` is where its view was; `ready` once a new core is up to Reopen it in. */
-  | { kind: 'gone'; path?: string; line?: number; ready: boolean; localOnly?: true }
+  /** Plan C7: the core died. `line` is where its view was; `ready` once a new core is up to Reopen it in. `crashed`: it
+   *  died while this file was opening or being read (Z78), so a restart won't reopen it by itself. */
+  | { kind: 'gone'; path?: string; line?: number; ready: boolean; localOnly?: true; crashed?: true }
+  /** Z78: restored unopened, since the core stopped while reading it. Only the reader opens it again. */
+  | { kind: 'crashed'; path: string; line?: number }
 
-export type Action = 'Open file…' | 'Locate…' | 'Retry' | 'Reload' | 'Close' | 'Reopen'
+export type Action = 'Open file…' | 'Locate…' | 'Retry' | 'Reload' | 'Close' | 'Reopen' | 'Open anyway'
 
 /** Display needs scalar identity, never the selected controller's first page or memory lease. */
 export type DisplayCard = Exclude<Card, { kind: 'open' }> | (Omit<Extract<Card, { kind: 'open' }>, 'opened'> & {
@@ -150,5 +153,7 @@ export function view(card: DisplayCard): CardView {
       if (!card.ready) return say("Typose's core stopped")
       if (card.localOnly) return say("Typose's core stopped · Open the file again to continue", 'Open file…')
       return say("Typose's core stopped", card.path ? 'Reopen' : 'Open file…')
+    case 'crashed':
+      return say("Typose's core stopped while reading this file.", 'Open anyway')
   }
 }

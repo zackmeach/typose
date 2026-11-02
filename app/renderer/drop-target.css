@@ -1,0 +1,28 @@
+/* Prototype p22's drop state: the workspace outlined, dashed, under the title bar. It never takes the drag itself. */
+.drop-target {
+  position: fixed;
+  inset: 48px 10px 10px;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--accent);
+  border-radius: 8px;
+  background: rgb(17 17 19 / 80%);
+  pointer-events: none;
+}
+.drop-target-card {
+  max-width: 420px;
+  padding: 24px 32px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.drop-target-card h1 {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 600;
+}
+.drop-target-card p {
+  margin: 0;
+  color: var(--text2);
+}

@@ -16,6 +16,7 @@ import './split-cards.css'
 import './link-preview.css'
 import { sessionWorkspace, type RecentLocation, type SessionWorkspace } from '../shared/session'
 import './workspace-controls.css'
+import { DropTarget } from './drop-target'
 
 interface LinkPreview extends ReaderGroup { sourceId: string; trigger: HTMLElement; width: number; right: number }
 
@@ -77,7 +78,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   const [shared] = useState<ReaderWindow>(() => ({ core, hello, groups: allGroups, closed, folders, pendingFolders,
     budget: workspaceBudget, peak: workspacePeak, queue: metadataQueue, pendingWorkspace, pendingNative,
     pendingHistory: pendingHistory.current, recharged, paid: () => payment.current,
-    charge: async () => false, release: () => {}, notice: () => {}, opened: () => {}, openLink: async () => false, report: () => {}, register: () => () => {} }))
+    charge: async () => false, release: () => {}, notice: () => {}, opened: () => {}, addFolder: async () => {}, openLink: async () => false, report: () => {}, register: () => () => {} }))
 
   function setPreview(next: LinkPreview | null): void {
     const previous = previewRef.current
@@ -232,6 +233,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   shared.release = releaseEmptyWorkspace
   shared.notice = setWorkspaceNotice
   shared.opened = () => { if (sidebarOverlay) setSidebarOpen(false) }
+  shared.addFolder = path => pickFolder(undefined, path)
   shared.openLink = openLink
   shared.report = (id, text, node) => { reports.current.set(id, { title: text, node }); if (focusedRef.current === id) { setTitle(text); setActiveNode(node) } }
   shared.register = (id, handle) => {
@@ -271,7 +273,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       recharged.current = false
       hello.current = null
       folderRequests.current.clear()
-      setFolders(folders.current.map(root => ({ ...root, unavailable: true, node: { ...root.node, expanded: false, loading: false, children: undefined, cursor: undefined, error: 'Core restarted · select the folder again' } })))
+      setFolders(folders.current.map(root => ({ ...root, unavailable: true, node: { ...root.node, expanded: false, loading: false, children: undefined, cursor: undefined, error: 'Core restarted · Locate the folder again to restore access' } })))
       workspacePeak.current = Math.max(workspacePeak.current, workspaceBudget.current?.snapshot().peakBytes ?? 0)
       workspaceBudget.current?.invalidate()
       workspaceBudget.current = null
@@ -290,6 +292,12 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       else reader.open(path)
     }
     const offOpen = window.typose.onOpenPath(openPath)
+    // A drop is the dialogs' explicit choice: files open as tabs in the focused card, folders become roots, in order.
+    const offDrop = window.typose.onDrop(drop => {
+      for (const path of drop.files) openPath(path)
+      void drop.folders.reduce((added, path) => added.then(() => pickFolder(undefined, path)), Promise.resolve())
+      if (drop.refused.length) setWorkspaceNotice(`Can't open ${drop.refused.filter(Boolean).join(', ') || 'what was dropped'} · only files and folders on this computer's drives can be dropped`)
+    })
     const offCommand = window.typose.onCommand(run)
     const key = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing) return
@@ -318,7 +326,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       for (const path of paths) openPath(path)
       scheduleSession()
     }).catch(error => { sessionReady.current = true; setWorkspaceNotice('Cannot restore workspace · ' + String(error)) })
-    return () => { cancelReaderWaiters('The workspace was unmounted'); gone(); ready(); offOpen(); offCommand(); window.removeEventListener('keydown', key) }
+    return () => { cancelReaderWaiters('The workspace was unmounted'); gone(); ready(); offOpen(); offDrop(); offCommand(); window.removeEventListener('keydown', key) }
   }, [core])
 
   function setFolders(next: readonly RootView[]): void {
@@ -381,7 +389,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       if (valid()) {
         setFolders(updateFolder(folders.current, rootId, nodeId, before => ({ ...before, error: e instanceof Error ? e.message : String(e) })))
         if (nodeId === root.node.id && e instanceof CoreCallError && e.code === 'NotFound')
-          setFolders(folders.current.map(item => item.id === rootId ? { ...item, unavailable: true } : item))
+          setFolders(folders.current.map(item => item.id === rootId ? { ...item, unavailable: true, node: { ...item.node, error: 'Folder not found · ' + e.message } } : item))
       }
     } finally {
       if (valid()) setFolders(updateFolder(folders.current, rootId, nodeId, before => ({ ...before, loading: false })))
@@ -839,6 +847,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
             onPointerUp={event => { delete event.currentTarget.dataset.x }} onPointerCancel={event => { delete event.currentTarget.dataset.x }} /> : null}
         </div>)}
       </main>
+      <DropTarget />
       {preview ? <ModalOverlay isOpen isDismissable className="link-preview-overlay" onOpenChange={open => { if (!open) void closePreview() }}>
         <Modal className="link-preview-frame" style={{ width: preview.width, right: `min(${preview.right}px, max(16px, calc(100vw - ${preview.width}px - 16px)))` }}>
           <Dialog aria-label="Link preview" className="link-preview-dialog">

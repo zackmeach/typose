@@ -12,7 +12,7 @@ export interface SavedLocation {
   readonly csvOptions?: Readonly<CsvOptions>
 }
 type OpenCard = Extract<Card, { kind: 'open' }>
-type FinishedCard = Extract<Card, { kind: 'open' | 'failed' }>
+type FinishedCard = Extract<Card, { kind: 'open' | 'failed' | 'crashed' }>
 
 /** Inactive tabs retain metadata, never a first-page payload or a viewport reservation. */
 export type StoredOpenCard = Readonly<Omit<OpenCard, 'opened'> & {
@@ -258,11 +258,12 @@ export class WorkspaceStore {
     return removed
   }
 
-  coreGone(session: number): void {
+  /** `crashed`: the tabs whose files were opening or being read when the core died (Z78). */
+  coreGone(session: number, crashed: ReadonlySet<TabId> = new Set()): void {
     if (session !== this.state.session || !this.state.ready) return
     for (const tab of this.state.tabs) this.versions.set(tab.id, (this.versions.get(tab.id) ?? 0) + 1)
     this.selectionVersion++
-    this.publish({ ...this.state, ready: false, tabs: this.state.tabs.map((tab) => this.gone(tab, false)) })
+    this.publish({ ...this.state, ready: false, tabs: this.state.tabs.map((tab) => this.gone(tab, false, crashed.has(tab.id))) })
   }
 
   coreReady(session: number): void {
@@ -272,11 +273,13 @@ export class WorkspaceStore {
     this.publish({ ...this.state, session, ready: true, tabs: this.state.tabs.map((tab) => this.gone(tab, true)) })
   }
 
-  private gone(tab: WorkspaceTab, ready: boolean): WorkspaceTab {
+  private gone(tab: WorkspaceTab, ready: boolean, crashed = false): WorkspaceTab {
     const card = tab.card
+    if (card.kind === 'crashed') return tab // never opened: no native document to lose
     const localOnly = card.kind === 'open' ? card.opened.localOnly : card.kind === 'gone' || card.kind === 'failed' ? card.localOnly : undefined
     const line = tab.anchor ?? (card.kind === 'open' || card.kind === 'opening' ? card.atLine : card.kind === 'gone' ? card.line : undefined)
-    return Object.freeze({ ...tab, card: Object.freeze({ kind: 'gone', path: tab.path, line, ready, ...(localOnly ? { localOnly } : {}) }) })
+    const marked = crashed || card.kind === 'gone' && card.crashed
+    return Object.freeze({ ...tab, card: Object.freeze({ kind: 'gone', path: tab.path, line, ready, ...(localOnly ? { localOnly } : {}), ...(marked ? { crashed: true } : {}) }) })
   }
 
   private change(id: TabId, update: (tab: WorkspaceTab) => WorkspaceTab): void {

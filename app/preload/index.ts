@@ -1,5 +1,8 @@
-import { contextBridge, ipcRenderer, webFrame } from 'electron'
-import type { Command, MainMessage, TyposeApi } from '../shared/protocol'
+import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
+import type { Command, DroppedPaths, MainMessage, TyposeApi } from '../shared/protocol'
+
+/** True only in the test-hooks build (`npm run build:hooks`); the shipped bundle has no hook code (plan §5). */
+declare const __TEST_HOOKS__: boolean
 
 // Brief §6.5: scale the whole view from 50–200%, before a lens can consume Ctrl+wheel as scrolling.
 window.addEventListener('wheel', (event) => {
@@ -38,6 +41,31 @@ window.addEventListener('click', event => {
   setTimeout(() => { clipboardGesture = false }, 0)
 }, { capture: true })
 
+// Files and folders dropped anywhere on the window: their real paths, read here (only a trusted drop has them), go to
+// main, which checks them as it does the dialogs' choices. A file drag's default, a file:// navigation, is cancelled
+// here, and main refuses every navigation besides. Text and link drags keep their defaults and open nothing.
+const dropped = new Set<(drop: DroppedPaths) => void>()
+const TEST_DROP = 'application/x-typose-test-drop'
+const files = (event: DragEvent) => !!event.dataTransfer?.types.includes('Files')
+window.addEventListener('dragover', event => {
+  if (!files(event)) return
+  event.preventDefault()
+  event.dataTransfer!.dropEffect = 'copy'
+}, { capture: true })
+window.addEventListener('drop', event => {
+  if (!files(event)) return
+  event.preventDefault()
+  const data = event.dataTransfer!
+  // The test-hooks build takes a page script's drop as naming the items it lists: a script's File has no path.
+  const test = __TEST_HOOKS__ && !event.isTrusted ? data.getData(TEST_DROP) : ''
+  if (!event.isTrusted && !test) return
+  const items: unknown = test ? JSON.parse(test) : [...data.items].filter(item => item.kind === 'file').map(item => {
+    const file = item.getAsFile()
+    return { path: file ? webUtils.getPathForFile(file) : '', folder: !!item.webkitGetAsEntry()?.isDirectory }
+  })
+  void ipcRenderer.invoke('drop-paths', items).then((drop: DroppedPaths | null) => { if (drop) for (const cb of dropped) cb(drop) }, () => {})
+}, { capture: true })
+
 const typose: TyposeApi = {
   loadSession: () => ipcRenderer.invoke('load-session'),
   saveSession: (session) => ipcRenderer.invoke('save-session', session),
@@ -55,6 +83,10 @@ const typose: TyposeApi = {
   },
   openDialog: () => ipcRenderer.invoke('open-dialog'),
   folderDialog: () => ipcRenderer.invoke('folder-dialog'),
+  onDrop: (cb) => {
+    dropped.add(cb)
+    return () => void dropped.delete(cb)
+  },
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   beginClipboardWrite: () => {
     if (!clipboardGesture) return null

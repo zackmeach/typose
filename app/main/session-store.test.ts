@@ -22,6 +22,11 @@ it('atomically round trips a two-card session and strips runtime capabilities', 
     expect(readFileSync(file, 'utf8')).not.toContain('secret')
     expect(store.update({ ...workspace, cards: [{ ...workspace.cards[0], selected: 7 }] })).toBe(false)
     expect(store.snapshot()).toEqual(reopened)
+    // Z78's crash mark survives a round trip as `true` only; any other value refuses the record.
+    const crashed = (value: unknown) => ({ ...workspace, cards: [{ ...workspace.cards[0], tabs: [{ ...workspace.cards[0].tabs[0], crashed: value }] }, workspace.cards[1]] })
+    expect(store.update(crashed(true))).toBe(true)
+    expect(store.snapshot().cards[0].tabs[0]).toEqual({ location: { kind: 'manual', path: 'C:\\one.md' }, anchor: 42, lens: 'rendered', crashed: true })
+    for (const value of [false, 1, 'true']) expect(store.update(crashed(value)), String(value)).toBe(false)
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 

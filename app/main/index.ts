@@ -7,7 +7,7 @@ import coreHostPath from '../core-host/index?modulePath'
 import { MAX_PRINT_PAGES, type Command, type PrintDocumentResult } from '../shared/protocol'
 import { openExternal } from './external'
 import { writeClipboardText } from './clipboard'
-import { handoff, launchPaths } from './launch'
+import { dropPaths, handoff, launchPaths } from './launch'
 import { startLifecycle } from './lifecycle'
 import { envWhole, isMark, marksHook } from './marks'
 import { SessionStore } from './session-store'
@@ -354,6 +354,8 @@ void app.whenReady().then(() => {
     const r = await dialog.showOpenDialog(win, { properties: ['openDirectory'] })
     return r.canceled ? null : (r.filePaths[0] ?? null)
   })
+  // A drop names files and folders as the dialogs above do; the preload sends only a trusted drop's items.
+  ipcMain.handle('drop-paths', (event, ...args: unknown[]) => fromMainApp(event) && args.length === 1 ? dropPaths(args[0]) : null)
   ipcMain.handle('open-external', (event: IpcMainInvokeEvent, ...args: unknown[]) => openExternal(win, event, args, (url) => shell.openExternal(url)))
   ipcMain.handle('write-clipboard', (event: IpcMainInvokeEvent, ...args: unknown[]) =>
     writeClipboardText(win, event, args, (text) => clipboard.writeText(text)))

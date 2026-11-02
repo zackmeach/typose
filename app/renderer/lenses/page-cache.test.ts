@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { PageItem } from '../../shared/protocol'
-import { FIXED, GARBAGE_PER_UNIT, LAYOUT_PER_UNIT, PageCache, WRAP, capFor, charge, rowBreaks, rowCost, rowsFor, rowsOf } from './page-cache'
+import { FIXED, GARBAGE_PER_UNIT, LAYOUT_PER_UNIT, PageCache, WRAP, capFor, charge, rowBreaks, rowCost, rowsFor, rowsOf, wrapBreaks } from './page-cache'
 
 const PIECE = 65_536
 const MAP_MAX = 393_224
@@ -255,6 +255,39 @@ describe('rowBreaks (Z66)', () => {
     const item = cjk(0)
     expect(rowsOf(item)).toBe(rowsOf(item))
     expect(rowsOf(item).length - 1).toBe(Math.ceil(21_845 / WRAP))
+    // Wrapping has its own breaks per width, and turning it off gives Z66's again.
+    expect(rowsOf(item, 100).length - 1).toBe(Math.ceil(21_845 / 50))
+    expect(rowsOf(item).length - 1).toBe(Math.ceil(21_845 / WRAP))
+  })
+})
+
+describe('wrapBreaks (Wrap lines)', () => {
+  const wrapped = (text: string, cols: number) => {
+    const b = wrapBreaks(text, cols)
+    return b.slice(0, -1).map((at, i) => text.slice(at, b[i + 1]))
+  }
+  it('fills rows to the column count, a wide character two columns', () => {
+    expect(wrapBreaks('', 10)).toEqual([0, 0])
+    expect(wrapped('a'.repeat(25), 10).map(r => r.length)).toEqual([10, 10, 5])
+    expect(wrapped('語'.repeat(12), 10).map(r => r.length)).toEqual([5, 5, 2])
+    expect(wrapped('ab語cd語ef', 4)).toEqual(['ab語', 'cd語', 'ef'])
+  })
+  it('never splits a surrogate pair or a grapheme cluster', () => {
+    const text = 'a\u{20000}é\u{1F468}‍\u{1F469}‍\u{1F467}x'.repeat(40)
+    for (const cols of [2, 3, 7, 80]) {
+      const b = wrapBreaks(text, cols)
+      for (const at of b.slice(1, -1)) expect(clusters(text).has(at), `cols ${cols} at ${at}`).toBe(true)
+      expect(wrapped(text, cols).join('')).toBe(text)
+    }
+  })
+  it('keeps every row within 2,048 units, cutting one grapheme longer than that outside its surrogate pairs', () => {
+    const marks = 'a' + '́'.repeat(5000)
+    expect(Math.max(...wrapped(marks + 'b', 80).map(r => r.length))).toBeLessThanOrEqual(WRAP)
+    const zwj = `${'\u{1F468}‍'.repeat(2000)}\u{1F469}`
+    const b = wrapBreaks(zwj, 80)
+    expect(Math.max(...wrapped(zwj, 80).map(r => r.length))).toBeLessThanOrEqual(WRAP)
+    for (const at of b.slice(1, -1)) expect(zwj.charCodeAt(at) < 0xdc00 || zwj.charCodeAt(at) > 0xdfff).toBe(true)
+    expect(wrapped(zwj, 80).join('')).toBe(zwj)
   })
 })
 

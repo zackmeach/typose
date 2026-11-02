@@ -21,6 +21,20 @@ export class CoreCallError extends Error {
   }
 }
 
+/** What the core was working on when it died (Z78): every document a pending call named, at any depth of its params
+ *  (a page's `doc`, a view's, a ref's), and every path an open named. Bookkeeping that reads no file doesn't count. */
+export interface Busy { docs: ReadonlySet<number>; paths: ReadonlySet<string> }
+const BOOKKEEPING = new Set<Method>(['reserve', 'deactivate', 'deactivateActivation', 'close', 'captureLocation', 'releaseSaved',
+  'releaseImage', 'transferDoc', 'releaseSurface', 'cancel', 'sourceFindClose', 'csvFindClose', 'csvOrderClose'])
+
+function busy(params: unknown, into: { docs: Set<number>; paths: Set<string> }, depth = 0): void {
+  if (typeof params !== 'object' || params === null || depth > 3) return
+  const p = params as Record<string, unknown>
+  if (typeof p.doc === 'number') into.docs.add(p.doc)
+  if (depth === 0 && typeof p.path === 'string') into.paths.add(p.path)
+  for (const value of Object.values(p)) busy(value, into, depth + 1)
+}
+
 const isMainMessage = (data: unknown): data is MainMessage =>
   typeof data === 'object' && data !== null && ['core-port', 'core-gone'].includes((data as MainMessage).type) && Number.isSafeInteger((data as MainMessage).session)
 
@@ -61,9 +75,9 @@ export class CoreClient {
   /** Sessions main reported gone before their port arrived. */
   private readonly lost = new Set<number>()
   private nextId = 1
-  private readonly pending = new Map<number, { method: Method; ok: (v: unknown) => void; fail: (e: CoreCallError) => void }>()
+  private readonly pending = new Map<number, { method: Method; params: unknown; ok: (v: unknown) => void; fail: (e: CoreCallError) => void }>()
   private readonly progress = new Set<(e: ProgressEvent) => void>()
-  private readonly goneListeners = new Set<() => void>()
+  private readonly goneListeners = new Set<(busy: Busy) => void>()
   private readonly readyListeners = new Set<(hello: Hello) => void>()
   private hello: Promise<Hello> | null = null
   /** `connect`'s promise, until the first session's handshake settles it. */
@@ -97,7 +111,7 @@ export class CoreClient {
         void this.call('cancel', { id }).catch(() => {})
       }
       const cleanup = () => signal?.removeEventListener('abort', cancel)
-      this.pending.set(id, { method,
+      this.pending.set(id, { method, params,
         ok: (value) => { cleanup(); ok(value as Result<M, P>) },
         fail: (error) => { cleanup(); fail(error) }
       })
@@ -123,7 +137,8 @@ export class CoreClient {
     return () => this.progress.delete(cb)
   }
 
-  onGone(cb: () => void): () => void {
+  /** Called when the core dies, with what it was working on; before any pending call's rejection is handled. */
+  onGone(cb: (busy: Busy) => void): () => void {
     this.goneListeners.add(cb)
     return () => this.goneListeners.delete(cb)
   }
@@ -182,7 +197,9 @@ export class CoreClient {
     const pending = [...this.pending.values()]
     this.pending.clear()
     if (__TEST_HOOKS__) testHooks.gone = { at: Date.now(), rejected: pending.length }
+    const working = { docs: new Set<number>(), paths: new Set<string>() }
+    for (const call of pending) if (!BOOKKEEPING.has(call.method)) busy(call.params, working)
     for (const call of pending) call.fail(new CoreCallError('CoreGone', "Typose's core stopped"))
-    for (const cb of this.goneListeners) cb()
+    for (const cb of this.goneListeners) cb(working)
   }
 }

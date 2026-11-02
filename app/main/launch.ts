@@ -1,5 +1,6 @@
-// Spec §8.1: files a launch names, from its argv and cwd: this launch's own, or a second instance's.
+// Spec §8.1: files a launch names, from its argv and cwd: this launch's own, or a second instance's; and what a drop names.
 import { resolve } from 'node:path'
+import type { DroppedPaths } from '../shared/protocol'
 
 /** Windows' command-line limit, in characters. A real launch's argv and cwd fit in it. */
 const MAX_CHARS = 32_767
@@ -31,4 +32,28 @@ export function handoff(data: unknown): { argv: string[]; cwd: string } | null {
   let chars = 0
   for (const a of argv as unknown[]) if (typeof a !== 'string' || (chars += a.length) > MAX_CHARS) return null // a hole is undefined
   return { argv: argv as string[], cwd }
+}
+
+/** The most items one drop opens. */
+const MAX_DROP = 256
+
+/**
+ * A drop is an explicit choice, as Open file… and Open folder… are, of what the preload read from it (untrusted): items
+ * of `{ path, folder }`, or null when the message has another shape or size. Only a drive path (Windows) or an absolute
+ * path (elsewhere) is opened; UNC, device, relative and empty paths are refused here, before anything touches them,
+ * since the manual open a file then takes would reach a share's host. Files then take Open file…'s manual-open policy
+ * and folders Open folder…'s capture, which refuses network, reparse and cloud-backed folders.
+ */
+export function dropPaths(items: unknown, windows = process.platform === 'win32'): DroppedPaths | null {
+  if (!Array.isArray(items) || items.length > MAX_DROP) return null
+  const drop: DroppedPaths = { files: [], folders: [], refused: [] }
+  for (const item of items as unknown[]) {
+    const { path, folder } = (item ?? {}) as { path?: unknown; folder?: unknown }
+    if (typeof path !== 'string' || path.length > MAX_CHARS || typeof folder !== 'boolean') return null
+    // oxlint-disable-next-line no-control-regex -- a path with a control character names nothing to open
+    const local = !/[\u0000-\u001f]/.test(path) && (windows ? /^[A-Za-z]:[\\/]/.test(path) : path.startsWith('/') && !path.startsWith('//'))
+    if (!local) drop.refused.push(path)
+    else (folder ? drop.folders : drop.files).push(path)
+  }
+  return drop
 }

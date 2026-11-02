@@ -60,6 +60,8 @@ export interface ReaderWindow {
   release(): void
   notice(message: string): void
   opened(): void
+  /** A folder a launch or drop named: added as Open folder… adds a root. */
+  addFolder(path: string): Promise<void>
   openLink(cardId: string, source: Opened, target: string, path: string, gesture: LocalGesture): Promise<boolean>
   report(cardId: string, title: string, folderNode?: string): void
   register(cardId: string, handle: ReaderHandle): () => void
