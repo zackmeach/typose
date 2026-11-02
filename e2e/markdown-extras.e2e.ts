@@ -1,7 +1,7 @@
 import { type Page, expect } from '@playwright/test'
 import { join } from 'node:path'
 import { HOSTILE_HTML, HOSTILE_MERMAID, HOSTILE_TEX, MATH_BOMB, MATH_BOMB_3 } from '../app/renderer/math/hostile'
-import { FIXTURES, type TestHooks, assertNetLog, finish, fixture, launch, test, waitIndexed } from './app'
+import { FIXTURES, type Launched, type TestHooks, assertNetLog, finish, fixture, launch, test, waitIndexed } from './app'
 import { processMemory } from './memory'
 
 /**
@@ -265,4 +265,40 @@ test('blocks that cannot highlight pay nothing, so a formula after a thousand of
     expect(await extrasReserved(live.win)).toBeLessThan(4 << 20)
     expect(live.pageErrors).toEqual([])
   } finally { await finish(live) }
+})
+
+/** The renderer's private bytes after a forced GC, so garbage from settled jobs doesn't count as kept. */
+async function keptPrivate(live: Launched): Promise<number> {
+  const cdp = await live.win.context().newCDPSession(live.win)
+  await cdp.send('HeapProfiler.collectGarbage')
+  await live.win.waitForTimeout(2000)
+  return (await processMemory(live.app)).find(p => p.type === 'Tab')!.private ?? 0
+}
+
+test('two thousand small formulas, or two thousand one-line code blocks, all render within a 2 GiB budget', async () => {
+  test.setTimeout(300_000)
+  const paragraphs = (item: (i: number) => string) => Array.from({ length: 20 }, (_, p) => Array.from({ length: 100 }, (_, i) => item(p * 100 + i)).join(' ')).join('\n\n')
+  const blocks = (language: string) => Array.from({ length: 2000 }, (_, i) => '```' + language + `\nconst value${i} = { id: ${i}, name: 'item' }\n` + '```').join('\n\n')
+  const cases = [
+    { name: 'formulas', plain: paragraphs(i => `x_${i}`), lit: paragraphs(i => `$x_${i}$`), done: '.tp-math .katex' },
+    { name: 'code blocks', plain: blocks('text'), lit: blocks('ts'), done: 'code[data-highlighted="1"]' }
+  ]
+  for (const { name, plain, lit, done } of cases) {
+    const measure = async (variant: string, source: string, count: number) => {
+      const file = fixture(`markdown-extras-2000-${name.replace(' ', '-')}-${variant}.md`, '# Many\n\n' + source + '\n')
+      const live = await launch({ file, hooks: true, env: { TYPOSE_TEST_BUDGET: String(2 ** 31) } })
+      try {
+        await expect(live.win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 60_000 })
+        await expect(live.win.locator(done)).toHaveCount(count, { timeout: 120_000 })
+        expect(await live.win.locator('.tp-math[title], code[title]').count()).toBe(0) // nothing refused or stopped
+        expect(live.pageErrors).toEqual([])
+        return { kept: await keptPrivate(live), extras: await extrasReserved(live.win) }
+      } finally { await finish(live) }
+    }
+    const before = await measure('plain', plain, 0)
+    const after = await measure('lit', lit, 2000)
+    const grew = after.kept - before.kept
+    console.log(`2,000 ${name}: ${(after.extras / 2 ** 20).toFixed(1)} MiB reserved against renderer private +${(grew / 2 ** 20).toFixed(1)} MiB`)
+    expect(grew).toBeLessThan(after.extras)
+  }
 })

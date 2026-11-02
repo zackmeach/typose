@@ -27,10 +27,12 @@ export function sanitizeMath(html: string): string {
 if (__TEST_HOOKS__) Object.assign(window, { typoseSanitizeMath: sanitizeMath })
 
 /**
- * Renderer bytes per generated element, charged before the DOM sees any: 30 dense 6×6 matrices (70,080 elements)
- * raised the renderer's private bytes by 156.6 MiB, 2,343 B an element. ×1.25, rounded up to 64 B.
+ * Renderer bytes a rendered formula keeps, charged before the DOM sees any: a fixed part plus one per element. 30 dense
+ * 6×6 matrices (2,340 elements each) raised the renderer's private bytes by 156.6 MiB, and 2,000 inline `$x_i$` (28
+ * each) by 292 MiB: 2,358 B an element and 87,064 B a formula. Each ×1.25, rounded up to 64 B.
  */
 export const MATH_ELEMENT_BYTES = 2944
+export const MATH_FORMULA_BYTES = 108_864
 /** A formula still in the worker after this is a runaway: the worker is terminated and respawned for the next. */
 const MATH_TIMEOUT_MS = 1500
 
@@ -58,7 +60,7 @@ export async function renderMath(el: HTMLElement, tex: string, displayMode = fal
   // The worker's caps again, before this thread parses anything.
   const elements = elementCount(result.html)
   if (result.html.length > MATH_MAX_BYTES || elements > MATH_MAX_ELEMENTS) return kept(`Math output exceeds ${MATH_MAX_ELEMENTS} elements`)
-  if (!await admit(elements * MATH_ELEMENT_BYTES)) return kept('rendering budget exceeded')
+  if (!await admit(MATH_FORMULA_BYTES + elements * MATH_ELEMENT_BYTES)) return kept('rendering budget exceeded')
   el.innerHTML = sanitizeMath(result.html)
   const parseError = el.querySelector('.katex-error')
   if (parseError) showProblem(el, tex, parseError.getAttribute('title') ?? 'KaTeX parse error')
