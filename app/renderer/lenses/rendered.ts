@@ -16,6 +16,12 @@ import '../markdown-extras.css'
 
 export { RENDERED_PER_UNIT, renderedCharge } from './rendered-charge'
 
+/** A link with nothing to open: a dashed grey underline (markdown-extras.css), and the target in its tooltip. */
+function unresolved(a: HTMLElement, target: string): void {
+  a.classList.add('md-unresolved')
+  a.title = `Not found: ${target}`
+}
+
 export interface RenderedOptions {
   /** Where to put the view, as a source line (the lens switch, Reload). */
   atLine?: number
@@ -403,7 +409,7 @@ export class RenderedLens {
 
   private async follow(a: HTMLAnchorElement, gesture: LocalGesture): Promise<void> {
     const href = a.getAttribute('data-href')
-    if (!href || this.stopped || this.paused) return
+    if (!href || this.stopped || this.paused || href.startsWith('typose-wiki:')) return
     const generation = this.linkGeneration
     const interaction = this.interaction
     try {
@@ -419,11 +425,16 @@ export class RenderedLens {
         this.focusJump = true
         delete this.scroller.dataset.ready
         this.settle()
-      } else if (target.kind === 'inert') a.title = `Not opened: ${href}`
+      } else if (target.kind === 'inert') {
+        if (href.startsWith('#')) unresolved(a, href) // no heading or footnote has this fragment
+        else a.title = `Not opened: ${href}`
+      }
     } catch (err) {
       if (this.stopped || this.paused || generation !== this.linkGeneration) return
       if (err instanceof CoreCallError && err.code === 'Frozen') this.options.onFrozen(err.message)
-      a.title = `Not opened: ${href}`
+      // The local target is missing. resolve only normalizes a path, so the failed open is the first that knows.
+      if (err instanceof CoreCallError && err.code === 'NotFound') unresolved(a, href)
+      else a.title = `Not opened: ${href}`
     }
   }
 
@@ -570,7 +581,8 @@ export class RenderedLens {
       for (const image of el.querySelectorAll<HTMLElement>('.tp-img')) this.images.add(image)
       for (const a of el.querySelectorAll('a')) {
         const dest = a.getAttribute('data-href')
-        if (dest) a.title = dest // the tooltip shows the target (plan §2.4); the href stays "#"
+        if (dest?.startsWith('typose-wiki:')) unresolved(a, dest.slice(12)) // nothing resolves wiki links yet
+        else if (dest) a.title = dest // the tooltip shows the target (plan §2.4); the href stays "#"
         if (!(a.textContent ?? '').trim()) a.setAttribute('aria-label', dest || 'Link')
       }
       for (const input of el.querySelectorAll('input'))

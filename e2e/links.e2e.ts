@@ -45,7 +45,8 @@ test('external links hand off once, while unsafe and missing targets keep the re
     await expect.poll(calls).toEqual([...before, url])
   }
   for (const name of ['Unsafe', 'Local', 'Share']) await win.getByRole('link', { name, exact: true }).click()
-  await expect(win.getByRole('link', { name: 'Local', exact: true })).toHaveAttribute('title', 'Not opened: other.md')
+  // Windows holds a local capability, so the missing target is known once its open fails; elsewhere local links are refused.
+  await expect(win.getByRole('link', { name: 'Local', exact: true })).toHaveAttribute('title', process.platform === 'win32' ? 'Not found: other.md' : 'Not opened: other.md')
   expect(await calls()).toHaveLength(3)
   await expect(win.locator('.card-name')).toHaveText('links.md')
   expect(l.pageErrors).toEqual([])

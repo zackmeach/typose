@@ -4,8 +4,9 @@ import { HOSTILE_MERMAID, HOSTILE_TEX } from '../app/renderer/math/hostile'
 import { FIXTURES, assertNetLog, finish, fixture, launch, test, waitIndexed } from './app'
 
 test('offline Markdown extras render securely and offscreen math/diagrams reach normalized print', async () => {
-  const source = ['---', 'title: Markdown candidate', 'owner: Zack', '---', '# Markdown extras', '',
-    '> [!NOTE]', '> A native callout.', '', '## Formatted code', '', '```typescript', 'const answer = 42', '```', '',
+  const source = ['---', 'title: Markdown candidate', 'owner: Zack', 'tags: [alpha, beta]', '---', '# Markdown extras', '',
+    '[Top](#markdown-extras) [Gone](#no-such-heading) [Risks](markdown-extras-risks.md) [[Team roster]]', '',
+    '> [!NOTE]', '> A native callout.', '', '## Formatted code', '', '```typescript', 'const answer = 42', "const config = { key: 'value', list: [1, 2] }", '```', '',
     '$x^2 + y^2$', '', '```mermaid', 'flowchart LR', '  A[Source] --> B[Reader]', '```', '',
     '<iframe src="data:text/html,<script>top.location=\'https://example.invalid/\'</script>"></iframe>', '',
     ...Array.from({ length: 60 }, (_, index) => `Offscreen paragraph ${index}.\n`),
@@ -17,8 +18,39 @@ test('offline Markdown extras render securely and offscreen math/diagrams reach 
     await expect(live.win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 60_000 })
     await waitIndexed(live.win)
     await expect(live.win.locator('.md-properties')).toContainText('Markdown candidate')
+    await expect(live.win.locator('.md-properties dd').filter({ hasText: 'alpha' })).toHaveText('[alpha, beta]')
     await expect(live.win.locator('.md-callout[data-tint="blue"]')).toContainText('A native callout.')
     await expect(live.win.locator('code[data-highlighted="1"]')).toContainText('const answer = 42', { timeout: 30_000 })
+    // Every colored token stays readable on the code block in both themes, and a theme switch repaints without a re-tokenize.
+    const tokens = () => live.win.evaluate(() => {
+      const luminance = (color: string) => {
+        const [r, g, b] = color.match(/[\d.]+/g)!.slice(0, 3).map(v => Number(v) / 255).map(v => v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)
+        return r * 0.2126 + g * 0.7152 + b * 0.0722
+      }
+      const code = document.querySelector('code[data-highlighted="1"]')!
+      const background = luminance(getComputedStyle(code.closest('pre')!).backgroundColor)
+      const colors = [...code.querySelectorAll('.tp-token')].filter(token => token.textContent!.trim()).map(token => getComputedStyle(token).color)
+      const ratios = colors.map(color => { const l = luminance(color); return (Math.max(l, background) + 0.05) / (Math.min(l, background) + 0.05) })
+      return { colors, min: Math.min(...ratios) }
+    })
+    const light = (on: boolean) => live.win.evaluate(on => {
+      // What the settings controller applies for Typose Light.
+      const root = document.documentElement, tokens = { canvas: '#f7f7f7', surface: '#ffffff', 'surface-raised': '#f0f0f2', border: '#dcdce0', text: '#202024', text2: '#64646d', accent: '#285ac9' }
+      if (on) root.dataset.theme = 'light'; else delete root.dataset.theme
+      for (const [key, value] of Object.entries(tokens)) {
+        if (on) root.style.setProperty('--' + key, value)
+        else root.style.removeProperty('--' + key)
+      }
+    }, on)
+    const dark = await tokens()
+    expect(dark.colors.length).toBeGreaterThan(8)
+    expect(dark.min).toBeGreaterThanOrEqual(3)
+    await light(true)
+    const lit = await tokens()
+    expect(lit.min).toBeGreaterThanOrEqual(3)
+    expect(lit.colors).not.toEqual(dark.colors)
+    await light(false)
+    expect((await tokens()).colors).toEqual(dark.colors)
     await expect(live.win.locator('.tp-math .katex')).toHaveCount(2, { timeout: 30_000 })
     const frame = live.win.locator('.md-diagram iframe')
     await expect(frame).toHaveAttribute('sandbox', '', { timeout: 30_000 })
@@ -55,6 +87,20 @@ test('offline Markdown extras render securely and offscreen math/diagrams reach 
     })
     expect(refused.map(result => result.kind)).toEqual(['refused', 'refused', 'refused'])
     expect(await live.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)).toBe(windows)
+    // A wiki link has nothing to resolve it; a missing heading or local file is known once following it fails.
+    const link = (name: string) => live.win.getByRole('link', { name, exact: true })
+    await expect(link('Team roster')).toHaveClass(/md-unresolved/)
+    await expect(link('Team roster')).toHaveAttribute('title', 'Not found: Team roster')
+    expect(await link('Team roster').evaluate(a => getComputedStyle(a).textDecorationStyle)).toBe('dashed')
+    await link('Gone').click()
+    await expect(link('Gone')).toHaveAttribute('title', 'Not found: #no-such-heading')
+    await expect(link('Gone')).toHaveClass(/md-unresolved/)
+    if (process.platform === 'win32') {
+      await link('Risks').click()
+      await expect(link('Risks')).toHaveAttribute('title', 'Not found: markdown-extras-risks.md', { timeout: 30_000 })
+      await expect(link('Risks')).toHaveClass(/md-unresolved/)
+    }
+    await expect(link('Top')).not.toHaveClass(/md-unresolved/)
     expect(live.pageErrors).toEqual([])
   } finally { await finish(live) }
   expect(assertNetLog(netlog)).toContain('PASS: no Chromium network-stack activity')

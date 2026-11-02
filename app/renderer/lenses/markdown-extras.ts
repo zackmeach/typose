@@ -1,4 +1,4 @@
-import { parseDocument } from 'yaml'
+import { parseDocument, stringify } from 'yaml'
 import { renderMath } from '../math/math'
 import { renderDiagram } from '../mermaid/diagram'
 import { OFFLINE_LANGUAGES, tokenizeOffline } from './syntax'
@@ -20,7 +20,8 @@ async function highlight(code: HTMLElement): Promise<void> {
     if (!code.isConnected || code.textContent !== original) return
     // Color spans sit INSIDE each native provenance span, so source selections remain mapped.
     let cursor = 0
-    const pieces = tokens.flatMap((line, index) => [...line, ...(index < tokens.length - 1 ? [{ content: '\n', color: undefined }] : [])])
+    const pieces: Array<{ content: string; variants: Record<string, { color?: string }> }> =
+      tokens.flatMap((line, index) => [...line, ...(index < tokens.length - 1 ? [{ content: '\n', variants: {} }] : [])])
     const walker = document.createTreeWalker(code, NodeFilter.SHOW_TEXT)
     const nodes: Text[] = []
     while (walker.nextNode()) nodes.push(walker.currentNode as Text)
@@ -34,7 +35,12 @@ async function highlight(code: HTMLElement): Promise<void> {
         if (count === 0) { tokenIndex++; tokenOffset = 0; continue }
         const span = document.createElement('span')
         span.textContent = node.data.slice(offset, offset + count)
-        if (token.color && /^#[\da-f]{6,8}$/i.test(token.color)) span.style.color = token.color
+        // Both themes' colors ride as custom properties; markdown-extras.css picks the app theme's, so a switch repaints.
+        span.className = 'tp-token'
+        for (const scheme of ['light', 'dark']) {
+          const color = token.variants[scheme]?.color
+          if (color && /^#[\da-f]{6,8}$/i.test(color)) span.style.setProperty('--tp-' + scheme, color)
+        }
         fragment.append(span)
         offset += count; cursor += count; tokenOffset += count
         if (tokenOffset === token.content.length) { tokenIndex++; tokenOffset = 0 }
@@ -62,7 +68,8 @@ function frontmatter(pre: HTMLElement): void {
     for (const [key, value] of entries) {
       const term = document.createElement('dt'), description = document.createElement('dd')
       term.textContent = key
-      description.textContent = typeof value === 'string' ? value : JSON.stringify(value)
+      // Nested values print as YAML flow style (`[a, b]`), as a Markdown author wrote them, not JSON.
+      description.textContent = typeof value === 'string' ? value : stringify(value, { schema: 'failsafe', collectionStyle: 'flow', flowCollectionPadding: false, lineWidth: 0 }).trimEnd()
       grid.append(term, description)
     }
     pre.replaceWith(grid)

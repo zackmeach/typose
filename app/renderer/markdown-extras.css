@@ -22,3 +22,8 @@ pre:hover > .md-code-copy, pre:focus-within > .md-code-copy { opacity: 1; }
 .md-outline button:hover { color: var(--text); }
 .md-outline button[aria-current="location"] { color: var(--accent); background: var(--surface); }
 .md-scroller[data-outline-column="1"] .md-column { margin-right: 232px; margin-left: auto; }
+/* Highlighted code carries github-dark and github-light colors; the app theme picks one, with no re-tokenize. */
+.tp-token { color: var(--tp-dark); }
+:root[data-theme="light"] .tp-token { color: var(--tp-light); }
+/* A link with no target to open: a missing local file or heading, or a wiki link. */
+.md-column a.md-unresolved { color: inherit; text-decoration: underline dashed var(--text2); text-underline-offset: 3px; }
