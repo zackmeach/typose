@@ -11,6 +11,8 @@ import { handoff, launchPaths } from './launch'
 import { startLifecycle } from './lifecycle'
 import { envWhole, isMark, marksHook } from './marks'
 import { SessionStore } from './session-store'
+import { ConfigStore, type TomlCodec } from './config-store'
+import { COMMANDS } from '../shared/commands'
 import { MAX_PRINT_PDF_BYTES, physicalPageCount, validatePrintDocument } from './print-validation'
 
 const mainStart = Date.now() // plan C8's first startup mark: read now, written once the hook is set up below
@@ -206,26 +208,15 @@ function createWindow(): BrowserWindow {
 /**
  * macOS's native menu (spec §9): ☰'s commands, with Cmd+W closing a tab (or the empty window, brief §7.2),
  * and the app, Edit and Window menus of every Mac app (Edit's Copy and Select All are how Cmd+C and Cmd+A reach the
- * page). The page keeps Cmd+R (PR 4), so Reload has no accelerator here.
+ * page). Command labels and accelerators come from the same table as the palette and shortcut reference.
  */
 function macMenu(win: BrowserWindow): Menu {
   const run = (command: Command) => () => win.isDestroyed() || win.webContents.send('command', command)
   return Menu.buildFromTemplate([
     { role: 'appMenu' },
     { label: 'File', submenu: [
-      { label: 'Open File…', click: run('open') },
-      { label: 'Open Folder…', click: run('open-folder') },
-      { label: 'Toggle Sidebar', accelerator: 'Cmd+B', click: run('toggle-sidebar') },
-      { label: 'Split Right', accelerator: 'Cmd+\\', click: run('split-right') },
-      { label: 'Move Tab Right', click: run('move-tab-right') },
-      { label: 'Close Card', click: run('close-card') },
-      { label: 'Reload', click: run('reload') },
-      { label: 'Find in File…', accelerator: 'Cmd+F', click: run('find') },
-      { label: 'Next Match', accelerator: 'F3', click: run('find-next') },
-      { label: 'Previous Match', accelerator: 'Shift+F3', click: run('find-previous') },
-      { label: 'Close Tab', accelerator: 'Cmd+W', click: run('close-tab') },
-      { label: 'Reopen Closed Tab', accelerator: 'Cmd+Shift+T', click: run('reopen-tab') },
-      { label: 'Clear Recently Closed Tabs', click: run('clear-closed') },
+      ...COMMANDS.filter(command => command.id !== 'exit' && command.id !== 'browse').map(command => ({ label: command.label,
+        ...(command.shortcut && command.id !== 'copy' ? { accelerator: command.shortcut.replace('Ctrl+', 'Cmd+') } : {}), click: run(command.id) })),
       { role: 'close', accelerator: 'Shift+Cmd+W' }
     ] },
     { role: 'editMenu' },
@@ -254,6 +245,9 @@ void app.whenReady().then(() => {
   session.defaultSession.setSpellCheckerEnabled(false)
   serveApp()
   const win = createWindow()
+  const targets: Record<string, string> = { 'win32-x64': 'win32-x64-msvc', 'darwin-arm64': 'darwin-arm64', 'linux-x64': 'linux-x64-gnu' }
+  const codec = require(`typose-node/${__TEST_HOOKS__ ? 'hooks/' : ''}typose-node.${targets[`${process.platform}-${process.arch}`]}.node`) as TomlCodec
+  const configStore = new ConfigStore(app.getPath('userData'), codec)
   if (sessionStore.snapshot().window?.maximized) win.maximize()
   const rememberBounds = () => { if (!win.isDestroyed()) sessionStore.bounds({ ...win.getNormalBounds(), maximized: win.isMaximized() }) }
   win.on('resize', rememberBounds)
@@ -269,6 +263,28 @@ void app.whenReady().then(() => {
     const workspace = sessionStore.snapshot()
     delete workspace.window
     return workspace
+  })
+  ipcMain.handle('load-settings', (event, ...args: unknown[]) => {
+    if (!fromMainApp(event) || args.length) throw new Error('refused load-settings')
+    return configStore.snapshot()
+  })
+  ipcMain.handle('change-setting', (event, ...args: unknown[]) => {
+    if (!fromMainApp(event) || args.length !== 3) throw new Error('refused change-setting')
+    return configStore.update(args[0], args[1], args[2])
+  })
+  ipcMain.handle('export-theme', (event, ...args: unknown[]) => {
+    if (!fromMainApp(event) || args.length !== 2) throw new Error('refused export-theme')
+    return configStore.exportTheme(args[0], args[1])
+  })
+  ipcMain.handle('chrome-theme', (event, ...args: unknown[]) => {
+    if (!fromMainApp(event) || args.length !== 3 || typeof args[0] !== 'boolean' || typeof args[1] !== 'string' || typeof args[2] !== 'string' || !/^#[0-9a-f]{6}$/i.test(args[1]) || !/^#[0-9a-f]{6}$/i.test(args[2])) return false
+    if (process.platform === 'win32') win.setTitleBarOverlay({ color: args[1], symbolColor: args[2] })
+    win.setBackgroundColor(args[1])
+    return true
+  })
+  ipcMain.handle('full-screen', (event, ...args: unknown[]) => {
+    if (!fromMainApp(event) || args.length) return false
+    win.setFullScreen(!win.isFullScreen()); return true
   })
   ipcMain.handle('save-session', (event, ...args: unknown[]) => {
     if (!fromMainApp(event) || args.length !== 1) return false

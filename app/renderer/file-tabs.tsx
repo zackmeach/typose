@@ -6,12 +6,13 @@ import type { TabId, WorkspaceTab } from './workspace'
 import './file-tabs.css'
 
 /** Permanent files on the canvas; the selected card alone owns a document lens. */
-export function FileTabs({ tabs, selected, onSelect, onClose, panelId = 'file-card' }: {
+export function FileTabs({ tabs, selected, onSelect, onClose, panelId = 'file-card', settings }: {
   tabs: readonly WorkspaceTab[]
   selected: TabId | null
   onSelect(id: TabId): void
   onClose(id: TabId): void
   panelId?: string
+  settings?: { active: boolean; onSelect(): void; onClose(): void }
 }) {
   const row = useRef<HTMLDivElement>(null)
   const [overflow, setOverflow] = useState(false)
@@ -42,13 +43,13 @@ export function FileTabs({ tabs, selected, onSelect, onClose, panelId = 'file-ca
   return (
     <nav className="file-tabs" aria-label="File tabs">
       {/* ARIA ownership groups only tabs; their visually paired close controls remain separate native buttons. */}
-      {tabs.length ? <div className="file-tab-list" role="tablist" aria-label="Files" aria-owns={tabs.map((tab) => `file-${tab.id}`).join(' ')} /> : null}
+      {tabs.length || settings ? <div className="file-tab-list" role="tablist" aria-label="Files" aria-owns={[...tabs.map(tab => `file-${tab.id}`), ...(settings ? ['settings-tab-' + panelId] : [])].join(' ')} /> : null}
       <div className="file-tab-scroll" ref={row}>
         {tabs.map((tab, index) => (
           <div className="file-pill" data-selected={tab.id === selected || undefined} key={tab.id}>
             <button type="button" className="file-tab" role="tab" id={`file-${tab.id}`}
               aria-controls={tab.id === selected ? panelId : undefined} aria-labelledby={`file-label-${tab.id}`}
-              aria-selected={tab.id === selected} tabIndex={tab.id === selected ? 0 : -1} title={tab.path}
+              aria-selected={!settings?.active && tab.id === selected} tabIndex={!settings?.active && tab.id === selected ? 0 : -1} title={tab.path}
               onClick={() => onSelect(tab.id)} onKeyDown={(event) => {
                 if (event.key === 'Delete') {
                   event.preventDefault()
@@ -65,6 +66,7 @@ export function FileTabs({ tabs, selected, onSelect, onClose, panelId = 'file-ca
               onClick={(event) => { event.stopPropagation(); onClose(tab.id) }}>×</button>
           </div>
         ))}
+        {settings ? <div className="file-pill" data-selected={settings.active || undefined}><button type="button" className="file-tab" role="tab" id={'settings-tab-' + panelId} aria-selected={settings.active} tabIndex={settings.active ? 0 : -1} onClick={settings.onSelect}>⚙ Settings</button><button type="button" className="file-tab-close" aria-label="Close Settings" onClick={settings.onClose}>×</button></div> : null}
       </div>
       {overflow ? (
         <MenuTrigger>

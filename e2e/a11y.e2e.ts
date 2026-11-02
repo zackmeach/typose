@@ -1,3 +1,4 @@
+import { menuLabels } from './menu-fixture'
 // Plan PR 7's accessibility gates (Z39, spec §6.3): the accessibility mode main forwards (§6.2), Raw and the chrome
 // in the accessibility trees (CDP, and UIA on Windows), focus, the keyboard, axe, and 200% zoom. No screen-reader
 // claim: real-reader testing stays parked.
@@ -92,7 +93,7 @@ test('Raw is a named region whose text leaves out the gutter, and ☰ exposes me
     await expect(win.getByRole('menu')).toBeVisible()
     const open = await axTree(win)
     const [menu] = open.find('menu')
-    expect(open.under(menu).filter((n) => n.role?.value === 'menuitem').map((n) => n.name?.value)).toEqual(['Open file…', 'Open folder…', 'Toggle sidebar', 'Split right', 'Move tab right', 'Close card', 'Reload', 'Find in file…', 'Next match', 'Previous match', 'Close tab', 'Reopen closed tab', 'Clear recently closed tabs', EXIT])
+    expect(open.under(menu).filter((n) => n.role?.value === 'menuitem').map((n) => n.name?.value)).toEqual(menuLabels(EXIT))
     await win.keyboard.press('Escape')
   }
 
@@ -107,7 +108,7 @@ test('Raw is a named region whose text leaves out the gutter, and ☰ exposes me
     await win.getByRole('button', { name: 'Menu', exact: true }).click()
     await expect(win.getByRole('menu')).toBeVisible()
     const menu = uiaNodes(await uiaTree(app)).find((n) => n.type === 'Menu')
-    expect(menu?.children?.filter((n) => n.type === 'MenuItem').map((n) => n.name)).toEqual(['Open file…', 'Open folder…', 'Toggle sidebar', 'Split right', 'Move tab right', 'Close card', 'Reload', 'Find in file…', 'Next match', 'Previous match', 'Close tab', 'Reopen closed tab', 'Clear recently closed tabs', EXIT])
+    expect(menu?.children?.filter((n) => n.type === 'MenuItem').map((n) => n.name)).toEqual(menuLabels(EXIT))
     await win.keyboard.press('Escape')
   }
   expect(l.pageErrors).toEqual([])
@@ -328,7 +329,7 @@ test('at 200% zoom in the smallest window, the chrome and Raw stay reachable, an
     }
     await tabTo(win, '.menu-button')
     await win.keyboard.press('Enter')
-    await expect(win.getByRole('menuitem')).toHaveText(['Open file…', 'Open folder…', 'Toggle sidebar', 'Split right', 'Move tab right', 'Close card', 'Reload', 'Find in file…', 'Next match', 'Previous match', 'Close tab', 'Reopen closed tab', 'Clear recently closed tabs', EXIT])
+    await expect(win.getByRole('menuitem')).toHaveText(menuLabels(EXIT))
     for (const item of await win.getByRole('menuitem').all()) {
       await expect(item).toBeFocused()
       expect(await item.evaluate(el => {

@@ -2,7 +2,14 @@
 use std::path::Path;
 use std::sync::RwLock;
 
-use encoding_rs::{Encoding, WINDOWS_1252};
+use encoding_rs::{Encoding, UTF_8, WINDOWS_1252};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static UTF8_FALLBACK: AtomicBool = AtomicBool::new(false);
+/// Applies to newly opened/reloaded documents; existing generations retain their detected encoding.
+pub fn set_encoding_fallback(utf8: bool) {
+    UTF8_FALLBACK.store(utf8, Ordering::Relaxed);
+}
 
 use crate::budget::{self, NoSlot, Reservation, Work};
 use crate::doc::{Charges, DocError, Document};
@@ -43,9 +50,10 @@ impl Raw {
 
     /// The caller reserves `OPEN_TEMP` before either kind of document construction and this initial sniff.
     fn from_document(doc: Document) -> Result<Raw, DocError> {
-        let index = LineIndex::new(doc.len(), &IndexConfig::default(), WINDOWS_1252).map_err(DocError::Memory)?;
+        let fallback = if UTF8_FALLBACK.load(Ordering::Relaxed) { UTF_8 } else { WINDOWS_1252 };
+        let index = LineIndex::new(doc.len(), &IndexConfig::default(), fallback).map_err(DocError::Memory)?;
         let head = doc.verified(doc.generation(), |store| store.read(0, CHUNK as u64))?;
-        let encoding = match sniff(&head, doc.len() <= CHUNK as u64, WINDOWS_1252) {
+        let encoding = match sniff(&head, doc.len() <= CHUNK as u64, fallback) {
             Sniffed::Text { encoding, .. } => encoding,
             Sniffed::Binary => return Err(DocError::Binary),
         };

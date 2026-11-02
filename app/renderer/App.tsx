@@ -1,4 +1,4 @@
-import { type CSSProperties, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { type CSSProperties, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { Button, Dialog, Modal, ModalOverlay } from 'react-aria-components'
 import type { Command, Hello, Opened } from '../shared/protocol'
 import { CoreCallError, type CoreClient } from './core'
@@ -16,6 +16,12 @@ import './split-cards.css'
 import './link-preview.css'
 import { sessionWorkspace, type RecentLocation, type SessionWorkspace } from '../shared/session'
 import './workspace-controls.css'
+import { COMMANDS } from '../shared/commands'
+import { SettingsController } from './settings-controller'
+import { SettingsPanel, type SettingsSection } from './SettingsPanel'
+import { WorkspaceOverlay, type QuickChoice } from './WorkspaceOverlay'
+import { indexRoot, type QuickIndex } from './workspace-search'
+import './settings.css'
 
 interface LinkPreview extends ReaderGroup { sourceId: string; trigger: HTMLElement; width: number; right: number }
 
@@ -24,6 +30,13 @@ export const appHooks: { close?: () => void; workspace?: () => ReturnType<Worksp
 
 /** The window owns commands, folders and metadata; each keyed ReaderCard owns one live document view. */
 export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> }) {
+  const [settings] = useState(() => new SettingsController())
+  const config = useSyncExternalStore(settings.subscribe, settings.getSnapshot)
+  const [overlay, setOverlay] = useState<'open' | 'palette' | null>(null)
+  const overlayRef = useRef<'open' | 'palette' | null>(null)
+  const [settingsTabs, setSettingsTabs] = useState<Record<string, { active: boolean; section: SettingsSection }>>({})
+  const settingsTabsRef = useRef(settingsTabs)
+  const [indexes, setIndexes] = useState<Record<string, QuickIndex>>({})
   const [groups, setGroups] = useState<readonly ReaderGroup[]>(() => [{ id: 'card-1', workspace: new WorkspaceStore('card-1-tab'), weight: 1 }])
   const groupRef = useRef(groups)
   const [preview, setPreviewState] = useState<LinkPreview | null>(null)
@@ -229,6 +242,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     })
   }
   shared.charge = charge
+  shared.settings = config.values
   shared.release = releaseEmptyWorkspace
   shared.notice = setWorkspaceNotice
   shared.opened = () => { if (sidebarOverlay) setSidebarOpen(false) }
@@ -249,6 +263,17 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   }
 
   useEffect(() => { document.title = title }, [title])
+  useEffect(() => { void settings.refresh().catch(error => setWorkspaceNotice('Cannot load settings · ' + String(error))) }, [settings])
+  useEffect(() => { if (hello.current) void core.call('preferences', { encodingFallback: config.values.encoding_fallback }).catch(error => setWorkspaceNotice('Cannot apply file preferences · ' + String(error))) }, [core, config.values.encoding_fallback])
+  const rootSignature = folderRoots.filter(root => !root.unavailable).map(root => root.id + ':' + root.ref.session).join(',')
+  useEffect(() => {
+    const controller = new AbortController()
+    setIndexes({})
+    for (const root of folders.current.filter(root => !root.unavailable)) void indexRoot(core, root, config.values.show_hidden, config.values.excludes, result => {
+      if (!controller.signal.aborted) setIndexes(before => ({ ...before, [root.id]: result }))
+    }, controller.signal)
+    return () => controller.abort()
+  }, [core, rootSignature, config.values.show_hidden, config.values.excludes.join('\n')])
   useEffect(() => {
     const off = groups.map(group => group.workspace.subscribe(scheduleSession))
     const capture = window.typose.onSessionCapture(() => captureNow.current())
@@ -256,6 +281,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     return () => { off.forEach(unsubscribe => unsubscribe()); capture(); window.removeEventListener('scroll', scheduleSession, true); clearTimeout(sessionTimer.current) }
   }, [groups])
   useEffect(() => { scheduleSession() }, [sidebarOpen, sidebarWidth, focused, folderRoots])
+  useEffect(() => { refreshFolders() }, [config.values.show_hidden])
   useLayoutEffect(() => markPainted('titlebarPainted'), [])
   useEffect(() => {
     const media = window.matchMedia('(max-width: 999px)')
@@ -282,7 +308,11 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       hello.current = value
       for (const group of allGroups.current) group.workspace.coreReady(value.session)
       workspaceBudget.current = new WorkspaceBudget(core, value.session, workspacePeak.current)
-      payment.current = charge(null, null, () => hello.current?.session === value.session).then(paid => { if (hello.current?.session === value.session) recharged.current = paid; return paid })
+      payment.current = charge(null, null, () => hello.current?.session === value.session).then(async paid => {
+        if (paid) await core.call('preferences', { encodingFallback: settings.getSnapshot().values.encoding_fallback })
+        if (hello.current?.session === value.session) recharged.current = paid
+        return paid
+      }).catch(error => { setWorkspaceNotice('Cannot apply file preferences · ' + String(error)); return false })
     })
     const openPath = (path: string) => {
       const reader = focusedReader()
@@ -295,6 +325,10 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       if (event.defaultPrevented || event.isComposing) return
       const command = MAC ? event.metaKey : event.ctrlKey
       const textControl = event.target instanceof Element && event.target.closest('input,textarea,select,[contenteditable="true"],[role="textbox"]')
+      if (command && !event.shiftKey && !event.altKey && ['o', 'k'].includes(event.key.toLowerCase())) { event.preventDefault(); run(event.key.toLowerCase() === 'o' ? 'open' : 'palette'); return }
+      if (overlayRef.current) return
+      if (command && !event.altKey && ['=', '+', '-', '0'].includes(event.key)) { event.preventDefault(); run(event.key === '0' ? 'zoom-reset' : event.key === '-' ? 'zoom-out' : 'zoom-in'); return }
+      if (event.key === 'F11') { event.preventDefault(); run('full-screen'); return }
       if (command && event.key.toLowerCase() === 'c' && !event.shiftKey && !event.altKey && !textControl) { event.preventDefault(); run('copy'); return }
       if (command && event.key.toLowerCase() === 'g' && !event.shiftKey && !event.altKey) { event.preventDefault(); run('go-to'); return }
       if (command && event.key.toLowerCase() === 'p' && !event.shiftKey && !event.altKey) { event.preventDefault(); run('print'); return }
@@ -312,7 +346,8 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     window.addEventListener('keydown', key)
     void core.connect().then(async () => {
       await payment.current
-      const [saved, paths] = await Promise.all([window.typose.loadSession(), window.typose.launchPaths()])
+      const [saved, paths] = await Promise.all([window.typose.loadSession(), window.typose.launchPaths(), settings.refresh()])
+      await core.call('preferences', { encodingFallback: settings.getSnapshot().values.encoding_fallback })
       await restoreWindowSession(saved)
       sessionReady.current = true
       for (const path of paths) openPath(path)
@@ -367,7 +402,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     setFolders(updateFolder(folders.current, rootId, nodeId, before => ({ ...before, loading: true, error: undefined })))
     try {
       if (!await metadata(async current => valid() && chargeWorkspace(workspace.getSnapshot().tabs, current))) return
-      const page = await core.call('listFolder', { folder: node.ref, ...(more ? { cursor: node.cursor } : {}), hidden: false })
+      const page = await core.call('listFolder', { folder: node.ref, ...(more ? { cursor: node.cursor } : {}), hidden: settings.getSnapshot().values.show_hidden })
       if (!valid()) return
       setFolders(updateFolder(folders.current, rootId, nodeId, before => {
         const entries = page.entries.map(entry => {
@@ -760,7 +795,53 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       splitBusy.current = false
     }
   }
+  function showOverlay(value: 'open' | 'palette' | null): void { overlayRef.current = value; setOverlay(value) }
+  function settingsTab(id: string, action: 'show' | 'file' | 'close', section: SettingsSection = 'Appearance'): void {
+    const next = { ...settingsTabsRef.current }
+    if (action === 'file' && !next[id]) return
+    if (action === 'close') delete next[id]
+    else next[id] = { active: action === 'show', section: action === 'file' ? next[id]?.section ?? section : section }
+    settingsTabsRef.current = next; setSettingsTabs(next)
+  }
+  function commandEnabled(command: Command): boolean {
+    const definition = COMMANDS.find(item => item.id === command)
+    const target = previewRef.current ?? groupRef.current.find(group => group.id === focusedRef.current)
+    if (definition?.document) {
+      if (!target || !previewRef.current && settingsTabsRef.current[target.id]?.active) return false
+      const tab = target.workspace.tab(target.workspace.getSnapshot().selected ?? '')
+      return tab?.card.kind === 'open'
+    }
+    return true
+  }
+  async function chooseQuick(choice: QuickChoice, side: boolean): Promise<void> {
+    if ('recent' in choice && choice.recent.kind === 'folder') { await pickFolder(undefined, choice.recent.path); return }
+    if (previewRef.current) { setWorkspaceNotice('Close the preview before changing the workspace'); return }
+    const sourceId = focusedRef.current
+    let destination = groupRef.current.find(group => group.id === sourceId)!
+    if (side) {
+      const at = groupRef.current.indexOf(destination)
+      destination = groupRef.current[at + 1] ?? groupRef.current[at - 1] ?? await newRight(sourceId) ?? destination
+    }
+    try {
+      const target = await waitForReader(destination.id)
+      settingsTab(destination.id, 'file'); focusCard(destination.id)
+      if ('file' in choice) await target.openIndexed({ ref: choice.file.ref, name: choice.file.name, kind: 'file', hidden: false })
+      else target.open(choice.recent.path)
+    } catch (error) { setWorkspaceNotice('Cannot open file · ' + String(error)) }
+  }
   function run(command: Command): void {
+    if (!commandEnabled(command)) return
+    if (command === 'palette' || command === 'open') { showOverlay(command === 'open' ? 'open' : 'palette'); return }
+    if (command === 'settings' || command === 'shortcuts') {
+      if (previewRef.current) { setWorkspaceNotice('Close the preview before opening Settings'); return }
+      settingsTab(focusedRef.current, 'show', command === 'shortcuts' ? 'Shortcuts' : 'Appearance'); return
+    }
+    if (command.startsWith('theme-')) { settings.change('theme_mode', command.slice(6)); return }
+    if (command.startsWith('zoom-')) { window.typose.zoom(command === 'zoom-reset' ? 'reset' : command === 'zoom-in' ? 'in' : 'out'); return }
+    if (command === 'full-screen') { void window.typose.fullScreen(); return }
+    if (command === 'wrap-lines') { settings.change('wrap_lines', !settings.getSnapshot().values.wrap_lines); return }
+    if (command === 'switch-lens') { (previewRef.current ? handles.current.get(previewRef.current.id) : focusedReader())?.switchLens(); return }
+    if (command === 'close-tab' && settingsTabsRef.current[focusedRef.current]?.active && !previewRef.current) { settingsTab(focusedRef.current, 'close'); return }
     if (command === 'go-to' || command === 'copy' || command === 'print') {
       const reader = previewRef.current ? handles.current.get(previewRef.current.id) : focusedReader()
       if (command === 'go-to') reader?.goTo()
@@ -782,7 +863,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       return
     }
     const reader = focusedReader()
-    if (command === 'open') void reader?.pick()
+    if (command === 'browse') { settingsTab(focusedRef.current, 'file'); void reader?.pick() }
     else if (command === 'open-folder') void pickFolder()
     else if (command === 'toggle-sidebar') setSidebarOpen(open => !open)
     else if (command === 'refresh-folders') refreshFolders()
@@ -806,7 +887,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
 
   return <>
     <header className={MAC ? 'titlebar mac' : 'titlebar'}>
-      <span className="titlebar-start">{MAC ? null : <><AppIcon /><AppMenu run={run} /></>}
+      <span className="titlebar-start">{MAC ? null : <><AppIcon /><AppMenu run={run} enabled={commandEnabled} /></>}
         <Button className="sidebar-toggle" aria-label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'} onPress={() => setSidebarOpen(open => !open)}>»</Button>
       </span>
       <span className="title" {...{ elementtiming: 'titlebar' }}>{title}</span>
@@ -820,6 +901,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
         {groups.map((group, index) => <div className="card-slot" style={{ flexGrow: group.weight }} key={group.id}>
           <ReaderCard id={group.id} label={index + 1} workspace={group.workspace} window={shared} fonts={fonts} focused={focused === group.id}
             onFocus={() => focusCard(group.id)} onCloseCard={() => void closeCard(group.id)} windowNotice={workspaceNotice}
+            settings={settingsTabs[group.id] ? { active: settingsTabs[group.id].active, content: <SettingsPanel controller={settings} initial={settingsTabs[group.id].section} />, onSelect: () => settingsTab(group.id, 'show', settingsTabs[group.id].section), onClose: () => settingsTab(group.id, 'close'), onFile: () => settingsTab(group.id, 'file') } : undefined}
             emptyContent={<div className="workspace-empty">
               <h1>Drop files or folders anywhere</h1>
               <div className="workspace-empty-actions"><Button className="open-button" onPress={() => { focusCard(group.id); run('open') }}>Open file… <kbd>{MAC ? '⌘O' : 'Ctrl+O'}</kbd></Button>
@@ -849,5 +931,6 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
         </Modal>
       </ModalOverlay> : null}
     </div>
+    {overlay ? <WorkspaceOverlay key={overlay} mode={overlay} indexes={Object.values(indexes)} recents={recents} close={() => showOverlay(null)} browse={() => run('browse')} choose={(choice, side) => void chooseQuick(choice, side)} run={run} enabled={commandEnabled} /> : null}
   </>
 }

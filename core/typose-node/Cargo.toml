@@ -18,6 +18,8 @@ napi-derive = "=3.6.12"
 # Not used directly: napi-derive's codegen. 6.1.6 emits calls that only napi 3.15 has.
 napi-derive-backend = "=6.1.5"
 typose-core = { path = "../typose-core" }
+toml_edit = "=0.25.17"
+serde_json = "=1.0.149"
 
 [build-dependencies]
 napi-build = "=2.6.0"

@@ -64,6 +64,7 @@ export interface Addon {
   limits(): Limits
   openDoc(path: string): Doc
   captureFolder?(path: string, id: string): NativeFolderRoot
+  setEncodingFallback?(utf8: boolean): void
   /** A new cancel flag, for one page read or one index job (plan C5, C6). */
   cancelFlag(): Cancel
   /** Plan C1: sets the renderer cache's reservation in the ledger; false if the ledger refused it. */
@@ -1050,6 +1051,13 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         account()
         throw e
       }
+    },
+    preferences: (p): boolean => {
+      if (p.encodingFallback !== 'windows-1252' && p.encodingFallback !== 'utf-8') throw new Refusal('InvalidParams', 'invalid encoding fallback')
+      const configure = addon.setEncodingFallback
+      if (!configure) throw new Refusal('Unsupported', 'encoding preferences are unavailable in this core')
+      configure(p.encodingFallback === 'utf-8')
+      return true
     },
     listFolder: async (p, req): Promise<FolderPage> => {
       const ref = folderRef(p.folder, 'folder')

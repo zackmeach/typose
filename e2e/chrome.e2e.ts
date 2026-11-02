@@ -1,3 +1,4 @@
+import { menuLabels } from './menu-fixture'
 // Plan PR 7's title bars and menus (brief §3.1, §3.2; spec §9): WCO on Windows, the traffic lights on macOS, ☰, and
 // Electron's default menu gone.
 import { expect } from '@playwright/test'
@@ -120,7 +121,7 @@ const appMenu = (l: Launched) =>
 const lines = Array.from({ length: 100 }, (_, i) => `line ${i}`)
 const lifetime = (l: Launched) => l.win.evaluate(() => (window as unknown as { pageLifetime?: string }).pageLifetime)
 
-test('macOS: a minimal native menu, and Cmd+R is the page’s Reload', async () => {
+test('macOS: the shared command table drives the native menu, and Cmd+R reloads the document', async () => {
   test.skip(!MAC, 'the native menu bar is macOS’s (brief §3.2)')
   const l = await launch({ file: fixture('accelerators.txt', lines.join('\n')) })
   const { win } = l
@@ -130,7 +131,7 @@ test('macOS: a minimal native menu, and Cmd+R is the page’s Reload', async () 
   // dead-key test below is Windows' and Linux's.)
   const menu = await appMenu(l)
   expect(menu?.map((m) => m.role ?? m.label)).toEqual(['appmenu', 'File', 'editmenu', 'windowmenu'])
-  expect(menu?.[1].items).toEqual(['Open File…', 'Open Folder…', 'Toggle Sidebar', 'Split Right', 'Move Tab Right', 'Close Card', 'Reload', 'Close Tab', 'Reopen Closed Tab', 'Clear Recently Closed Tabs', 'close'])
+  expect(menu?.[1].items).toEqual([...menuLabels('Exit').slice(0, -1), 'close'])
   await win.evaluate(() => Object.assign(window, { pageLifetime: 'the first page' }))
   await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '1')
   await pressAsOS(l, 'R', ['meta'])
@@ -213,7 +214,7 @@ test('☰ is a menu of Open file…, Reload and Exit, each wired to its command;
   const opened = async () => {
     await trigger.click()
     await expect(win.getByRole('menu')).toBeVisible()
-    await expect(win.getByRole('menuitem')).toHaveText(['Open file…', 'Open folder…', 'Toggle sidebar', 'Split right', 'Move tab right', 'Close card', 'Reload', 'Find in file…', 'Next match', 'Previous match', 'Close tab', 'Reopen closed tab', 'Clear recently closed tabs', exit])
+    await expect(win.getByRole('menuitem')).toHaveText(menuLabels(exit))
   }
   // Escape closes it and gives focus back to ☰.
   await opened()
@@ -227,6 +228,7 @@ test('☰ is a menu of Open file…, Reload and Exit, each wired to its command;
   await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '2')
   await opened()
   await win.getByRole('menuitem', { name: 'Open file…' }).click()
+  await win.getByRole('button', { name: 'Browse…', exact: true }).click()
   await expect(win.locator('.card-name')).toHaveText('menu-second.txt')
   expect(await app.evaluate(() => (globalThis as { dialogCalls?: number }).dialogCalls)).toBe(1)
   await opened()

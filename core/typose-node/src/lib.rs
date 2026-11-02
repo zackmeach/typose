@@ -22,6 +22,7 @@ use typose_core::raw::Raw;
 use typose_core::store::{self, cancellable};
 
 mod csv;
+pub mod config;
 mod find;
 mod source;
 mod structured;

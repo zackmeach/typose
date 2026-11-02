@@ -37,8 +37,22 @@ window.addEventListener('click', event => {
   clipboardGesture = true
   setTimeout(() => { clipboardGesture = false }, 0)
 }, { capture: true })
+window.addEventListener('keydown', event => {
+  if (!event.isTrusted || event.isComposing || event.key !== 'Enter' || !(event.target instanceof Element)) return
+  const active = event.target.getAttribute('aria-activedescendant')
+  const command = active ? document.getElementById(active) : event.target.closest('[role="menuitem"]')
+  if (command?.getAttribute('data-clipboard-copy') !== 'true') return
+  clipboardGesture = true
+  setTimeout(() => { clipboardGesture = false }, 0)
+}, { capture: true })
 
 const typose: TyposeApi = {
+  loadSettings: () => ipcRenderer.invoke('load-settings'),
+  changeSetting: (key, value, revision) => ipcRenderer.invoke('change-setting', key, value, revision),
+  exportTheme: (name, tokens) => ipcRenderer.invoke('export-theme', name, tokens),
+  setChromeTheme: (dark, canvas, text) => ipcRenderer.invoke('chrome-theme', dark, canvas, text),
+  zoom: action => webFrame.setZoomFactor(action === 'reset' ? 1 : Math.max(0.5, Math.min(2, webFrame.getZoomFactor() * (action === 'in' ? 1.1 : 1 / 1.1)))),
+  fullScreen: () => ipcRenderer.invoke('full-screen'),
   loadSession: () => ipcRenderer.invoke('load-session'),
   saveSession: (session) => ipcRenderer.invoke('save-session', session),
   onSessionCapture: (cb) => {
