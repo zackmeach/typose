@@ -49,6 +49,7 @@ process.parentPort.once('message', (e) => {
     limits: addon.limits,
     openDoc: (path: string) => addon.Doc.open(path),
     captureFolder: (path: string, id: string) => addon.FolderRoot.capture(path, id),
+    networkPath: addon.networkPath,
     cancelFlag: () => new addon.Cancel(),
     reserveCache: addon.reserveCache
   }

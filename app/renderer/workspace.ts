@@ -2,7 +2,7 @@ import type { Card } from './card'
 import type { CapturedLocation, CsvOptions, Opened, ProgressEvent } from '../shared/protocol'
 
 export type TabId = string
-export type LensChoice = 'raw' | 'rendered' | 'grid' | null
+export type LensChoice = import('./card').LensName | null
 /** A saved location owns scalar metadata and, for derived files, one native route ticket. */
 export interface SavedLocation {
   readonly location: CapturedLocation

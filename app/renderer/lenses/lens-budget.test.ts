@@ -1,6 +1,17 @@
 import { expect, it } from 'vitest'
 import { LensBudget } from './lens-budget'
 
+it('keeps worker model and mounted UI charges additive and releases a locked/disposed model', async () => {
+  const budget = new LensBudget({ call: async () => true }, 1, 1, 1, 10, 10)
+  await budget.reserveModel(1, 100)
+  await budget.reserveGrid(1, 32)
+  expect(budget.snapshot()).toMatchObject({ model: 100, grid: 32, total: 142 })
+  await budget.reserveGrid(1, 16)
+  expect(budget.snapshot()).toMatchObject({ model: 100, grid: 32, total: 142 })
+  await budget.reserveModel(1, 0)
+  expect(budget.snapshot().total).toBe(42)
+})
+
 function pending() {
   let resolve!: (value: boolean) => void
   const promise = new Promise<boolean>((done) => { resolve = done })

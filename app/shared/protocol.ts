@@ -25,6 +25,16 @@ export interface Page {
 export const PROTOCOL = 1
 export const MAX_CLIPBOARD_BYTES = 16 << 20
 export const LARGE_COPY_CONFIRM_BYTES = 10 << 20
+export const MAX_PRINT_BYTES = 32 << 20
+export const MAX_PRINT_PAGES = 1000
+export const MAX_PRINT_NODES = 100_000
+export type PrintDocumentResult = { kind: 'printed'; pages: number } | { kind: 'cancelled' } | { kind: 'refused'; reason: string }
+
+export type PrintTag = 'p' | 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6' | 'strong' | 'em' | 'del' | 'code' | 'pre' |
+  'ul' | 'ol' | 'li' | 'blockquote' | 'table' | 'thead' | 'tbody' | 'tr' | 'th' | 'td' | 'a' | 'br' | 'hr' | 'span' | 'img'
+export type PrintNode =
+  | { text: string }
+  | { tag: PrintTag; children?: PrintNode[]; href?: string; alt?: string; src?: string }
 
 /** Typed errors. `CoreGone` is the renderer's own: the core host died with the call pending (plan C7). */
 export type ErrorCode =
@@ -67,7 +77,7 @@ export interface Opened {
   doc: number
   gen: number
   /** Spec §4.1, by the file's extension: `markdown` for `.md` and `.markdown`. */
-  format: 'markdown' | 'text' | 'csv'
+  format: 'markdown' | 'text' | 'csv' | 'json' | 'jsonl' | 'yaml'
   size: number
   encoding: string
   /** Lines the index has found so far; `firstPage` doesn't wait for it (Z37). */
@@ -90,6 +100,17 @@ export interface Opened {
 export interface SurfaceRef { session: number; id: number }
 export interface ViewRef { session: number; surface: number; id: number; doc: number; gen: number }
 
+export interface StructuredRef { session: number; doc: number; gen: number; revision: number }
+export interface SourceSpan { start: number; end: number }
+export interface StructuredProblem { kind: string; count: number; message: string; first: SourceSpan; line?: number; column?: number }
+export interface StructuredNode { ordinal: number; kind: 'object' | 'array' | 'string' | 'number' | 'boolean' | 'null' | 'alias' | 'comment'; span: SourceSpan; key?: string; keySpan?: SourceSpan; keyMore?: boolean; text: string; more: boolean; container?: number; children?: number; duplicate?: boolean }
+export interface StructuredInfo { ref: StructuredRef; format: 'json' | 'jsonl' | 'yaml'; status: 'ready' | 'partial' | 'indexing' | 'locked'; reason?: string; parsedAs?: 'json' | 'jsonc'; root?: StructuredNode; rows?: number; parsed?: number; failed?: number; blank?: number; columns?: number; tableOff?: string; schema?: string; done: boolean; problems: StructuredProblem[]; transcript?: { adapter: 'claude-code-v1' | 'openai-chat-v1'; confidence: number; mode?: 'messages' | 'dataset' } }
+export interface StructuredChildren { nodes: StructuredNode[]; next?: number }
+export interface StructuredRow { line: number; span: SourceSpan; status: 'valid' | 'failed'; timestamp?: string; type?: string; summary: string; root?: StructuredNode; problem?: string; more: boolean }
+export interface StructuredRows { rows: StructuredRow[]; nextLine?: number; done: boolean }
+export interface StructuredColumn { id: number; key: string; span?: SourceSpan }
+export interface StructuredColumns { columns: StructuredColumn[]; next?: number; total: number; done: boolean }
+
 export interface SourceFindRef { view: ViewRef; id: number }
 export interface SourceFindInfo { ref: SourceFindRef; count: number; scannedBytes: number; complete: boolean }
 export interface SourceHit { start: number; end: number; line: number; lineStart: number; text: string; map: WireMap; matchStart: number; matchEnd: number }
@@ -110,6 +131,7 @@ export interface CsvOptions { delimiter: 'auto' | CsvDelimiter; header: 'auto' |
 export interface CsvInfo {
   ref: CsvRef; status: 'indexing' | 'ready' | 'locked'; reason?: string; delimiter: CsvDelimiter; header: boolean; encoding: string
   sourceRecords: number; indexedBytes: number; done: boolean; expectedColumns: number; maxColumnsKnown: number; metadataDone: boolean
+  problems?: { kind: string; count: number; first: CsvSpan; sourceRecord?: number; sourceLine?: number }[]
 }
 export interface CsvContinuation { ref: CsvRef; sourceRecord: number; column: number; offset: number }
 export interface CsvCellPiece {
@@ -124,7 +146,7 @@ export type CsvLocated = { kind: 'pending' } | { kind: 'located'; dataRow: numbe
 export type CsvSource = { kind: 'pending' } | { kind: 'located'; span: CsvSpan; rawLine: number }
 
 export interface FolderRef { session: number; root: string; node: string }
-export interface FolderRoot { ref: FolderRef; label: string; path: string }
+export interface FolderRoot { ref: FolderRef; label: string; path: string; identity?: string }
 export interface FolderEntry { ref: FolderRef; name: string; kind: 'directory' | 'file' | 'unsupported'; hidden: boolean }
 export interface FolderPage { entries: FolderEntry[]; cursor?: string }
 
@@ -133,6 +155,15 @@ export interface SavedTicket { session: number; id: string }
 export type CapturedLocation = { kind: 'manual'; path: string } | { kind: 'derived'; ticket: SavedTicket }
 
 export interface Methods {
+  /** Original verified bytes from this exact live view; at most 64 KiB per cancellable call. */
+  sourceBytes: { params: { view: ViewRef; start: number; count: number }; result: Uint8Array }
+  sourceLineRange: { params: { view: ViewRef; startLine: number; count: number }; result: SourceSpan }
+  sourceLineAt: { params: { view: ViewRef; offset: number }; result: { line: number } }
+  sourceVerify: { params: { view: ViewRef; start: number; end: number }; result: boolean }
+  structuredBuild: { params: { view: ViewRef }; result: StructuredInfo }
+  structuredChildren: { params: { ref: StructuredRef; record?: number; container: number; start: number; count: number }; result: StructuredChildren }
+  structuredRows: { params: { ref: StructuredRef; start: number; count: number }; result: StructuredRows }
+  structuredColumns: { params: { ref: StructuredRef; start: number; count: number }; result: StructuredColumns }
   sourceFindStart: { params: { view: ViewRef; query: string; matchCase: boolean }; result: SourceFindInfo }
   sourceFindScan: { params: { ref: SourceFindRef }; result: SourceFindPage }
   sourceFindSeek: { params: { ref: SourceFindRef; from?: number; direction: 'next' | 'previous' }; result: SourceFindSeek }
@@ -174,6 +205,8 @@ export interface Methods {
   hello: { params: { protocol: number }; result: Hello }
   /** `bytes`: the lens's viewport-only cache cap, reserved with the document's floor (plan C1); refused, `Memory`. */
   open: { params: { surface?: SurfaceRef; path: string; count: number; bytes: number }; result: Opened }
+  /** Whether a path reaches a network share, judged without opening it: restore leaves those for a click (brief §4.6). */
+  networkPath: { params: { path: string }; result: boolean }
   /** First screen of a retained document, without reopening or restarting its index. One renderer lens is active. */
   activate: { params: { surface?: SurfaceRef; activationId?: string; doc: number; gen: number; count: number; bytes: number }; result: Opened }
   /** Dispose a current view or Reload's exact old settled view, retaining the document/index. Pending activation cannot hand it back. */
@@ -282,6 +315,9 @@ export type MainMessage = { type: 'core-port'; session: number } | { type: 'core
 
 /** The page's whole API into main, from the preload. Main validates arguments and sender (C4); external links require the main frame. */
 export interface TyposeApi {
+  loadSession(): Promise<import('./session').SessionWorkspace>
+  saveSession(session: import('./session').SessionWorkspace): Promise<boolean>
+  onSessionCapture(cb: () => Promise<boolean>): () => void
   /** The file named on the command line, if any: the newest named before the page asked (spec §8.1). */
   launchPath(): Promise<string | null>
   /** Every file named at startup, consumed as one batch for serial tab creation. */
@@ -298,6 +334,8 @@ export interface TyposeApi {
   cancelClipboardWrite(token: string): void
   /** A bounded plain-text write. Main independently checks the app's main frame and byte cap; no read API exists. */
   writeClipboardText(text: string, token: string): Promise<boolean>
+  /** Opens the OS print dialog for a bounded, plain-text document built after the user chooses a range. */
+  printDocument(title: string, blocks: PrintNode[], pages: number, confirmed: boolean): Promise<PrintDocumentResult>
   /** A startup mark at a wall-clock time (ms); main records it only under the TYPOSE_MARKS hook (plan C8). */
   mark(name: StartupMark, t: number): void
   /** Called once, when main has shown the window; main only tells the page under the TYPOSE_MARKS hook (plan C8). */
@@ -308,7 +346,7 @@ export interface TyposeApi {
 }
 
 /** The menu's commands (brief §3.2's M1 subset): ☰ on Windows and Linux, the native menu on macOS. */
-export type Command = 'open' | 'open-folder' | 'toggle-sidebar' | 'refresh-folders' | 'split-right' | 'close-card' | 'move-tab-right' | 'reload' | 'close-tab' | 'reopen-tab' | 'clear-closed' | 'find' | 'find-next' | 'find-previous' | 'exit'
+export type Command = 'open' | 'open-folder' | 'toggle-sidebar' | 'refresh-folders' | 'split-right' | 'close-card' | 'move-tab-right' | 'reload' | 'close-tab' | 'reopen-tab' | 'clear-closed' | 'find' | 'find-next' | 'find-previous' | 'go-to' | 'copy' | 'print' | 'exit'
 
 /** The renderer's startup marks (plan C8, §5). */
 export const STARTUP_MARKS = [

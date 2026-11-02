@@ -48,10 +48,12 @@ import {
   type SourceFindInfo,
   type SourceFindPage,
   type SourceFindSeek,
-  type ViewRef
+  type ViewRef,
+  type StructuredRef
 } from '../shared/protocol'
 import { isValid } from './numbers'
 import { boundedLink, decodedLocalTarget, localTarget } from './local-target'
+import { structuredChildren, structuredColumns, structuredInfo, structuredRows } from './structured-validation'
 import { findNumber, findProgress, sourceHit, sourceHits, csvFindHit, csvFindHits } from './find-validation'
 
 declare const __TEST_HOOKS__: boolean
@@ -62,6 +64,8 @@ export interface Addon {
   limits(): Limits
   openDoc(path: string): Doc
   captureFolder?(path: string, id: string): NativeFolderRoot
+  /** UNC, or a drive letter the network redirector serves; nothing is opened. */
+  networkPath?(path: string): boolean
   /** A new cancel flag, for one page read or one index job (plan C5, C6). */
   cancelFlag(): Cancel
   /** Plan C1: sets the renderer cache's reservation in the ledger; false if the ledger refused it. */
@@ -265,13 +269,21 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       throw new Refusal('Internal', 'the core returned invalid CSV configuration metadata')
     const reason = value.reason
     if (reason != null && typeof reason !== 'string') throw new Refusal('Internal', 'the core returned an invalid CSV reason')
+    const rawProblems = (value as NativeCsvInfo & { problems?: unknown }).problems
+    if (rawProblems != null && (!Array.isArray(rawProblems) || rawProblems.length > 2)) throw new Refusal('Internal', 'the core returned invalid CSV problems')
+    const problems = (rawProblems as unknown[] | undefined ?? []).map(problem => {
+      if (!isRecord(problem) || !['ragged', 'decoding'].includes(String(problem.kind))) throw new Refusal('Internal', 'the core returned invalid CSV problem metadata')
+      return { kind: String(problem.kind), count: csvResultNumber(problem.count, 'problem count', 1), first: nativeCsvSpan(problem.first),
+        ...(problem.sourceRecord == null ? {} : { sourceRecord: csvResultNumber(problem.sourceRecord, 'problem record') }),
+        ...(problem.sourceLine == null ? {} : { sourceLine: csvResultNumber(problem.sourceLine, 'problem line') }) }
+    })
     return {
       ref: { session, doc: id, gen, revision }, status: value.status as CsvInfo['status'], ...(reason == null ? {} : { reason }),
       delimiter: value.delimiter as CsvInfo['delimiter'], header: value.header, encoding: value.encoding,
       sourceRecords: csvResultNumber(value.sourceRecords, 'source records'),
       indexedBytes: csvResultNumber(value.indexedBytes, 'indexed bytes'), done: value.done,
       expectedColumns: csvResultNumber(value.expectedColumns, 'expected columns'),
-      maxColumnsKnown: csvResultNumber(value.maxColumnsKnown, 'maximum known columns'), metadataDone: value.metadataDone
+      maxColumnsKnown: csvResultNumber(value.maxColumnsKnown, 'maximum known columns'), metadataDone: value.metadataDone, problems
     }
   }
   const docs = new Map<number, Doc>()
@@ -340,7 +352,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     return { session, doc: id, gen, id: resource }
   }
 
-  type Lease = { ref: ViewRef; bytes: number; activationId?: string; sourceFind?: number; csvFind?: { id: number; order: CsvOrderRef } }
+  type Lease = { ref: ViewRef; bytes: number; activationId?: string; sourceFind?: number; csvFind?: { id: number; order: CsvOrderRef }; structured?: StructuredRef }
   type SurfaceState = { ref: SurfaceRef; alive: boolean; views: Map<number, Lease>; current?: number; latest?: Pending }
   type Pending = { request: number; surface: SurfaceState; bytes: number; activationId?: string; doc?: number; gen?: number; disposed: boolean; previousView?: number; kind?: 'activate' | 'reload' }
   // Surface zero is an isolated compatibility owner. Explicit documents never accept its doc/gen-only cleanup.
@@ -480,6 +492,18 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     try { encodeURIComponent(p.query) } catch { throw new Refusal('InvalidParams', 'query contains an unpaired surrogate', 'query') }
     if (typeof p.matchCase !== 'boolean') throw new Refusal('InvalidParams', 'matchCase must be boolean', 'matchCase')
     return p.query
+  }
+  const structuredReference = (value: unknown): { ref: StructuredRef; lease: Lease; doc: Doc } => {
+    if (!isRecord(value)) throw new Refusal('InvalidParams', 'ref must be a structured reference', 'ref')
+    const ref: StructuredRef = { session: int(value, 'session'), doc: int(value, 'doc'), gen: int(value, 'gen'), revision: int({ gen: value.revision }, 'gen', 'revision') }
+    if (ref.session !== session) throw new Refusal('Stale', 'the structured reference belongs to another session')
+    const owner = docOwners.get(ref.doc)
+    const surface = owner === undefined ? undefined : surfaces.get(owner)
+    const lease = surface ? currentLease(surface) : undefined
+    if (!lease || lease.ref.doc !== ref.doc || lease.ref.gen !== ref.gen || lease.structured?.revision !== ref.revision)
+      throw new Refusal('Stale', 'the structured view or index was replaced')
+    findLease(lease.ref)
+    return { ref, lease, doc: getDoc(ref.doc) }
   }
   const findDirection = (p: Params): boolean => {
     if (p.direction !== 'next' && p.direction !== 'previous') throw new Refusal('InvalidParams', 'direction must be next or previous', 'direction')
@@ -723,6 +747,92 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
 
   // Each handler checks all of its parameters before it calls the addon or changes state. `id` is the request's.
   const handlers: Record<string, (params: Params, id: number) => unknown> = {
+    structuredBuild: (p, req) => {
+      const lease = findLease(p.view), doc = getDoc(lease.ref.doc)
+      return read(req, lease.ref.doc, async (cancel) => {
+        const native = await doc.structuredBuild(lease.ref.gen, cancel)
+        if (findLease(lease.ref) !== lease) throw new Refusal('Stale', 'the structured view was replaced while indexing')
+        const info = structuredInfo(native, { session, doc: lease.ref.doc, gen: lease.ref.gen }, doc.size)
+        lease.structured = info.ref
+        return info
+      })
+    },
+    structuredChildren: (p, req) => {
+      const { ref, lease, doc } = structuredReference(p.ref)
+      const container = csvRequestNumber(p.container, 'container', 0, 0xffff_ffff)
+      const start = csvRequestNumber(p.start, 'start')
+      const count = csvRequestNumber(p.count, 'count', 1, 128)
+      const record = p.record === undefined ? undefined : csvRequestNumber(p.record, 'record')
+      return read(req, ref.doc, async (cancel) => {
+        const page = await doc.structuredChildren(ref.gen, ref.revision, container, start, count, cancel, record)
+        if (structuredReference(ref).lease !== lease) throw new Refusal('Stale', 'the structured index was replaced while reading')
+        return structuredChildren(page, doc.size)
+      })
+    },
+    structuredRows: (p, req) => {
+      const { ref, lease, doc } = structuredReference(p.ref)
+      const start = csvRequestNumber(p.start, 'start')
+      const count = csvRequestNumber(p.count, 'count', 1, 128)
+      return read(req, ref.doc, async (cancel) => {
+        const page = await doc.structuredRows(ref.gen, ref.revision, start, count, cancel)
+        if (structuredReference(ref).lease !== lease) throw new Refusal('Stale', 'the structured view was replaced while reading records')
+        return structuredRows(page, doc.size)
+      })
+    },
+    structuredColumns: (p, req) => {
+      const { ref, lease, doc } = structuredReference(p.ref)
+      const start = csvRequestNumber(p.start, 'start')
+      const count = csvRequestNumber(p.count, 'count', 1, 128)
+      return read(req, ref.doc, async (cancel) => {
+        const page = await doc.structuredColumns(ref.gen, ref.revision, start, count, cancel)
+        if (structuredReference(ref).lease !== lease) throw new Refusal('Stale', 'the structured view was replaced while reading columns')
+        return structuredColumns(page, doc.size)
+      })
+    },
+    sourceBytes: (p,req):Promise<Uint8Array> => {
+      const lease = findLease(p.view), doc = getDoc(lease.ref.doc)
+      const start = csvRequestNumber(p.start, 'start', 0, doc.size)
+      const count = csvRequestNumber(p.count, 'count', 1, 65_536)
+      if (count > doc.size - start) throw new Refusal('InvalidParams', 'sourceBytes range is outside the document')
+      return read(req, lease.ref.doc, async (cancel) => {
+        const bytes = await doc.sourceBytes(lease.ref.gen, start, count, cancel)
+        if (findLease(lease.ref) !== lease) throw new Refusal('Stale', 'the source view was replaced while reading')
+        if (!(bytes instanceof Uint8Array) || bytes.byteLength !== count) throw new Refusal('Internal', 'the core returned invalid source bytes')
+        return bytes
+      })
+    },
+    sourceLineRange: (p, req): Promise<{ start: number; end: number }> => {
+      const lease = findLease(p.view), doc = getDoc(lease.ref.doc)
+      const startLine = csvRequestNumber(p.startLine, 'startLine')
+      const count = csvRequestNumber(p.count, 'count', 1)
+      return read(req, lease.ref.doc, async (cancel) => {
+        const span = await doc.sourceLineRange(lease.ref.gen, startLine, count, cancel)
+        if (findLease(lease.ref) !== lease) throw new Refusal('Stale', 'the source view was replaced while reading')
+        const start = csvResultNumber(span.start, 'source start', 0, doc.size)
+        const end = csvResultNumber(span.end, 'source end', start, doc.size)
+        return { start, end }
+      })
+    },
+    sourceVerify: (p, req): Promise<boolean> => {
+      const lease = findLease(p.view), doc = getDoc(lease.ref.doc)
+      const start = csvRequestNumber(p.start, 'start', 0, doc.size)
+      const end = csvRequestNumber(p.end, 'end', start, doc.size)
+      return read(req, lease.ref.doc, async (cancel) => {
+        const result = await doc.sourceVerify(lease.ref.gen, start, end, cancel)
+        if (findLease(lease.ref) !== lease) throw new Refusal('Stale', 'the source view was replaced while verifying')
+        if (result !== true) throw new Refusal('Internal', 'the core did not verify the source range')
+        return true
+      })
+    },
+    sourceLineAt: (p, req): Promise<{ line: number }> => {
+      const lease = findLease(p.view), doc = getDoc(lease.ref.doc)
+      const offset = csvRequestNumber(p.offset, 'offset', 0, doc.size)
+      return read(req, lease.ref.doc, async (cancel) => {
+        const location = await doc.sourceLineAt(lease.ref.gen, offset, cancel)
+        if (findLease(lease.ref) !== lease) throw new Refusal('Stale', 'the source view was replaced while locating')
+        return { line: csvResultNumber(location.line, 'source line') }
+      })
+    },
     sourceFindStart: (p): SourceFindInfo => {
       const query = findQuery(p), lease = findLease(p.view)
       const doc = getDoc(lease.ref.doc)
@@ -930,9 +1040,12 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         native = addon.captureFolder(p.path, id)
         const label = native.label
         const path = native.path
+        const identity = (native as NativeFolderRoot & { readonly identity?: string }).identity
+        if (identity !== undefined && (typeof identity !== 'string' || !/^[0-9a-f]{16}-[0-9a-f]{32}$/.test(identity)))
+          throw new Refusal('Internal', 'the core returned an invalid folder identity')
         rootPeak = peak
         roots.set(id, { native, path })
-        return { ref: { session, root: id, node: '0' }, label, path }
+        return { ref: { session, root: id, node: '0' }, label, path, ...(identity ? { identity } : {}) }
       } catch (e) {
         native?.close()
         rootHostBytes = previous
@@ -1089,6 +1202,12 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         if (result.kind !== 'located') throw new Refusal('Internal', 'the core returned an invalid CSV source location')
         return { kind: 'located', span: nativeCsvSpan(result.span), rawLine: csvResultNumber(result.rawLine, 'raw line') }
       })
+    },
+    networkPath: (p): boolean => {
+      if (typeof p.path !== 'string' || p.path.length === 0 || p.path.length > 32_767 || p.path.includes('\0'))
+        throw new Refusal('InvalidParams', 'path must be a non-empty string of at most 32,767 characters, without NUL', 'path')
+      // Without the native test, only the UNC form is known to be a share.
+      return addon.networkPath ? addon.networkPath(p.path) : /^[\\/]{2}/.test(p.path)
     },
     open: async (p, req): Promise<Opened> => {
       const [count, bytes] = [int(p, 'count'), int(p, 'bytes')]

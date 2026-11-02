@@ -1,4 +1,6 @@
-import type { CsvInfo, CsvOptions, ErrorCode, MdBuild, Opened } from '../shared/protocol'
+import type { CsvInfo, CsvOptions, ErrorCode, MdBuild, Opened, StructuredInfo } from '../shared/protocol'
+
+export type LensName = 'raw' | 'rendered' | 'grid' | 'tree' | 'rows' | 'table' | 'transcript'
 
 /** Why Rendered stays off, in the switch's tooltip (plan §2.2, Z71, Z34). */
 export const RENDERED_OFF = {
@@ -28,7 +30,10 @@ export type Card =
       refused?: true
       atLine?: number
       /** What's showing. Markdown opens in Raw, then Rendered once its build fits (plan §2.2). */
-      lens?: 'raw' | 'rendered' | 'grid'
+      lens?: LensName
+      structured?: StructuredInfo
+      structuredOff?: string
+      transcriptOff?: string
       csv?: CsvInfo
       csvOptions?: CsvOptions
       gridOff?: string
@@ -41,6 +46,8 @@ export type Card =
     }
   | {
       kind: 'failed'; path: string; code: ErrorCode; message: string; localOnly?: true
+      /** A network share left unopened at launch (brief §4.6): Retry opens its path. */
+      network?: true
       /** Inactive activation froze, but this tab still owns the native document and its Reload capability. */
       reloadable?: true
     }
@@ -62,9 +69,9 @@ export interface CardView {
   /** A banner under the header, and its button's label. The button reloads, as Ctrl+R does. */
   banner: { text: string; action: string } | null
   /** The Raw lens, the Rendered lens, or a message with its actions. */
-  body: { raw: true } | { rendered: true } | { grid: true } | { message: string; actions: Action[] }
+  body: { raw: true } | { rendered: true } | { grid: true } | { structured: true } | { message: string; actions: Action[] }
   /** Markdown's Raw/Rendered switch. `renderedOff` is the disabled tab's tooltip. Null when the file has no switch. */
-  lenses: null | { showing: 'raw' | 'rendered' | 'grid'; renderedOff?: string; grid?: true; gridOff?: string }
+  lenses: null | { showing: LensName; renderedOff?: string; grid?: true; gridOff?: string; structured?: { id: LensName; label: string; off?: string }[] }
 }
 
 export const fileName = (path: string): string => path.split(/[\\/]/).pop() || path
@@ -104,6 +111,8 @@ export function view(card: DisplayCard): CardView {
       if (opened.format === 'csv' && card.csv) status = `${Math.max(0, card.csv.sourceRecords - (card.csv.header ? 1 : 0)).toLocaleString('en')} rows${card.csv.done ? '' : '…'} · ${card.csv.encoding}`
       const showing = card.lens ?? 'raw'
       const markdown = opened.format === 'markdown' && !opened.blank
+      const parseProblem = card.structured?.problems.find(problem => problem.kind === 'parse')
+      const parseFailure = card.structuredOff && !card.structured?.root && parseProblem
       return {
         status,
         progress: card.indexed || frozen ? null : opened.size > 0 ? card.bytes / opened.size : 0,
@@ -111,14 +120,19 @@ export function view(card: DisplayCard): CardView {
           ? { text: "Can't reload: Typose's memory budget is full", action: 'Retry (Ctrl+R)' }
           : frozen
             ? { text: 'Changed on disk', action: 'Reload (Ctrl+R)' }
-            : null,
-        body: opened.blank ? { message: 'Empty file', actions: [] } : showing === 'rendered' ? { rendered: true } : showing === 'grid' ? { grid: true } : { raw: true },
+            : parseFailure ? { text: `Couldn’t parse as ${opened.format.toUpperCase()} · showing Raw · ${parseProblem.line ? `line ${parseProblem.line}${parseProblem.column ? `, col ${parseProblem.column}` : ''}` : `byte ${parseProblem.first.start}`}`, action: 'View problem in Raw' } : null,
+        body: opened.blank ? { message: 'Empty file', actions: [] } : showing === 'rendered' ? { rendered: true } : showing === 'grid' ? { grid: true } : showing !== 'raw' ? { structured: true } : { raw: true },
         lenses: markdown ? { showing, renderedOff: card.renderedOff ? RENDERED_OFF[card.renderedOff] : undefined } :
-          opened.format === 'csv' && !opened.blank ? { showing, grid: true, gridOff: card.gridOff } : null
+          opened.format === 'csv' && !opened.blank ? { showing, grid: true, gridOff: card.gridOff } :
+          ['json', 'jsonl', 'yaml'].includes(opened.format) && !opened.blank ? { showing, structured: opened.format === 'jsonl' ? [
+            ...(card.structured?.transcript ? [{ id: 'transcript' as const, label: 'Transcript', off: card.transcriptOff ?? card.structuredOff }] : []),
+            { id: 'rows', label: 'Rows', off: card.structuredOff }, { id: 'table', label: 'Table', off: card.structuredOff ?? card.structured?.tableOff }
+          ] : [{ id: 'tree', label: 'Tree', off: card.structuredOff ?? (!card.structured ? 'Preparing Tree…' : undefined) }] } : null
       }
     }
     case 'failed':
       if (card.reloadable) return say(`Can't open ${card.path} · ${card.message}`, 'Reload', 'Close')
+      if (card.network) return say(`${card.path} is on a network share · ${card.message}. Retry to connect.`, 'Retry', 'Close')
       // A lost local capability cannot be recreated by treating its display path as a manual open.
       if (card.localOnly) return say(`Can't open ${card.path} · ${card.message}`, 'Locate…', 'Close')
       switch (card.code) {

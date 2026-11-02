@@ -78,7 +78,7 @@ test('a TYPOSE_MARKS that names a directory is refused and logged, and the app s
   let kept: string | undefined // the profile closePackaged keeps, removed whether or not the expectations hold
   try {
     const l = await launchPackaged({ cdp: true, env: { TYPOSE_MARKS: dir } })
-    await expect(l.page!.locator('.open-button')).toBeVisible() // the window, its page and the core are up
+    await expect(l.page!.getByRole('button', { name: /^Open file…/ })).toBeVisible() // the window, its page and the core are up
     const log = lifecycle(l.userData)
     kept = l.userData
     expect(await closePackaged(l, true)).toEqual({ code: 0, signal: null })

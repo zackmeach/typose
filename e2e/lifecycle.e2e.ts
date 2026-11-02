@@ -1,6 +1,6 @@
 // Plan C9's four controlled failures, each told apart by the lifecycle log and the exit status alone.
 import { expect } from '@playwright/test'
-import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { dumps, finish, fixture, launch, lifecycle, test, waitOpen } from './app'
 
@@ -67,8 +67,15 @@ test('a core kill (C7): main logs the exit and lives on, and the card shows the 
 })
 
 test('an armed process.crash() in main: an external crash exit, a dump, and the unclean marker next launch', async () => {
-  const first = await launch({ file: file() })
+  const path = file()
+  const first = await launch({ file: path })
   await waitOpen(first.win)
+  const sessionFile = join(first.userData, 'session.json')
+  await expect.poll(() => {
+    if (!existsSync(sessionFile)) return false
+    const saved = JSON.parse(readFileSync(sessionFile, 'utf8')) as { cards?: { tabs: { location: { path: string } }[] }[] }
+    return saved.cards?.some(card => card.tabs.some(tab => tab.location.path === path)) ?? false
+  }).toBe(true)
   const pid = first.pid
   await first.app.evaluate(() => setTimeout(() => process.crash(), 100))
   const exit = await first.exited
@@ -79,7 +86,8 @@ test('an armed process.crash() in main: an external crash exit, a dump, and the 
   await finish(first, true)
 
   const second = await launch({ userData: first.userData })
-  await expect(second.win.locator('.open-button')).toBeVisible()
+  await waitOpen(second.win)
+  await expect(second.win.getByRole('tab', { name: 'lifecycle.txt' })).toHaveAttribute('aria-selected', 'true')
   const unclean = lifecycle(second.userData).find((r) => r.event === 'previous-run-unclean')
   expect(unclean).toMatchObject({ previousPid: pid })
   if (process.platform === 'win32') expect((unclean!.dumps as string[]).length).toBeGreaterThan(0)

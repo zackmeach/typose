@@ -4,7 +4,7 @@ import { finish, launch, test } from './app'
 test('the app runs from typose:// and cannot reach the network', async () => {
   const l = await launch()
   const { app, win } = l
-  await expect(win.locator('.open-button')).toBeVisible() // the empty card, with the core connected
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible() // the empty card, with the core connected
   expect(await win.evaluate(() => location.protocol)).toBe('typose:')
   const outcome = await win.evaluate(() =>
     fetch('https://example.com/').then(
@@ -23,7 +23,7 @@ test('the app runs from typose:// and cannot reach the network', async () => {
 test('the CSP header forbids inline script, and navigation and new windows are denied', async () => {
   const l = await launch()
   const { app, win } = l
-  await expect(win.locator('.open-button')).toBeVisible()
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   const csp = await win.evaluate(() => fetch('/index.html').then((r) => r.headers.get('content-security-policy')))
   expect(csp).toContain("default-src 'self'")
   const inline = await win.evaluate(
