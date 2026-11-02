@@ -6,10 +6,13 @@ import type { LensBudget } from './lens-budget'
 import { RenderedImages } from './images'
 import type { LocalGesture } from '../reader-window'
 import { RenderedFind } from './rendered-find'
-import { markdownPrintNodes } from './markdown-print'
+import { markdownRichPrintNodes } from './markdown-rich-print'
 import { PRINT_LINES_PER_PAGE, type PrintPayload, type PrintPlan } from '../print'
 import { utf8ByteLength } from './grid-interactions'
 import { copySourceSpan } from './source-copy'
+import { renderedSelection } from './rendered-selection'
+import { markdownExtras } from './markdown-extras'
+import '../markdown-extras.css'
 
 export { RENDERED_PER_UNIT, renderedCharge } from './rendered-charge'
 
@@ -64,6 +67,10 @@ export class RenderedLens {
   private copyAbort: AbortController | undefined
   private copyToken: string | null = null
   private copyStatus: HTMLDivElement
+  private readonly outline: HTMLElement
+  private readonly outlineNav: HTMLElement
+  private extras = Promise.resolve()
+  private readonly outlineResize: ResizeObserver
 
   constructor(
     host: HTMLElement,
@@ -85,9 +92,24 @@ export class RenderedLens {
     this.scroller.setAttribute('aria-label', 'Rendered')
     this.column = document.createElement('div')
     this.column.className = 'md-column'
+    const outline = document.createElement('details')
+    outline.className = 'md-outline'
+    const summary = document.createElement('summary')
+    summary.textContent = 'Outline'
+    this.outlineNav = document.createElement('nav')
+    this.outlineNav.setAttribute('aria-label', 'Document outline')
+    outline.append(summary, this.outlineNav)
+    outline.hidden = true
+    this.outline = outline
+    const outlineLayout = () => {
+      this.scroller.dataset.outlineColumn = outline.open && this.scroller.clientWidth >= 936 ? '1' : '0'
+    }
+    outline.addEventListener('toggle', outlineLayout)
+    this.outlineResize = new ResizeObserver(outlineLayout)
+    this.outlineResize.observe(this.scroller)
     this.copyStatus = Object.assign(document.createElement('div'), { className: 'md-copy-status' })
     this.copyStatus.setAttribute('role', 'status')
-    this.scroller.append(this.column, this.copyStatus)
+    this.scroller.append(outline, this.column, this.copyStatus)
     host.append(this.scroller)
     this.element = this.scroller
     this.find = new RenderedFind(this.scroller, this.column, () => this.cursor >= this.blocks, options.budget, opened.gen)
@@ -149,6 +171,12 @@ export class RenderedLens {
       const block = child as HTMLElement
       if (block.getBoundingClientRect().bottom > edge + 1) {
         this.shown = Number(block.dataset.line)
+        let current: HTMLElement | undefined
+        for (const entry of this.outlineNav.children) {
+          entry.removeAttribute('aria-current')
+          if (Number((entry as HTMLElement).dataset.line) <= this.shown) current = entry as HTMLElement
+        }
+        current?.setAttribute('aria-current', 'location')
         return
       }
     }
@@ -183,15 +211,10 @@ export class RenderedLens {
     this.cancelCopy()
     const token = window.typose.beginClipboardWrite()
     if (!token) { this.copyStatus.textContent = 'Copy unavailable · use the reader Copy command'; return false }
-    if (!this.copyAll) {
-      window.typose.cancelClipboardWrite(token)
-      const selected = window.getSelection()
-      const node = selected?.anchorNode instanceof Element ? selected.anchorNode : selected?.anchorNode?.parentElement
-      this.copyStatus.textContent = node && this.scroller.contains(node)
-        ? 'Partial Rendered copy is unavailable until this selection has a source map'
-        : 'Press Ctrl+A in Rendered, then Copy to copy the complete source'
-      return false
-    }
+    const all = this.copyAll
+    const selection = all ? { start: 0, end: this.opened.size } : renderedSelection(this.column, window.getSelection())
+    if (!selection) { window.typose.cancelClipboardWrite(token); this.copyStatus.textContent = 'Copy refused · select mapped source text or press Ctrl+A'; return false }
+    const { start, end } = selection
     const view = this.opened.view, owner = this.options.budget, generation = this.opened.gen
     if (!view || !owner || this.opened.size > MAX_CLIPBOARD_BYTES) {
       window.typose.cancelClipboardWrite(token)
@@ -201,19 +224,24 @@ export class RenderedLens {
     const controller = new AbortController()
     this.copyAbort = controller
     this.copyToken = token
-    const current = () => this.copyAbort === controller && !controller.signal.aborted && !this.stopped && !this.paused && this.copyAll && owner.current(generation)
+    const current = () => {
+      if (this.copyAbort !== controller || controller.signal.aborted || this.stopped || this.paused || this.copyAll !== all || !owner.current(generation)) return false
+      if (all) return true
+      const selected = renderedSelection(this.column, window.getSelection())
+      return selected?.start === start && selected?.end === end
+    }
     this.copyStatus.textContent = 'Preparing source copy…'
     try {
       const copied = await copySourceSpan({
         valid: current,
         reserve: bytes => owner.reserveCopy(generation, bytes),
         read: (start, count, signal) => this.core.call('sourceBytes', { view, start, count }, signal),
-        verify: signal => this.core.call('sourceVerify', { view, start: 0, end: this.opened.size }, signal),
+        verify: signal => this.core.call('sourceVerify', { view, start, end }, signal),
         confirm: async bytes => window.confirm(`Copy ${new Intl.NumberFormat('en').format(bytes)} bytes to the clipboard?`),
         write: text => window.typose.writeClipboardText(text, token),
         cancelWrite: () => window.typose.cancelClipboardWrite(token),
         status: message => { this.copyStatus.textContent = message }
-      }, 0, this.opened.size, this.opened.encoding, controller.signal)
+      }, start, end, this.opened.encoding, controller.signal)
       if (copied) this.copyStatus.textContent = 'Copied source text'
       else if (controller.signal.aborted) this.copyStatus.textContent = 'Copy cancelled'
       return copied
@@ -263,7 +291,11 @@ export class RenderedLens {
           if (item.line >= end || item.line + item.lines <= start) continue
           if (!await owner.reserveCopy(generation, (512 << 10) + jsonBytes * 4 + item.html.length * 8 + visited * 64))
             throw new Error('Print is unavailable · the memory budget is full')
-          const rendered = markdownPrintNodes(item.html, item.note)
+          let richCharge = 0
+          const rendered = await markdownRichPrintNodes(item.html, item.note, current, async bytes => {
+            richCharge += bytes
+            return owner.reserveCopy(generation, richCharge + (512 << 10) + jsonBytes * 4 + item.html.length * 8 + visited * 64)
+          })
           const chunkBytes = utf8ByteLength(JSON.stringify(rendered))
           jsonBytes += chunkBytes
           visited += rendered.length
@@ -347,6 +379,7 @@ export class RenderedLens {
     this.find.destroy()
     this.stopped = true
     this.images.dispose()
+    this.outlineResize.disconnect()
     this.placeGen++
     for (const f of this.flight) f.abort.abort()
     this.scroller.removeEventListener('click', this.onLink, true)
@@ -517,6 +550,23 @@ export class RenderedLens {
       el.append(button)
     } else {
       el.innerHTML = item.html
+      const heading = el.querySelector<HTMLElement>('h1,h2,h3,h4,h5,h6')
+      if (heading && item.slug && Number(heading.tagName.slice(1)) <= 3) {
+        const entry = document.createElement('button')
+        entry.type = 'button'
+        entry.textContent = heading.textContent
+        entry.dataset.line = String(item.line)
+        entry.style.paddingLeft = `${8 + (Number(heading.tagName.slice(1)) - 1) * 12}px`
+        entry.addEventListener('click', () => this.goTo(item.line + 1))
+        this.outlineNav.append(entry)
+        this.outline.hidden = this.outlineNav.childElementCount < 3
+      }
+      // Enhancements keep native source-map ancestors intact. Every asynchronous result belongs to this lens.
+      requestAnimationFrame(() => {
+        this.extras = this.extras.then(async () => {
+          if (!this.stopped) await markdownExtras(el, () => !this.stopped, bytes => this.options.budget?.growRendered(this.opened.gen, bytes) ?? Promise.resolve(false))
+        }).catch(error => { console.error('Markdown enhancement failed', error) })
+      })
       for (const image of el.querySelectorAll<HTMLElement>('.tp-img')) this.images.add(image)
       for (const a of el.querySelectorAll('a')) {
         const dest = a.getAttribute('data-href')
@@ -526,6 +576,23 @@ export class RenderedLens {
       for (const input of el.querySelectorAll('input'))
         if (input instanceof HTMLInputElement && input.type === 'checkbox' && !input.hasAttribute('aria-label'))
           input.setAttribute('aria-label', input.checked ? 'Completed task' : 'Task')
+      for (const code of el.querySelectorAll<HTMLElement>('pre > code:not(.language-mermaid)')) {
+        if (!code.querySelector('[data-source-map]')) continue
+        const button = document.createElement('button')
+        button.type = 'button'
+        button.className = 'md-code-copy'
+        button.textContent = 'Copy code'
+        button.dataset.clipboardCopy = 'true'
+        button.addEventListener('click', () => {
+          this.copyAll = false
+          const range = document.createRange()
+          range.selectNodeContents(code)
+          const selection = window.getSelection()
+          selection?.removeAllRanges(); selection?.addRange(range)
+          void this.copy()
+        })
+        code.parentElement!.prepend(button)
+      }
     }
     return el
   }

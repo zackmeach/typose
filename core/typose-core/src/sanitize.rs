@@ -26,20 +26,22 @@ pub const OWN_TAGS: [&str; 16] =
 
 static AMMONIA: LazyLock<ammonia::Builder<'static>> = LazyLock::new(|| {
     // No `href` at all: `sanitize` writes every link's `href` itself, so none from the file can survive.
-    let attrs: [(&str, &[&str]); 5] = [
+    let attrs: [(&str, &[&str]); 7] = [
         ("a", &["data-href"]),
         ("img", &["data-src", "alt"]),
         // pulldown-cmark's attributes sit only on its own tags, so raw HTML can't smuggle them onto RAW_TAGS.
         ("ol", &["start"]),
         ("input", &["type", "checked", "disabled"]),
         // The placeholder `sanitize` makes, kept when it runs again.
-        ("span", &["data-src", "data-alt"]),
+        ("span", &["data-src", "data-alt", "data-source-map", "data-display"]),
+        ("blockquote", &["data-callout"]),
+        ("pre", &["data-frontmatter"]),
     ];
     let set = |v: &[&'static str]| v.iter().copied().collect::<HashSet<_>>();
     let mut b = ammonia::Builder::empty();
     b.tags(RAW_TAGS.iter().chain(&OWN_TAGS).copied().collect())
         .tag_attributes(attrs.iter().map(|&(t, a)| (t, set(a))).collect::<HashMap<_, _>>())
-        .allowed_classes([("span", set(&["tp-img"]))].into_iter().collect())
+        .allowed_classes([("span", set(&["tp-img", "tp-math"])), ("code", set(&["language-mermaid", "language-ts", "language-typescript", "language-js", "language-javascript", "language-json", "language-rust", "language-python", "language-css", "language-html", "language-bash", "language-yaml"]))].into_iter().collect())
         .generic_attributes(HashSet::new()) // ammonia's default allows `lang` and `title` everywhere
         .url_schemes(["http", "https", "mailto"].into())
         .link_rel(None);

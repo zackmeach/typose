@@ -19,4 +19,17 @@ describe('print document validation', () => {
     expect(physicalPageCount(Buffer.from('%PDF /Type /Pages /Count 17'))).toBe(17)
     expect(physicalPageCount(Buffer.from('%PDF empty'))).toBeNull()
   })
+
+  it('accepts static generated MathML and refuses namespace escape, URL attributes and layout bombs', () => {
+    const math = { tag: 'math', children: [{ tag: 'msup', children: [{ tag: 'mi', children: [{ text: 'x' }] }, { tag: 'mn', children: [{ text: '2' }] }] }] }
+    expect(validatePrintDocument('math', [{ tag: 'math', math }], 1).ok).toBe(true)
+    for (const malicious of [
+      { tag: 'annotation-xml', children: [{ tag: 'script', children: [{ text: 'alert(1)' }] }] },
+      { tag: 'mi', attrs: { href: 'https://evil.invalid/' } },
+      { tag: 'mstyle', attrs: { style: 'background:url(https://evil.invalid/)' } },
+      { tag: 'mspace', attrs: { width: '100000000em' } },
+      { tag: 'mtd', attrs: { columnspan: '100000000' } },
+      { tag: 'mi', attrs: { onclick: 'run' } }
+    ]) expect(validatePrintDocument('bad', [{ tag: 'math', math: malicious }], 1).ok).toBe(false)
+  })
 })

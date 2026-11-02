@@ -37,13 +37,16 @@ const CANCEL_EVERY: usize = 1024;
 /// A colon cannot occur in the generated heading slugs, so footnote targets never collide with them.
 const FOOTNOTE_PREFIX: &str = "typose-footnote:";
 
-/// CommonMark with GFM's tables, footnotes, strikethrough and task lists. Off until M4: GitHub alerts, math and wikilinks
-/// (`[!NOTE]`, `$x$` and `[[w]]` stay literal text), and pulldown-cmark's metadata blocks, which it accepts at any block
-/// start: `front_matter_end` finds Z44's at the file's start.
+/// CommonMark with GFM, math and wikilinks. Extras become inert native markers for the renderer.
+/// pulldown-cmark's metadata blocks stay off because it accepts them at any block start;
+/// `front_matter_end` enforces Z44's file-start-only rule.
 const OPTIONS: Options = Options::ENABLE_TABLES
     .union(Options::ENABLE_FOOTNOTES)
     .union(Options::ENABLE_STRIKETHROUGH)
-    .union(Options::ENABLE_TASKLISTS);
+    .union(Options::ENABLE_TASKLISTS)
+    .union(Options::ENABLE_MATH)
+    .union(Options::ENABLE_WIKILINKS)
+    .union(Options::ENABLE_GFM);
 
 /// Spec §4.1: the format is the file's extension's. `md` and `markdown` are Markdown, in any case.
 pub fn is_markdown(path: &Path) -> bool {
@@ -281,29 +284,6 @@ fn table_cells(text: &str) -> u64 {
     total
 }
 
-/// Decodes the file's `bytes` as Raw does (`encoding::decode`'s text, without its map, which would cost up to 13 bytes
-/// a byte): its BOM removed, each malformed sequence a U+FFFD. Valid UTF-8 keeps its buffer. Otherwise the decode takes
-/// `decoded` bytes (`max_utf8_buffer_length`), once, and never grows.
-fn decode(bytes: Vec<u8>, encoding: &'static Encoding, decoded: usize) -> String {
-    let bytes = if encoding == UTF_8 {
-        match String::from_utf8(bytes) {
-            Ok(mut text) => {
-                if text.starts_with('\u{FEFF}') {
-                    text.drain(..3);
-                }
-                return text;
-            }
-            Err(e) => e.into_bytes(),
-        }
-    } else {
-        bytes
-    };
-    let mut text = String::with_capacity(decoded);
-    let (result, _, _) = encoding.new_decoder_with_bom_removal().decode_to_string(&bytes, &mut text, true);
-    debug_assert_eq!(result, encoding_rs::CoderResult::InputEmpty, "max_utf8_buffer_length holds any decode");
-    text
-}
-
 /// A lone CR becomes LF: CommonMark ends a line at either, but pulldown-cmark 0.13.4 misreads a fence opener, front
 /// matter or a final line ended by a lone CR (Spike C). Both are one byte, so no offset moves.
 /// ponytail: Raw's lines break at LF only, so in a file with lone CRs an item's `line` runs ahead of Raw's. Keep the
@@ -457,7 +437,9 @@ impl Build<'_> {
 struct Events<'p, 'b, 'a, I> {
     parser: &'p mut I,
     build: &'p mut Build<'b>,
-    first: Option<Event<'a>>,
+    first: Option<(Event<'a>, Range<usize>)>,
+    source: &'a str,
+    source_bytes: &'p [u64],
     pending: Option<Event<'a>>,
     depth: usize,
     done: bool,
@@ -469,6 +451,71 @@ struct Events<'p, 'b, 'a, I> {
     raw: Option<String>,
     /// A top-level heading's text, for its slug.
     heading: Option<String>,
+}
+
+fn escaped_text(text: &str) -> String {
+    let mut out = String::new();
+    escape_text(text, &mut out);
+    out
+}
+
+/// Each displayed scalar carries its actual source-byte edges. Transformed parser atoms (entities,
+/// escapes and normalized code) snap outward to their source atom instead of guessing encoded widths.
+fn mapped_text(text: &str, source: &str, range: Range<usize>, bytes: &[u64], code: bool) -> String {
+    let original = &source[range.clone()];
+    let literal = original == text;
+    let code_atoms = if code {
+        let fence = original.bytes().take_while(|&b| b == b'`').count();
+        let mut atoms = Vec::new();
+        if fence > 0 && original.len() >= 2 * fence {
+            let body = &original[fence..original.len() - fence];
+            let mut chars = body.char_indices().peekable();
+            while let Some((at, ch)) = chars.next() {
+                let mut end = at + ch.len_utf8();
+                if ch == '\r' && chars.peek().is_some_and(|&(_, c)| c == '\n') { end = chars.next().unwrap().0 + 1; }
+                atoms.push((if matches!(ch, '\r' | '\n') { ' ' } else { ch }, range.start + fence + at..range.start + fence + end));
+            }
+            if atoms.first().is_some_and(|a| a.0 == ' ') && atoms.last().is_some_and(|a| a.0 == ' ') && atoms.iter().any(|a| a.0 != ' ') {
+                atoms.pop(); atoms.remove(0);
+            }
+        }
+        (atoms.iter().map(|a| a.0).collect::<String>() == text).then_some(atoms)
+    } else { None };
+    let mut pairs = Vec::with_capacity(text.len());
+    for (index, (at, ch)) in text.char_indices().enumerate() {
+        let (start, end) = if literal { (bytes[range.start + at], bytes[range.start + at + ch.len_utf8()]) }
+            else if let Some(atoms) = &code_atoms { (bytes[atoms[index].1.start], bytes[atoms[index].1.end]) }
+            else { (bytes[range.start], bytes[range.end]) };
+        for _ in 0..ch.len_utf16() {
+            pairs.push((start, end));
+        }
+    }
+    let mut edges = String::new();
+    if let Some(&(start, end)) = pairs.first() {
+        let width = end - start;
+        if pairs.iter().enumerate().all(|(i, &(s, e))| s == start + i as u64 * width && e == s + width) {
+            edges = format!("L:{start}:{width}:{}", pairs.len());
+        } else {
+            for (start, end) in pairs {
+                if !edges.is_empty() { edges.push(','); }
+                use std::fmt::Write;
+                let _ = write!(edges, "{start}:{end}");
+            }
+        }
+    }
+    let inner = format!("<span data-source-map=\"{edges}\">{}</span>", escaped_text(text));
+    if code { format!("<code>{inner}</code>") } else { inner }
+}
+
+fn byte_edges(text: &str, map: &crate::bytemap::ByteMap) -> Vec<u64> {
+    let mut out = vec![0; text.len() + 1];
+    let mut unit = 0;
+    for (at, ch) in text.char_indices() {
+        out[at] = map.start_byte(unit);
+        unit += ch.len_utf16() as u32;
+        out[at + ch.len_utf8()] = map.end_byte(unit);
+    }
+    out
 }
 
 impl<'a, I: Iterator<Item = (Event<'a>, Range<usize>)>> Events<'_, '_, 'a, I> {
@@ -493,13 +540,13 @@ impl<'a, I: Iterator<Item = (Event<'a>, Range<usize>)>> Events<'_, '_, 'a, I> {
             return Err(e);
         }
         while !self.done {
-            let Some(event) = self.first.take().or_else(|| self.parser.next().map(|(e, _)| e)) else { break };
+            let Some((event, _)) = self.first.take().or_else(|| self.parser.next()) else { break };
             self.step(&event)?;
         }
         Ok(())
     }
 
-    fn rewrite(&mut self, event: Event<'a>) -> Result<Event<'a>, DocError> {
+    fn rewrite(&mut self, event: Event<'a>, range: Range<usize>) -> Result<Event<'a>, DocError> {
         match &event {
             Event::Start(Tag::HtmlBlock) => self.raw = Some(String::new()),
             Event::Start(Tag::Image { .. }) => self.alt = Some(self.depth),
@@ -518,9 +565,17 @@ impl<'a, I: Iterator<Item = (Event<'a>, Range<usize>)>> Events<'_, '_, 'a, I> {
         };
         Ok(match event {
             Event::Start(Tag::Link { link_type, dest_url, .. }) => {
-                let url =
-                    if link_type == LinkType::Email { format!("mailto:{dest_url}") } else { dest_url.to_string() };
+                let url = if link_type == LinkType::Email { format!("mailto:{dest_url}") }
+                    else if matches!(link_type, LinkType::WikiLink { .. }) { format!("typose-wiki:{dest_url}") }
+                    else { dest_url.to_string() };
                 Event::InlineHtml(format!("<a data-href=\"{}\">", escape_attr(&url)).into())
+            }
+            Event::Start(Tag::BlockQuote(Some(kind))) => Event::Html(format!("<blockquote data-callout=\"{}\">", format!("{kind:?}").to_lowercase()).into()),
+            Event::Text(t) if self.alt.is_none() => Event::InlineHtml(mapped_text(&t, self.source, range, self.source_bytes, false).into()),
+            Event::Code(t) => Event::InlineHtml(mapped_text(&t, self.source, range, self.source_bytes, true).into()),
+            Event::InlineMath(t) | Event::DisplayMath(t) => {
+                let display = matches!(self.source.get(range.clone()), Some(s) if s.starts_with("$$"));
+                Event::InlineHtml(format!("<span class=\"tp-math\" data-display=\"{}\">{}</span>", if display { "1" } else { "0" }, escaped_text(&t)).into())
             }
             Event::FootnoteReference(label) => {
                 let n = self.build.number(&label).map_err(DocError::Memory)?;
@@ -549,7 +604,7 @@ impl<'a, I: Iterator<Item = (Event<'a>, Range<usize>)>> Iterator for Events<'_, 
             if self.done || self.deep || self.stop.is_some() {
                 return None;
             }
-            let event = self.first.take().or_else(|| self.parser.next().map(|(e, _)| e))?;
+            let (event, range) = self.first.take().or_else(|| self.parser.next())?;
             if let Err(e) = self.step(&event) {
                 self.stop = Some(e);
                 return None;
@@ -579,7 +634,7 @@ impl<'a, I: Iterator<Item = (Event<'a>, Range<usize>)>> Iterator for Events<'_, 
                     _ => {}
                 }
             }
-            match self.rewrite(event) {
+            match self.rewrite(event, range) {
                 Ok(e) => return Some(e),
                 Err(e) => {
                     self.stop = Some(e);
@@ -644,12 +699,19 @@ impl Lines {
 
 /// The items of `text`, the decoded file whose first `front` bytes are its front matter (plan §2.1). `cancelled` is
 /// checked every `CANCEL_EVERY` events.
+#[cfg(test)]
 fn blocks(
     text: &str,
     front: usize,
     encoding: &'static Encoding,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Rendered, DocError> {
+    let map = crate::encoding::decode(text.as_bytes(), UTF_8, 0).map;
+    let edges = byte_edges(text, &map);
+    blocks_mapped(text, front, encoding, &edges, cancelled)
+}
+
+fn blocks_mapped(text: &str, front: usize, encoding: &'static Encoding, edges: &[u64], cancelled: &dyn Fn() -> bool) -> Result<Rendered, DocError> {
     let mut out = Rendered::new().map_err(DocError::Memory)?;
     let mut build =
         Build { events: 0, cancelled, numbers: HashMap::new(), slugs: HashMap::new(), charge: Reservation::none() };
@@ -671,7 +733,7 @@ fn blocks(
             out.push(Item { line, lines, html, slug, footnote, note }, units).map_err(DocError::Memory)
         };
     if front > 0 {
-        let mut code = String::from("<pre><code>");
+        let mut code = String::from("<pre data-frontmatter=\"1\"><code>");
         escape_text(&text[..front], &mut code);
         code.push_str("</code></pre>");
         let written = if code.len() <= HTML_MAX { Ok(code.as_str()) } else { Err(Note::Large) };
@@ -687,7 +749,9 @@ fn blocks(
         let mut events = Events {
             parser: &mut parser,
             build: &mut build,
-            first: Some(first),
+            first: Some((first, r)),
+            source: &text[front..],
+            source_bytes: &edges[front..],
             pending: None,
             depth: 0,
             done: false,
@@ -746,14 +810,16 @@ pub fn build(
         Some((e, n)) if e == encoding => n,
         _ => 0,
     };
-    let text = lone_cr_to_lf(decode(bytes, encoding, decoded.unwrap_or(0)));
-    temp.shrink(temp.bytes() - text.capacity() as u64); // the bytes, or the decode, are all that's left
+    temp.grow(len.saturating_mul(40)).map_err(DocError::Memory)?;
+    let decoded = crate::encoding::decode(&bytes, encoding, 0);
+    let edges = byte_edges(&decoded.text, &decoded.map);
+    let text = lone_cr_to_lf(decoded.text);
     if cancelled() {
         return Err(DocError::Cancelled);
     }
     let front = front_matter_end(&text, encoding, bom).unwrap_or(0);
     temp.grow(parse_temp(text.len(), table_cells(&text[front..]))).map_err(DocError::Memory)?;
-    blocks(&text, front, encoding, cancelled)
+    blocks_mapped(&text, front, encoding, &edges, cancelled)
 }
 
 #[cfg(test)]
@@ -773,7 +839,19 @@ mod tests {
     }
 
     fn htmls(md: &str) -> Vec<String> {
-        render(md).items().iter().map(|i| i.html.to_string()).collect()
+        render(md).items().iter().map(|i| semantic_html(&i.html)).collect()
+    }
+
+    /// Structural snapshots ignore provenance wrappers, which are tested independently below.
+    fn semantic_html(html: &str) -> String {
+        let mut out = html.replace(" data-frontmatter=\"1\"", "");
+        while let Some(start) = out.find("<span data-source-map=\"") {
+            let content = out[start..].find('>').unwrap() + start + 1;
+            let end = out[content..].find("</span>").unwrap() + content;
+            out.replace_range(end..end + 7, "");
+            out.replace_range(start..content, "");
+        }
+        out
     }
 
     /// `bytes` as a file, opened in Raw and rendered.
@@ -781,8 +859,8 @@ mod tests {
         Raw::open(&temp_file(name, bytes)).unwrap().render(1)
     }
 
-    /// Plan §1's In constructs, each to its sanitized HTML: what pulldown-cmark writes, less what ammonia strips (a
-    /// code block's language class, a cell's alignment style, a link's title), with every link and image rewritten.
+    /// CommonMark/GFM constructs, each to sanitized semantic HTML with local code-language classes,
+    /// cell alignment styles and link titles stripped, and every link and image rewritten.
     #[test]
     fn each_in_construct_renders_to_its_sanitized_html() {
         let cases: [(&str, &[&str]); 21] = [
@@ -800,7 +878,7 @@ mod tests {
                 ],
             ),
             ("> q\n> > r\n", &["<blockquote>\n<p>q</p>\n<blockquote>\n<p>r</p>\n</blockquote>\n</blockquote>\n"]),
-            ("```rust\nfn x() {} // <b>\n```\n", &["<pre><code>fn x() {} // &lt;b&gt;\n</code></pre>\n"]),
+            ("```rust\nfn x() {} // <b>\n```\n", &["<pre><code class=\"language-rust\">fn x() {} // &lt;b&gt;\n</code></pre>\n"]),
             ("    indented\n", &["<pre><code>indented\n</code></pre>\n"]),
             (
                 "| a | b |\n|:--|--:|\n| 1 | x<br>y |\n",
@@ -887,13 +965,33 @@ mod tests {
         assert!(r.items()[4].html.contains("<sup>2</sup>"));
     }
 
-    /// Plan §1: a GitHub alert, math and a wikilink stay literal text until M4.
+    /// M4 extensions remain inert until explicitly enhanced by the bounded renderer.
     #[test]
-    fn alerts_math_and_wikilinks_stay_literal() {
-        assert_eq!(
-            htmls("> [!NOTE]\n> $x$ and $$y$$ [[w]] [[w|t]]"),
-            ["<blockquote>\n<p>[!NOTE]\n$x$ and $$y$$ [[w]] [[w|t]]</p>\n</blockquote>\n"]
-        );
+    fn alerts_math_and_wikilinks_have_only_inert_native_markers() {
+        let r = render("> [!NOTE]\n> $x$ and $$y$$ [[w]] [[w|t]]");
+        let html = &r.items()[0].html;
+        assert!(html.contains("data-callout=\"note\""));
+        assert!(html.contains("class=\"tp-math\" data-display=\"0\">x"));
+        assert!(html.contains("class=\"tp-math\" data-display=\"1\">y"));
+        assert!(html.contains("data-href=\"typose-wiki:w\""));
+        check_items(&r).unwrap();
+    }
+
+    #[test]
+    fn provenance_retains_entity_code_normalization_bom_and_surrogate_bytes() {
+        let ascii: Vec<u64> = (0..=5).collect();
+        assert!(mapped_text("&", "&amp;", 0..5, &ascii, false).contains("L:0:5:1"));
+        assert!(mapped_text("a b", "`a\nb`", 0..5, &ascii, true).contains("L:1:1:3"));
+        let bytes: Vec<u8> = [0xff, 0xfe].into_iter().chain("😀".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        let decoded = crate::encoding::decode(&bytes, UTF_16LE, 0);
+        let edges = byte_edges(&decoded.text, &decoded.map);
+        assert!(mapped_text("😀", &decoded.text, 0..decoded.text.len(), &edges, false).contains("2:6,2:6"));
+        let decoded = crate::encoding::decode(&[b'c', b'a', b'f', 0xe9], encoding_rs::WINDOWS_1252, 0);
+        let edges = byte_edges(&decoded.text, &decoded.map);
+        assert!(mapped_text("café", &decoded.text, 0..decoded.text.len(), &edges, false).contains("L:0:1:4"));
+        let decoded = crate::encoding::decode(&[0xe2, 0x28, 0xa1], UTF_8, 0);
+        let edges = byte_edges(&decoded.text, &decoded.map);
+        assert!(mapped_text(&decoded.text, &decoded.text, 0..decoded.text.len(), &edges, false).contains("L:0:1:3"));
     }
 
     /// Z44: front matter at the file's start shows as a code block, never discarded; anywhere else, or closing past the
@@ -901,8 +999,8 @@ mod tests {
     #[test]
     fn front_matter_shows_only_at_the_start_and_within_64_kib() {
         let r = render("---\ntitle: <x>\n---\nbody\n");
-        let got: Vec<_> = r.items().iter().map(|i| (i.line, i.lines, &*i.html)).collect();
-        assert_eq!(got, [(0, 3, "<pre><code>---\ntitle: &lt;x&gt;\n---\n</code></pre>"), (3, 1, "<p>body</p>\n")]);
+        let got: Vec<_> = r.items().iter().map(|i| (i.line, i.lines, semantic_html(&i.html))).collect();
+        assert_eq!(got, [(0, 3, "<pre><code>---\ntitle: &lt;x&gt;\n---\n</code></pre>".into()), (3, 1, "<p>body</p>\n".into())]);
         assert_eq!(htmls("intro\n\n---\ntitle: x\n---\n"), ["<p>intro</p>\n", "<hr>\n", "<h2>title: x</h2>\n"]);
         assert_eq!(htmls("\n---\ntitle: x\n---\n"), ["<hr>\n", "<h2>title: x</h2>\n"]); // not at offset 0
         // Closing within the first 64 KiB, at 65,536 exactly, and one byte past it.
@@ -914,11 +1012,11 @@ mod tests {
         assert!(over[1].starts_with("<h2>kkk")); // never discarded
         // After a BOM, from a file; and its source bytes counted in UTF-16.
         let r = render_file("md-fm-bom", "\u{FEFF}---\na: 1\n...\n# H\n".as_bytes()).unwrap();
-        assert_eq!(r.items()[0].html.as_ref(), "<pre><code>---\na: 1\n...\n</code></pre>");
+        assert_eq!(semantic_html(&r.items()[0].html), "<pre><code>---\na: 1\n...\n</code></pre>");
         let utf16 =
             |s: &str| [&[0xFF, 0xFE][..], &s.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>()].concat();
         let fits = format!("---\n{}\n---\n", "k".repeat(FRONT_MATTER / 2 - 10)); // 65,534 bytes after the BOM
-        assert!(render_file("md-fm-u16", &utf16(&fits)).unwrap().items()[0].html.starts_with("<pre><code>"));
+        assert!(render_file("md-fm-u16", &utf16(&fits)).unwrap().items()[0].html.starts_with("<pre data-frontmatter=\"1\"><code>"));
         let over = format!("---\n{}\n---\n", "k".repeat(FRONT_MATTER / 2 - 9));
         assert_eq!(render_file("md-fm-u16-over", &utf16(&over)).unwrap().items()[0].html.as_ref(), "<hr>\n");
     }
@@ -934,7 +1032,7 @@ mod tests {
         let utf16: Vec<u8> = [0xFF, 0xFE].into_iter().chain(md.encode_utf16().flat_map(u16::to_le_bytes)).collect();
         assert_eq!(lines(render_file("md-lines-u16", &utf16).unwrap()), want);
         let w1252 = render_file("md-lines-1252", &[md.as_bytes(), b"caf\xE9\n"].concat()).unwrap();
-        assert_eq!(w1252.items().last().unwrap().html.as_ref(), "<p>café</p>\n");
+        assert_eq!(semantic_html(&w1252.items().last().unwrap().html), "<p>café</p>\n");
     }
 
     /// Plan §3's bounds: a block over 64 KiB of source, nested over 64 deep or writing over 256 KiB is a note at its line.
@@ -949,7 +1047,7 @@ mod tests {
             let r = render(&format!("intro\n\n{block}\n\nafter\n"));
             let notes: Vec<_> = r.items().iter().map(|i| (i.line, i.note, i.html.is_empty())).collect();
             assert_eq!(notes[1], (2, Some(Note::Big), true), "{name}");
-            assert_eq!((notes.len(), r.items()[2].html.as_ref()), (3, "<p>after</p>\n"), "{name}");
+            assert_eq!((notes.len(), semantic_html(&r.items()[2].html)), (3, "<p>after</p>\n".into()), "{name}");
         }
         // 64 quotes around a paragraph nest it 65 deep; 63 render.
         assert_eq!(render(&format!("{} x", ">".repeat(64))).items()[0].note, Some(Note::Deep));
@@ -1122,7 +1220,7 @@ mod tests {
         const TAGS: &str = "b i em strong code kbd sub sup br hr details summary a table thead tbody tr th td p h1 h2 h3 \
                             h4 h5 h6 blockquote ul ol li pre del span div input";
         const FORBIDDEN: &str = "link meta base style script iframe object svg math img";
-        const ATTRS: [(&str, &str); 9] = [
+        const ATTRS: [(&str, &str); 14] = [
             ("a", "href"),
             ("a", "data-href"),
             ("ol", "start"),
@@ -1132,6 +1230,11 @@ mod tests {
             ("span", "class"),
             ("span", "data-src"),
             ("span", "data-alt"),
+            ("span", "data-source-map"),
+            ("span", "data-display"),
+            ("blockquote", "data-callout"),
+            ("pre", "data-frontmatter"),
+            ("code", "class"),
         ];
         let listed = |list: &str, name: &str| list.split_whitespace().any(|t| t == name);
         let mut rest = html;
@@ -1166,7 +1269,9 @@ mod tests {
                     "href" => value != "#",
                     "data-href" => scheme.is_some_and(|s| matches!(s.as_str(), "javascript" | "vbscript" | "data")),
                     "data-src" => network_path(&s) || scheme.is_some_and(|s| !matches!(s.as_str(), "http" | "https")),
-                    "class" => value != "tp-img",
+                    "class" => if name == "code" { !value.is_empty() && !value.starts_with("language-") } else { !matches!(value.as_str(), "tp-img" | "tp-math") },
+                    "data-source-map" => !value.bytes().all(|b| b.is_ascii_digit() || b"L:,".contains(&b)),
+                    "data-display" | "data-frontmatter" => !matches!(value.as_str(), "0" | "1"),
                     _ => false,
                 };
                 if bad {
@@ -1380,7 +1485,7 @@ mod tests {
                     panic!("{md:?}: {e}\n{:?}", r.items().iter().map(|i| &i.html).collect::<Vec<_>>());
                 }
                 outputs += r.items().len();
-                let html: String = r.items().iter().map(|i| &*i.html).collect();
+                let html: String = r.items().iter().map(|i| semantic_html(&i.html)).collect();
                 if literal && let Some(name) = first_disallowed(payload) {
                     assert!(html.contains(&format!("&lt;{name}")), "{md:?}: <{name} isn't literal text in {html:?}");
                 }

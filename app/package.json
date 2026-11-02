@@ -12,6 +12,10 @@
     "package": "install-electron && electron-builder --dir --publish never"
   },
   "dependencies": {
+    "dompurify": "3.4.17",
+    "katex": "0.19.0",
+    "mermaid": "12.2.0",
+    "shiki": "4.0.2",
     "typose-node": "0.0.0",
     "yaml": "2.9.1"
   },

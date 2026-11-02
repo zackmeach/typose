@@ -1,0 +1,24 @@
+.md-properties { display: grid; grid-template-columns: minmax(8ch, 1fr) 3fr; gap: 6px 18px; padding: 14px 18px; background: var(--surface-raised); border: 1px solid var(--border); border-radius: 8px; font-size: 13px; }
+.md-properties dt { color: var(--text2); }
+.md-properties dd { margin: 0; overflow-wrap: anywhere; }
+.md-callout { --callout-tint: #93c5fd; border-left: 3px solid var(--callout-tint); padding: 12px 18px; background: color-mix(in srgb, var(--callout-tint) 8%, transparent); }
+.md-callout[data-tint="green"] { --callout-tint: #86efac; }
+.md-callout[data-tint="purple"] { --callout-tint: #d8b4fe; }
+.md-callout[data-tint="yellow"] { --callout-tint: #fde68a; }
+.md-callout[data-tint="pink"] { --callout-tint: #f9a8d4; }
+.md-callout[data-tint="neutral"] { --callout-tint: #d4d4d8; }
+.md-callout-title { color: var(--callout-tint); font-size: 13px; font-weight: 650; margin-bottom: 6px; }
+.md-callout > p:last-child { margin-bottom: 0; }
+.md-diagram { background: transparent; padding: 0; }
+.md-diagram iframe { width: 100%; border: 0; }
+.tp-math { overflow-wrap: normal; }
+.tp-math[data-display="1"] { display: block; overflow-x: auto; }
+.md-code-copy { float: right; opacity: 0; }
+pre:hover > .md-code-copy, pre:focus-within > .md-code-copy { opacity: 1; }
+.md-outline { position: sticky; top: calc(100% - 48px); float: right; height: 0; margin-right: 18px; z-index: 4; }
+.md-outline summary { position: absolute; top: 0; right: 0; width: max-content; cursor: pointer; padding: 7px 14px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-raised); }
+.md-outline nav { position: absolute; right: 0; bottom: 8px; width: 216px; max-height: 65vh; overflow: auto; padding: 8px; background: var(--surface-raised); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 28px #0005; }
+.md-outline button { display: block; background: transparent; border: 0; color: var(--text2); text-align: left; padding: 5px 8px; }
+.md-outline button:hover { color: var(--text); }
+.md-outline button[aria-current="location"] { color: var(--accent); background: var(--surface); }
+.md-scroller[data-outline-column="1"] .md-column { margin-right: 232px; margin-left: auto; }
