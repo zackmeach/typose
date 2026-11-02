@@ -54,7 +54,10 @@ export type Card =
   /** Plan C7: the core died. `line` is where its view was; `ready` once a new core is up to Reopen it in. */
   | { kind: 'gone'; path?: string; line?: number; ready: boolean; localOnly?: true }
 
-export type Action = 'Open file…' | 'Locate…' | 'Retry' | 'Reload' | 'Close' | 'Reopen'
+export type Action = 'Open file…' | 'Locate…' | 'Retry' | 'Reload' | 'Close' | 'Reopen' | 'Open with default app' | 'Show in folder'
+
+/** Names whose files Typose reads as text, so a NUL in one means a misnamed file (Z79's binary board). */
+const TEXT_NAMES = /\.(md|markdown|txt|csv|tsv|json|jsonl|yaml|yml|log|toml|ini|cfg|xml|html|css|js|ts|py|rs|c|h|cpp|hpp|java|sh|ps1|sql)$/i
 
 /** Display needs scalar identity, never the selected controller's first page or memory lease. */
 export type DisplayCard = Exclude<Card, { kind: 'open' }> | (Omit<Extract<Card, { kind: 'open' }>, 'opened'> & {
@@ -69,7 +72,7 @@ export interface CardView {
   /** A banner under the header, and its button's label. The button reloads, as Ctrl+R does. */
   banner: { text: string; action: string } | null
   /** The Raw lens, the Rendered lens, or a message with its actions. */
-  body: { raw: true } | { rendered: true } | { grid: true } | { structured: true } | { message: string; actions: Action[] }
+  body: { raw: true } | { rendered: true } | { grid: true } | { structured: true } | { message: string; detail?: string; actions: Action[] }
   /** Markdown's Raw/Rendered switch. `renderedOff` is the disabled tab's tooltip. Null when the file has no switch. */
   lenses: null | { showing: LensName; renderedOff?: string; grid?: true; gridOff?: string; structured?: { id: LensName; label: string; off?: string }[] }
 }
@@ -143,8 +146,12 @@ export function view(card: DisplayCard): CardView {
       // A lost local capability cannot be recreated by treating its display path as a manual open.
       if (card.localOnly) return say(`Can't open ${card.path} · ${card.message}`, 'Locate…', 'Close')
       switch (card.code) {
-        case 'Binary':
-          return say('Binary file · not shown') // the hand-off (brief §4.6) is M4
+        case 'Binary': {
+          // Binary means a NUL in the first 8 KB (spec §4.1). The hand-off is brief §4.6's, Z79's.
+          const named = TEXT_NAMES.exec(card.path)?.[0]
+          const detail = named ? `It has a ${named} name but contains NUL bytes in the first 8 KB.` : 'It contains NUL bytes in the first 8 KB.'
+          return { ...plain, body: { message: 'Binary file · not shown', detail, actions: ['Open with default app', 'Show in folder'] } }
+        }
         case 'NotFound':
           return say(`File not found at ${card.path}`, 'Locate…', 'Close')
         case 'PermissionDenied':

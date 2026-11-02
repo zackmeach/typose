@@ -10,7 +10,8 @@ import { ReaderCard } from './ReaderCard'
 import { WorkspaceStore, WorkspaceMetadataQueue, type WorkspaceTab } from './workspace'
 import { WorkspaceBudget } from './workspace-budget'
 import { FolderSidebar } from './folder-sidebar'
-import { entryView, folderNode, foldersCharge, rootView, updateFolder, type RootView } from './folders'
+import { entryView, folderNode, foldersCharge, nodePath, rootView, updateFolder, type RootView } from './folders'
+import { handOff } from './handoff'
 import type { ClosedLocation, LocalGesture, ReaderGroup, ReaderHandle, ReaderWindow } from './reader-window'
 import './split-cards.css'
 import './link-preview.css'
@@ -823,7 +824,11 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
         onWidth={setSidebarWidth} onCollapse={() => { setSidebarOpen(false); requestAnimationFrame(() => document.querySelector<HTMLElement>('.sidebar-toggle')?.focus()) }}
         onAdd={() => void pickFolder()} onToggle={toggleFolder} onOpen={(root, node) => void focusedReader()?.openChild(root, node)}
         onRefresh={refreshDirectory} onMore={(root, node) => void listDirectory(root, node, true)} onRemove={removeFolder}
-        onLocate={root => void pickFolder(root, folders.current.find(item => item.id === root && item.network)?.path)} /> : null}
+        onLocate={root => void pickFolder(root, folders.current.find(item => item.id === root && item.network)?.path)}
+        onHandoff={(rootId, nodeId, kind) => {
+          const root = folders.current.find(item => item.id === rootId), node = root && folderNode(root, nodeId)
+          if (root && node) void handOff(kind, { entry: node.ref }, nodePath(root, nodeId) ?? node.name).then(message => { if (message) setWorkspaceNotice(message) })
+        }} /> : null}
       <main className="card-row" ref={row}>
         {groups.map((group, index) => <div className="card-slot" style={{ flexGrow: group.weight }} key={group.id}>
           <ReaderCard id={group.id} label={index + 1} workspace={group.workspace} window={shared} fonts={fonts} focused={focused === group.id}

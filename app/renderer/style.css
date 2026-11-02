@@ -649,3 +649,13 @@ html[data-a11y='on'] .md-block,
   max-width: 100%;
   height: auto;
 }
+
+/* Z79's hand-off: the binary state's reason, and the sheet for a file Typose won't show or run. */
+.card-state .card-detail { margin-top: -8px; font-size: 12px; }
+.handoff-overlay { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; background: rgb(0 0 0 / 48%); }
+.handoff-sheet { width: min(440px, calc(100vw - 32px)); padding: 18px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); box-shadow: 0 14px 50px rgb(0 0 0 / 50%); font: 13px/1.5 var(--font-ui); }
+.handoff-dialog { outline: none; }
+.handoff-dialog h2 { margin: 0 0 6px; font: 600 14px/1.4 var(--font-ui); }
+.handoff-dialog p { margin: 0 0 14px; color: var(--text2); }
+.handoff-dialog code { display: block; margin: 0 0 16px; padding: 8px 10px; border-radius: 6px; background: var(--canvas); font: 12px/1.5 var(--font-mono); overflow-wrap: anywhere; }
+.handoff-actions { display: flex; justify-content: flex-end; gap: 8px; }

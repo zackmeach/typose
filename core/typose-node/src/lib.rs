@@ -644,6 +644,15 @@ impl FolderRoot {
             _charge: charge,
         }))
     }
+    /// A listed entry's path, for main's OS hand-off. It opens nothing.
+    #[napi]
+    pub fn entry_path(&self, node: f64) -> std::result::Result<String, Error<Code>> {
+        let node = int("start", node)?;
+        if node >= folder::MAX_NODES as u64 {
+            return Err(Error::new(Code::InvalidParams, "invalid folder node"));
+        }
+        self.state.entry_path(node as u32).map_err(doc_error)
+    }
     #[napi]
     pub fn open(&self, node: f64) -> std::result::Result<Doc, Error<Code>> {
         let node = int("start", node)?;
@@ -961,6 +970,19 @@ impl Doc {
         let (raw, generation) = self.local_source(generation)?;
         let _temp = Reservation::new((3 * pages::MAX_PATH_BYTES) as u64).map_err(|e| doc_error(DocError::Memory(e)))?;
         let route = raw.document().local_path(generation, &target).map_err(doc_error)?;
+        Ok(route.path().to_string_lossy().into_owned())
+    }
+
+    /// `local_path` for any extension: where a linked program or script is, for the hand-off sheet. It opens nothing.
+    /// `href` must be a link of this generation's build (`target` is the host's decoding of it): never a page's choice.
+    #[napi]
+    pub fn link_path(&self, generation: f64, target: String, href: String) -> std::result::Result<String, Error<Code>> {
+        let (raw, generation) = self.local_source(generation)?;
+        if !self.built.lock().unwrap().as_ref().is_some_and(|built| built.links_to(&href)) {
+            return Err(Error::new(Code::Refused, "the document doesn't link to this target"));
+        }
+        let _temp = Reservation::new((3 * pages::MAX_PATH_BYTES) as u64).map_err(|e| doc_error(DocError::Memory(e)))?;
+        let route = raw.document().link_path(generation, &target).map_err(doc_error)?;
         Ok(route.path().to_string_lossy().into_owned())
     }
 
