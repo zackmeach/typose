@@ -29,7 +29,7 @@
 .structured-problem .jsonl-expand { color:inherit; }
 .jsonl-gap { flex:none; width:20px; }
 .jsonl-list .jsonl-number { flex:none; min-width:calc(var(--jsonl-digits, 4) * 1ch); text-align:right; color:var(--text2); }
-.jsonl-time { flex:none; color:var(--text2); font-variant-numeric:tabular-nums; }
+.jsonl-time { flex:none; max-width:24ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text2); font-variant-numeric:tabular-nums; }
 .jsonl-time:empty, .jsonl-type:empty { display:none; }
 .jsonl-type.csv-value-pill { flex:none; max-width:18ch; padding:0 6px; color:var(--text); }
 .jsonl-problem { flex:none; }
