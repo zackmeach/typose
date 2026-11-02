@@ -229,7 +229,9 @@ export class StructuredLens {
         this.renderRows()
       }
     } catch (error) {
+      // Failed rows retry on their own a second later, without waiting for a scroll or an index update.
       this.retryAt = performance.now() + 1000
+      setTimeout(() => { this.retryAt = 0; this.schedule() }, 1000)
       if (!this.stopped) { if (error instanceof CoreCallError && error.code === 'Frozen') this.error(error); else this.options.notice(String(error)) }
     } finally {
       this.filling = false
