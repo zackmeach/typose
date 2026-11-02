@@ -1,7 +1,38 @@
-import { expect } from '@playwright/test'
+import { type Page, expect } from '@playwright/test'
 import { join } from 'node:path'
-import { HOSTILE_MERMAID, HOSTILE_TEX } from '../app/renderer/math/hostile'
+import { HOSTILE_MERMAID, HOSTILE_TEX, MATH_BOMB, MATH_BOMB_3 } from '../app/renderer/math/hostile'
 import { FIXTURES, assertNetLog, finish, fixture, launch, test, waitIndexed } from './app'
+
+/**
+ * Until the returned stop: the worst eval round-trip from the test, the renderer's longest task, and the most a 25 ms
+ * page timer ran late (GC pauses included). A round-trip also crosses the browser process and this test's own loop.
+ */
+async function responsiveness(win: Page): Promise<() => Promise<{ worstRoundTrip: number; longestTask: number; timerLate: number }>> {
+  await win.waitForLoadState('domcontentloaded')
+  await win.evaluate(() => {
+    const w = window as unknown as { longTasks: number[]; timerLate: number }
+    w.longTasks = []
+    w.timerLate = 0
+    new PerformanceObserver(list => { for (const entry of list.getEntries()) w.longTasks.push(entry.duration) }).observe({ type: 'longtask', buffered: true })
+    let last = performance.now()
+    setInterval(() => { const now = performance.now(); w.timerLate = Math.max(w.timerLate, now - last - 25); last = now }, 25)
+  })
+  let running = true, worstRoundTrip = 0
+  const sampling = (async () => {
+    while (running) {
+      const start = Date.now()
+      if (await win.evaluate(() => 0).catch(() => null) === null) return
+      worstRoundTrip = Math.max(worstRoundTrip, Date.now() - start)
+      await new Promise(done => setTimeout(done, 25))
+    }
+  })()
+  return async () => {
+    running = false
+    await sampling
+    const page = await win.evaluate(() => { const w = window as unknown as { longTasks: number[]; timerLate: number }; return { longestTask: Math.max(0, ...w.longTasks), timerLate: Math.round(w.timerLate) } })
+    return { worstRoundTrip, ...page }
+  }
+}
 
 test('offline Markdown extras render securely and offscreen math/diagrams reach normalized print', async () => {
   const source = ['---', 'title: Markdown candidate', 'owner: Zack', 'tags: [alpha, beta]', '---', '# Markdown extras', '',
@@ -123,6 +154,37 @@ test('every hostile Mermaid diagram type and hostile TeX settle in script-less f
     expect(frames.length).toBeGreaterThan(0)
     expect(frames.every(Boolean)).toBe(true)
     expect(live.win.url()).toContain('typose://')
+    expect(live.pageErrors).toEqual([])
+  } finally { await finish(live) }
+  expect(assertNetLog(netlog)).toContain('PASS: no Chromium network-stack activity')
+})
+
+test('math bombs, oversized formulas and hostile sanitizer input stay bounded and keep the reader responsive', async () => {
+  const cell = (i: number) => String.raw`\frac{a_${i}}{b_${i}}`
+  const matrix = (n: number) => String.raw`\begin{pmatrix}` + Array.from({ length: n }, () => Array.from({ length: n }, (_, i) => cell(i)).join(' & ')).join(String.raw`\\`) + String.raw`\end{pmatrix}`
+  const source = ['# Bounded math', '', '$$' + MATH_BOMB + '$$', '', '$$' + MATH_BOMB_3 + '$$', '', '$$' + matrix(10) + '$$', '', '$$' + matrix(12) + '$$', '',
+    ...HOSTILE_TEX.flatMap(tex => ['$$' + tex + '$$', '']), '> [!constructor]', '> Not a callout.', ''].join('\n')
+  const file = fixture('markdown-extras-bounded-math.md', source)
+  const netlog = join(FIXTURES, 'markdown-extras-bounded-math.netlog.json')
+  const live = await launch({ file, netlog, hooks: true })
+  try {
+    const stop = await responsiveness(live.win)
+    await expect(live.win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 60_000 })
+    // Every formula ends rendered, or as its source with the reason in its tooltip. (The 100,001-character nesting
+    // fixture is over the 64 KiB block bound, so the core makes it a note, not a formula.)
+    await expect.poll(() => live.win.evaluate(() => [...document.querySelectorAll('.tp-math')]
+      .filter(m => !m.querySelector('.katex, .problem') && !m.getAttribute('title')).length), { timeout: 60_000 }).toBe(0)
+    const { worstRoundTrip, longestTask, timerLate } = await stop()
+    const titles = await live.win.evaluate(() => [...document.querySelectorAll('.tp-math')].map(m => m.getAttribute('title')))
+    expect(titles.slice(0, 4)).toEqual(['Math source kept · Macro definitions are not rendered', 'Math source kept · Macro definitions are not rendered', null, 'Math source kept · Math output exceeds 8192 elements'])
+    await expect(live.win.locator('.tp-math').nth(2).locator('.katex')).toHaveCount(1)
+    expect(await live.win.evaluate(() => document.querySelectorAll('*').length)).toBeLessThan(40_000)
+    console.log(`bounded math: worst eval round-trip ${worstRoundTrip} ms, longest renderer task ${Math.round(longestTask)} ms, page timer late ${timerLate} ms`)
+    expect(worstRoundTrip).toBeLessThan(1000)
+    expect(longestTask).toBeLessThan(250)
+    expect(timerLate).toBeLessThan(250)
+    // An Object.prototype key is not a callout kind.
+    expect(await live.win.locator('.md-callout').count()).toBe(0)
     expect(live.pageErrors).toEqual([])
   } finally { await finish(live) }
   expect(assertNetLog(netlog)).toContain('PASS: no Chromium network-stack activity')

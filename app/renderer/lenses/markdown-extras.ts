@@ -121,7 +121,7 @@ export function markdownExtras(root: HTMLElement, current: () => boolean, reserv
     const source = math.textContent ?? ''
     pending.push(async () => {
       if (!current() || source.length > 8192 || !await reserve((1 << 20) + source.length * 512)) { math.title = 'Math source kept · rendering budget exceeded'; return }
-      await renderMath(math, source, math.dataset.display === '1')
+      await renderMath(math, source, math.dataset.display === '1', bytes => current() ? reserve(bytes) : Promise.resolve(false))
     })
   }
   for (const code of root.querySelectorAll<HTMLElement>('pre > code')) {

@@ -1,6 +1,8 @@
 // Math on the main thread (spec §4.6): KaTeX runs in a worker, and its output passes DOMPurify before it reaches the DOM.
 import DOMPurify from 'dompurify'
 import 'katex/dist/katex.min.css'
+import { workerJobs } from '../worker-jobs'
+import { MATH_MAX_BYTES, MATH_MAX_ELEMENTS, elementCount } from './limits'
 
 // Our own instance: the default one is shared with Mermaid, which must not inherit this hook.
 const purify = DOMPurify(window)
@@ -23,26 +25,16 @@ export function sanitizeMath(html: string): string {
   return purify.sanitize(html, CONFIG)
 }
 
-type Result = { id: number; html?: string; error?: string }
-let worker: Worker | undefined
-let nextId = 0
-const pending = new Map<number, (r: Result) => void>()
+/**
+ * Renderer bytes per generated element, charged before the DOM sees any: 30 dense 6×6 matrices (70,080 elements)
+ * raised the renderer's private bytes by 156.6 MiB, 2,343 B an element. ×1.25, rounded up to 64 B.
+ */
+export const MATH_ELEMENT_BYTES = 2944
+/** A formula still in the worker after this is a runaway: the worker is terminated and respawned for the next. */
+const MATH_TIMEOUT_MS = 1500
 
-function katexWorker(): Worker {
-  if (worker) return worker
-  const w = new Worker(new URL('./katex.worker.ts', import.meta.url), { type: 'module' })
-  w.onmessage = (e: MessageEvent<Result>) => {
-    pending.get(e.data.id)?.(e.data)
-    pending.delete(e.data.id)
-  }
-  w.onerror = (e) => {
-    for (const [id, done] of pending) done({ id, error: e.message || 'KaTeX worker failed' })
-    pending.clear()
-    w.terminate()
-    worker = undefined
-  }
-  return (worker = w)
-}
+const katexJob = workerJobs<{ tex: string; displayMode: boolean; maxElements: number }, { html: string } | { error: string }>(
+  () => new Worker(new URL('./katex.worker.ts', import.meta.url), { type: 'module' }), MATH_TIMEOUT_MS)
 
 function showProblem(el: HTMLElement, tex: string, message: string): void {
   const marker = document.createElement('span')
@@ -52,16 +44,21 @@ function showProblem(el: HTMLElement, tex: string, message: string): void {
   el.replaceChildren(marker, tex)
 }
 
-/** Renders TeX into `el`. A render error shows the source with a problem marker (brief §4.6). */
-export async function renderMath(el: HTMLElement, tex: string, displayMode = false): Promise<void> {
-  const w = katexWorker()
-  const id = nextId++
-  const result = await new Promise<Result>((ok) => {
-    pending.set(id, ok)
-    w.postMessage({ id, tex, displayMode })
-  })
-  if (result.error !== undefined) return showProblem(el, tex, result.error)
-  el.innerHTML = sanitizeMath(result.html ?? '')
+/**
+ * Renders TeX into `el`, after `admit` grants the output's measured cost. A refusal (a macro definition, output over
+ * the caps, the watchdog, the budget) keeps the source with the reason in its tooltip; a TeX error also shows a problem
+ * marker (brief §4.6).
+ */
+export async function renderMath(el: HTMLElement, tex: string, displayMode = false, admit: (bytes: number) => Promise<boolean> = async () => true): Promise<void> {
+  const kept = (why: string) => { el.title = `Math source kept · ${why}` }
+  let result: { html: string } | { error: string }
+  try { result = await katexJob({ tex, displayMode, maxElements: MATH_MAX_ELEMENTS }) } catch (error) { return kept(error instanceof Error ? error.message : String(error)) }
+  if ('error' in result) return kept(result.error)
+  // The worker's caps again, before this thread parses anything.
+  const elements = elementCount(result.html)
+  if (result.html.length > MATH_MAX_BYTES || elements > MATH_MAX_ELEMENTS) return kept(`Math output exceeds ${MATH_MAX_ELEMENTS} elements`)
+  if (!await admit(elements * MATH_ELEMENT_BYTES)) return kept('rendering budget exceeded')
+  el.innerHTML = sanitizeMath(result.html)
   const parseError = el.querySelector('.katex-error')
   if (parseError) showProblem(el, tex, parseError.getAttribute('title') ?? 'KaTeX parse error')
 }

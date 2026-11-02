@@ -19,6 +19,11 @@ export const HOSTILE_TEX: string[] = [
   String.raw`\sqrt{x}\frac{a}{b}\xrightarrow{abc}\widehat{xyz}` // legitimate: KaTeX draws these with inline SVG
 ]
 
+/** One \def that copies its argument 100 times, applied twice: 231 characters, 101 expansions, 200,010 elements. */
+export const MATH_BOMB = String.raw`\def\zz#1{` + '#1'.repeat(100) + String.raw`}\zz{\zz{yyyyyyyyyy}}`
+/** The same, three deep: past maxExpand, so KaTeX itself stops it. */
+export const MATH_BOMB_3 = String.raw`\def\zz#1{` + '#1'.repeat(100) + String.raw`}\zz{\zz{\zz{y}}}`
+
 /** HTML/MathML/SVG a KaTeX bug could emit: what the DOMPurify pass alone must neutralize. */
 export const HOSTILE_HTML: string[] = [
   '<math><annotation-xml encoding="text/html"><img src="https://example.invalid/a" onerror="alert(1)"></annotation-xml></math>',
