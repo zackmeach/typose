@@ -68,7 +68,7 @@ const MIME: Record<string, string> = {
 // Spec §7.1, sent as a header on every app response rather than a meta tag. No inline script; inline style stays
 // allowed, as in the spike, because React Aria injects a style element.
 const CSP =
-  "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+  "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-src data:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 /** Files queued before the page asks for them; subsequent opens are delivered individually. */
 let pendingPaths = launchPaths(process.argv, process.cwd(), !!process.defaultApp)
@@ -387,6 +387,15 @@ void app.whenReady().then(() => {
         const heading = document.createElement('h1'); heading.textContent = decode('${title64}'); document.body.append(heading);
         const make = node => {
           if (Object.hasOwn(node, 'text')) return document.createTextNode(node.text);
+          if (node.tag === 'math') {
+            const math = value => {
+              if (Object.hasOwn(value, 'text')) return document.createTextNode(value.text);
+              const element = document.createElementNS('http://www.w3.org/1998/Math/MathML', value.tag);
+              for (const [key, text] of Object.entries(value.attrs || {})) element.setAttribute(key, text);
+              for (const child of value.children || []) element.append(math(child)); return element;
+            };
+            return math(node.math);
+          }
           if (node.tag === 'img') { const image = document.createElement('img'); image.src = node.src; image.alt = node.alt || ''; return image; }
           const tag = node.tag === 'a' ? 'span' : node.tag; const element = document.createElement(tag);
           for (const child of node.children || []) element.append(make(child)); return element;

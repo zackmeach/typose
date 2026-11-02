@@ -788,10 +788,12 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         setWorkspaceNotice('Cannot open local file · ' + (e instanceof Error ? e.message : String(e)))
         if (workspace.selected(selection) && e instanceof CoreCallError && e.code === 'Frozen')
           setCard((d) => d.kind === 'open' && d.opened === source ? { ...d, frozen: d.frozen ?? e.message } : d)
+        if (e instanceof CoreCallError && e.code === 'NotFound') throw e // the source lens marks its link unresolved
         return false
       }
     } catch (e) {
       setWorkspaceNotice('Cannot open local file · ' + (e instanceof Error ? e.message : String(e)))
+      if (e instanceof CoreCallError && e.code === 'NotFound') throw e
       return false
     } finally {
       if (captured) releaseLocation(captured)
@@ -813,6 +815,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         workspace.updateDocument({ session, doc: source.doc, gen: source.gen }, stored => ({ ...stored, frozen: stored.frozen ?? error.message }))
         setCard(card => card.kind === 'open' && card.opened === source ? { ...card, frozen: card.frozen ?? error.message } : card)
       }
+      if (error instanceof CoreCallError && error.code === 'NotFound') throw error // Rendered marks the link unresolved
       return false
     })
   }
@@ -850,6 +853,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     } catch (error) {
       if (error instanceof CoreCallError && error.code === 'Frozen') throw error
       setWorkspaceNotice('Cannot open local file · ' + String(error))
+      if (error instanceof CoreCallError && error.code === 'NotFound') throw error // the source lens marks its link unresolved
       return false
     } finally {
       if (candidate && ownerSession === currentSession.current) void core.call('close', { surface: surface.current!, doc: candidate.doc }).catch(() => {})
