@@ -24,6 +24,9 @@ export interface StoredSession extends SessionWorkspace { window?: SessionBounds
 const record = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 // oxlint-disable-next-line no-control-regex -- Persisted paths must reject NUL and other control characters.
 const path = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v.length <= 32_767 && !/[\u0000-\u001f]/.test(v)
+// A drive path (`C:\` or `C:/`), a UNC path, or a POSIX one: a relative or drive-relative path would resolve against
+// whatever directory the next launch happens to have. Only a folder tab's own path, display text, may be relative.
+const absolute = (v: unknown): v is string => path(v) && /^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(v)
 const integer = (v: unknown, min: number, max: number): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v >= min && v <= max
 const identity = (v: unknown): v is string => typeof v === 'string' && /^[0-9a-f]{16}-[0-9a-f]{32}$/.test(v)
 // oxlint-disable-next-line no-control-regex -- Native root-relative components reject controls and separators.
@@ -38,8 +41,8 @@ export function sessionWorkspace(value: unknown): SessionWorkspace | null {
     || !integer(value.focused, 0, value.cards.length - 1)) return null
   const roots: SessionRoot[] = []
   for (const root of value.roots) {
-    if (path(root)) { roots.push({ path: root }); continue } // Existing sessions predate root identity capture.
-    if (!record(root) || !path(root.path) || root.identity !== undefined && !identity(root.identity)) return null
+    if (absolute(root)) { roots.push({ path: root }); continue } // Existing sessions predate root identity capture.
+    if (!record(root) || !absolute(root.path) || root.identity !== undefined && !identity(root.identity)) return null
     roots.push({ path: root.path, ...(root.identity ? { identity: root.identity as string } : {}) })
   }
   let total = 0
@@ -49,7 +52,7 @@ export function sessionWorkspace(value: unknown): SessionWorkspace | null {
       || typeof card.weight !== 'number' || !Number.isFinite(card.weight) || card.weight <= 0 || card.weight > 100_000) return null
     const tabs: SessionTab[] = []
     for (const tab of card.tabs) {
-      if (!record(tab) || !record(tab.location) || !['manual', 'reselect', 'folder'].includes(tab.location.kind as string) || !path(tab.location.path)
+      if (!record(tab) || !record(tab.location) || !['manual', 'reselect', 'folder'].includes(tab.location.kind as string) || !(tab.location.kind === 'folder' ? path : absolute)(tab.location.path)
         || !integer(tab.anchor, 0, Number.MAX_SAFE_INTEGER) || ![null, 'raw', 'rendered', 'grid', 'tree', 'rows', 'table', 'transcript'].includes(tab.lens as null | string)) return null
       let csvOptions: CsvOptions | undefined
       if (tab.csvOptions !== undefined) {
@@ -59,7 +62,7 @@ export function sessionWorkspace(value: unknown): SessionWorkspace | null {
       }
       let location: SessionTab['location'] = { kind: tab.location.kind as 'manual' | 'reselect', path: tab.location.path }
       if (tab.location.kind === 'folder') {
-        if (!record(tab.location.root) || !path(tab.location.root.path) || !identity(tab.location.root.identity) || !Array.isArray(tab.location.segments)
+        if (!record(tab.location.root) || !absolute(tab.location.root.path) || !identity(tab.location.root.identity) || !Array.isArray(tab.location.segments)
           || !tab.location.segments.length || tab.location.segments.length > 256 || !tab.location.segments.every(component)) return null
         const rootPath = tab.location.root.path, rootIdentity = tab.location.root.identity
         if (!roots.some(root => root.path === rootPath && root.identity === rootIdentity)) return null
@@ -72,7 +75,7 @@ export function sessionWorkspace(value: unknown): SessionWorkspace | null {
   }
   const recents: RecentLocation[] = []
   for (const recent of value.recents) {
-    if (!record(recent) || !['file', 'folder'].includes(recent.kind as string) || !path(recent.path)) return null
+    if (!record(recent) || !['file', 'folder'].includes(recent.kind as string) || !absolute(recent.path)) return null
     recents.push({ kind: recent.kind as 'file' | 'folder', path: recent.path })
   }
   return { version: 1, roots, cards, focused: value.focused,
