@@ -157,8 +157,8 @@ export function FolderSidebar(props: FolderSidebarProps) {
         <Menu className="menu" aria-label={'Actions for ' + menu.node.name} autoFocus="first"
           onAction={kind => props.onHandoff(menu.root, menu.node.id, kind as HandoffKind)} onClose={closeMenu}>
           <MenuItem id="copy" className="menu-item">Copy path</MenuItem>
-          <MenuItem id="show" className="menu-item">{SHOW_IN_FOLDER}</MenuItem>
-          <MenuItem id="open" className="menu-item">Open with default app</MenuItem>
+          <MenuItem id="show" className="menu-item" data-handoff="true">{SHOW_IN_FOLDER}</MenuItem>
+          <MenuItem id="open" className="menu-item" data-handoff="true">Open with default app</MenuItem>
         </Menu>
       </Popover> : null}
       <div className="folder-resizer" role="separator" aria-label="Sidebar width" aria-orientation="vertical"

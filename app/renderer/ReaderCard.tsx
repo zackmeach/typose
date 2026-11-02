@@ -1275,8 +1275,8 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         <Popover className="menu-popover" placement="bottom end">
           <Menu className="menu" aria-label="File actions" onAction={key => cardHandOff(key as HandoffKind)}>
             <MenuItem id="copy" className="menu-item">Copy path</MenuItem>
-            <MenuItem id="show" className="menu-item">{SHOW_IN_FOLDER}</MenuItem>
-            <MenuItem id="open" className="menu-item">Open with default app</MenuItem>
+            <MenuItem id="show" className="menu-item" data-handoff="true">{SHOW_IN_FOLDER}</MenuItem>
+            <MenuItem id="open" className="menu-item" data-handoff="true">Open with default app</MenuItem>
           </Menu>
         </Popover>
       </MenuTrigger> : null}
@@ -1316,7 +1316,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         {'detail' in shown.body && shown.body.detail ? <p className="card-detail">{shown.body.detail}</p> : null}
         {'actions' in shown.body
           ? shown.body.actions.map((a) => (
-              <Button key={a} className="open-button" onPress={actions[a]}>
+              <Button key={a} className="open-button" onPress={actions[a]} data-handoff={a === 'Open with default app' || a === 'Show in folder' ? 'true' : undefined}>
                 {a === 'Show in folder' ? SHOW_IN_FOLDER : a}
               </Button>
             ))
@@ -1629,8 +1629,8 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
               {sheet.path ? <code>{sheet.path}</code> : null}
               <div className="handoff-actions">
                 <Button className="open-button" onPress={() => setSheet(null)}>Cancel</Button>
-                {isExecutable(sheet.name) ? null : <Button className="open-button" onPress={() => sheetHandOff('open')}>Open with default app</Button>}
-                <Button className="open-button" autoFocus onPress={() => sheetHandOff('show')}>{SHOW_IN_FOLDER}</Button>
+                {isExecutable(sheet.name) ? null : <Button className="open-button" data-handoff="true" onPress={() => sheetHandOff('open')}>Open with default app</Button>}
+                <Button className="open-button" data-handoff="true" autoFocus onPress={() => sheetHandOff('show')}>{SHOW_IN_FOLDER}</Button>
               </div>
             </Dialog>
           </Modal>

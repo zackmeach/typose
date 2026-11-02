@@ -8,7 +8,7 @@ import { MAX_PRINT_PAGES, type Command, type PrintDocumentResult } from '../shar
 import { openExternal } from './external'
 import { writeClipboardText } from './clipboard'
 import { handoff, launchPaths } from './launch'
-import { handOff, type HandoffAction } from './handoff'
+import { gestures, handOff, type HandoffAction } from './handoff'
 import { startLifecycle } from './lifecycle'
 import { envWhole, isMark, marksHook } from './marks'
 import { SessionStore } from './session-store'
@@ -392,9 +392,12 @@ void app.whenReady().then(() => {
     shellCalls.push({ action, path })
     return recorded
   }
+  const gesture = gestures()
+  ipcMain.on('handoff-gesture', (event, token: unknown) => { if (fromMainApp(event)) gesture.arm(token) })
   for (const [channel, action] of [['show-in-folder', 'show'], ['open-with-default', 'open']] as const)
     ipcMain.handle(channel, (event: IpcMainInvokeEvent, ...args: unknown[]) => fromMainApp(event)
       ? handOff(action, args, {
+        takeGesture: token => gesture.take(token),
         granted, resolve: subject => askCore(subject), platform: process.platform, pathext: process.env.PATHEXT ?? '',
         isDirectory: async path => (await stat(path)).isDirectory(),
         show: path => viaShell('show', path, () => shell.showItemInFolder(path), undefined),

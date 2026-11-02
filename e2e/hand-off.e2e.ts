@@ -35,6 +35,26 @@ async function axe(win: Page): Promise<string[]> {
   return violations.map((v) => `${v.impact} ${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(' | ')}`)
 }
 
+/**
+ * A bridge call from page script during a real click, as an injected control could make one: the gesture is the user's,
+ * the subject is whatever the page chose. Returns main's answer.
+ */
+async function viaGesture(win: Page, action: 'showInFolder' | 'openWithDefault', subject: unknown): Promise<unknown> {
+  await win.evaluate(([action, subject]) => {
+    let probe = document.getElementById('handoff-probe')
+    if (!probe) {
+      probe = Object.assign(document.createElement('button'), { id: 'handoff-probe', textContent: 'probe' })
+      probe.dataset.handoff = 'true'
+      probe.style.cssText = 'position:fixed;left:0;bottom:0;z-index:2147483647'
+      document.body.append(probe)
+    }
+    const state = window as unknown as { typose: Record<string, (subject: unknown) => Promise<unknown>>; probed?: Promise<unknown> }
+    probe.onclick = () => { state.probed = state.typose[action as string](subject) }
+  }, [action, subject] as const)
+  await win.locator('#handoff-probe').click()
+  return win.evaluate(() => (window as unknown as { probed: Promise<unknown> }).probed)
+}
+
 const notice = (win: Page) => win.locator('.reader-card .banner[role="status"]')
 async function fileAction(win: Page, name: string): Promise<void> {
   await win.getByRole('button', { name: 'File actions', exact: true }).click()
@@ -74,6 +94,36 @@ test('the card menu copies the path, shows the file and opens it, each through o
   await win.keyboard.press('Escape')
   await expect(win.getByRole('menu')).toHaveCount(0)
   await expect(win.getByRole('button', { name: 'File actions', exact: true })).toBeFocused()
+  // Enter on a hand-off item is a gesture too.
+  await win.keyboard.press('Enter')
+  await win.keyboard.press('ArrowDown')
+  await expect(win.getByRole('menuitem', { name: SHOW, exact: true })).toBeFocused()
+  await win.keyboard.press('Enter')
+  await expect.poll(calls).toEqual([{ action: 'show', path: file }, { action: 'open', path: file }, { action: 'show', path: file }])
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+test('a hand-off from page script without a user gesture is refused, and a trusted click still works', async () => {
+  const file = fixture('handoff-gesture.txt', 'gesture\n')
+  const l = await launch({ hooks: true, file, env: RECORD })
+  const { win } = l
+  const calls = await shellCalls(l.app)
+  await waitOpen(win)
+  const results = await win.evaluate(async () => {
+    const api = (window as unknown as { typose: Record<'showInFolder' | 'openWithDefault', (subject: unknown) => Promise<unknown>> }).typose
+    // Page-made events are untrusted, so even a press on a marked control arms nothing.
+    const control = Object.assign(document.createElement('div'), { tabIndex: 0 })
+    control.dataset.handoff = 'true'
+    document.body.append(control)
+    control.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0 }))
+    control.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter' }))
+    return [await api.showInFolder({ session: 1, doc: 1, gen: 1 }), await api.openWithDefault({ session: 1, doc: 1, gen: 1 })]
+  })
+  expect(results).toEqual([{ ok: false, reason: 'Hand-offs need a click or key press on a Typose control' }, { ok: false, reason: 'Hand-offs need a click or key press on a Typose control' }])
+  expect(await calls()).toEqual([])
+  await fileAction(win, SHOW)
+  await expect.poll(calls).toEqual([{ action: 'show', path: file }])
   expect(l.pageErrors).toEqual([])
   await finish(l)
 })
@@ -98,12 +148,8 @@ test('Open with default app refuses programs, scripts and shortcuts with a messa
   await expect(notice(win)).toHaveText('Typose won’t open programs or scripts · show the file in its folder instead')
   await win.getByRole('button', { name: SHOW, exact: true }).click()
   await expect.poll(calls).toEqual([{ action: 'show', path: lnk }])
-  // The page's bridge, called directly with the path main handed it, gets the same refusal: main decides, not the menu.
-  const results = await win.evaluate(async () => {
-    const api = (window as unknown as { typose: { openWithDefault(subject: unknown): Promise<unknown> } }).typose
-    return [await api.openWithDefault({ path: document.querySelector('.card-identity')!.getAttribute('title') })]
-  })
-  expect(results).toEqual([{ ok: false, reason: 'Typose won’t open programs or scripts · show the file in its folder instead' }])
+  // The page's bridge, called with the path main handed it during a real click, gets the same refusal: main decides.
+  expect(await viaGesture(win, 'openWithDefault', { path: lnk })).toEqual({ ok: false, reason: 'Typose won’t open programs or scripts · show the file in its folder instead' })
   expect(await calls()).toEqual([{ action: 'show', path: lnk }])
   expect(l.pageErrors).toEqual([])
   await finish(l)
@@ -117,16 +163,16 @@ test('the bridge refuses paths Typose never held, other sessions’ documents, a
   const { win } = l
   const calls = await shellCalls(l.app)
   await expect(win.getByRole('tab')).toHaveCount(2)
-  const results = await win.evaluate(async ([elsewhere, held]) => {
-    const api = (window as unknown as { typose: Record<'showInFolder' | 'openWithDefault', (subject: unknown) => Promise<unknown>> }).typose
-    const subjects: unknown[] = [{ path: elsewhere }, { path: 'C:\\Windows\\notepad.exe' }, { path: '\\\\example.invalid\\share\\x.txt' }, { path: '//example.invalid/share/x.txt' },
-      { path: held.toUpperCase() }, held, [held], null, { session: 1, doc: 999, gen: 1 }, { session: 999, doc: 1, gen: 1 }, { session: 1, doc: 1, gen: 999 },
-      { session: 1, doc: 1, gen: 1, target: '..\\..\\Windows\\notepad.exe' }, { entry: { session: 1, root: '1', node: '0' } }]
-    const out: unknown[] = []
-    for (const subject of subjects) out.push(await api.showInFolder(subject), await api.openWithDefault(subject))
-    return out
-  }, [elsewhere, held])
+  // Each call carries a real click's gesture, so what refuses it is the subject.
+  const results: unknown[] = []
+  for (const subject of [{ path: elsewhere }, { path: 'C:\\Windows\\notepad.exe' }, { path: '\\\\example.invalid\\share\\x.txt' }, { path: '//example.invalid/share/x.txt' },
+    { path: held.toUpperCase() }, held, [held], null, { session: 1, doc: 999, gen: 1 }, { session: 999, doc: 1, gen: 1 }, { session: 1, doc: 1, gen: 999 },
+    { session: 1, doc: 1, gen: 1, target: '..\\..\\Windows\\notepad.exe' }, { entry: { session: 1, root: '1', node: '0' } }])
+    for (const action of ['showInFolder', 'openWithDefault'] as const) results.push(await viaGesture(win, action, subject))
   expect(results.every((r) => (r as { ok: boolean }).ok === false), JSON.stringify(results)).toBe(true)
+  expect(await viaGesture(win, 'showInFolder', { path: held })).toEqual({ ok: true }) // the control: the probe's gesture is accepted
+  expect(await calls()).toEqual([{ action: 'show', path: held }])
+  await l.app.evaluate(() => { (globalThis as { typoseShellCalls?: unknown[] }).typoseShellCalls!.length = 0 })
   // A network path never gets as far as the OS even when main handed it to the page: `\\?\` is refused at main.
   await win.getByRole('tab', { name: 'handoff-device.txt', exact: true }).click()
   await fileAction(win, SHOW)
