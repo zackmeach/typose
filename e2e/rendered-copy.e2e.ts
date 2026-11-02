@@ -97,3 +97,33 @@ test('Rendered partial source maps retain UTF-16 BOM offsets and multibyte scala
     expect(live.pageErrors).toEqual([])
   } finally { await finish(live) }
 })
+
+test('Rendered partial selections map exact source bytes across mixed byte widths, in prose and a 25 KB code block', async () => {
+  const prose = 'Une crème brûlée, très légère, à côté du café.'
+  const code = 'x'.repeat(12_500) + 'café ·' + 'y'.repeat(12_500)
+  const file = fixture('rendered-copy-mixed.md', `# Mixed widths\n\n${prose}\n\n\`\`\`text\n${code}\n\`\`\`\n`)
+  const live = await launch({ file, hooks: true })
+  try {
+    await live.app.evaluate(({ clipboard }) => { clipboard.writeText = async text => { (globalThis as { copiedSource?: string }).copiedSource = text } })
+    const copied = () => live.app.evaluate(() => (globalThis as { copiedSource?: string }).copiedSource)
+    const scroller = live.win.locator('.md-scroller').first()
+    await expect(scroller).toHaveAttribute('data-ready', '1', ready)
+    await expect(scroller.locator('.md-note')).toHaveCount(0) // one `·` no longer makes the block "renders too large"
+    await scroller.click()
+    // Select `part` inside the one source-mapped run of `selector`, by UTF-16 offsets into its text.
+    const select = (selector: string, part: string) => scroller.locator(selector).first().evaluate((host, part) => {
+      const run = host.querySelector('[data-source-map]')!
+      const text = run.firstChild as Text, at = text.data.indexOf(part)
+      const range = document.createRange()
+      range.setStart(text, at); range.setEnd(text, at + part.length)
+      const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range)
+    }, part)
+    await select('p', 'brûlée, très légère, à côté')
+    await live.win.keyboard.press(command + '+c')
+    await expect.poll(copied).toBe('brûlée, très légère, à côté')
+    await select('pre code', 'xcafé ·y')
+    await live.win.keyboard.press(command + '+c')
+    await expect.poll(copied).toBe('xcafé ·y')
+    expect(live.pageErrors).toEqual([])
+  } finally { await finish(live) }
+})

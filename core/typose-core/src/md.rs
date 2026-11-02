@@ -481,30 +481,67 @@ fn mapped_text(text: &str, source: &str, range: Range<usize>, bytes: &[u64], cod
         }
         (atoms.iter().map(|a| a.0).collect::<String>() == text).then_some(atoms)
     } else { None };
-    let mut pairs = Vec::with_capacity(text.len());
+    let mut scalars = Vec::with_capacity(text.len());
     for (index, (at, ch)) in text.char_indices().enumerate() {
         let (start, end) = if literal { (bytes[range.start + at], bytes[range.start + at + ch.len_utf8()]) }
             else if let Some(atoms) = &code_atoms { (bytes[atoms[index].1.start], bytes[atoms[index].1.end]) }
             else { (bytes[range.start], bytes[range.end]) };
-        for _ in 0..ch.len_utf16() {
-            pairs.push((start, end));
-        }
+        scalars.push((start, end, ch.len_utf16()));
     }
-    let mut edges = String::new();
-    if let Some(&(start, end)) = pairs.first() {
-        let width = end - start;
-        if pairs.iter().enumerate().all(|(i, &(s, e))| s == start + i as u64 * width && e == s + width) {
-            edges = format!("L:{start}:{width}:{}", pairs.len());
-        } else {
-            for (start, end) in pairs {
-                if !edges.is_empty() { edges.push(','); }
-                use std::fmt::Write;
-                let _ = write!(edges, "{start}:{end}");
-            }
-        }
-    }
+    let edges = source_map(&scalars);
     let inner = format!("<span data-source-map=\"{edges}\">{}</span>", escaped_text(text));
     if code { format!("<code>{inner}</code>") } else { inner }
+}
+
+/// One run's map from its displayed UTF-16 units to source bytes, from each scalar's `(start, end, units)`, in the most
+/// compact form its shape allows. rendered-selection.ts reads each:
+/// - `L:s:w:n`: n units of w bytes each from s (one byte width: ASCII, CJK, a single-byte encoding);
+/// - `S:s:t,t,…`: contiguous scalars from s, each token `w`, `w*k` for k alike, with `p` after w for a surrogate pair
+///   (two units, one w-byte range): at most about 2 bytes a unit, so mixed widths never outgrow their text;
+/// - `R:s:e:n`: n units all snapped to one source atom (an entity, an escape);
+/// - `s:e,…` per unit, only while that stays within 2 bytes a unit (a run or two); past it the run snaps to one `R`
+///   over its whole range: a partial selection inside copies the whole run.
+fn source_map(scalars: &[(u64, u64, usize)]) -> String {
+    use std::fmt::Write;
+    let Some(&(first, first_end, _)) = scalars.first() else { return String::new() };
+    let units: usize = scalars.iter().map(|s| s.2).sum();
+    let width = first_end - first;
+    let mut out = String::new();
+    if scalars.iter().enumerate().all(|(i, &(s, e, u))| u == 1 && s == first + i as u64 * width && e == s + width) {
+        let _ = write!(out, "L:{first}:{width}:{units}");
+    } else if scalars.windows(2).all(|pair| pair[1].0 == pair[0].1) {
+        let _ = write!(out, "S:{first}:");
+        let mut i = 0;
+        while i < scalars.len() {
+            let (s, e, u) = scalars[i];
+            let alike = scalars[i..].iter().take_while(|&&(s2, e2, u2)| e2 - s2 == e - s && u2 == u).count();
+            if i > 0 {
+                out.push(',');
+            }
+            let _ = write!(out, "{}{}", e - s, if u == 2 { "p" } else { "" });
+            if alike > 1 {
+                let _ = write!(out, "*{alike}");
+            }
+            i += alike;
+        }
+    } else if scalars.iter().all(|&(s, e, _)| s == first && e == first_end) {
+        let _ = write!(out, "R:{first}:{first_end}:{units}");
+    } else {
+        for &(s, e, u) in scalars {
+            for _ in 0..u {
+                if !out.is_empty() {
+                    out.push(',');
+                }
+                let _ = write!(out, "{s}:{e}");
+            }
+        }
+        if out.len() > 2 * units + 32 {
+            let (s, e) = (scalars.iter().map(|x| x.0).min().unwrap_or(first), scalars.iter().map(|x| x.1).max().unwrap_or(first_end));
+            out.clear();
+            let _ = write!(out, "R:{s}:{e}:{units}");
+        }
+    }
+    out
 }
 
 fn byte_edges(text: &str, map: &crate::bytemap::ByteMap) -> Vec<u64> {
@@ -977,6 +1014,42 @@ mod tests {
         check_items(&r).unwrap();
     }
 
+    /// Mixed byte widths keep the map near the text's size: the base rendered these, and a per-unit map made one `·` in
+    /// a 25 KB code block a "renders too large" note.
+    #[test]
+    fn mixed_width_runs_keep_a_compact_source_map() {
+        let block = format!("```text\n{}café ·{}\n```\n", "x".repeat(12_500), "y".repeat(12_500));
+        let r = render(&block);
+        assert_eq!(r.items()[0].note, None);
+        assert!(r.items()[0].html.len() < 25_200, "{} bytes of HTML", r.items()[0].html.len());
+        let prose = "Une crème brûlée, très légère, à côté du café. ".repeat(400);
+        let r = render(&prose);
+        assert!(r.items()[0].html.len() < prose.len() * 2, "{} bytes of HTML for {}", r.items()[0].html.len(), prose.len());
+    }
+
+    /// Each map form, from scalars' `(start, end, units)`.
+    #[test]
+    fn source_maps_encode_runs_of_one_width_as_segments() {
+        let run = |widths: &[(u64, usize)], from: u64| {
+            let mut at = from;
+            widths.iter().map(|&(w, u)| { let s = (at, at + w, u); at += w; s }).collect::<Vec<_>>()
+        };
+        assert_eq!(source_map(&run(&[(1, 1); 4], 7)), "L:7:1:4");
+        // "café ·" in UTF-8: c a f é space ·
+        assert_eq!(source_map(&run(&[(1, 1), (1, 1), (1, 1), (2, 1), (1, 1), (2, 1)], 0)), "S:0:1*3,2,1,2");
+        // "A😀😀B" in UTF-16 after a BOM: two surrogate pairs share one 4-byte range each.
+        assert_eq!(source_map(&run(&[(2, 1), (4, 2), (4, 2), (2, 1)], 2)), "S:2:2,4p*2,2");
+        // An entity's units all snap to its source atom.
+        assert_eq!(source_map(&[(3, 8, 1), (3, 8, 1)]), "R:3:8:2");
+        // Neither contiguous nor one atom: per unit while small, else one snapped range.
+        assert_eq!(source_map(&[(0, 2, 1), (5, 6, 1)]), "0:2,5:6");
+        let scattered: Vec<_> = (0..100u64).map(|i| (i * 10, i * 10 + 1, 1)).collect();
+        assert_eq!(source_map(&scattered), "R:0:991:100");
+        // The worst alternation stays within 2 bytes a unit.
+        let alternating = run(&[(1, 1), (2, 1)].repeat(5000), 0);
+        assert!(source_map(&alternating).len() <= 2 * 10_000 + 16);
+    }
+
     #[test]
     fn provenance_retains_entity_code_normalization_bom_and_surrogate_bytes() {
         let ascii: Vec<u64> = (0..=5).collect();
@@ -985,7 +1058,7 @@ mod tests {
         let bytes: Vec<u8> = [0xff, 0xfe].into_iter().chain("😀".encode_utf16().flat_map(u16::to_le_bytes)).collect();
         let decoded = crate::encoding::decode(&bytes, UTF_16LE, 0);
         let edges = byte_edges(&decoded.text, &decoded.map);
-        assert!(mapped_text("😀", &decoded.text, 0..decoded.text.len(), &edges, false).contains("2:6,2:6"));
+        assert!(mapped_text("😀", &decoded.text, 0..decoded.text.len(), &edges, false).contains("\"S:2:4p\""));
         let decoded = crate::encoding::decode(&[b'c', b'a', b'f', 0xe9], encoding_rs::WINDOWS_1252, 0);
         let edges = byte_edges(&decoded.text, &decoded.map);
         assert!(mapped_text("café", &decoded.text, 0..decoded.text.len(), &edges, false).contains("L:0:1:4"));
@@ -1270,7 +1343,7 @@ mod tests {
                     "data-href" => scheme.is_some_and(|s| matches!(s.as_str(), "javascript" | "vbscript" | "data")),
                     "data-src" => network_path(&s) || scheme.is_some_and(|s| !matches!(s.as_str(), "http" | "https")),
                     "class" => if name == "code" { !value.is_empty() && !value.starts_with("language-") } else { !matches!(value.as_str(), "tp-img" | "tp-math") },
-                    "data-source-map" => !value.bytes().all(|b| b.is_ascii_digit() || b"L:,".contains(&b)),
+                    "data-source-map" => !value.bytes().all(|b| b.is_ascii_digit() || b"LSRp*:,".contains(&b)),
                     "data-display" | "data-frontmatter" => !matches!(value.as_str(), "0" | "1"),
                     _ => false,
                 };

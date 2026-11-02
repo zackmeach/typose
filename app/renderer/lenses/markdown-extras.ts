@@ -1,6 +1,7 @@
 import { parseDocument, stringify } from 'yaml'
 import { renderMath } from '../math/math'
 import { renderDiagram } from '../mermaid/diagram'
+import { dropMappedUnits } from './rendered-selection'
 import { HIGHLIGHT_MAX_CHARS, OFFLINE_LANGUAGES, tokenizeOffline } from './syntax'
 
 const CALLOUTS: Record<string, string> = {
@@ -100,13 +101,7 @@ function removeCalloutMarker(paragraph: HTMLElement, units: number): void {
     if (units <= 0) break
     const removed = Math.min(units, text.length)
     const run = text.parentElement?.closest<HTMLElement>('[data-source-map]')
-    if (run && removed < text.length) {
-      const map = run.dataset.sourceMap ?? ''
-      const linear = /^L:(\d+):(\d+):(\d+)$/.exec(map)
-      run.dataset.sourceMap = linear
-        ? `L:${Number(linear[1]) + removed * Number(linear[2])}:${linear[2]}:${Number(linear[3]) - removed}`
-        : map.split(',').slice(removed).join(',')
-    }
+    if (run && removed < text.length) run.dataset.sourceMap = dropMappedUnits(run.dataset.sourceMap ?? '', removed)
     text.deleteData(0, removed)
     units -= removed
     if (run && !run.textContent) run.remove()
