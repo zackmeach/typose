@@ -31,7 +31,13 @@ function revision(text: string): string { return createHash('sha256').update(tex
 function atomic(file: string, text: string): void {
   const temp = `${file}.${process.pid}.tmp`
   try { writeFileSync(temp, text, { encoding: 'utf8', mode: 0o600 }); renameSync(temp, file) }
-  catch (error) { try { unlinkSync(temp) } catch { /* no incomplete output */ } throw error }
+  catch (error) {
+    try { unlinkSync(temp) } catch { /* no incomplete output */ }
+    // Another program (a Typose tab reading config.toml) can hold the file open on Windows: write it in place.
+    const code = (error as NodeJS.ErrnoException).code
+    if (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES') throw error
+    writeFileSync(file, text, { encoding: 'utf8', mode: 0o600 })
+  }
 }
 /** Only main supplies this directory; IPC accepts keys and a revision, never destinations. */
 export class ConfigStore {
