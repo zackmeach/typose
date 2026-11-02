@@ -21,6 +21,20 @@ export function folderNode(root: RootView, id: string): FolderNode | undefined {
   return find(root.node)
 }
 
+/** A loaded entry's display path, for Copy path and the hand-off sheet only: hand-offs name its ref, never this. */
+export function nodePath(root: RootView, id: string): string | undefined {
+  const names = (node: FolderNode): string[] | undefined => {
+    if (node.id === id) return []
+    for (const child of node.children ?? []) {
+      const below = names(child)
+      if (below) return [child.name, ...below]
+    }
+  }
+  const found = names(root.node)
+  // ponytail: '\\' because folder roots are Windows-only today; take the root path's separator once they aren't.
+  return found && [root.path.replace(/[\\/]+$/, ''), ...found].join('\\')
+}
+
 export function updateFolder(roots: readonly RootView[], root: string, node: string, update: (before: FolderNode) => FolderNode): readonly RootView[] {
   const change = (before: FolderNode): FolderNode => before.id === node ? update(before) : before.children ? { ...before, children: before.children.map(change) } : before
   return roots.map(item => item.id === root ? { ...item, node: change(item.node) } : item)

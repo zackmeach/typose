@@ -1,6 +1,8 @@
 import { type FormEvent, type ReactNode, type RefObject, useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { Button, Dialog, DialogTrigger, Menu, MenuItem, MenuTrigger, Popover, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
-import { MAX_PRINT_PAGES, type CapturedLocation, type CsvInfo, type CsvOptions, type Hello, type Limits, type MdBuild, type Methods, type Opened, type SurfaceRef, type ViewRef } from '../shared/protocol'
+import { Button, Dialog, DialogTrigger, Heading, Menu, MenuItem, MenuTrigger, Modal, ModalOverlay, Popover, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
+import { MAX_PRINT_PAGES, type CapturedLocation, type CsvInfo, type CsvOptions, type HandoffSubject, type Hello, type Limits, type MdBuild, type Methods, type Opened, type SurfaceRef, type ViewRef } from '../shared/protocol'
+import { canOpen, extension, isExecutable } from '../shared/handoff'
+import { type HandoffKind, SHOW_IN_FOLDER, handOff } from './handoff'
 import { type Action, type Card, type LensName, fileName, jsonlCounts, parentName, view } from './card'
 import { FileIcon } from './file-icon'
 import { type CoreClient, CoreCallError } from './core'
@@ -15,7 +17,7 @@ import { prepareStructured, type StructuredSource } from './lenses/structured-so
 import { inputMark, markNow } from './perf'
 import { type SavedLocation, type SelectionTicket, type TabId, type WorkspaceStore, type WorkspaceTab } from './workspace'
 import { FileTabs } from './file-tabs'
-import { entryView, folderNode } from './folders'
+import { entryView, folderNode, nodePath } from './folders'
 import type { LocalGesture, ReaderHandle, ReaderWindow } from './reader-window'
 import { FindBar } from './FindBar'
 import type { FindController } from './find'
@@ -118,6 +120,8 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   const [printConfirmed, setPrintConfirmed] = useState(false)
   const [printBusy, setPrintBusy] = useState(false)
   const printAbort = useRef<AbortController | null>(null)
+  /** Z79's sheet for a file Typose won't show: a program or script (from a link or the sidebar), or another type. */
+  const [sheet, setSheet] = useState<{ name: string; path?: string; subject: HandoffSubject; link?: true } | null>(null)
   const findNow = useRef({ open: findOpen, query: findQuery, controller: findController })
   findNow.current = { open: findOpen, query: findQuery, controller: findController }
   const findDirection = useRef<1 | -1 | undefined>(undefined)
@@ -1060,7 +1064,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     const root = folders.current.find(root => root.id === rootId)
     const node = root && (provided ? { ...entryView(provided), ref: provided.ref } : folderNode(root, nodeId))
     if (!root || !node) return
-    if (node.kind !== 'file') { setWorkspaceNotice('Unsupported file · ' + node.name); return }
+    if (node.kind !== 'file') { setSheet({ name: node.name, path: nodePath(root, nodeId), subject: { entry: node.ref } }); return }
     const l = latest.current.limits
     if (!l || navigating.current || !recharged.current || root.ref.session !== currentSession.current) return
     const existing = workspace.getSnapshot().tabs.find(tab => tab.session === currentSession.current && tab.card.kind === 'open' &&
@@ -1182,7 +1186,21 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       else if (selected) document.querySelector<HTMLElement>('.card-state button')?.focus()
     })
   }
+  /** The shown file's hand-off: an open card names its document, a failed manual open the path main handed the page. */
+  function cardHandOff(kind: HandoffKind): void {
+    const c = latest.current.card
+    if (c.kind !== 'open' && (c.kind !== 'failed' || c.localOnly)) return
+    const subject: HandoffSubject = c.kind === 'open' ? { session: currentSession.current, doc: c.opened.doc, gen: c.opened.gen } : { path: c.path }
+    void handOff(kind, subject, c.path).then(message => { if (message) setWorkspaceNotice(message) })
+  }
+  function sheetHandOff(kind: 'show' | 'open'): void {
+    if (!sheet) return
+    setSheet(null)
+    void handOff(kind, sheet.subject, sheet.path ?? sheet.name).then(message => { if (message) setWorkspaceNotice(message) })
+  }
   const actions: Record<Action, () => void> = {
+    'Open with default app': () => cardHandOff('open'),
+    'Show in folder': () => cardHandOff('show'),
     'Open file…': () => void pick(),
     'Locate…': () => void pick(true),
     Retry: () => void reload(),
@@ -1256,6 +1274,16 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       </DialogTrigger> : null}
       <span className="card-status" title={shown.status} tabIndex={shown.status ? 0 : undefined}>{shown.status}</span>
       <span className="card-status-tooltip" aria-hidden="true">{shown.status}</span>
+      {card.kind === 'open' || card.kind === 'failed' && !card.localOnly ? <MenuTrigger>
+        <Button className="file-actions-button" aria-label="File actions"><span aria-hidden="true" title="File actions">⋯</span></Button>
+        <Popover className="menu-popover" placement="bottom end">
+          <Menu className="menu" aria-label="File actions" onAction={key => cardHandOff(key as HandoffKind)}>
+            <MenuItem id="copy" className="menu-item">Copy path</MenuItem>
+            <MenuItem id="show" className="menu-item" data-handoff="true">{SHOW_IN_FOLDER}</MenuItem>
+            <MenuItem id="open" className="menu-item" data-handoff="true">Open with default app</MenuItem>
+          </Menu>
+        </Popover>
+      </MenuTrigger> : null}
       {preview ? <span className="preview-actions">
         <Button aria-label="Open as tab" isDisabled={preview.busy || navigationBusy} onPress={preview.onTab}><span aria-hidden="true" title="Open as tab">↗</span><span className="preview-action-label">Open as tab</span></Button>
         <Button aria-label="Open to side" isDisabled={preview.busy || navigationBusy} onPress={preview.onSide}><span aria-hidden="true" title="Open to side">▥</span><span className="preview-action-label">Open to side</span></Button>
@@ -1289,10 +1317,11 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       {card.kind === 'empty' && emptyContent ? emptyContent :
       <div className="card-state">
         {'message' in shown.body && shown.body.message ? <p>{shown.body.message}</p> : null}
+        {'detail' in shown.body && shown.body.detail ? <p className="card-detail">{shown.body.detail}</p> : null}
         {'actions' in shown.body
           ? shown.body.actions.map((a) => (
-              <Button key={a} className="open-button" onPress={actions[a]}>
-                {a}
+              <Button key={a} className="open-button" onPress={actions[a]} data-handoff={a === 'Open with default app' || a === 'Show in folder' ? 'true' : undefined}>
+                {a === 'Show in folder' ? SHOW_IN_FOLDER : a}
               </Button>
             ))
           : null}
@@ -1367,6 +1396,8 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         frozen={frozen !== undefined}
         mode="rendered"
         build={card.build}
+        onExecutable={(href, path) => setSheet({ name: fileName(path), path, link: true,
+          subject: { session: currentSession.current, doc: card.opened.doc, gen: card.opened.gen, href } })}
         onFrozen={(why) => setCard((c) => (c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c))}
         notice={message => shared.notice(message)}
         onShowRaw={(line) => {
@@ -1594,6 +1625,25 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
             </div>
           </form>
         })() : null}
+        {sheet ? <ModalOverlay isOpen isDismissable className="handoff-overlay" onOpenChange={open => { if (!open) setSheet(null) }}>
+          <Modal className="handoff-sheet">
+            <Dialog className="handoff-dialog">
+              {isExecutable(sheet.name) ? <>
+                <Heading slot="title" level={2}>Typose won't run {sheet.name}</Heading>
+                <p>Scripts and programs are never launched from {sheet.link ? 'a link' : 'Typose'}. You can show the file in its folder instead.</p>
+              </> : <>
+                <Heading slot="title" level={2}>Typose doesn't show {extension(sheet.name).slice(1).toUpperCase() || 'these'} files</Heading>
+                <p>{canOpen(sheet.name) ? 'You can open it with its default app, or show it in its folder.' : 'You can show it in its folder.'}</p>
+              </>}
+              {sheet.path ? <code>{sheet.path}</code> : null}
+              <div className="handoff-actions">
+                <Button className="open-button" onPress={() => setSheet(null)}>Cancel</Button>
+                {isExecutable(sheet.name) || !canOpen(sheet.name) ? null : <Button className="open-button" data-handoff="true" onPress={() => sheetHandOff('open')}>Open with default app</Button>}
+                <Button className="open-button" data-handoff="true" autoFocus onPress={() => sheetHandOff('show')}>{SHOW_IN_FOLDER}</Button>
+              </div>
+            </Dialog>
+          </Modal>
+        </ModalOverlay> : null}
         {card.kind === 'open' ? (
           <>
             {shown.lenses ? (
@@ -1679,11 +1729,13 @@ interface LensHostProps {
   notice(message: string): void
   onShowRaw(line: number): void
   onOpenLocal(target: string, path: string, gesture: LocalGesture): Promise<boolean>
+  /** Rendered's link to a program or script (Z79). */
+  onExecutable?(href: string, path: string): void
   onDisposed(opened: Opened): void
 }
 
 /** Mounts Raw or Rendered into the card body. A switch or Reload of this document keeps the previous lens's top line. */
-function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place, hadFocus, restoreFocus, atLine, opened, name, lines, indexed, limits, frozen, mode, build, csv, csvOptions, onCsvInfo, structured, onRows, onFrozen, notice, onShowRaw, onOpenLocal, onDisposed }: LensHostProps) {
+function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place, hadFocus, restoreFocus, atLine, opened, name, lines, indexed, limits, frozen, mode, build, csv, csvOptions, onCsvInfo, structured, onRows, onFrozen, notice, onShowRaw, onOpenLocal, onExecutable, onDisposed }: LensHostProps) {
   const host = useRef<HTMLDivElement>(null)
   const onFrozenNow = useRef(onFrozen)
   onFrozenNow.current = onFrozen
@@ -1691,6 +1743,8 @@ function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place
   onShowRawNow.current = onShowRaw
   const onOpenLocalNow = useRef(onOpenLocal)
   onOpenLocalNow.current = onOpenLocal
+  const onExecutableNow = useRef(onExecutable)
+  onExecutableNow.current = onExecutable
   const onDisposedNow = useRef(onDisposed)
   onDisposedNow.current = onDisposed
   const onCsvInfoNow = useRef(onCsvInfo)
@@ -1719,7 +1773,8 @@ function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place
         kept?.view.dispose()
         const made = new RenderedLens(host.current!, core, opened, build, limits, {
           onFrozen: onFrozenHere, atLine: at, onShowRaw: (line) => onShowRawNow.current(line),
-          onOpenLocal: (target, path, gesture) => onOpenLocalNow.current(target, path, gesture), budget: budget ?? undefined
+          onOpenLocal: (target, path, gesture) => onOpenLocalNow.current(target, path, gesture), budget: budget ?? undefined,
+          onExecutable: (href, path) => onExecutableNow.current?.(href, path)
         })
         retained.current = { session, doc: opened.doc, gen: opened.gen, view: made }
         view = made

@@ -112,6 +112,20 @@ impl Folder {
         }
     }
 
+    /// A listed entry's path, for main's OS hand-off only. Nothing here opens or reads it.
+    pub fn entry_path(&self, node: u32) -> Result<String, DocError> {
+        #[cfg(windows)]
+        {
+            let inner = self.inner.lock().unwrap();
+            inner.as_ref().ok_or(DocError::Cancelled)?.entry_path(node).map_err(error)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = node;
+            Err(DocError::Cancelled)
+        }
+    }
+
     pub fn open(&self, node: u32) -> Result<crate::raw::Raw, DocError> {
         let route = self.route(node)?;
         let raw = crate::raw::Raw::open_saved(&route)?;
@@ -263,6 +277,11 @@ mod win {
                 return Err(LocalError::Refused("folder entry changed; refresh the folder"));
             }
             Ok(file)
+        }
+
+        pub(super) fn entry_path(&self, node: u32) -> Result<String, LocalError> {
+            let n = self.nodes.get(node as usize).ok_or(LocalError::Refused("folder entry is no longer available"))?;
+            Ok(n.path.clone())
         }
 
         pub(super) fn route(&self, node: u32) -> Result<LocalRoute, LocalError> {
