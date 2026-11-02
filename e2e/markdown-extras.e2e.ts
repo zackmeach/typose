@@ -1,6 +1,6 @@
 import { type Page, expect } from '@playwright/test'
 import { join } from 'node:path'
-import { HOSTILE_MERMAID, HOSTILE_TEX, MATH_BOMB, MATH_BOMB_3 } from '../app/renderer/math/hostile'
+import { HOSTILE_HTML, HOSTILE_MERMAID, HOSTILE_TEX, MATH_BOMB, MATH_BOMB_3 } from '../app/renderer/math/hostile'
 import { FIXTURES, assertNetLog, finish, fixture, launch, test, waitIndexed } from './app'
 
 /**
@@ -185,6 +185,20 @@ test('math bombs, oversized formulas and hostile sanitizer input stay bounded an
     expect(timerLate).toBeLessThan(250)
     // An Object.prototype key is not a callout kind.
     expect(await live.win.locator('.md-callout').count()).toBe(0)
+    // The math sanitizer, alone, on HTML a KaTeX bug could emit: nothing that loads, links, runs or styles survives.
+    const leaks = await live.win.evaluate(corpus => {
+      const sanitize = (window as unknown as { typoseSanitizeMath: (html: string) => string }).typoseSanitizeMath
+      return corpus.flatMap(html => {
+        const t = document.createElement('template')
+        t.innerHTML = sanitize(html)
+        return [...t.content.querySelectorAll('*')].flatMap(el => [
+          ...(['script', 'iframe', 'object', 'embed', 'style', 'foreignobject', 'image', 'use', 'form'].includes(el.localName) ? [`<${el.localName}>`] : []),
+          ...[...el.attributes].filter(a => a.name.startsWith('on') || /example\.invalid|javascript:/i.test(a.value) || (a.name === 'style' && /url\(|@import/i.test(a.value)))
+            .map(a => `${el.localName}[${a.name}]`)
+        ])
+      })
+    }, HOSTILE_HTML)
+    expect(leaks).toEqual([])
     expect(live.pageErrors).toEqual([])
   } finally { await finish(live) }
   expect(assertNetLog(netlog)).toContain('PASS: no Chromium network-stack activity')

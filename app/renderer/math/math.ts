@@ -16,14 +16,15 @@ purify.addHook('uponSanitizeAttribute', (_node, data) => {
 // minus anything that can load or navigate. KaTeX with trust: false never emits a link or an image.
 const CONFIG = {
   USE_PROFILES: { html: true, mathMl: true, svg: true },
-  FORBID_TAGS: ['style'],
-  FORBID_ATTR: ['href', 'xlink:href', 'src'],
+  FORBID_TAGS: ['style', 'form', 'image'],
+  FORBID_ATTR: ['href', 'xlink:href', 'src', 'srcset', 'poster', 'background', 'action'],
   ALLOW_DATA_ATTR: false
 }
 
 export function sanitizeMath(html: string): string {
   return purify.sanitize(html, CONFIG)
 }
+if (__TEST_HOOKS__) Object.assign(window, { typoseSanitizeMath: sanitizeMath })
 
 /**
  * Renderer bytes per generated element, charged before the DOM sees any: 30 dense 6×6 matrices (70,080 elements)

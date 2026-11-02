@@ -35,7 +35,9 @@ export const HOSTILE_HTML: string[] = [
   '<style>@import url(https://example.invalid/i.css)</style><span style="x:1;@import url(https://example.invalid/j.css)">c</span>',
   '<span onclick="alert(1)" data-x="1">d</span><script>alert(1)</script><img src=x onerror=alert(1)>',
   '<math><mtext><table><mglyph><style><img src=https://example.invalid/mx onerror=alert(1)>',
-  '<a href="https://example.invalid/">link</a><iframe src="https://example.invalid/if"></iframe><object data="https://example.invalid/o"></object>'
+  '<a href="https://example.invalid/">link</a><iframe src="https://example.invalid/if"></iframe><object data="https://example.invalid/o"></object>',
+  '<img srcset="https://example.invalid/s.png 1x"><video poster="https://example.invalid/p.png"></video><table background="https://example.invalid/t.png"><tr><td background="https://example.invalid/d.png">x</td></tr></table>' +
+    '<form action="https://example.invalid/f"><button formaction="https://example.invalid/g">b</button><input type="image" src="https://example.invalid/i.png"></form>'
 ]
 
 /** YAML for the zero-effects run: an alias bomb, URL-shaped tags and %TAG handles, a recursive alias. */
