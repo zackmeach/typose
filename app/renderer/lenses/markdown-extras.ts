@@ -104,7 +104,7 @@ export function markdownExtras(root: HTMLElement, current: () => boolean, reserv
     const first = quote.querySelector('p')
     const marker = /^\[!([A-Za-z]+)\][+-]?(?:[ \t]+([^\n]*))?/.exec(first?.textContent ?? '')
     const kind = quote.dataset.callout ?? marker?.[1].toLowerCase()
-    if (!kind || !CALLOUTS[kind]) continue
+    if (!kind || !Object.hasOwn(CALLOUTS, kind)) continue
     quote.classList.add('md-callout')
     quote.dataset.tint = CALLOUTS[kind]
     const title = document.createElement('div')
