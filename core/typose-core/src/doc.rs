@@ -948,6 +948,36 @@ mod tests {
         }
     }
 
+    /// Brief §4.6: session restore leaves network shares unopened. UNC forms, and drive letters the redirector serves
+    /// directly or through a subst, are network; a local drive, a relative path and a subst'd folder aren't.
+    #[cfg(windows)]
+    #[test]
+    fn network_routes_are_recognized_without_opening_them() {
+        use crate::store::network;
+        for path in
+            [r"\\example.invalid\share\x.md", "//example.invalid/share/x.md", r"\\?\UNC\example.invalid\share\x"]
+        {
+            assert!(network(Path::new(path)), "{path}");
+        }
+        for path in [r"C:\Windows\x.md", "relative.md"] {
+            assert!(!network(Path::new(path)), "{path}");
+        }
+        let _turn = DRIVES.lock().unwrap_or_else(|e| e.into_inner());
+        let letter = DosDevice::free_letter();
+        let path = PathBuf::from(format!(r"{letter}:\x.md"));
+        for target in [
+            r"\Device\Mup\example.invalid\share",
+            r"\Device\LanmanRedirector\;Q:0000000000001234\example.invalid\share",
+            r"\??\UNC\example.invalid\share",
+        ] {
+            let _drive = DosDevice::define(letter, target, true);
+            assert!(network(&path), "{letter}: -> {target}");
+        }
+        let scratch = Scratch::new("network-subst");
+        let _drive = DosDevice::define(letter, &scratch.0.to_string_lossy(), false);
+        assert!(!network(&path));
+    }
+
     /// Plan PR 4 (PR 1's known limit 2): a drive letter mapped onto the pipe namespace, by `DefineDosDeviceW` as any
     /// program in the session can, is refused before anything opens the path. A subst'd folder still opens.
     #[cfg(windows)]

@@ -89,6 +89,12 @@ pub fn core_version() -> String {
     typose_core::version().to_string()
 }
 
+/// Whether `path` reaches a network share, judged without opening anything (`store::network`).
+#[napi]
+pub fn network_path(path: String) -> bool {
+    typose_core::store::network(std::path::Path::new(&path))
+}
+
 /// Plan C1: sets the ledger's limit to a quarter of `totalmem` (Z34), the core host's `os.totalmem()`, and reserves
 /// the pool of transient slots. Nothing opens until it's set.
 #[napi]

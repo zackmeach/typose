@@ -50,6 +50,38 @@ test('actual restart preserves cards, selected tabs, lenses and anchors, and kee
   expect(await finish(resumed)).toEqual({ code: 0, signal: null })
 })
 
+test('a network share in the saved session stays unopened until a click', async () => {
+  test.skip(process.platform !== 'win32', 'UNC shares are Windows paths')
+  const share = String.raw`\\example.invalid\typose-probe-no-such-share`
+  const file = share + String.raw`\a.md`
+  const userData = mkdtempSync(join(tmpdir(), 'typose-network-restart-'))
+  writeFileSync(join(userData, 'session.json'), JSON.stringify({ ...emptySession(), roots: [share], sidebar: { open: true, width: 240 },
+    cards: [{ tabs: [{ location: { kind: 'manual', path: file }, anchor: 0, lens: 'raw' }], selected: 0, weight: 1 }] }))
+  const live = await launch({ userData })
+  const card = live.win.getByRole('region', { name: 'Reader card 1', exact: true })
+  // Any open of the path would replace this placeholder with an opening or failed card.
+  await expect(card).toContainText(`${file} is on a network share · Not opened at launch. Retry to connect.`, { timeout: 30_000 })
+  await expect(live.win.getByRole('status').filter({ hasText: 'Network folder · not opened at launch' })).toBeVisible()
+  await expect(live.win.getByRole('button', { name: 'Reconnect', exact: true })).toBeVisible()
+  await expect(live.win.getByText('Folder not found', { exact: false })).toHaveCount(0)
+  expect(live.pageErrors).toEqual([])
+  expect(await finish(live, true)).toEqual({ code: 0, signal: null })
+  // Unclicked, both stay what they were: a manual tab and a root, for the next launch to leave alone again.
+  const saved = JSON.parse(readFileSync(join(userData, 'session.json'), 'utf8'))
+  expect(saved.cards[0].tabs[0].location).toEqual({ kind: 'manual', path: file })
+  expect(saved.roots).toEqual([{ path: share }])
+  const resumed = await launch({ userData })
+  const again = resumed.win.getByRole('region', { name: 'Reader card 1', exact: true })
+  await expect(again).toContainText('Not opened at launch', { timeout: 30_000 })
+  await again.getByRole('button', { name: 'Retry', exact: true }).click()
+  // The click is what opens it: the share doesn't exist, so the card shows that open's own failure.
+  await expect(again).not.toContainText('Not opened at launch', { timeout: 90_000 })
+  await expect(again.getByRole('button', { name: 'Close', exact: true })).toBeVisible({ timeout: 90_000 })
+  expect(resumed.pageErrors).toEqual([])
+  expect(await finish(resumed)).toEqual({ code: 0, signal: null })
+  rmSync(userData, { recursive: true, force: true })
+})
+
 test('a persisted derived display path cannot acquire manual file authority on restart', async () => {
   const target = fixture('session-derived.md', '# Must not reopen by display path\n')
   const userData = mkdtempSync(join(tmpdir(), 'typose-derived-restart-'))

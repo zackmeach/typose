@@ -1442,7 +1442,9 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     const restored: TabId[] = []
     for (const entry of saved.tabs) {
       let restoredTab: WorkspaceTab | undefined
-      if (entry.location.kind === 'manual') {
+      // Brief §4.6: a network share is never touched at launch; its tab waits for a click on Retry.
+      const network = entry.location.kind === 'manual' && await core.call('networkPath', { path: entry.location.path }).catch(() => true)
+      if (entry.location.kind === 'manual' && !network) {
         await open(entry.location.path, entry.anchor)
         restoredTab = workspace.find(manualKey(entry.location.path))
       } else if (entry.location.kind === 'folder') restoredTab = await restoreFolderEntry(entry)
@@ -1457,13 +1459,16 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
           setCard(card => card.kind === 'open' && card.opened.doc === doc ? { ...card, csvOptions: entry.csvOptions } : card)
         }
       } else {
-        if (!await metadata(current => chargeWorkspace([...workspace.getSnapshot().tabs, { key: 'reselect:' + entry.location.path, path: entry.location.path }], current))) continue
+        // A share keeps its manual key, so it's saved as manual again until the click opens it.
+        const key = network ? manualKey(entry.location.path) : 'reselect:' + entry.location.path
+        if (!await metadata(current => chargeWorkspace([...workspace.getSnapshot().tabs, { key, path: entry.location.path }], current))) continue
         leave()
-        const requested = workspace.beginOpen('reselect:' + entry.location.path, entry.location.path)
+        const requested = workspace.beginOpen(key, entry.location.path)
         if (requested.kind !== 'open') continue
-        const blocked: Extract<Card, { kind: 'failed' }> = { kind: 'failed', path: entry.location.path, code: 'Refused',
-          message: 'The source must be selected again after restart', localOnly: true }
-        workspace.complete(requested.ticket, 'reselect:' + entry.location.path, blocked)
+        const blocked: Extract<Card, { kind: 'failed' }> = network
+          ? { kind: 'failed', path: entry.location.path, code: 'Refused', message: 'Not opened at launch', network: true }
+          : { kind: 'failed', path: entry.location.path, code: 'Refused', message: 'The source must be selected again after restart', localOnly: true }
+        workspace.complete(requested.ticket, key, blocked)
         workspace.remember(requested.ticket.tab, entry.anchor, entry.lens)
         display(requested.ticket.tab, blocked)
         restored.push(requested.ticket.tab)
