@@ -343,13 +343,7 @@ impl Csv {
                 if let Event::Field { record, column, .. } = &event {
                     if sampling {
                         let text = self.encoding.decode_without_bom_handling(&sample).0;
-                        self.index.write().unwrap().metadata.sample(
-                            *record,
-                            *column,
-                            self.header,
-                            &text,
-                            !sample_more,
-                        )?;
+                        self.index.write().unwrap().metadata.sample(*record, *column, self.header, &text, !sample_more);
                     }
                     sample.clear();
                     sample_more = false;
@@ -367,13 +361,7 @@ impl Csv {
                     });
                     if let Event::Field { record, column, .. } = &event {
                         let text = self.encoding.decode_without_bom_handling(&sample).0;
-                        self.index.write().unwrap().metadata.sample(
-                            *record,
-                            *column,
-                            self.header,
-                            &text,
-                            !sample_more,
-                        )?;
+                        self.index.write().unwrap().metadata.sample(*record, *column, self.header, &text, !sample_more);
                     }
                     self.publish_row(&event);
                 }
