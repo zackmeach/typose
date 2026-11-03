@@ -454,11 +454,7 @@ impl Doc {
         generation: f64,
         cancel: &Cancel,
     ) -> std::result::Result<AsyncTask<Build>, Error<Code>> {
-        let generation = int("gen", generation)? as u32;
-        let raw = self.raw()?;
-        if raw.document().generation() != generation {
-            return Err(doc_error(DocError::Stale { current: raw.document().generation(), asked: generation }));
-        }
+        let (raw, generation) = self.at_generation(generation)?;
         let format = format(raw.document().path())
             .ok_or_else(|| Error::new(Code::Refused, "No structured lens for this format"))?;
         let charge = Reservation::new(core_structured::TEMP_BYTES).map_err(|e| doc_error(DocError::Memory(e)))?;

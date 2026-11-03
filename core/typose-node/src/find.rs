@@ -146,11 +146,7 @@ impl Doc {
         query: String,
         match_case: bool,
     ) -> std::result::Result<u32, Error<Code>> {
-        let generation = int("gen", generation)? as u32;
-        let raw = self.raw()?;
-        if raw.document().generation() != generation {
-            return Err(doc_error(DocError::Stale { current: raw.document().generation(), asked: generation }));
-        }
+        let (raw, generation) = self.at_generation(generation)?;
         let source = core_find::Source::new(generation, &query, match_case, raw.document().len()).map_err(doc_error)?;
         let id = self
             .find

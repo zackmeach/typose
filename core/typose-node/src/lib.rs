@@ -772,6 +772,17 @@ impl Doc {
         self.raw.as_ref().ok_or_else(|| Error::new(Code::NoDocument, "the document is closed"))
     }
 
+    /// The open document, while `generation` is its current one: `Stale` otherwise.
+    fn at_generation(&self, generation: f64) -> std::result::Result<(&Arc<Raw>, u32), Error<Code>> {
+        let generation = int("gen", generation)? as u32;
+        let raw = self.raw()?;
+        let current = raw.document().generation();
+        if generation != current {
+            return Err(doc_error(DocError::Stale { current, asked: generation }));
+        }
+        Ok((raw, generation))
+    }
+
     #[napi]
     pub fn bind_folder(&mut self, root: &FolderRoot) -> std::result::Result<bool, Error<Code>> {
         let raw = self.raw.as_mut().ok_or_else(|| Error::new(Code::NoDocument, "the document is closed"))?;
@@ -804,13 +815,8 @@ impl Doc {
     /// Retained inactive tabs keep their store floor. This only changes cache policy; it performs no identity/path IO.
     #[napi]
     pub fn set_cache_active(&self, generation: f64, active: bool) -> std::result::Result<(), Error<Code>> {
-        let generation = int("gen", generation)? as u32;
-        let document = self.raw()?.document();
-        let current = document.generation();
-        if generation != current {
-            return Err(doc_error(DocError::Stale { current, asked: generation }));
-        }
-        document.store().set_cache_active(active);
+        let (raw, _) = self.at_generation(generation)?;
+        raw.document().store().set_cache_active(active);
         Ok(())
     }
 
@@ -865,12 +871,7 @@ impl Doc {
 
     /// The local-link source must still be live and rendered in this generation. The target is already decoded.
     fn local_source(&self, generation: f64) -> std::result::Result<(&Arc<Raw>, u32), Error<Code>> {
-        let generation = int("gen", generation)? as u32;
-        let raw = self.raw()?;
-        let current = raw.document().generation();
-        if generation != current {
-            return Err(doc_error(DocError::Stale { current, asked: generation }));
-        }
+        let (raw, generation) = self.at_generation(generation)?;
         if !md::is_markdown(raw.document().path()) {
             return Err(Error::new(Code::Refused, "local links require a Markdown source"));
         }
@@ -1174,14 +1175,10 @@ impl Doc {
     /// A decoded fragment's source line in this generation's held Markdown build. No file-system access.
     #[napi]
     pub fn heading_line(&self, generation: f64, fragment: String) -> std::result::Result<Option<u32>, Error<Code>> {
-        let generation = int("gen", generation)? as u32;
         if fragment.len() > 32 << 10 || fragment.chars().any(char::is_control) {
             return Err(Error::new(Code::InvalidParams, "fragment must be at most 32 KiB, without control characters"));
         }
-        let current = self.raw()?.document().generation();
-        if generation != current {
-            return Err(doc_error(DocError::Stale { current, asked: generation }));
-        }
+        self.at_generation(generation)?;
         let built = self.built.lock().unwrap();
         let rendered =
             built.as_ref().ok_or_else(|| Error::new(Code::InvalidParams, "render the Markdown build first"))?;

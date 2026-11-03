@@ -561,7 +561,6 @@ impl Doc {
         header: f64,
         cancel: &Cancel,
     ) -> std::result::Result<AsyncTask<Configure>, Error<Code>> {
-        let generation = int("gen", generation)? as u32;
         let delimiter = match delimiter.as_str() {
             "auto" => None,
             "," => Some(b','),
@@ -576,10 +575,7 @@ impl Doc {
             -1.0 => Some(false),
             _ => return Err(Error::new(Code::InvalidParams, "header must be -1, 0 or 1")),
         };
-        let raw = self.raw()?;
-        if raw.document().generation() != generation {
-            return Err(doc_error(DocError::Stale { current: raw.document().generation(), asked: generation }));
-        }
+        let (raw, generation) = self.at_generation(generation)?;
         if !supported(raw.document().path()) {
             return Err(Error::new(Code::Refused, "Grid is available for CSV/TSV files"));
         }
@@ -622,12 +618,8 @@ impl Doc {
         cancel: &Cancel,
         query: Q,
     ) -> std::result::Result<AsyncTask<ReadCsv<Q>>, Error<Code>> {
-        let generation = int("gen", generation)? as u32;
         let revision = int("gen", revision)? as u32;
-        let raw = self.raw()?;
-        if raw.document().generation() != generation {
-            return Err(doc_error(DocError::Stale { current: raw.document().generation(), asked: generation }));
-        }
+        let (raw, _) = self.at_generation(generation)?;
         let state = self.csv.at(revision).ok_or_else(|| Error::new(Code::Stale, "CSV configuration was replaced"))?;
         if state.csv.locked {
             return Err(Error::new(Code::Refused, core_csv::UTF16_REASON));
@@ -834,11 +826,7 @@ impl Doc {
         direction: String,
         cancel: &Cancel,
     ) -> std::result::Result<AsyncTask<ReadCsv<SortQuery>>, Error<Code>> {
-        let asked_generation = int("gen", generation)? as u32;
-        let current = self.raw()?.document().generation();
-        if current != asked_generation {
-            return Err(doc_error(DocError::Stale { current, asked: asked_generation }));
-        }
+        self.at_generation(generation)?;
         let revision_id = int("gen", revision)? as u32;
         let state = self.csv.at(revision_id).ok_or_else(|| Error::new(Code::Stale, "CSV configuration replaced"))?;
         let column = int("start", column)?;
@@ -1076,13 +1064,9 @@ impl Doc {
         query: String,
         match_case: bool,
     ) -> std::result::Result<u32, Error<Code>> {
-        let generation = int("gen", generation)? as u32;
         let revision = int("gen", revision)? as u32;
         let order_id = order_id(order)?;
-        let raw = self.raw()?;
-        if raw.document().generation() != generation {
-            return Err(doc_error(DocError::Stale { current: raw.document().generation(), asked: generation }));
-        }
+        let (raw, _) = self.at_generation(generation)?;
         let state = self.csv.at(revision).ok_or_else(|| Error::new(Code::Stale, "CSV configuration replaced"))?;
         if state.csv.locked {
             return Err(Error::new(Code::Refused, core_csv::UTF16_REASON));
