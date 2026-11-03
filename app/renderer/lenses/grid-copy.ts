@@ -7,12 +7,9 @@ const CELL_REFERENCE_BYTES = 48
 const OUTPUT_COPIES = 4
 const CHARGE_GRANULARITY = 256 << 10
 
-export interface GridCopyReader {
+export interface GridCopyPort {
   sourceRecord(displayRow: number, signal: AbortSignal): Promise<number>
   cellChunks(sourceRecord: number, column: number, signal: AbortSignal): AsyncIterable<string>
-}
-
-export interface GridCopyPort extends GridCopyReader {
   reserve(bytes: number, signal: AbortSignal): Promise<boolean>
   confirm(bytes: number, signal: AbortSignal): Promise<boolean>
   write(text: string): Promise<boolean>
