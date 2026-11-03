@@ -38,14 +38,8 @@ impl JsonTree {
                 };
                 let found = json::duplicate_keys(store, index, id as u32)?.ok_or(StoreError::Cancelled)?;
                 for ordinal in found {
-                    if duplicates.len() == duplicates.capacity() {
-                        let old = duplicates.capacity();
-                        let next = old.max(32) * 2;
-                        if let Err(e) = charge.grow((next * size_of::<(u32, u64)>()) as u64) {
-                            return Ok(Err(DocError::Memory(e)));
-                        }
-                        duplicates.reserve_exact(next - duplicates.len());
-                        charge.shrink((old * size_of::<(u32, u64)>()) as u64);
+                    if let Err(e) = json::room(duplicates, charge) {
+                        return Ok(Err(DocError::Memory(e)));
                     }
                     duplicates.push((id as u32, ordinal));
                 }

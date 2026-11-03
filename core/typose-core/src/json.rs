@@ -103,7 +103,7 @@ pub struct Paged<T> {
 }
 
 const PAGE: usize = 4096;
-fn room<T>(values: &mut Vec<T>, charge: &mut Reservation) -> Result<(), OverBudget> {
+pub(crate) fn room<T>(values: &mut Vec<T>, charge: &mut Reservation) -> Result<(), OverBudget> {
     if values.len() == values.capacity() {
         let old = values.capacity();
         let next = old.max(32) * 2;
