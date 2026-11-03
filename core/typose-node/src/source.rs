@@ -18,10 +18,7 @@ impl Task for SourceBytes {
     fn compute(&mut self) -> Result<Self::Output> {
         let flag = self.cancel.clone();
         Ok(cancellable(&flag, || {
-            self.slot = Some(budget::slot(Work::Page, &store::cancelled).map_err(|e| match e {
-                NoSlot::Cancelled => DocError::Cancelled,
-                NoSlot::Budget(e) => DocError::Memory(e),
-            })?);
+            self.slot = Some(slot(Work::Page, &store::cancelled)?);
             self.raw.document().read(self.generation, self.start, self.start + self.count)
         }))
     }
@@ -91,10 +88,7 @@ impl Task for Location {
     fn compute(&mut self) -> Result<Self::Output> {
         let flag = self.cancel.clone();
         Ok(cancellable(&flag, || {
-            self.slot = Some(budget::slot(Work::Page, &store::cancelled).map_err(|e| match e {
-                NoSlot::Cancelled => DocError::Cancelled,
-                NoSlot::Budget(e) => DocError::Memory(e),
-            })?);
+            self.slot = Some(slot(Work::Page, &store::cancelled)?);
             let line = self
                 .raw
                 .source_line_at(self.generation, self.offset)?
@@ -130,10 +124,7 @@ impl Task for LineRange {
     fn compute(&mut self) -> Result<Self::Output> {
         let flag = self.cancel.clone();
         Ok(cancellable(&flag, || {
-            self.slot = Some(budget::slot(Work::Page, &store::cancelled).map_err(|e| match e {
-                NoSlot::Cancelled => DocError::Cancelled,
-                NoSlot::Budget(e) => DocError::Memory(e),
-            })?);
+            self.slot = Some(slot(Work::Page, &store::cancelled)?);
             let (lines, done) = self.raw.lines_known();
             let end_line = self
                 .start
@@ -181,10 +172,7 @@ impl Task for Verify {
     fn compute(&mut self) -> Result<Self::Output> {
         let flag = self.cancel.clone();
         Ok(cancellable(&flag, || {
-            self.slot = Some(budget::slot(Work::Page, &store::cancelled).map_err(|e| match e {
-                NoSlot::Cancelled => DocError::Cancelled,
-                NoSlot::Budget(e) => DocError::Memory(e),
-            })?);
+            self.slot = Some(slot(Work::Page, &store::cancelled)?);
             self.raw.document().verified(self.generation, |store| {
                 let mut at = self.start;
                 while at < self.end {

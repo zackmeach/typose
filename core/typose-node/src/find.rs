@@ -101,10 +101,7 @@ impl Task for FindTask {
     fn compute(&mut self) -> Result<Self::Output> {
         let flag = self.cancel.clone();
         Ok(cancellable(&flag, || {
-            self.slot = Some(budget::slot(Work::Page, &store::cancelled).map_err(|e| match e {
-                NoSlot::Cancelled => DocError::Cancelled,
-                NoSlot::Budget(e) => DocError::Memory(e),
-            })?);
+            self.slot = Some(slot(Work::Page, &store::cancelled)?);
             self.check()?;
             let mut page = SourceFindPage {
                 count: 0.,

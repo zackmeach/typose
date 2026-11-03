@@ -297,10 +297,7 @@ impl Task for Build {
             if let Some(entry) = &self.existing {
                 return Ok((entry.clone(), describe(&self.raw, entry)?));
             }
-            self.slot = Some(budget::slot(Work::Index, &store::cancelled).map_err(|e| match e {
-                NoSlot::Cancelled => DocError::Cancelled,
-                NoSlot::Budget(e) => DocError::Memory(e),
-            })?);
+            self.slot = Some(slot(Work::Index, &store::cancelled)?);
             let utf16 = self.raw.encoding().starts_with("UTF-16");
             let tree = if self.format == "json" && !utf16 {
                 Some(core_structured::JsonTree::build(self.raw.document(), self.generation)?)
@@ -390,10 +387,7 @@ impl Task for Children {
     fn compute(&mut self) -> Result<Self::Output> {
         let flag = self.cancel.clone();
         Ok(cancellable(&flag, || {
-            self.slot = Some(budget::slot(Work::Page, &store::cancelled).map_err(|e| match e {
-                NoSlot::Cancelled => DocError::Cancelled,
-                NoSlot::Budget(e) => DocError::Memory(e),
-            })?);
+            self.slot = Some(slot(Work::Page, &store::cancelled)?);
             // One identity check for the page, not one per node key and value.
             self.raw.document().batch(self.entry.generation, || {
                 let record_tree;
@@ -918,10 +912,7 @@ impl Task for Rows {
     fn compute(&mut self) -> Result<Self::Output> {
         let flag = self.cancel.clone();
         Ok(cancellable(&flag, || {
-            self.slot = Some(budget::slot(Work::Page, &store::cancelled).map_err(|e| match e {
-                NoSlot::Cancelled => DocError::Cancelled,
-                NoSlot::Budget(e) => DocError::Memory(e),
-            })?);
+            self.slot = Some(slot(Work::Page, &store::cancelled)?);
             check_read(&self.raw, &self.owner, &self.entry, &flag)?;
             if self.entry.format != "jsonl" || self.entry.jsonl.is_none() {
                 return Err(DocError::Refused("Rows are unavailable for this document".into()));

@@ -201,12 +201,6 @@ fn stale(revision: u32) -> DocError {
 fn source_check(raw: &Raw, generation: u32) -> std::result::Result<(), DocError> {
     raw.document().verified(generation, |_| Ok(()))
 }
-fn page_slot() -> std::result::Result<Slot, DocError> {
-    budget::slot(Work::Page, &store::cancelled).map_err(|e| match e {
-        NoSlot::Cancelled => DocError::Cancelled,
-        NoSlot::Budget(e) => DocError::Memory(e),
-    })
-}
 fn err(env: Env, e: DocError) -> Error {
     Error::from(JsError::from(doc_error(e)).into_unknown(env))
 }
@@ -235,7 +229,7 @@ impl Task for Configure {
             if let Some(state) = &self.existing {
                 return Ok(state.clone());
             }
-            self.slot = Some(page_slot()?);
+            self.slot = Some(slot(Work::Page, &store::cancelled)?);
             source_check(&self.raw, self.generation)?;
             let csv = self.raw.csv(self.generation, self.revision, self.options)?;
             if !csv.locked {
@@ -244,10 +238,7 @@ impl Task for Configure {
                         || self.owner.closed.load(Ordering::Relaxed)
                         || self.owner.epoch.load(Ordering::Relaxed) != self.epoch
                 };
-                self.build_slot = Some(budget::slot(Work::Index, &stop).map_err(|e| match e {
-                    NoSlot::Cancelled => DocError::Cancelled,
-                    NoSlot::Budget(e) => DocError::Memory(e),
-                })?);
+                self.build_slot = Some(slot(Work::Index, &stop)?);
                 self.build_temp = Some(Reservation::new(core_csv::TEMP_BYTES).map_err(DocError::Memory)?);
             }
             Ok(Arc::new(State {
@@ -356,7 +347,7 @@ impl<Q: Query> Task for ReadCsv<Q> {
     fn compute(&mut self) -> Result<Self::Output> {
         let flag = self.ctx.cancel.clone();
         Ok(cancellable(&flag, || {
-            self.ctx.slot = Some(page_slot()?);
+            self.ctx.slot = Some(slot(Work::Page, &store::cancelled)?);
             self.ctx.check()?;
             self.query.check(&self.ctx)?;
             self.query.run(&self.ctx)

@@ -82,6 +82,14 @@ fn doc_error(e: DocError) -> Error<Code> {
     Error::new(code, e.to_string())
 }
 
+/// Plan C1: a slot in the pool for `work`, waited for until `stop` (then `Cancelled`).
+fn slot(work: Work, stop: &dyn Fn() -> bool) -> std::result::Result<Slot, DocError> {
+    budget::slot(work, stop).map_err(|e| match e {
+        NoSlot::Cancelled => DocError::Cancelled,
+        NoSlot::Budget(over) => DocError::Memory(over),
+    })
+}
+
 fn int(field: &str, x: f64) -> std::result::Result<u64, Error<Code>> {
     limits::int(field, x).map_err(|why| Error::new(Code::InvalidParams, why))
 }
@@ -307,10 +315,7 @@ impl Task for Read {
     fn compute(&mut self) -> Result<Self::Output> {
         let (raw, generation) = (&self.raw, self.generation);
         Ok(cancellable(&self.cancel, || {
-            self.slot = Some(budget::slot(Work::Page, &store::cancelled).map_err(|e| match e {
-                NoSlot::Cancelled => DocError::Cancelled,
-                NoSlot::Budget(over) => DocError::Memory(over),
-            })?);
+            self.slot = Some(slot(Work::Page, &store::cancelled)?);
             match self.want {
                 Want::Lines { start, count } => raw.page(generation, start, count),
                 Want::Piece { line, offset } => raw.piece(generation, line, offset).map(|p| vec![p]),
@@ -418,10 +423,7 @@ impl Task for MdRead {
     fn compute(&mut self) -> Result<Self::Output> {
         let flag = self.cancel.clone();
         Ok(cancellable(&flag, || {
-            self.slot = Some(budget::slot(Work::Page, &store::cancelled).map_err(|e| match e {
-                NoSlot::Cancelled => DocError::Cancelled,
-                NoSlot::Budget(over) => DocError::Memory(over),
-            })?);
+            self.slot = Some(slot(Work::Page, &store::cancelled)?);
             if self.generation != self.current {
                 return Err(DocError::Stale { current: self.current, asked: self.generation });
             }
@@ -526,10 +528,7 @@ impl Task for ImageChunk {
 
     fn compute(&mut self) -> Result<Self::Output> {
         Ok(cancellable(&self.cancel, || {
-            self.slot = Some(budget::slot(Work::Page, &store::cancelled).map_err(|error| match error {
-                NoSlot::Cancelled => DocError::Cancelled,
-                NoSlot::Budget(error) => DocError::Memory(error),
-            })?);
+            self.slot = Some(slot(Work::Page, &store::cancelled)?);
             self.raw.document().check_local_source(self.generation)?;
             let bytes = self.state.chunk(self.id, self.offset)?;
             self.raw.document().check_local_source(self.generation)?;
