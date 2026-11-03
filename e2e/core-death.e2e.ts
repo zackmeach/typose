@@ -5,7 +5,7 @@
 import { type Page, expect } from '@playwright/test'
 import { rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { FIXTURES, type Launched, type TestHooks, debugStats, finish, fixture, killCore, launch, lifecycle, sparseFixture, stubOpenDialog, test, visibleRows, waitIndexed, waitOpen } from './app'
+import { FIXTURES, type Launched, type TestHooks, debugStats, finish, fixture, killCore, launch, lifecycle, runCommand, sparseFixture, stubOpenDialog, test, visibleRows, waitIndexed, waitOpen } from './app'
 
 const hooks = (win: Page) => win.evaluate(() => (({ held, ...rest }) => ({ ...rest, held: held.length }))((window as unknown as { typoseTest: TestHooks }).typoseTest.client))
 /** Holds back what `session`'s core host sends from now on, until `deliverHeld`. */
@@ -144,8 +144,7 @@ test('Open file… while the core is stopped acknowledges the queued file and op
   await expect(win.locator('.card-message .open-button')).toHaveText(['Reopen']) // respawned at once
   killCore(l) // a second death within 60 s: stopped, with nothing offered
   await expect(win.locator('.card-message .open-button')).toHaveCount(0)
-  await win.getByRole('button', { name: 'Menu', exact: true }).click()
-  await win.getByRole('menuitem', { name: 'Open file…' }).click()
+  await runCommand(win, 'Open file…')
   await win.getByRole('button', { name: 'Browse…', exact: true }).click()
   // The lost document keeps its tab. The explicit manual request is acknowledged, then opens when the core returns.
   await expect(win.locator('.card-name')).toHaveText('core-death-first.txt')

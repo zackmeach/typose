@@ -1,7 +1,7 @@
 import { expect } from '@playwright/test'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { FIXTURES, debugStats, finish, fixture, launch, test, visibleRows, waitIndexed, waitOpen } from './app'
+import { FIXTURES, debugStats, finish, fixture, launch, runCommand, test, visibleRows, waitIndexed, waitOpen } from './app'
 
 test('failed Back preserves the mounted preview and history until its target can reopen', async () => {
   test.skip(process.platform !== 'win32', 'local capability backend is currently Windows-only')
@@ -47,8 +47,7 @@ test('closing a derived tab retains only a route; Clear releases it', async () =
   await win.getByRole('button', { name: 'Close B.txt', exact: true }).click()
   await expect(win.locator('.card-name')).toHaveText('A.md')
   await expect.poll(async () => ({ docs: (await debugStats(win)).docs, tickets: (await debugStats(win)).saved.tickets })).toEqual({ docs: 1, tickets: 1 })
-  await win.getByRole('button', { name: 'Menu', exact: true }).click()
-  await win.getByRole('menuitem', { name: 'Clear recently closed tabs', exact: true }).click()
+  await runCommand(win, 'Clear recently closed tabs')
   await expect.poll(async () => (await debugStats(win)).saved.tickets).toBe(0)
   expect(l.pageErrors).toEqual([])
   await finish(l)

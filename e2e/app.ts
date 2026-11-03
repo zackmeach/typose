@@ -250,6 +250,13 @@ export function fixturesGen(...args: string[]): void {
   execFileSync('cargo', ['run', '--release', '-q', '-p', 'fixtures-gen', '--', ...args], { cwd: resolve(__dirname, '../core'), stdio: 'inherit' })
 }
 
+/** Runs a command by its label through the palette, which every OS has (macOS has no ☰). */
+export async function runCommand(win: Page, label: string): Promise<void> {
+  await win.keyboard.press('ControlOrMeta+K')
+  await win.getByRole('combobox', { name: 'Search commands' }).fill(label)
+  await win.keyboard.press('Enter')
+}
+
 /**
  * Holds the page core client's reply to `method` (every call, or only the first when `once`) until the test calls
  * `window[name]()`; the test waits for it with `typeof window[name] === 'function'`. Test-hooks build only.

@@ -2,7 +2,7 @@ import { expect } from '@playwright/test'
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { FIXTURES, finish, fixture, launch, stubOpenDialog, test } from './app'
+import { FIXTURES, finish, fixture, launch, runCommand, stubOpenDialog, test } from './app'
 import { emptySession } from '../app/shared/session'
 
 test('actual restart preserves cards, selected tabs, lenses and anchors, and keeps missing locations visible', async () => {
@@ -129,11 +129,9 @@ test('sidebar tasks.csv restores through its approved root in a split with the s
   const live = await launch({ file: source })
   await expect(live.win.getByRole('heading', { name: 'Launch plan' })).toBeVisible({ timeout: 30_000 })
   await stubOpenDialog(live.app, root, 'folder-dialog')
-  await live.win.getByRole('button', { name: 'Menu', exact: true }).click()
-  await live.win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
+  await runCommand(live.win, 'Open folder…')
   await expect(live.win.getByRole('treeitem', { name: 'tasks.csv', exact: true })).toBeVisible()
-  await live.win.getByRole('button', { name: 'Menu', exact: true }).click()
-  await live.win.getByRole('menuitem', { name: 'Split right', exact: true }).click()
+  await runCommand(live.win, 'Split right')
   const right = live.win.getByRole('region', { name: 'Reader card 2', exact: true })
   await expect(right).toHaveAttribute('data-focused', 'true')
   await live.win.getByRole('treeitem', { name: 'tasks.csv', exact: true }).locator('.folder-row').click()

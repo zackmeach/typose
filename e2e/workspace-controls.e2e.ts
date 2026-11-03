@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { finish, fixture, launch, stubOpenDialog, test } from './app'
+import { finish, fixture, launch, runCommand, stubOpenDialog, test } from './app'
 import { SHOW } from './menu-fixture'
 import { emptySession } from '../app/shared/session'
 
@@ -18,8 +18,7 @@ test('quick open browses through the real command surface and opens fuzzy root r
   const live = await launch()
   await expect(live.win.getByRole('button', { name: /^Open file/ })).toBeVisible()
   await stubOpenDialog(live.app, root, 'folder-dialog')
-  await live.win.getByRole('button', { name: 'Menu', exact: true }).click()
-  await live.win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
+  await runCommand(live.win, 'Open folder…')
   await expect(live.win.getByRole('treeitem', { name: 'reports', exact: true })).toBeVisible()
   await live.win.keyboard.press('ControlOrMeta+O')
   await expect(live.win.getByRole('dialog', { name: 'Quick open' })).toBeVisible()
@@ -172,8 +171,7 @@ test('palette groups commands under LENS, VIEW and FILE; quick open separates RE
   await live.win.keyboard.press('Escape')
   if (FOLDERS) {
     await stubOpenDialog(live.app, root, 'folder-dialog')
-    await live.win.getByRole('button', { name: 'Menu', exact: true }).click()
-    await live.win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
+    await runCommand(live.win, 'Open folder…')
     await expect(live.win.getByRole('treeitem', { name: 'reports', exact: true })).toBeVisible()
     await live.win.keyboard.press('ControlOrMeta+O')
     const quick = live.win.getByRole('dialog', { name: 'Quick open' })
@@ -207,8 +205,7 @@ test('a file or folder that failed to open is not recorded as a recent', async (
   await expect(live.win.getByText(/Cannot add folder/)).toBeVisible()
   if (FOLDERS) {
     await folderDialog(good)
-    await live.win.getByRole('button', { name: 'Menu', exact: true }).click()
-    await live.win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
+    await runCommand(live.win, 'Open folder…')
     await expect(live.win.getByRole('tree')).toBeVisible()
   }
   expect(live.pageErrors).toEqual([])
@@ -230,8 +227,7 @@ test('quick open walks lazily with its own root, so it never spends the sidebar 
   const live = await launch()
   await expect(live.win.getByRole('button', { name: /^Open file/ })).toBeVisible()
   await stubOpenDialog(live.app, root, 'folder-dialog')
-  await live.win.getByRole('button', { name: 'Menu', exact: true }).click()
-  await live.win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
+  await runCommand(live.win, 'Open folder…')
   await expect(live.win.getByRole('treeitem', { name: 'd15', exact: true })).toBeVisible()
   await live.win.keyboard.press('ControlOrMeta+O')
   await expect(live.win.getByRole('status').filter({ hasText: /Quick open shows the first [\d,]+ entries of / })).toBeVisible({ timeout: 60_000 })
@@ -256,8 +252,7 @@ test('quick open skips a root whose folder was replaced, and lists past an unrea
     await expect(live.win.getByRole('button', { name: /^Open file/ })).toBeVisible()
     for (const [root, row] of [[swapped, 'original.md'], [mixed, 'c']]) {
       await stubOpenDialog(live.app, root, 'folder-dialog')
-      await live.win.getByRole('button', { name: 'Menu', exact: true }).click()
-      await live.win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
+      await runCommand(live.win, 'Open folder…')
       await expect(live.win.getByRole('treeitem', { name: row, exact: true })).toBeVisible()
     }
     renameSync(swapped, swapped + '-moved'); mkdirSync(swapped); writeFileSync(join(swapped, 'impostor.md'), '# impostor\n')
@@ -361,11 +356,10 @@ test('Copy path confirms for 3 s; Settings names the window; the palette says Sh
   const { win } = live
   await expect(win.getByRole('heading', { name: 'Polish doc' })).toBeVisible()
   const palette = win.getByRole('dialog', { name: 'Command palette' })
-  const command = async (name: string) => { await win.keyboard.press('ControlOrMeta+K'); await win.getByRole('combobox', { name: 'Search commands' }).fill(name); await win.keyboard.press('Enter') }
 
   // Copy path's confirmation goes by itself: the clipboard is stubbed, so nothing reaches the OS clipboard.
   await win.evaluate(() => { navigator.clipboard.writeText = async () => {} })
-  await command('Copy path')
+  await runCommand(win, 'Copy path')
   const banner = win.locator('.reader-card .banner[role="status"]')
   await expect(banner).toHaveText('Path copied')
   await expect(banner).toHaveCount(0, { timeout: 6_000 })
@@ -386,7 +380,7 @@ test('Copy path confirms for 3 s; Settings names the window; the palette says Sh
   await win.getByRole('combobox', { name: 'Search commands' }).fill(SHOW.split(' ').at(-1)!.toLowerCase())
   await expect(palette.getByRole('option', { name: SHOW, exact: true })).toBeVisible()
   await win.keyboard.press('Escape')
-  await command('Wrap lines')
+  await runCommand(win, 'Wrap lines')
   await expect(win.locator('html')).toHaveAttribute('data-wrap-lines', 'true')
   await win.keyboard.press('ControlOrMeta+K')
   await expect(palette.getByRole('option', { name: 'Wrap lines, On', exact: true }).locator('.workspace-badge')).toHaveText('On')
@@ -400,8 +394,7 @@ test('Copy path confirms for 3 s; Settings names the window; the palette says Sh
   // Quick open's status is a row of its own below the list, not against the list's last, partly visible result.
   if (FOLDERS) {
     await stubOpenDialog(live.app, root, 'folder-dialog')
-    await win.getByRole('button', { name: 'Menu', exact: true }).click()
-    await win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
+    await runCommand(win, 'Open folder…')
     await expect(win.getByRole('treeitem', { name: 'file-39.md', exact: true })).toBeVisible()
     await win.keyboard.press('ControlOrMeta+O')
     await expect(win.getByRole('status').filter({ hasText: '40 files' })).toBeVisible()
