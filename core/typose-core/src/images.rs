@@ -270,7 +270,7 @@ fn encode_pixels_with(
     Ok(CanonicalImage { bytes: sink.bytes, width: pixels.width, height: pixels.height, resource: sink.resource })
 }
 
-// Reviewed against png =0.18.1, fdeflate =0.3.7, gif =0.14.2, weezl =0.1.10.
+// Reviewed against png =0.18.1, fdeflate =0.3.7, gif =0.14.2, weezl =0.1.10, crc32fast =1.5.3.
 // Caller owns and has charged `source`; no source copy is made here.
 
 struct PngPreflight {
