@@ -51,17 +51,12 @@ impl Owner {
     }
 }
 #[napi(object)]
-pub struct StructuredSpan {
-    pub start: f64,
-    pub end: f64,
-}
-#[napi(object)]
 pub struct StructuredNode {
     pub ordinal: f64,
     pub kind: String,
-    pub span: StructuredSpan,
+    pub span: Span,
     pub key: Option<String>,
-    pub key_span: Option<StructuredSpan>,
+    pub key_span: Option<Span>,
     pub key_more: bool,
     pub text: String,
     pub more: bool,
@@ -74,7 +69,7 @@ pub struct StructuredProblem {
     pub kind: String,
     pub count: f64,
     pub message: String,
-    pub first: StructuredSpan,
+    pub first: Span,
     pub line: Option<f64>,
     pub column: Option<f64>,
 }
@@ -100,9 +95,6 @@ pub struct StructuredInfo {
 pub struct StructuredChildren {
     pub nodes: Vec<StructuredNode>,
     pub next: Option<f64>,
-}
-fn span(s: json::Span) -> StructuredSpan {
-    StructuredSpan { start: s.start as f64, end: s.end as f64 }
 }
 fn node(
     raw: &Raw,
@@ -214,7 +206,7 @@ fn describe(raw: &Raw, entry: &Entry) -> std::result::Result<StructuredInfo, Doc
                 kind: "parse".into(),
                 count: 1.,
                 message: message.into(),
-                first: StructuredSpan { start: error.offset as f64, end: error.offset as f64 },
+                first: Span { start: error.offset as f64, end: error.offset as f64 },
                 line: Some(error.line as f64),
                 column: Some(error.column as f64),
             });
@@ -597,7 +589,7 @@ fn record_body(raw: &Raw, generation: u32, range: json::Span) -> std::result::Re
 #[napi(object)]
 pub struct StructuredRow {
     pub line: f64,
-    pub span: StructuredSpan,
+    pub span: Span,
     pub status: String,
     pub timestamp: Option<String>,
     pub r#type: Option<String>,
@@ -616,7 +608,7 @@ pub struct StructuredRows {
 pub struct StructuredColumn {
     pub id: f64,
     pub key: String,
-    pub span: StructuredSpan,
+    pub span: Span,
 }
 #[napi(object)]
 pub struct StructuredColumns {

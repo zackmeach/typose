@@ -55,11 +55,6 @@ impl Owner {
 }
 
 #[napi(object)]
-pub struct CsvSpan {
-    pub start: f64,
-    pub end: f64,
-}
-#[napi(object)]
 pub struct CsvInfo {
     pub revision: u32,
     pub status: String,
@@ -78,7 +73,7 @@ pub struct CsvInfo {
 pub struct CsvProblem {
     pub kind: String,
     pub count: f64,
-    pub first: CsvSpan,
+    pub first: Span,
     pub source_record: Option<f64>,
     pub source_line: Option<f64>,
 }
@@ -92,8 +87,8 @@ pub struct CsvContinuation {
 pub struct CsvCellPiece {
     pub source_record: f64,
     pub column: f64,
-    pub span: CsvSpan,
-    pub piece_span: CsvSpan,
+    pub span: Span,
+    pub piece_span: Span,
     pub text: String,
     pub map: WireMap,
     pub replacements: u32,
@@ -109,7 +104,7 @@ pub struct CsvRow {
     pub data_row: f64,
     pub source_record: f64,
     pub source_line: f64,
-    pub span: CsvSpan,
+    pub span: Span,
     pub field_count: f64,
     pub cells: Vec<CsvCell>,
     pub complete: bool,
@@ -144,13 +139,10 @@ pub struct CsvLocated {
     pub data_row: Option<f64>,
     pub source_record: Option<f64>,
     pub source_line: Option<f64>,
-    pub span: Option<CsvSpan>,
+    pub span: Option<Span>,
     pub column: Option<f64>,
 }
 
-fn span(s: core_csv::Span) -> CsvSpan {
-    CsvSpan { start: s.start as f64, end: s.end as f64 }
-}
 fn piece(p: core_csv::Piece) -> CsvCellPiece {
     let w = p.map.to_wire();
     CsvCellPiece {
@@ -204,7 +196,7 @@ fn info(state: &State) -> CsvInfo {
             .map(|problem| CsvProblem {
                 kind: problem.kind.into(),
                 count: problem.count as f64,
-                first: CsvSpan { start: problem.first.start as f64, end: problem.first.end as f64 },
+                first: span(problem.first),
                 source_record: problem.record.map(|record| record as f64),
                 source_line: problem.record.map(|_| problem.line as f64),
             })

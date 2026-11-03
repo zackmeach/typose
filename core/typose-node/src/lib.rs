@@ -172,6 +172,17 @@ pub struct WireMap {
     pub points: Uint32Array,
 }
 
+/// A source byte range, `[start, end)`.
+#[napi(object)]
+pub struct Span {
+    pub start: f64,
+    pub end: f64,
+}
+
+fn span(s: typose_core::json::Span) -> Span {
+    Span { start: s.start as f64, end: s.end as f64 }
+}
+
 /// Where a line's next piece starts (plan C3): the core issues it and checks it when it comes back. The core host
 /// adds its session.
 #[napi(object)]

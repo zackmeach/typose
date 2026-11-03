@@ -73,12 +73,6 @@ impl Doc {
 }
 
 #[napi(object)]
-pub struct SourceLineRange {
-    pub start: f64,
-    pub end: f64,
-}
-
-#[napi(object)]
 pub struct SourceLocation {
     pub line: f64,
 }
@@ -131,8 +125,8 @@ pub struct LineRange {
     _task: hooks::Live,
 }
 impl Task for LineRange {
-    type Output = std::result::Result<SourceLineRange, DocError>;
-    type JsValue = SourceLineRange;
+    type Output = std::result::Result<Span, DocError>;
+    type JsValue = Span;
     fn compute(&mut self) -> Result<Self::Output> {
         let flag = self.cancel.clone();
         Ok(cancellable(&flag, || {
@@ -156,7 +150,7 @@ impl Task for LineRange {
                     .line_offset(self.generation, end_line)?
                     .ok_or_else(|| DocError::Refused("The requested source range is not indexed yet".into()))?
             };
-            Ok(SourceLineRange { start: start as f64, end: end as f64 })
+            Ok(Span { start: start as f64, end: end as f64 })
         }))
     }
     fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -239,7 +233,7 @@ impl Doc {
             _task: hooks::Live::new(&hooks::TASKS),
         }))
     }
-    #[napi(ts_return_type = "Promise<SourceLineRange>")]
+    #[napi(ts_return_type = "Promise<Span>")]
     pub fn source_line_range(
         &self,
         generation: f64,
