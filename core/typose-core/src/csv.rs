@@ -1062,6 +1062,21 @@ struct GridCursor {
     counts: Vec<u64>,
     complete: bool,
 }
+impl GridCursor {
+    fn new(csv: &Csv, pattern: &crate::find::Pattern, rows: u64) -> Self {
+        let scan = csv.index.read().unwrap().checkpoints[0].clone();
+        GridCursor {
+            pending_start: scan.field_start,
+            scan,
+            matcher: crate::find::Matcher::new(pattern),
+            pending: Vec::new(),
+            positions: Vec::new(),
+            count: 0,
+            counts: vec![0; rows as usize],
+            complete: false,
+        }
+    }
+}
 pub struct GridProgress {
     pub count: u64,
     pub bytes: u64,
@@ -1083,18 +1098,7 @@ impl GridFind {
         )
         .map_err(DocError::Memory)?;
         let pattern = crate::find::Pattern::new(query, match_case)?;
-        let scan = csv.index.read().unwrap().checkpoints[0].clone();
-        let matcher = crate::find::Matcher::new(&pattern);
-        let cursor = GridCursor {
-            pending_start: scan.field_start,
-            scan,
-            matcher,
-            pending: Vec::new(),
-            positions: Vec::new(),
-            count: 0,
-            counts: vec![0; order.rows as usize],
-            complete: false,
-        };
+        let cursor = GridCursor::new(csv, &pattern, order.rows);
         Ok(Self {
             pattern,
             order,
@@ -1224,17 +1228,7 @@ impl GridFind {
         previous: bool,
     ) -> Result<(Option<GridHit>, bool, Option<u64>), DocError> {
         let _temp = Reservation::new(TEMP_BYTES + self.order.rows * 8).map_err(DocError::Memory)?;
-        let scan = csv.index.read().unwrap().checkpoints[0].clone();
-        let mut c = GridCursor {
-            pending_start: scan.field_start,
-            scan,
-            matcher: crate::find::Matcher::new(&self.pattern),
-            pending: Vec::new(),
-            positions: Vec::new(),
-            count: 0,
-            counts: vec![0; self.order.rows as usize],
-            complete: false,
-        };
+        let mut c = GridCursor::new(csv, &self.pattern, self.order.rows);
         let (mut first, mut last, mut chosen): (Option<GridHit>, Option<GridHit>, Option<GridHit>) = (None, None, None);
         while !c.complete {
             self.step(csv, doc, &mut c, crate::find::SCAN_BYTES, |h| {
