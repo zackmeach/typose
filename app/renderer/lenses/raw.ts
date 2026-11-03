@@ -345,52 +345,8 @@ export class RawLens {
       allFits: this.indexed && pages <= MAX_PRINT_PAGES && this.opened.size <= MAX_PRINT_BYTES }
   }
 
-  async printRange(start: number, end: number, signal: AbortSignal): Promise<PrintPayload> {
-    const generation = this.opened.gen, view = this.opened.view, owner = this.options.budget
-    const current = () => !signal.aborted && !this.stopped && !this.yielded && this.indexed && !!view && owner?.current(generation) !== false
-    if (!view || !owner || !current() || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start || end > this.lineCount)
-      throw new Error('The Raw print range is no longer available')
-    if (!await owner.reserveCopy(generation, 512 << 10)) throw new Error('Print is unavailable · the memory budget is full')
-    let retained = true
-    try {
-      const span = await this.core.call('sourceLineRange', { view, startLine: start, count: end - start }, signal)
-      const decoder = new TextDecoder(this.opened.encoding, { ignoreBOM: true })
-      const parts: string[] = []
-      let offset = span.start, inputBytes = 0, outputBytes = 0, charged = 512 << 10
-      while (offset < span.end) {
-        if (!current()) throw new Error('The Raw print job was cancelled or the source changed')
-        const count = Math.min(64 << 10, span.end - offset)
-        const nextCharge = (512 << 10) + (inputBytes + count) * 2 + outputBytes * 4
-        if (nextCharge > charged && !await owner.reserveCopy(generation, nextCharge)) throw new Error('Print is unavailable · the memory budget is full')
-        charged = Math.max(charged, nextCharge)
-        const bytes = await this.core.call('sourceBytes', { view, start: offset, count }, signal)
-        if (!current() || bytes.length !== count) throw new Error('The Raw print source changed while reading')
-        const chunk = decoder.decode(bytes, { stream: true })
-        inputBytes += bytes.length
-        outputBytes += utf8ByteLength(chunk)
-        if (outputBytes > MAX_PRINT_BYTES) throw new Error('The selected print range exceeds the 8 MiB document limit')
-        parts.push(chunk)
-        offset += count
-      }
-      const tail = decoder.decode()
-      outputBytes += utf8ByteLength(tail)
-      if (outputBytes > MAX_PRINT_BYTES || !current()) throw new Error('The selected print range exceeds the bounded print limit')
-      parts.push(tail)
-      const text = parts.join('')
-      const jsonBytes = utf8ByteLength(JSON.stringify(text))
-      if (jsonBytes > MAX_PRINT_BYTES || !await owner.reserveCopy(generation, (512 << 10) + inputBytes * 2 + outputBytes * 4 + jsonBytes * 2))
-        throw new Error('Print is unavailable · the memory budget is full')
-      retained = false
-      let released = false
-      return {
-        blocks: [{ tag: 'pre', children: [{ text }] }],
-        pages: Math.ceil((end - start) / PRINT_LINES_PER_PAGE),
-        verify: async checkSignal => !checkSignal.aborted && current() && await this.core.call('sourceVerify', { view, start: span.start, end: span.end }, checkSignal),
-        release: async () => { if (released) return; released = true; await owner.reserveCopy(generation, 0) }
-      }
-    } finally {
-      if (retained) await owner.reserveCopy(generation, 0)
-    }
+  printRange(start: number, end: number, signal: AbortSignal): Promise<PrintPayload> {
+    return printLines(this.core, this.opened, this.options.budget, start, end, this.lineCount, () => !this.stopped && !this.yielded && this.indexed, signal)
   }
 
   /**
@@ -843,5 +799,55 @@ export class RawLens {
     }
     const text = next ? '↪' : item.rest === undefined ? 'More on this line' : `+${size(item.rest)} more on this line`
     return Object.assign(document.createElement('span'), { className: 'more', textContent: text })
+  }
+}
+
+/** Raw's and Structured's print: source lines `start` to `end` as one decoded text block, charged stepwise to the copy share. */
+export async function printLines(core: CoreClient, opened: Opened, owner: LensBudget | null | undefined, start: number, end: number, lines: number,
+  live: () => boolean, signal: AbortSignal): Promise<PrintPayload> {
+  const generation = opened.gen, view = opened.view
+  const current = () => !signal.aborted && live() && !!view && owner?.current(generation) !== false
+  if (!view || !owner || !current() || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start || end > lines)
+    throw new Error('The print range is no longer available')
+  if (!await owner.reserveCopy(generation, 512 << 10)) throw new Error('Print is unavailable · the memory budget is full')
+  let retained = true
+  try {
+    const span = await core.call('sourceLineRange', { view, startLine: start, count: end - start }, signal)
+    const decoder = new TextDecoder(opened.encoding, { ignoreBOM: true })
+    const parts: string[] = []
+    let offset = span.start, inputBytes = 0, outputBytes = 0, charged = 512 << 10
+    while (offset < span.end) {
+      if (!current()) throw new Error('The print job was cancelled or the source changed')
+      const count = Math.min(64 << 10, span.end - offset)
+      const nextCharge = (512 << 10) + (inputBytes + count) * 2 + outputBytes * 4
+      if (nextCharge > charged && !await owner.reserveCopy(generation, nextCharge)) throw new Error('Print is unavailable · the memory budget is full')
+      charged = Math.max(charged, nextCharge)
+      const bytes = await core.call('sourceBytes', { view, start: offset, count }, signal)
+      if (!current() || bytes.length !== count) throw new Error('The print source changed while reading')
+      const chunk = decoder.decode(bytes, { stream: true })
+      inputBytes += bytes.length
+      outputBytes += utf8ByteLength(chunk)
+      if (outputBytes > MAX_PRINT_BYTES) throw new Error('The selected print range exceeds the 8 MiB document limit')
+      parts.push(chunk)
+      offset += count
+    }
+    const tail = decoder.decode()
+    outputBytes += utf8ByteLength(tail)
+    if (outputBytes > MAX_PRINT_BYTES || !current()) throw new Error('The selected print range exceeds the bounded print limit')
+    parts.push(tail)
+    const text = parts.join('')
+    const jsonBytes = utf8ByteLength(JSON.stringify(text))
+    if (jsonBytes > MAX_PRINT_BYTES || !await owner.reserveCopy(generation, (512 << 10) + inputBytes * 2 + outputBytes * 4 + jsonBytes * 2))
+      throw new Error('Print is unavailable · the memory budget is full')
+    retained = false
+    let released = false
+    return {
+      blocks: [{ tag: 'pre', children: [{ text }] }],
+      pages: Math.ceil((end - start) / PRINT_LINES_PER_PAGE),
+      verify: async checkSignal => !checkSignal.aborted && current() && await core.call('sourceVerify', { view, start: span.start, end: span.end }, checkSignal),
+      release: async () => { if (released) return; released = true; await owner.reserveCopy(generation, 0) }
+    }
+  } finally {
+    if (retained) await owner.reserveCopy(generation, 0)
   }
 }
