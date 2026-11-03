@@ -1,4 +1,4 @@
-/** The only privileged link action: an allowed URL from this window's current app main frame. */
+/** Main's trust boundary for the page: every IPC channel's sender check, and the one privileged link action, an allowed URL from that sender. */
 interface Frame {
   readonly url: string
 }
