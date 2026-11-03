@@ -102,6 +102,7 @@ The packet (`docs/superpowers/plans/2026-10-22-phase0-decision-packet.md`) holds
 | Z91 | **The Rendered charge growth from source maps is accepted for now.** Inline-heavy Markdown reserves up to about twice as much; recalibrating the per-span cost waits until a real document hits the limit. (2026-11-02) |
 | Z92 | **On Linux the accessibility mode is always on.** Electron reports accessibility support on macOS and Windows only, so on Linux every Markdown block stays in the accessibility tree (no `content-visibility: auto` skipping) whether or not a screen reader runs. (2026-11-02) |
 | Z93 | **Size-bounding Raw's reservation is shelved, and the per-row cost gap is a known issue.** Raw charges items per UTF-16 unit, so a row's own DOM cost (about 0.7 KB live, more as repaint garbage) is unmodeled: a 192 KB file of newlines overruns its reservation by about 176 MiB on `26792b3`. Bounding reservations by file size (branch `fix/size-bound-reservations`, review FIX-FIRST) would extend that gap to 4 KB files, so 7–8 GB machines and hosted runners keep the 1.75–2 GiB link-preview limit. Fixing both needs calibrated per-row terms. (2026-11-02) |
+| Z94 | **The weekly macOS run leaves out `rendered-memory`.** That spec alone takes 7–9 minutes on Windows, so it would push the macOS run past its time box, and macOS minutes bill 10× [Z65]. Its reservation logic doesn't depend on the platform, and Windows and Linux run it. A dispatch can still name it. The e2e step's time box is 15 minutes. macOS stays unqualified [Z75]. (2026-11-03) |
 
 ---
 
@@ -611,7 +612,7 @@ Nothing can expose DOM that doesn't exist (§14, D5). The design:
 
 ### 11.2 CI (GitHub Actions)
 - **Every push:** a matrix of `windows-latest`, `macos-latest` and `ubuntu-latest`, running `cargo fmt`, `clippy` and `test`; npm `typecheck`, `lint` and `vitest`; and a Playwright smoke run including the network check.
-  - **While the repo is private** [Z60, Z61]: Windows and Linux run on every PR; macOS runs weekly on `main` (Mondays 06:00 UTC) plus `workflow_dispatch` [PR #16, Z65] (PR runs narrowed to a smoke e2e by Z85), all within the free included minutes. The full matrix on every push applies once the repo is public.
+  - **While the repo is private** [Z60, Z61]: Windows and Linux run on every PR; macOS runs weekly on `main` (Mondays 06:00 UTC) plus `workflow_dispatch` [PR #16, Z65] (PR runs narrowed to a smoke e2e by Z85; the weekly macOS run leaves out `rendered-memory`, Z94), all within the free included minutes. The full matrix on every push applies once the repo is public.
 - **Tags:** the same, plus signed installers built and attached to a draft GitHub Release (§12).
 
 ---

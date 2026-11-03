@@ -9,7 +9,7 @@ on:
     - cron: '0 6 * * 1' # Mondays 06:00 UTC, on the default branch
   workflow_dispatch:
     # A dispatch can run only the e2e tests it names, so checking a macOS fix costs what those tests take. The weekly
-    # run has no inputs, so it runs the whole suite.
+    # run has no inputs, so it runs the whole suite but rendered-memory (Z94).
     inputs:
       grep:
         description: Run only the e2e tests whose title matches this regular expression (Playwright --grep)
@@ -31,7 +31,7 @@ permissions:
 jobs:
   test:
     runs-on: macos-latest
-    timeout-minutes: 20 # the e2e step's 12 after a ~1-minute setup, with room left for the evidence upload
+    timeout-minutes: 23 # the e2e step's 15 after a ~1-minute setup, with room left for the evidence upload
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: rust
@@ -89,11 +89,14 @@ jobs:
         run: npm run package
       - name: e2e and the NetLog assertion
         if: ${{ !cancelled() && steps.package.outcome == 'success' && steps.electron.outcome == 'success' }}
-        timeout-minutes: 12 # past the longest test's own limit (10 min, large and long-line; the config's is 5)
+        timeout-minutes: 15 # past the longest test's own limit (10 min, large and long-line; the config's is 5)
         env: # through the environment, never pasted into the script
           GREP: ${{ inputs.grep }}
+          # Z94: a run that names no tests leaves out rendered-memory, which alone would outlast the step on macOS. Its
+          # reservation logic is the same on every platform, and Windows and Linux run it. A dispatch can still name it.
+          SKIP: ${{ !inputs.grep && 'rendered-memory.e2e' || '' }}
           REPEAT_EACH: ${{ inputs.repeat-each }}
-        run: npm run e2e -- ${GREP:+--grep "$GREP"} ${REPEAT_EACH:+--repeat-each "$REPEAT_EACH"}
+        run: npm run e2e -- ${GREP:+--grep "$GREP"} ${SKIP:+--grep-invert "$SKIP"} ${REPEAT_EACH:+--repeat-each "$REPEAT_EACH"}
       # Every launch should have exited by now; one that didn't is evidence too (run 40067408502 left one hanging).
       - name: Electron and Typose processes still running
         if: failure()
