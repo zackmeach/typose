@@ -19,11 +19,10 @@
 .csv-value-pill[data-tint='5'] { background: color-mix(in srgb, #72b6bc 20%, var(--surface)); }
 .csv-heading[data-sort='asc']::after { content: ' ↑'; color: var(--accent); }
 .csv-heading[data-sort='desc']::after { content: ' ↓'; color: var(--accent); }
-.csv-heading { cursor: pointer; }
 .csv-row [role='rowheader'] { cursor: pointer; }
 .csv-row.csv-selected-row > .csv-gutter,
 .csv-row[aria-selected='true'] > .csv-gutter { background: var(--surface-raised); color: var(--accent); }
-.csv-heading { font-weight: 500; color: var(--text2); }
+.csv-heading { cursor: pointer; font-weight: 500; color: var(--text2); }
 .csv-gutter { position: sticky; left: 0; width: 52px; height: 28px; padding: 0 10px; box-sizing: border-box; text-align: right; color: var(--text2); background: var(--surface); border-right: 1px solid var(--border); z-index: 2; }
 .csv-missing::after { content: '—'; color: var(--text2); }
 .csv-extra { text-decoration: underline dotted; }

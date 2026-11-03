@@ -1,5 +1,4 @@
 .workspace-overlay { position: fixed; inset: 0; z-index: 100; background: #0006; display: flex; align-items: flex-start; justify-content: center; padding-top: min(16vh, 128px); }
-.menu-popover { max-height: calc(100vh - 56px); overflow: auto; }
 .menu-item[data-disabled] { color: var(--text2); opacity: .6; }
 .workspace-search { width: min(640px, calc(100vw - 40px)); background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 16px 48px #0005; overflow: hidden; }
 .workspace-search input { box-sizing: border-box; width: 100%; color: var(--text); background: transparent; border: 0; border-bottom: 1px solid var(--border); padding: 16px; font: inherit; outline: none; }

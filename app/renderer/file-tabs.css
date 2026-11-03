@@ -69,8 +69,7 @@
   height: 26px;
   padding: 0 0 0 10px;
 }
-.file-tab-parent,
-.file-icon {
+.file-tab-parent {
   color: var(--text2);
 }
 .file-tab-close,
