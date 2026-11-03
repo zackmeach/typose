@@ -1,6 +1,6 @@
 import { type CSSProperties, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { Button, Dialog, Modal, ModalOverlay } from 'react-aria-components'
-import { MAX_DROP, type Command, type Hello, type Opened } from '../shared/protocol'
+import { MAX_DROP, type CapturedLocation, type Command, type Hello, type Opened } from '../shared/protocol'
 import { CoreCallError, type CoreClient } from './core'
 import { AppIcon, FileIcon } from './file-icon'
 import { fileName } from './card'
@@ -94,7 +94,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   const [shared] = useState<ReaderWindow>(() => ({ core, hello, groups: allGroups, closed, folders, pendingFolders,
     budget: workspaceBudget, peak: workspacePeak, queue: metadataQueue, pendingWorkspace, pendingNative,
     pendingHistory: pendingHistory.current, recharged, paid: () => payment.current,
-    charge: async () => false, release: () => {}, notice: () => {}, opened: () => {}, addFolder: async () => {}, openLink: async () => false, report: () => {}, register: () => () => {} }))
+    charge: async () => false, release: () => {}, releaseLocation: () => {}, notice: () => {}, opened: () => {}, addFolder: async () => {}, openLink: async () => false, report: () => {}, register: () => () => {} }))
 
   function setPreview(next: LinkPreview | null): void {
     const previous = previewRef.current
@@ -257,6 +257,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   shared.charge = charge
   shared.settings = config.values
   shared.release = releaseEmptyWorkspace
+  shared.releaseLocation = releaseLocation
   shared.notice = setWorkspaceNotice
   shared.opened = () => { if (sidebarOverlay) setSidebarOpen(false) }
   shared.addFolder = path => pickFolder(undefined, path)
@@ -587,7 +588,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
         const surface = handle.surface()
         if (surface && surface.session === hello.current?.session && !await core.call('releaseSurface', { surface, retiredBytes: retirement.bytes })) throw new Error('The preview could not be released')
       }
-      for (const tab of group.workspace.getSnapshot().tabs) for (const entry of tab.back ?? []) releaseLocation(entry)
+      for (const tab of group.workspace.getSnapshot().tabs) for (const entry of tab.back ?? []) releaseLocation(entry.location)
       pendingHistory.current.delete(group.id)
       setPreview(null)
       restorePreviewFocus(group)
@@ -691,8 +692,8 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       if (handle) waiter.start(handle)
     })
   }
-  function releaseLocation(entry: ClosedLocation['entry']): void {
-    if (entry.location.kind === 'derived' && entry.location.ticket.session === currentSession.current) void core.call('releaseSaved', { ticket: entry.location.ticket }).catch(() => {})
+  function releaseLocation(location: CapturedLocation): void {
+    if (location.kind === 'derived' && location.ticket.session === currentSession.current) void core.call('releaseSaved', { ticket: location.ticket }).catch(() => {})
   }
   async function newRight(sourceId: string): Promise<ReaderGroup | null> {
     if (!row.current || (groupRef.current.length + 1) * 320 + groupRef.current.length * 16 > row.current.clientWidth) {
@@ -729,7 +730,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     } catch (error) {
       setWorkspaceNotice('Cannot split · ' + String(error))
       if (created) await closeCard(created.id)
-    } finally { if (entry) releaseLocation(entry); pendingSplit.current = 0; splitBusy.current = false }
+    } finally { if (entry) releaseLocation(entry.location); pendingSplit.current = 0; splitBusy.current = false }
   }
   async function closeCard(id: string): Promise<void> {
     const source = groupRef.current.find(group => group.id === id), handle = handles.current.get(id)

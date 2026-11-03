@@ -1,5 +1,5 @@
 import type { RefObject } from 'react'
-import type { Hello, Opened, SurfaceRef } from '../shared/protocol'
+import type { CapturedLocation, Hello, Opened, SurfaceRef } from '../shared/protocol'
 import type { CoreClient } from './core'
 import type { RootView } from './folders'
 import type { SavedLocation, TabId, WorkspaceMetadataQueue, WorkspaceStore, WorkspaceTab } from './workspace'
@@ -58,6 +58,7 @@ export interface ReaderWindow {
   paid(): Promise<boolean>
   charge(owner: WorkspaceStore | null, tabs: readonly Pick<WorkspaceTab, 'key' | 'path'>[] | null, current: () => boolean): Promise<boolean>
   release(): void
+  releaseLocation(location: CapturedLocation): void
   notice(message: string): void
   opened(): void
   /** A folder a launch or drop named: added as Open folder… adds a root. */

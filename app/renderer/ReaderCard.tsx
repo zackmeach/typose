@@ -827,7 +827,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       if (e instanceof CoreCallError && e.code === 'NotFound') throw e
       return false
     } finally {
-      if (captured) releaseLocation(captured)
+      if (captured) shared.releaseLocation(captured)
       if (pendingWorkspace.current.get(id) === pending) pendingWorkspace.current.delete(id)
       if (plan) owner?.cancelTransition(plan)
       navigated()
@@ -897,14 +897,9 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   function navigate(l: Limits): void { navigating.current = true; setNavigationBusy(true); pendingHistoryBytes.current = historyDraftBytes(l) }
   function navigated(): void { pendingHistoryBytes.current = 0; navigating.current = false; setNavigationBusy(false); releaseEmptyWorkspace() }
 
-  function releaseLocation(location: CapturedLocation): void {
-    if (location.kind === 'derived' && location.ticket.session === currentSession.current)
-      void core.call('releaseSaved', { ticket: location.ticket }).catch(() => {})
-  }
-
   function clearClosed(): void {
     if (navigating.current) return
-    for (const item of closed.current) releaseLocation(item.entry.location)
+    for (const item of closed.current) shared.releaseLocation(item.entry.location)
     closed.current = []
     setWorkspaceNotice('Recently closed tabs cleared')
     if (!recharged.current && workspace.getSnapshot().ready)
@@ -984,7 +979,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     if (!id || !entry) return
     if (await restoreLocation(entry, id)) {
       workspace.consumeBack(id, entry) // duplicate manual targets focus their existing tab instead of replacing this one
-      releaseLocation(entry.location)
+      shared.releaseLocation(entry.location)
     }
   }
 
@@ -993,7 +988,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     if (!item) { setWorkspaceNotice('No recently closed tabs'); return }
     if (await restoreLocation(item.entry, undefined, item.index)) {
       if (closed.current.at(-1) === item) closed.current.pop()
-      releaseLocation(item.entry.location)
+      shared.releaseLocation(item.entry.location)
     }
   }
 
@@ -1174,7 +1169,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     } catch (e) {
       setWorkspaceNotice('Tab closed · cannot retain Reopen history: ' + (e instanceof Error ? e.message : String(e)))
     } finally {
-      if (captured) releaseLocation(captured)
+      if (captured) shared.releaseLocation(captured)
       pendingHistoryBytes.current = 0
       navigating.current = false
       setNavigationBusy(false)
@@ -1186,7 +1181,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     // Other cards and recently closed locations still own the shared window reservation/metadata queue.
     activationFailed.current.delete(id)
     closeNative(removed)
-    for (const entry of removed.back ?? []) releaseLocation(entry.location)
+    for (const entry of removed.back ?? []) shared.releaseLocation(entry.location)
     if (selected) {
       const next = workspace.getSnapshot().selected
       display(null, { kind: 'empty' })
