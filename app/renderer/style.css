@@ -175,8 +175,6 @@ body {
 
 .card {
   position: absolute;
-  inset: env(titlebar-area-height, 40px) 16px 16px;
-  left: calc(16px + var(--sidebar-offset, 0px));
   display: flex;
   flex-direction: column;
   background: var(--surface);

@@ -2,7 +2,6 @@
 .link-preview-frame { position: absolute; top: 16px; bottom: 16px; max-width: calc(100vw - 32px); outline: none; }
 .link-preview-dialog { position: absolute; inset: 0; outline: none; }
 .preview-reader { position: absolute; inset: 0; min-width: 0; }
-.preview-reader .file-card-panel { top: 0; }
 .preview-reader .card { inset: 0; box-shadow: 0 12px 40px rgb(0 0 0 / 35%); }
 .preview-actions { display: flex; align-items: center; gap: 4px; flex: none; }
 .preview-actions button { display: inline-flex; gap: 4px; align-items: center; padding: 4px 6px; color: var(--text2); background: transparent; border: 0; border-radius: 4px; font: 12px/20px var(--font-ui); }
