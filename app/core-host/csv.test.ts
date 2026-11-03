@@ -10,7 +10,7 @@ type TestPage = { rows: Array<{ dataRow: number; sourceRecord: number; sourceLin
 
 function nativeInfo(revision = 1, delimiter = ';') {
   return { revision, status: 'indexing', delimiter, header: true, encoding: 'UTF-8', sourceRecords: 2,
-    indexedBytes: 24, done: false, expectedColumns: 2, maxColumnsKnown: 2, metadataDone: false } as const
+    done: false, expectedColumns: 2, maxColumnsKnown: 2, metadataDone: false } as const
 }
 
 function setup(path = 'tasks.csv') {
@@ -39,8 +39,7 @@ function setup(path = 'tasks.csv') {
     csvPage: vi.fn(async (): Promise<TestPage> => ({ rows: [], completeRect: true, indexing: false })),
     csvPiece: vi.fn(async () => ({ sourceRecord: 1, column: 0, span: { start: 8, end: 14 }, pieceSpan: { start: 8, end: 14 }, text: '001', map: {}, replacements: 0 })),
     csvColumns: vi.fn(async () => ({ columns: [], metadataDone: false })),
-    csvLocate: vi.fn(async () => ({ kind: 'pending' as const })),
-    csvSource: vi.fn(async () => ({ kind: 'pending' as const }))
+    csvLocate: vi.fn(async () => ({ kind: 'pending' as const }))
   }
   const openDoc = vi.fn(() => doc as unknown as Doc)
   const dispatcher = makeDispatcher({ coreVersion: () => 'test', limits, openDoc, cancelFlag: flag, reserveCache: () => true }, 9, () => {})
@@ -81,7 +80,7 @@ describe('CSV core-host bridge', () => {
     const info = await configure(s, doc, surface)
     expect(s.doc.csvConfigure).toHaveBeenCalledWith(1, ';', 1, expect.anything())
     expect(info).toMatchObject({ ref: { session: 9, doc, gen: 1, revision: 1 }, status: 'indexing', delimiter: ';', header: true,
-      sourceRecords: 2, indexedBytes: 24, expectedColumns: 2, maxColumnsKnown: 2, metadataDone: false })
+      sourceRecords: 2, expectedColumns: 2, maxColumnsKnown: 2, metadataDone: false })
     expect(info).not.toHaveProperty('revision')
   })
 

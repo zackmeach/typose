@@ -27,13 +27,6 @@ impl Owner {
     }
 }
 #[napi(object)]
-pub struct SourceFindInfo {
-    pub id: u32,
-    pub count: f64,
-    pub scanned_bytes: f64,
-    pub complete: bool,
-}
-#[napi(object)]
 pub struct SourceHit {
     pub start: f64,
     pub end: f64,
@@ -47,36 +40,21 @@ pub struct SourceHit {
 #[napi(object)]
 pub struct SourceFindPage {
     pub count: f64,
-    pub scanned_bytes: f64,
     pub complete: bool,
     pub hits: Vec<SourceHit>,
     pub hit: Option<SourceHit>,
     pub wrapped: bool,
     pub ordinal: Option<f64>,
 }
-#[napi(object)]
-pub struct SourceFindSeek {
-    pub hit: Option<SourceHit>,
-    pub wrapped: bool,
-    pub ordinal: Option<f64>,
-}
 fn hit(raw: &Raw, generation: u32, h: core_find::Hit) -> std::result::Result<SourceHit, DocError> {
     let (slice, units) = core_find::snippet(raw.document(), generation, raw.source_encoding(), h)?;
-    let w = slice.map.to_wire();
     Ok(SourceHit {
         start: h.start as f64,
         end: h.end as f64,
         line: h.line as f64,
         line_start: h.line_start as f64,
         text: slice.text,
-        map: WireMap {
-            uniform: w.uniform,
-            start: w.start as f64,
-            end: w.end as f64,
-            units: w.units,
-            unit_bytes: w.unit_bytes,
-            points: Uint32Array::new(w.points),
-        },
+        map: wire(&slice.map),
         match_start: 0,
         match_end: units,
     })
@@ -96,10 +74,6 @@ pub struct FindTask {
     #[cfg(feature = "test-hooks")]
     _task: hooks::Live,
 }
-pub struct Output {
-    page: SourceFindPage,
-    seek: SourceFindSeek,
-}
 impl FindTask {
     fn check(&self) -> std::result::Result<(), DocError> {
         if self.cancel.load(Ordering::Relaxed) {
@@ -112,31 +86,25 @@ impl FindTask {
     }
 }
 impl Task for FindTask {
-    type Output = std::result::Result<Output, DocError>;
+    type Output = std::result::Result<SourceFindPage, DocError>;
     type JsValue = SourceFindPage;
     fn compute(&mut self) -> Result<Self::Output> {
         let flag = self.cancel.clone();
         Ok(cancellable(&flag, || {
-            self.slot = Some(budget::slot(Work::Page, &store::cancelled).map_err(|e| match e {
-                NoSlot::Cancelled => DocError::Cancelled,
-                NoSlot::Budget(e) => DocError::Memory(e),
-            })?);
+            self.slot = Some(slot(Work::Page, &store::cancelled)?);
             self.check()?;
             let mut page = SourceFindPage {
                 count: 0.,
-                scanned_bytes: 0.,
                 complete: false,
                 hits: Vec::new(),
                 hit: None,
                 wrapped: false,
                 ordinal: None,
             };
-            let mut seek = SourceFindSeek { hit: None, wrapped: false, ordinal: None };
             match self.want {
                 Want::Scan => {
                     let p = self.entry.source.scan(self.raw.document(), self.raw.source_encoding())?;
                     page.count = p.count as f64;
-                    page.scanned_bytes = p.bytes as f64;
                     page.complete = p.complete;
                     let mut wire = 1024;
                     for h in p.hits {
@@ -152,28 +120,21 @@ impl Task for FindTask {
                 Want::Seek { from, previous } => {
                     let (h, wrapped) =
                         self.entry.source.seek(self.raw.document(), self.raw.source_encoding(), from, previous)?;
-                    seek = SourceFindSeek {
-                        ordinal: h.map(|h| h.ordinal as f64),
-                        hit: h.map(|h| hit(&self.raw, self.entry.source.generation, h)).transpose()?,
-                        wrapped,
-                    };
+                    page.ordinal = h.map(|h| h.ordinal as f64);
+                    page.hit = h.map(|h| hit(&self.raw, self.entry.source.generation, h)).transpose()?;
+                    page.wrapped = wrapped;
                 }
             }
-            Ok(Output { page, seek })
+            Ok(page)
         }))
     }
     fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        let result = output
-            .and_then(|out| {
+        output
+            .and_then(|page| {
                 self.check()?;
-                Ok(out)
+                Ok(page)
             })
-            .map_err(|e| Error::from(JsError::from(doc_error(e)).into_unknown(env)))?;
-        let mut page = result.page;
-        page.hit = result.seek.hit;
-        page.wrapped = result.seek.wrapped;
-        page.ordinal = result.seek.ordinal;
-        Ok(page)
+            .map_err(|e| err(env, e))
     }
 }
 #[napi]
@@ -184,12 +145,8 @@ impl Doc {
         generation: f64,
         query: String,
         match_case: bool,
-    ) -> std::result::Result<SourceFindInfo, Error<Code>> {
-        let generation = int("gen", generation)? as u32;
-        let raw = self.raw()?;
-        if raw.document().generation() != generation {
-            return Err(doc_error(DocError::Stale { current: raw.document().generation(), asked: generation }));
-        }
+    ) -> std::result::Result<u32, Error<Code>> {
+        let (raw, generation) = self.at_generation(generation)?;
         let source = core_find::Source::new(generation, &query, match_case, raw.document().len()).map_err(doc_error)?;
         let id = self
             .find
@@ -201,7 +158,7 @@ impl Doc {
         if let Some(old) = self.find.state.lock().unwrap().replace(entry) {
             old.source.close();
         }
-        Ok(SourceFindInfo { id, count: 0., scanned_bytes: 0., complete: false })
+        Ok(id)
     }
     fn source_find_task(
         &self,
@@ -244,7 +201,7 @@ impl Doc {
     ) -> std::result::Result<AsyncTask<FindTask>, Error<Code>> {
         self.source_find_task(generation, id, cancel, Want::Scan)
     }
-    #[napi(ts_return_type = "Promise<SourceFindSeek>")]
+    #[napi(ts_return_type = "Promise<SourceFindPage>")]
     pub fn source_find_seek(
         &self,
         generation: f64,

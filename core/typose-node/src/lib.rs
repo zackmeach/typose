@@ -9,6 +9,7 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{JsError, Task};
 use napi_derive::napi;
 use typose_core::budget::{self, NoSlot, Reservation, Slot, Work};
+use typose_core::bytemap::ByteMap;
 use typose_core::doc::DocError;
 #[cfg(feature = "test-hooks")]
 use typose_core::hooks;
@@ -81,6 +82,25 @@ fn doc_error(e: DocError) -> Error<Code> {
     Error::new(code, e.to_string())
 }
 
+/// Plan C1: a slot in the pool for `work`, waited for until `stop` (then `Cancelled`).
+fn slot(work: Work, stop: &dyn Fn() -> bool) -> std::result::Result<Slot, DocError> {
+    budget::slot(work, stop).map_err(|e| match e {
+        NoSlot::Cancelled => DocError::Cancelled,
+        NoSlot::Budget(over) => DocError::Memory(over),
+    })
+}
+
+/// A promise rejects with the JS value an error holds, so the typed code survives.
+fn err(env: Env, e: DocError) -> Error {
+    Error::from(JsError::from(doc_error(e)).into_unknown(env))
+}
+
+/// A cancel that arrives after the work, while the result is on its way to JS, still rejects it.
+fn settle<T>(env: Env, cancel: &AtomicBool, output: std::result::Result<T, DocError>) -> Result<T> {
+    let output = if cancel.load(Ordering::Relaxed) { Err(DocError::Cancelled) } else { output };
+    output.map_err(|e| err(env, e))
+}
+
 fn int(field: &str, x: f64) -> std::result::Result<u64, Error<Code>> {
     limits::int(field, x).map_err(|why| Error::new(Code::InvalidParams, why))
 }
@@ -134,13 +154,11 @@ pub struct Range {
 #[napi(object)]
 pub struct Limits {
     pub piece_bytes: u32,
-    pub page_bytes: u32,
     pub max_items: u32,
     pub map_max: u32,
     pub item_wire_fixed: u32,
     pub page_wire_max: u32,
-    /// Plan C1: one page read's temporaries in Rust, and an open's.
-    pub page_temp: u32,
+    /// Plan C1: an open's temporaries in Rust.
     pub open_temp: u32,
     pub ranges: Vec<Range>,
 }
@@ -149,12 +167,10 @@ pub struct Limits {
 pub fn limits() -> Limits {
     Limits {
         piece_bytes: pages::PIECE_BYTES as u32,
-        page_bytes: pages::PAGE_BYTES as u32,
         max_items: pages::MAX_ITEMS as u32,
         map_max: pages::MAP_MAX as u32,
         item_wire_fixed: pages::ITEM_WIRE_FIXED as u32,
         page_wire_max: pages::PAGE_WIRE_MAX as u32,
-        page_temp: pages::PAGE_TEMP as u32,
         open_temp: typose_core::raw::OPEN_TEMP as u32,
         ranges: RANGES
             .iter()
@@ -174,6 +190,17 @@ pub struct WireMap {
     pub units: u32,
     pub unit_bytes: u32,
     pub points: Uint32Array,
+}
+
+/// A source byte range, `[start, end)`.
+#[napi(object)]
+pub struct Span {
+    pub start: f64,
+    pub end: f64,
+}
+
+fn span(s: typose_core::json::Span) -> Span {
+    Span { start: s.start as f64, end: s.end as f64 }
 }
 
 /// Where a line's next piece starts (plan C3): the core issues it and checks it when it comes back. The core host
@@ -212,20 +239,23 @@ pub struct IndexProgress {
     pub lines: f64,
     pub bytes: f64,
     pub done: bool,
-    pub elapsed_ms: f64,
     pub error: Option<String>,
 }
 
-fn item(generation: u32, p: LinePiece) -> PageItem {
-    let w = p.map.to_wire();
-    let map = WireMap {
+fn wire(map: &ByteMap) -> WireMap {
+    let w = map.to_wire();
+    WireMap {
         uniform: w.uniform,
         start: w.start as f64,
         end: w.end as f64,
         units: w.units,
         unit_bytes: w.unit_bytes,
         points: Uint32Array::new(w.points),
-    };
+    }
+}
+
+fn item(generation: u32, p: LinePiece) -> PageItem {
+    let map = wire(&p.map);
     let next = p.next.map(|offset| Continuation { generation, line: p.line as f64, offset: offset as f64 });
     let (line, offset, rest) = (p.line as f64, p.offset as f64, p.rest.map(|r| r as f64));
     PageItem { generation, line, offset, text: p.text, more: p.more, map, next, rest }
@@ -296,10 +326,7 @@ impl Task for Read {
     fn compute(&mut self) -> Result<Self::Output> {
         let (raw, generation) = (&self.raw, self.generation);
         Ok(cancellable(&self.cancel, || {
-            self.slot = Some(budget::slot(Work::Page, &store::cancelled).map_err(|e| match e {
-                NoSlot::Cancelled => DocError::Cancelled,
-                NoSlot::Budget(over) => DocError::Memory(over),
-            })?);
+            self.slot = Some(slot(Work::Page, &store::cancelled)?);
             match self.want {
                 Want::Lines { start, count } => raw.page(generation, start, count),
                 Want::Piece { line, offset } => raw.piece(generation, line, offset).map(|p| vec![p]),
@@ -310,12 +337,8 @@ impl Task for Read {
     /// A cancel that arrives after the reads, while the result is on its way to JS, still ends the read: once the
     /// core host has cancelled a read, it never resolves.
     fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Page> {
-        let output = if self.cancel.load(Ordering::Relaxed) { Err(DocError::Cancelled) } else { output };
-        match output {
-            Ok(pieces) => Ok(Page { items: pieces.into_iter().map(|p| item(self.generation, p)).collect() }),
-            // A promise rejects with the JS value an error holds, so the typed code survives.
-            Err(e) => Err(Error::from(JsError::from(doc_error(e)).into_unknown(env))),
-        }
+        let pieces = settle(env, &self.cancel, output)?;
+        Ok(Page { items: pieces.into_iter().map(|p| item(self.generation, p)).collect() })
     }
 }
 
@@ -331,8 +354,7 @@ pub struct MdBuild {
 }
 
 /// One top-level block of a Markdown build: its index, its first line and how many lines it runs over (Raw's), its
-/// sanitized HTML, and a top-level heading's slug or a footnote definition's label. A block too large to render has
-/// no HTML, and a `note` saying why.
+/// sanitized HTML, and a top-level heading's slug. A block too large to render has no HTML, and a `note` saying why.
 #[napi(object)]
 pub struct MdItem {
     pub block: f64,
@@ -340,7 +362,6 @@ pub struct MdItem {
     pub lines: f64,
     pub html: String,
     pub slug: Option<String>,
-    pub footnote: Option<String>,
     pub note: Option<String>,
 }
 
@@ -374,17 +395,12 @@ impl Task for Render {
 
     /// As `Read`'s: once the core host has cancelled a build, it never resolves, and what it built drops here.
     fn resolve(&mut self, env: Env, output: Self::Output) -> Result<MdBuild> {
-        let output = if self.cancel.load(Ordering::Relaxed) { Err(DocError::Cancelled) } else { output };
-        match output {
-            Ok(rendered) => {
-                let size = rendered.items().len() as f64;
-                let (units, html_bytes) = (rendered.units() as f64, rendered.html_bytes() as f64);
-                let (nodes, note_units) = (rendered.nodes() as f64, rendered.note_units() as f64);
-                *self.built.lock().unwrap() = Some(rendered); // the build it replaces drops
-                Ok(MdBuild { blocks: size, units, html_bytes, nodes, note_units })
-            }
-            Err(e) => Err(Error::from(JsError::from(doc_error(e)).into_unknown(env))),
-        }
+        let rendered = settle(env, &self.cancel, output)?;
+        let size = rendered.items().len() as f64;
+        let (units, html_bytes) = (rendered.units() as f64, rendered.html_bytes() as f64);
+        let (nodes, note_units) = (rendered.nodes() as f64, rendered.note_units() as f64);
+        *self.built.lock().unwrap() = Some(rendered); // the build it replaces drops
+        Ok(MdBuild { blocks: size, units, html_bytes, nodes, note_units })
     }
 }
 
@@ -409,10 +425,7 @@ impl Task for MdRead {
     fn compute(&mut self) -> Result<Self::Output> {
         let flag = self.cancel.clone();
         Ok(cancellable(&flag, || {
-            self.slot = Some(budget::slot(Work::Page, &store::cancelled).map_err(|e| match e {
-                NoSlot::Cancelled => DocError::Cancelled,
-                NoSlot::Budget(over) => DocError::Memory(over),
-            })?);
+            self.slot = Some(slot(Work::Page, &store::cancelled)?);
             if self.generation != self.current {
                 return Err(DocError::Stale { current: self.current, asked: self.generation });
             }
@@ -422,7 +435,6 @@ impl Task for MdRead {
             })?;
             let start = usize::try_from(self.start).unwrap_or(usize::MAX);
             let page = rendered.page(start, self.count as usize);
-            let label = |s: &Option<Box<str>>| s.as_deref().map(String::from);
             Ok(page
                 .iter()
                 .enumerate()
@@ -431,8 +443,7 @@ impl Task for MdRead {
                     line: item.line as f64,
                     lines: item.lines as f64,
                     html: item.html.to_string(),
-                    slug: label(&item.slug),
-                    footnote: label(&item.footnote),
+                    slug: item.slug.as_deref().map(String::from),
                     note: item.note.map(|n| n.text().to_string()),
                 })
                 .collect())
@@ -440,11 +451,7 @@ impl Task for MdRead {
     }
 
     fn resolve(&mut self, env: Env, output: Self::Output) -> Result<MdPage> {
-        let output = if self.cancel.load(Ordering::Relaxed) { Err(DocError::Cancelled) } else { output };
-        match output {
-            Ok(items) => Ok(MdPage { items }),
-            Err(e) => Err(Error::from(JsError::from(doc_error(e)).into_unknown(env))),
-        }
+        settle(env, &self.cancel, output).map(|items| MdPage { items })
     }
 }
 
@@ -495,7 +502,7 @@ impl Task for PrepareImage {
                 encoded_bytes: metadata.encoded_bytes,
                 pixel_bytes: metadata.pixel_bytes,
             }),
-            Err(error) => Err(Error::from(JsError::from(doc_error(error)).into_unknown(env))),
+            Err(error) => Err(err(env, error)),
         }
     }
 }
@@ -519,10 +526,7 @@ impl Task for ImageChunk {
 
     fn compute(&mut self) -> Result<Self::Output> {
         Ok(cancellable(&self.cancel, || {
-            self.slot = Some(budget::slot(Work::Page, &store::cancelled).map_err(|error| match error {
-                NoSlot::Cancelled => DocError::Cancelled,
-                NoSlot::Budget(error) => DocError::Memory(error),
-            })?);
+            self.slot = Some(slot(Work::Page, &store::cancelled)?);
             self.raw.document().check_local_source(self.generation)?;
             let bytes = self.state.chunk(self.id, self.offset)?;
             self.raw.document().check_local_source(self.generation)?;
@@ -540,7 +544,7 @@ impl Task for ImageChunk {
         });
         match output {
             Ok(bytes) => Ok(Uint8Array::new(bytes)), // Work::Page slot survives through this NAPI conversion
-            Err(error) => Err(Error::from(JsError::from(doc_error(error)).into_unknown(env))),
+            Err(error) => Err(err(env, error)),
         }
     }
 }
@@ -576,6 +580,15 @@ pub struct FolderContext {
     pub node: Option<String>,
     pub label: String,
     pub segments: Vec<String>,
+}
+
+/// A folder entry's node, as `FolderRoot` lists it.
+fn folder_node(node: f64) -> std::result::Result<u32, Error<Code>> {
+    let node = int("start", node)?;
+    if node >= folder::MAX_NODES as u64 {
+        return Err(Error::new(Code::InvalidParams, "invalid folder node"));
+    }
+    Ok(node as u32)
 }
 
 /// No constructor: only an explicit selected-directory capture creates authority.
@@ -624,10 +637,7 @@ impl FolderRoot {
         hidden: bool,
         cancel: &Cancel,
     ) -> std::result::Result<AsyncTask<ListFolder>, Error<Code>> {
-        let node = int("start", node)?;
-        if node >= folder::MAX_NODES as u64 {
-            return Err(Error::new(Code::InvalidParams, "invalid folder node"));
-        }
+        let node = folder_node(node)?;
         let cursor = cursor
             .map(|x| {
                 int("id", x).and_then(|n| {
@@ -638,7 +648,7 @@ impl FolderRoot {
         let charge = Reservation::new(folder::PAGE_WORK).map_err(|e| doc_error(DocError::Memory(e)))?;
         Ok(AsyncTask::new(ListFolder {
             state: self.state.clone(),
-            node: node as u32,
+            node,
             cursor,
             hidden,
             cancel: cancel.flag.clone(),
@@ -648,27 +658,12 @@ impl FolderRoot {
     /// A listed entry's path, for main's OS hand-off. It opens nothing.
     #[napi]
     pub fn entry_path(&self, node: f64) -> std::result::Result<String, Error<Code>> {
-        let node = int("start", node)?;
-        if node >= folder::MAX_NODES as u64 {
-            return Err(Error::new(Code::InvalidParams, "invalid folder node"));
-        }
-        self.state.entry_path(node as u32).map_err(doc_error)
+        self.state.entry_path(folder_node(node)?).map_err(doc_error)
     }
     #[napi]
     pub fn open(&self, node: f64) -> std::result::Result<Doc, Error<Code>> {
-        let node = int("start", node)?;
-        if node >= folder::MAX_NODES as u64 {
-            return Err(Error::new(Code::InvalidParams, "invalid folder node"));
-        }
-        let raw = self.state.open(node as u32).map_err(doc_error)?;
-        Ok(Doc {
-            images: None,
-            raw: Some(Arc::new(raw)),
-            built: Built::default(),
-            csv: Arc::default(),
-            find: Arc::default(),
-            structured: Arc::default(),
-        })
+        let raw = self.state.open(folder_node(node)?).map_err(doc_error)?;
+        Ok(Doc::wrap(raw))
     }
     #[napi]
     pub fn close(&self) -> bool {
@@ -691,18 +686,14 @@ impl Task for ListFolder {
         Ok(self.state.list(self.node, self.cursor, self.hidden, &|| self.cancel.load(Ordering::Relaxed)))
     }
     fn resolve(&mut self, env: Env, output: Self::Output) -> Result<FolderPage> {
-        let output = if self.cancel.load(Ordering::Relaxed) { Err(DocError::Cancelled) } else { output };
-        match output {
-            Ok(p) => Ok(FolderPage {
-                entries: p
-                    .entries
-                    .into_iter()
-                    .map(|e| FolderEntry { id: e.id, name: e.name, kind: e.kind.into(), hidden: e.hidden })
-                    .collect(),
-                cursor: p.cursor,
-            }),
-            Err(e) => Err(Error::from(JsError::from(doc_error(e)).into_unknown(env))),
-        }
+        settle(env, &self.cancel, output).map(|p| FolderPage {
+            entries: p
+                .entries
+                .into_iter()
+                .map(|e| FolderEntry { id: e.id, name: e.name, kind: e.kind.into(), hidden: e.hidden })
+                .collect(),
+            cursor: p.cursor,
+        })
     }
 }
 
@@ -712,14 +703,7 @@ impl SavedRoute {
     pub fn open(&self) -> std::result::Result<Doc, Error<Code>> {
         let route = self.route.as_ref().ok_or_else(|| Error::new(Code::NoDocument, "the saved route was released"))?;
         let raw = Raw::open_saved(route).map_err(doc_error)?;
-        Ok(Doc {
-            images: None,
-            raw: Some(Arc::new(raw)),
-            built: Built::default(),
-            csv: Arc::default(),
-            find: Arc::default(),
-            structured: Arc::default(),
-        })
+        Ok(Doc::wrap(raw))
     }
 
     #[napi]
@@ -758,18 +742,45 @@ impl Doc {
             return Err(Error::new(Code::InvalidParams, why));
         }
         let raw = Raw::open(std::path::Path::new(&path)).map_err(doc_error)?;
-        Ok(Doc {
+        Ok(Doc::wrap(raw))
+    }
+
+    fn wrap(raw: Raw) -> Doc {
+        Doc {
             images: None,
             raw: Some(Arc::new(raw)),
             built: Built::default(),
             csv: Arc::default(),
             find: Arc::default(),
             structured: Arc::default(),
-        })
+        }
+    }
+
+    /// Ends this generation's CSV, structured, Find and image work; `next` takes its place, or nothing on close.
+    fn retire(&mut self, next: Option<Raw>) {
+        self.csv.close();
+        self.structured.close();
+        self.find.close();
+        self.clear_images();
+        self.csv = Arc::default();
+        self.structured = Arc::default();
+        self.raw = next.map(Arc::new);
+        self.built = Built::default();
     }
 
     fn raw(&self) -> std::result::Result<&Arc<Raw>, Error<Code>> {
         self.raw.as_ref().ok_or_else(|| Error::new(Code::NoDocument, "the document is closed"))
+    }
+
+    /// The open document, while `generation` is its current one: `Stale` otherwise.
+    fn at_generation(&self, generation: f64) -> std::result::Result<(&Arc<Raw>, u32), Error<Code>> {
+        let generation = int("gen", generation)? as u32;
+        let raw = self.raw()?;
+        let current = raw.document().generation();
+        if generation != current {
+            return Err(doc_error(DocError::Stale { current, asked: generation }));
+        }
+        Ok((raw, generation))
     }
 
     #[napi]
@@ -804,13 +815,8 @@ impl Doc {
     /// Retained inactive tabs keep their store floor. This only changes cache policy; it performs no identity/path IO.
     #[napi]
     pub fn set_cache_active(&self, generation: f64, active: bool) -> std::result::Result<(), Error<Code>> {
-        let generation = int("gen", generation)? as u32;
-        let document = self.raw()?.document();
-        let current = document.generation();
-        if generation != current {
-            return Err(doc_error(DocError::Stale { current, asked: generation }));
-        }
-        document.store().set_cache_active(active);
+        let (raw, _) = self.at_generation(generation)?;
+        raw.document().store().set_cache_active(active);
         Ok(())
     }
 
@@ -865,12 +871,7 @@ impl Doc {
 
     /// The local-link source must still be live and rendered in this generation. The target is already decoded.
     fn local_source(&self, generation: f64) -> std::result::Result<(&Arc<Raw>, u32), Error<Code>> {
-        let generation = int("gen", generation)? as u32;
-        let raw = self.raw()?;
-        let current = raw.document().generation();
-        if generation != current {
-            return Err(doc_error(DocError::Stale { current, asked: generation }));
-        }
+        let (raw, generation) = self.at_generation(generation)?;
         if !md::is_markdown(raw.document().path()) {
             return Err(Error::new(Code::Refused, "local links require a Markdown source"));
         }
@@ -992,14 +993,7 @@ impl Doc {
     pub fn open_local(&self, generation: f64, target: String) -> std::result::Result<Doc, Error<Code>> {
         let (raw, generation) = self.local_source(generation)?;
         let next = raw.open_local(generation, &target).map_err(doc_error)?;
-        Ok(Doc {
-            images: None,
-            raw: Some(Arc::new(next)),
-            built: Built::default(),
-            csv: Arc::default(),
-            find: Arc::default(),
-            structured: Arc::default(),
-        })
+        Ok(Doc::wrap(next))
     }
 
     /// Ctrl+R (spec §3.1): the same path at the next generation, which `startIndex` then indexes. Every page and
@@ -1007,28 +1001,14 @@ impl Doc {
     #[napi]
     pub fn reload(&mut self) -> std::result::Result<(), Error<Code>> {
         let next = self.raw()?.reload().map_err(doc_error)?;
-        self.csv.close();
-        self.structured.close();
-        self.structured = Arc::default();
-        self.find.close();
-        self.csv = Arc::default();
-        self.clear_images();
-        self.raw = Some(Arc::new(next));
-        self.built = Built::default();
+        self.retire(Some(next));
         Ok(())
     }
 
     #[napi]
     pub fn reload_in_folder(&mut self, root: &FolderRoot) -> std::result::Result<(), Error<Code>> {
         let next = self.raw()?.reload_in_folder(Some(&root.state)).map_err(doc_error)?;
-        self.csv.close();
-        self.structured.close();
-        self.structured = Arc::default();
-        self.find.close();
-        self.csv = Arc::default();
-        self.clear_images();
-        self.raw = Some(Arc::new(next));
-        self.built = Built::default();
+        self.retire(Some(next));
         Ok(())
     }
 
@@ -1036,12 +1016,7 @@ impl Doc {
     /// stopped, which the core host cancels first. Every later call is `NoDocument`.
     #[napi]
     pub fn close(&mut self) {
-        self.csv.close();
-        self.structured.close();
-        self.find.close();
-        self.clear_images();
-        self.raw = None;
-        self.built = Built::default();
+        self.retire(None);
     }
 
     /// Lines found so far by the index, and whether it's done.
@@ -1082,13 +1057,8 @@ impl Doc {
                     {
                         last = Some(Instant::now());
                         sent_lines = p.lines;
-                        let progress = IndexProgress {
-                            lines: p.lines as f64,
-                            bytes: p.bytes as f64,
-                            done: p.done,
-                            elapsed_ms: p.elapsed_ms as f64,
-                            error: None,
-                        };
+                        let progress =
+                            IndexProgress { lines: p.lines as f64, bytes: p.bytes as f64, done: p.done, error: None };
                         on_progress.call(progress, ThreadsafeFunctionCallMode::NonBlocking);
                     }
                     !cancel.load(Ordering::Relaxed)
@@ -1099,7 +1069,6 @@ impl Doc {
                     lines: raw.lines_known().0 as f64, // what the index published, not the last count sent
                     bytes: 0.0,
                     done: false,
-                    elapsed_ms: 0.0,
                     error: Some(e),
                 };
                 on_progress.call(progress, ThreadsafeFunctionCallMode::NonBlocking);
@@ -1180,14 +1149,10 @@ impl Doc {
     /// A decoded fragment's source line in this generation's held Markdown build. No file-system access.
     #[napi]
     pub fn heading_line(&self, generation: f64, fragment: String) -> std::result::Result<Option<u32>, Error<Code>> {
-        let generation = int("gen", generation)? as u32;
         if fragment.len() > 32 << 10 || fragment.chars().any(char::is_control) {
             return Err(Error::new(Code::InvalidParams, "fragment must be at most 32 KiB, without control characters"));
         }
-        let current = self.raw()?.document().generation();
-        if generation != current {
-            return Err(doc_error(DocError::Stale { current, asked: generation }));
-        }
+        self.at_generation(generation)?;
         let built = self.built.lock().unwrap();
         let rendered =
             built.as_ref().ok_or_else(|| Error::new(Code::InvalidParams, "render the Markdown build first"))?;
@@ -1261,7 +1226,7 @@ pub mod test_hooks {
         }
     }
 
-    /// One document's charges, itemized (plan C1, C6), and whether its line checkpoints stopped at the limit.
+    /// One document's charges, itemized (plan C1, C6).
     #[napi(object)]
     pub struct Charges {
         pub hashes: f64,
@@ -1269,7 +1234,6 @@ pub mod test_hooks {
         pub cache: f64,
         pub metadata: f64,
         pub total: f64,
-        pub lines_stopped: bool,
     }
 
     #[napi]
@@ -1285,7 +1249,7 @@ pub mod test_hooks {
         let [hashes, checkpoints, cache, metadata, total] =
             [c.hashes, c.checkpoints, c.cache, c.metadata, c.total() + rendered + images + csv + find + structured]
                 .map(|n| n as f64);
-        Ok(Charges { hashes, checkpoints, cache, metadata, total, lines_stopped: raw.lines_stopped() })
+        Ok(Charges { hashes, checkpoints, cache, metadata, total })
     }
 
     /// Starts the ledger's high-water mark again from what's charged now (plan C1's exhaustion test, per cycle).

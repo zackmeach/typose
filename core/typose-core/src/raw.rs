@@ -63,11 +63,6 @@ impl Raw {
         Charges { checkpoints: self.index.read().unwrap().checkpoints.charged(), ..self.doc.charges() }
     }
 
-    /// Whether the ledger stopped this document's line checkpoints (plan C1's elastic structures).
-    pub fn lines_stopped(&self) -> bool {
-        self.index.read().unwrap().lines_stopped
-    }
-
     /// Ctrl+R (spec §3.1): the same path, opened again one generation later, with a new index. This generation
     /// freezes, so its index stops at its next block and its pages and tokens are refused. If the open fails
     /// (the file is gone, say), this generation stays as it was.

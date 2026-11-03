@@ -51,17 +51,12 @@ impl Owner {
     }
 }
 #[napi(object)]
-pub struct StructuredSpan {
-    pub start: f64,
-    pub end: f64,
-}
-#[napi(object)]
 pub struct StructuredNode {
     pub ordinal: f64,
     pub kind: String,
-    pub span: StructuredSpan,
+    pub span: Span,
     pub key: Option<String>,
-    pub key_span: Option<StructuredSpan>,
+    pub key_span: Option<Span>,
     pub key_more: bool,
     pub text: String,
     pub more: bool,
@@ -74,7 +69,7 @@ pub struct StructuredProblem {
     pub kind: String,
     pub count: f64,
     pub message: String,
-    pub first: StructuredSpan,
+    pub first: Span,
     pub line: Option<f64>,
     pub column: Option<f64>,
 }
@@ -100,9 +95,6 @@ pub struct StructuredInfo {
 pub struct StructuredChildren {
     pub nodes: Vec<StructuredNode>,
     pub next: Option<f64>,
-}
-fn span(s: json::Span) -> StructuredSpan {
-    StructuredSpan { start: s.start as f64, end: s.end as f64 }
 }
 fn node(
     raw: &Raw,
@@ -214,7 +206,7 @@ fn describe(raw: &Raw, entry: &Entry) -> std::result::Result<StructuredInfo, Doc
                 kind: "parse".into(),
                 count: 1.,
                 message: message.into(),
-                first: StructuredSpan { start: error.offset as f64, end: error.offset as f64 },
+                first: Span { start: error.offset as f64, end: error.offset as f64 },
                 line: Some(error.line as f64),
                 column: Some(error.column as f64),
             });
@@ -305,10 +297,7 @@ impl Task for Build {
             if let Some(entry) = &self.existing {
                 return Ok((entry.clone(), describe(&self.raw, entry)?));
             }
-            self.slot = Some(budget::slot(Work::Index, &store::cancelled).map_err(|e| match e {
-                NoSlot::Cancelled => DocError::Cancelled,
-                NoSlot::Budget(e) => DocError::Memory(e),
-            })?);
+            self.slot = Some(slot(Work::Index, &store::cancelled)?);
             let utf16 = self.raw.encoding().starts_with("UTF-16");
             let tree = if self.format == "json" && !utf16 {
                 Some(core_structured::JsonTree::build(self.raw.document(), self.generation)?)
@@ -375,7 +364,7 @@ impl Task for Build {
             self.owner.state.lock().unwrap().replace(entry);
             Ok(info)
         });
-        result.map_err(|e| Error::from(JsError::from(doc_error(e)).into_unknown(env)))
+        result.map_err(|e| err(env, e))
     }
 }
 pub struct Children {
@@ -398,10 +387,7 @@ impl Task for Children {
     fn compute(&mut self) -> Result<Self::Output> {
         let flag = self.cancel.clone();
         Ok(cancellable(&flag, || {
-            self.slot = Some(budget::slot(Work::Page, &store::cancelled).map_err(|e| match e {
-                NoSlot::Cancelled => DocError::Cancelled,
-                NoSlot::Budget(e) => DocError::Memory(e),
-            })?);
+            self.slot = Some(slot(Work::Page, &store::cancelled)?);
             // One identity check for the page, not one per node key and value.
             self.raw.document().batch(self.entry.generation, || {
                 let record_tree;
@@ -457,7 +443,7 @@ impl Task for Children {
             self.raw.document().verified(self.entry.generation, |_| Ok(()))?;
             Ok(page)
         });
-        result.map_err(|e| Error::from(JsError::from(doc_error(e)).into_unknown(env)))
+        result.map_err(|e| err(env, e))
     }
 }
 #[napi]
@@ -468,11 +454,7 @@ impl Doc {
         generation: f64,
         cancel: &Cancel,
     ) -> std::result::Result<AsyncTask<Build>, Error<Code>> {
-        let generation = int("gen", generation)? as u32;
-        let raw = self.raw()?;
-        if raw.document().generation() != generation {
-            return Err(doc_error(DocError::Stale { current: raw.document().generation(), asked: generation }));
-        }
+        let (raw, generation) = self.at_generation(generation)?;
         let format = format(raw.document().path())
             .ok_or_else(|| Error::new(Code::Refused, "No structured lens for this format"))?;
         let charge = Reservation::new(core_structured::TEMP_BYTES).map_err(|e| doc_error(DocError::Memory(e)))?;
@@ -531,8 +513,6 @@ impl Doc {
         cancel: &Cancel,
         record: Option<f64>,
     ) -> std::result::Result<AsyncTask<Children>, Error<Code>> {
-        let generation = int("gen", generation)? as u32;
-        let revision = int("gen", revision)? as u32;
         let container = u32::try_from(int("start", container)?)
             .map_err(|_| Error::new(Code::InvalidParams, "container exceeds u32"))?;
         let start = int("start", start)?;
@@ -540,19 +520,10 @@ impl Doc {
         if count > 128 {
             return Err(Error::new(Code::InvalidParams, "Tree count exceeds 128"));
         }
-        let raw = self.raw()?;
-        let entry = self
-            .structured
-            .state
-            .lock()
-            .unwrap()
-            .as_ref()
-            .filter(|e| e.generation == generation && e.revision == revision)
-            .cloned()
-            .ok_or_else(|| Error::new(Code::Stale, "structured index was replaced"))?;
+        let (raw, entry) = self.structured_entry(generation, revision)?;
         let charge = Reservation::new(core_structured::TEMP_BYTES).map_err(|e| doc_error(DocError::Memory(e)))?;
         Ok(AsyncTask::new(Children {
-            raw: raw.clone(),
+            raw,
             owner: self.structured.clone(),
             entry,
             container,
@@ -597,7 +568,7 @@ fn record_body(raw: &Raw, generation: u32, range: json::Span) -> std::result::Re
 #[napi(object)]
 pub struct StructuredRow {
     pub line: f64,
-    pub span: StructuredSpan,
+    pub span: Span,
     pub status: String,
     pub timestamp: Option<String>,
     pub r#type: Option<String>,
@@ -616,7 +587,7 @@ pub struct StructuredRows {
 pub struct StructuredColumn {
     pub id: f64,
     pub key: String,
-    pub span: StructuredSpan,
+    pub span: Span,
 }
 #[napi(object)]
 pub struct StructuredColumns {
@@ -926,10 +897,7 @@ impl Task for Rows {
     fn compute(&mut self) -> Result<Self::Output> {
         let flag = self.cancel.clone();
         Ok(cancellable(&flag, || {
-            self.slot = Some(budget::slot(Work::Page, &store::cancelled).map_err(|e| match e {
-                NoSlot::Cancelled => DocError::Cancelled,
-                NoSlot::Budget(e) => DocError::Memory(e),
-            })?);
+            self.slot = Some(slot(Work::Page, &store::cancelled)?);
             check_read(&self.raw, &self.owner, &self.entry, &flag)?;
             if self.entry.format != "jsonl" || self.entry.jsonl.is_none() {
                 return Err(DocError::Refused("Rows are unavailable for this document".into()));
@@ -982,7 +950,7 @@ impl Task for Rows {
                 check_read(&self.raw, &self.owner, &self.entry, &self.cancel)?;
                 Ok(page)
             })
-            .map_err(|e| Error::from(JsError::from(doc_error(e)).into_unknown(env)))
+            .map_err(|e| err(env, e))
     }
 }
 pub struct Columns {
@@ -1031,7 +999,7 @@ impl Task for Columns {
                 check_read(&self.raw, &self.owner, &self.entry, &self.cancel)?;
                 Ok(page)
             })
-            .map_err(|e| Error::from(JsError::from(doc_error(e)).into_unknown(env)))
+            .map_err(|e| err(env, e))
     }
 }
 #[napi]

@@ -19,7 +19,6 @@ import {
   type CsvLocated,
   type CsvPage,
   type CsvRef,
-  type CsvSource,
   type CsvOrderRef,
   type CsvOrderInfo,
   type CsvFindRef,
@@ -51,7 +50,7 @@ import {
   type ViewRef,
   type StructuredRef
 } from '../shared/protocol'
-import { isValid } from './numbers'
+import { isRecord, isValid } from './numbers'
 import { boundedLink, decodedLocalTarget, localTarget } from './local-target'
 import { isExecutable } from '../shared/handoff'
 import { structuredChildren, structuredColumns, structuredInfo, structuredRows } from './structured-validation'
@@ -99,8 +98,9 @@ class Refusal extends Error {
 /** The addon's own codes (`typose-node`'s `Code`), passed through; anything else thrown is `Internal`. */
 const ADDON_CODES = new Set<string>(['InvalidParams', 'NotFound', 'NotDirectory', 'PermissionDenied', 'Refused', 'Binary', 'Frozen', 'Stale', 'Io', 'Cancelled', 'NoDocument', 'Memory'])
 
+/** A canonical UUID v4, as `randomUUID` makes them. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 type Params = Record<string, unknown>
-const isRecord = (v: unknown): v is Params => typeof v === 'object' && v !== null && !Array.isArray(v)
 const codeOf = (e: unknown): unknown => (e as { code?: unknown } | null)?.code
 
 export function makeDispatcher(addon: Addon, session: number, emit: (event: ProgressEvent) => void, ticketId: () => string = randomUUID): ((data: unknown) => Promise<Response>) & { handoffPath(subject: unknown): string } {
@@ -149,18 +149,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       throw new Refusal('Stale', 'the CSV configuration was replaced')
     return doc
   }
-  const cancelCsvReads = (doc: number, except?: number): void => {
-    for (const [req, entry] of reads) if (req !== except && entry.doc === doc && entry.csv) {
-      entry.cancelled = true
-      entry.cancel.cancel()
-    }
-  }
-  const cancelCsvConfigurations = (doc: number): void => {
-    for (const entry of reads.values()) if (entry.doc === doc && entry.csvConfig) {
-      entry.cancelled = true
-      entry.cancel.cancel()
-    }
-  }
+  const cancelCsvReads = (doc: number, except?: number): void => stopReads((entry, req) => req !== except && entry.doc === doc && entry.csv)
   const invalidateCsv = (doc: number): void => {
     closeDocumentCsvInteractions(doc)
     cancelCsvReads(doc)
@@ -283,7 +272,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       ref: { session, doc: id, gen, revision }, status: value.status as CsvInfo['status'], ...(reason == null ? {} : { reason }),
       delimiter: value.delimiter as CsvInfo['delimiter'], header: value.header, encoding: value.encoding,
       sourceRecords: csvResultNumber(value.sourceRecords, 'source records'),
-      indexedBytes: csvResultNumber(value.indexedBytes, 'indexed bytes'), done: value.done,
+      done: value.done,
       expectedColumns: csvResultNumber(value.expectedColumns, 'expected columns'),
       maxColumnsKnown: csvResultNumber(value.maxColumnsKnown, 'maximum known columns'), metadataDone: value.metadataDone, problems
     }
@@ -299,6 +288,11 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     findView?: number; findId?: number; findKind?: 'source' | 'csv'; findOp?: 'scan' | 'seek'; csvSort?: true
   }
   const reads = new Map<number, ReadEntry>()
+  /** Marks a read cancelled, then cancels its native flag. */
+  const stop = (entry?: ReadEntry): void => { if (entry) { entry.cancelled = true; entry.cancel.cancel() } }
+  const stopReads = (match: (entry: ReadEntry, req: number) => boolean | undefined): void => {
+    for (const [req, entry] of reads) if (match(entry, req)) stop(entry)
+  }
   const saved = new Map<string, SavedRoute>()
   let savedPeak = 0
   let savedHostBytes = 0
@@ -341,7 +335,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     if (!isRecord(p.ticket)) throw new Refusal('InvalidParams', 'ticket must be a saved-location ticket', 'ticket')
     const ticketSession = int(p.ticket, 'session', 'ticket.session')
     const id = p.ticket.id
-    if (typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id))
+    if (typeof id !== 'string' || !UUID.test(id))
       throw new Refusal('InvalidParams', 'ticket.id must be an opaque UUID', 'ticket.id')
     return { session: ticketSession, id }
   }
@@ -373,8 +367,9 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     for (const pending of pendingViews.values()) bytes += pending.bytes
     return bytes
   }
-  const account = (bytes = viewBytes(), hostBytes = surfaceHostBytes): boolean => {
-    const total = bytes + workspaceBytes + savedHostBytes + rootHostBytes + hostBytes
+  /** Plan C1: reserves the core host's whole share of the ledger. A caller passes the terms it's about to change. */
+  const account = ({ views = viewBytes(), workspace = workspaceBytes, savedHost = savedHostBytes, rootHost = rootHostBytes, surfaceHost = surfaceHostBytes } = {}): boolean => {
+    const total = views + workspace + savedHost + rootHost + surfaceHost
     return Number.isSafeInteger(total) && addon.reserveCache(total)
   }
   const surfaceRef = (value: unknown): SurfaceState => {
@@ -401,7 +396,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   const reserveTable = (surfaceCount: number, views: number, pending: number, bytes = viewBytes()): boolean => {
     const nextSurfaces = Math.max(surfacePeak, surfaceCount), nextViews = Math.max(viewPeak, views), nextPending = Math.max(pendingPeak, pending)
     const hostBytes = 3 * ((64 << 10) + 4096 * nextSurfaces + 1024 * (nextViews + nextPending))
-    if ((hostBytes !== surfaceHostBytes || bytes !== viewBytes()) && !account(bytes, hostBytes)) return false
+    if ((hostBytes !== surfaceHostBytes || bytes !== viewBytes()) && !account({ views: bytes, surfaceHost: hostBytes })) return false
     surfacePeak = nextSurfaces; viewPeak = nextViews; pendingPeak = nextPending; surfaceHostBytes = hostBytes
     return true
   }
@@ -415,8 +410,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     const previous = surface.latest
     if (previous?.kind === 'activate') {
       previous.disposed = true
-      const entry = reads.get(previous.request)
-      if (entry) { entry.cancelled = true; entry.cancel.cancel() }
+      stop(reads.get(previous.request))
     }
     surface.latest = pending
     return pending
@@ -428,12 +422,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     if (!transferred) account()
   }
   /** Leaving a view retains Reload's first page for its new metadata/index. */
-  const cancelReads = (doc: number, leaving = false) => {
-    for (const read of reads.values()) if (read.doc === doc && (!leaving || !read.retainOnLeave)) {
-      read.cancelled = true
-      read.cancel.cancel()
-    }
-  }
+  const cancelReads = (doc: number, leaving = false) => stopReads((read) => read.doc === doc && (!leaving || !read.retainOnLeave))
   const reclaimInactive = (): void => {
     for (const [id, doc] of docs) if (!viewed(id, doc.generation) && ![...pendingViews.values()].some((pending) => pending.doc === id)) {
       doc.setCacheActive(doc.generation, false)
@@ -518,11 +507,8 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     if (lease.sourceFind !== id) throw new Refusal('Stale', 'the Find query was replaced')
     return { ref: { view: lease.ref, id }, lease, doc: getDoc(lease.ref.doc) }
   }
-  const cancelFindReads = (lease: Lease, id: number, kind: 'source' | 'csv' = 'source'): void => {
-    for (const entry of reads.values()) if (entry.findView === lease.ref.id && entry.findId === id && entry.findKind === kind) {
-      entry.cancelled = true; entry.cancel.cancel()
-    }
-  }
+  const cancelFindReads = (lease: Lease, id: number, kind: 'source' | 'csv' = 'source'): void =>
+    stopReads((entry) => entry.findView === lease.ref.id && entry.findId === id && entry.findKind === kind)
   const closeSourceFind = (lease: Lease): void => {
     const id = lease.sourceFind
     if (id === undefined) return
@@ -535,8 +521,8 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     for (const surface of surfaces.values()) for (const lease of surface.views.values()) if (lease.ref.doc === id) closeSourceFind(lease)
   }
   const beginFindRead = (req: number, lease: Lease, id: number, kind: 'source' | 'csv', op: 'scan' | 'seek'): void => {
-    for (const [other, entry] of reads) if (other !== req && entry.findView === lease.ref.id && entry.findId === id
-      && entry.findKind === kind && entry.findOp === op) { entry.cancelled = true; entry.cancel.cancel() }
+    stopReads((entry, other) => other !== req && entry.findView === lease.ref.id && entry.findId === id
+      && entry.findKind === kind && entry.findOp === op)
     Object.assign(reads.get(req)!, { findView: lease.ref.id, findId: id, findKind: kind, findOp: op })
   }
   const sourceFindRead = <T>(req: number, ref: SourceFindRef, lease: Lease, op: 'scan' | 'seek', start: (cancel: Cancel) => Promise<T>): Promise<T> =>
@@ -555,7 +541,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     return findLease(lease.ref)
   }
   const csvInteractionId = (value: unknown): string => {
-    if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value))
+    if (typeof value !== 'string' || !UUID.test(value))
       throw new Refusal('InvalidParams', 'interactionId must be a Grid UUID', 'interactionId')
     return value
   }
@@ -839,20 +825,19 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const query = findQuery(p), lease = findLease(p.view)
       const doc = getDoc(lease.ref.doc)
       const native = doc.sourceFindStart(lease.ref.gen, query, p.matchCase as boolean)
-      const id = findNumber(native.id, 0xffff_ffff)
+      const id = findNumber(native, 0xffff_ffff)
       if (id === 0) throw new Refusal('Internal', 'the core returned an invalid Find identity')
       try {
-        const progress = findProgress(native, doc.size)
         closeDocumentFind(lease.ref.doc)
         lease.sourceFind = id
-        return { ref: { view: lease.ref, id }, ...progress }
+        return { ref: { view: lease.ref, id }, count: 0, complete: false }
       } catch (e) { doc.sourceFindClose(lease.ref.gen, id); throw e }
     },
     sourceFindScan: (p, req): Promise<SourceFindPage> => {
       const { ref, lease, doc } = sourceFindRef(p.ref)
       return sourceFindRead(req, ref, lease, 'scan', async (cancel) => {
         const value = await doc.sourceFindScan(ref.view.gen, ref.id, cancel)
-        return { ref, ...findProgress(value, doc.size), hits: sourceHits(value.hits, doc.size) }
+        return { ref, ...findProgress(value), hits: sourceHits(value.hits, doc.size) }
       })
     },
     sourceFindSeek: (p, req): Promise<SourceFindSeek> => {
@@ -883,7 +868,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       if (!Number.isSafeInteger(nextSort)) throw new Refusal('Refused', 'sort intents are exhausted')
       const intent = nextSort++
       config.sort = intent; config.sortView = lease.ref.id; config.interactionId = interactionId
-      for (const entry of reads.values()) if (entry.doc === ref.doc && entry.csvSort) { entry.cancelled = true; entry.cancel.cancel() }
+      stopReads((entry) => entry.doc === ref.doc && entry.csvSort)
       return csvRead(req, ref.doc, ref.gen, ref.revision, async (cancel) => {
         reads.get(req)!.csvSort = true
         const value = await doc.csvSort(ref.gen, ref.revision, column, p.direction as string, cancel)
@@ -949,19 +934,18 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const { order, lease, doc } = orderRef(p.order)
       if (lease !== explicit) throw new Refusal('Stale', 'the Find view does not own this Grid')
       const value = doc.csvFindStart(order.csv.gen, order.csv.revision, order.id, query, p.matchCase as boolean)
-      const id = csvResultNumber(value.id, 'Find identity', 1, 0xffff_ffff)
+      const id = csvResultNumber(value, 'Find identity', 1, 0xffff_ffff)
       try {
-        const progress = findProgress(value, doc.size)
         closeCsvFind(lease)
         lease.csvFind = { id, order }
-        return { ref: { view: lease.ref, order, id }, ...progress }
+        return { ref: { view: lease.ref, order, id }, count: 0, complete: false }
       } catch (e) { doc.csvFindClose(order.csv.gen, order.csv.revision, id); throw e }
     },
     csvFindScan: (p, req): Promise<CsvFindPage> => {
       const { ref, lease, doc } = csvSearchRef(p.ref)
       return csvFindRead(req, ref, lease, 'scan', async (cancel) => {
         const value = await doc.csvFindScan(ref.view.gen, ref.order.csv.revision, ref.id, cancel)
-        return { ref, ...findProgress(value, doc.size), hits: csvFindHits(value.hits, doc.size) }
+        return { ref, ...findProgress(value), hits: csvFindHits(value.hits, doc.size) }
       })
     },
     csvFindSeek: (p, req): Promise<CsvFindSeek> => {
@@ -1006,7 +990,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       if (workspaceBytes < retired) throw new Refusal('Memory', 'precharge the window retirement allowance before closing this card')
       surface.alive = false
       for (const pending of pendingViews.values()) if (pending.surface === surface) pending.disposed = true
-      for (const entry of reads.values()) if (entry.surface === id) { entry.cancelled = true; entry.cancel.cancel() }
+      stopReads((entry) => entry.surface === id)
       for (const [doc, owner] of docOwners) if (owner === id) closeDoc(doc)
       surface.views.clear()
       surfaces.delete(id)
@@ -1099,7 +1083,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       if (ownerSession !== session) return false
       const root = roots.get(p.root)
       if (!root) return false
-      for (const entry of reads.values()) if (entry.folder === root.native) { entry.cancelled = true; entry.cancel.cancel() }
+      stopReads((entry) => entry.folder === root.native)
       roots.delete(p.root)
       root.native.close()
       return true
@@ -1115,7 +1099,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const doc = ownedDoc(surface, id)
       if (doc.generation !== gen) throw new Refusal('Stale', 'the CSV document generation was replaced')
       if (!csvFormat(doc)) throw new Refusal('Unsupported', 'Grid is available for .csv and .tsv files')
-      cancelCsvConfigurations(id)
+      stopReads((entry) => entry.doc === id && entry.csvConfig)
       const configuration = nextCsvConfig(id)
       return read(req, id, async (cancel) => {
         const native = await doc.csvConfigure(gen, options.delimiter, options.header, cancel)
@@ -1200,18 +1184,6 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
           span: nativeCsvSpan(result.span), ...(result.column == null ? {} : { column: csvResultNumber(result.column, 'column') }) }
       })
     },
-    csvSource: (p, req): Promise<CsvSource> => {
-      const ref = csvRef(p.ref)
-      const sourceRecord = csvRequestNumber(p.sourceRecord, 'sourceRecord')
-      const column = p.column === undefined ? undefined : csvRequestNumber(p.column, 'column')
-      const doc = csvForRef(ref)
-      return csvRead(req, ref.doc, ref.gen, ref.revision, async (cancel) => {
-        const result = await doc.csvSource(ref.gen, ref.revision, sourceRecord, column, cancel)
-        if (result.kind === 'pending') return { kind: 'pending' }
-        if (result.kind !== 'located') throw new Refusal('Internal', 'the core returned an invalid CSV source location')
-        return { kind: 'located', span: nativeCsvSpan(result.span), rawLine: csvResultNumber(result.rawLine, 'raw line') }
-      })
-    },
     networkPath: (p): boolean => {
       if (typeof p.path !== 'string' || p.path.length === 0 || p.path.length > 32_767 || p.path.includes('\0'))
         throw new Refusal('InvalidParams', 'path must be a non-empty string of at most 32,767 characters, without NUL', 'path')
@@ -1238,7 +1210,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     },
     activate: async (p, req): Promise<Opened> => {
       const [id, gen, count, bytes] = [int(p, 'doc'), int(p, 'gen'), int(p, 'count'), int(p, 'bytes')]
-      if (p.activationId !== undefined && (typeof p.activationId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(p.activationId)))
+      if (p.activationId !== undefined && (typeof p.activationId !== 'string' || !UUID.test(p.activationId)))
         throw new Refusal('InvalidParams', 'activationId must be a canonical UUID v4', 'activationId')
       const surface = requestSurface(p)
       const doc = ownedDoc(surface, id)
@@ -1271,7 +1243,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       return true
     },
     deactivateActivation: (p): boolean => {
-      if (typeof p.activationId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(p.activationId))
+      if (typeof p.activationId !== 'string' || !UUID.test(p.activationId))
         throw new Refusal('InvalidParams', 'activationId must be a canonical UUID v4', 'activationId')
       const surface = surfaceRef(p.surface)
       const lease = currentLease(surface)
@@ -1279,8 +1251,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const pending = surface.latest
       if (pending?.kind !== 'activate' || pending.activationId !== p.activationId) return false
       pending.disposed = true
-      const entry = reads.get(pending.request)
-      if (entry) { entry.cancelled = true; entry.cancel.cancel() }
+      stop(reads.get(pending.request))
       return true
     },
     openLocal: async (p, req): Promise<Opened> => {
@@ -1316,8 +1287,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       if (!doc.localOnly) return { kind: 'manual', path: doc.path }
       const peak = Math.max(savedPeak, saved.size + 1)
       const bytes = 3 * ((64 << 10) + (16 << 10) * peak)
-      const total = viewBytes() + workspaceBytes + bytes + rootHostBytes + surfaceHostBytes
-      if (!Number.isSafeInteger(total) || !addon.reserveCache(total)) throw new Refusal('Memory', 'the saved-location table cannot grow')
+      if (!account({ savedHost: bytes })) throw new Refusal('Memory', 'the saved-location table cannot grow')
       const previous = savedHostBytes
       savedHostBytes = bytes
       let route: SavedRoute | undefined
@@ -1325,7 +1295,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       try {
         route = doc.saveRoute(gen)
         const id = ticketId()
-        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id) || saved.has(id))
+        if (!UUID.test(id) || saved.has(id))
           throw new Refusal('Refused', 'a unique saved-location identity could not be allocated')
         attempted = true
         savedPeak = peak
@@ -1362,10 +1332,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const ticket = savedTicket(p)
       const route = ticket.session === session ? saved.get(ticket.id) : undefined
       if (!route) return false
-      for (const entry of reads.values()) if (entry.candidate && entry.saved === route) {
-        entry.cancelled = true
-        entry.cancel.cancel()
-      }
+      stopReads((entry) => entry.candidate && entry.saved === route)
       saved.delete(ticket.id)
       route.release()
       return true
@@ -1521,8 +1488,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     cancel: (p) => {
       const running = reads.get(int(p, 'id'))
       if (!running) return false
-      running.cancelled = true
-      running.cancel.cancel()
+      stop(running)
       if (__TEST_HOOKS__) {
         cancels.cancels++
         running.cancelledAt ??= performance.now()
@@ -1533,14 +1499,13 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     reserve: (p) => {
       const bytes = int(p, 'bytes')
       const owned = requestedLease(p)
-      if (!owned || !account(viewBytes() - owned.lease.bytes + bytes)) return false
+      if (!owned || !account({ views: viewBytes() - owned.lease.bytes + bytes })) return false
       owned.lease.bytes = bytes
       return true
     },
     reserveWorkspace: (p) => {
       const bytes = int(p, 'bytes')
-      const total = viewBytes() + bytes + savedHostBytes + rootHostBytes + surfaceHostBytes
-      if (!Number.isSafeInteger(total) || !addon.reserveCache(total)) return false
+      if (!account({ workspace: bytes })) return false
       workspaceBytes = bytes
       return true
     },

@@ -112,7 +112,7 @@ export interface StructuredColumn { id: number; key: string; span?: SourceSpan }
 export interface StructuredColumns { columns: StructuredColumn[]; next?: number; total: number; done: boolean }
 
 export interface SourceFindRef { view: ViewRef; id: number }
-export interface SourceFindInfo { ref: SourceFindRef; count: number; scannedBytes: number; complete: boolean }
+export interface SourceFindInfo { ref: SourceFindRef; count: number; complete: boolean }
 export interface SourceHit { start: number; end: number; line: number; lineStart: number; text: string; map: WireMap; matchStart: number; matchEnd: number }
 export interface SourceFindPage extends SourceFindInfo { hits: SourceHit[] }
 export interface SourceFindSeek { hit?: SourceHit; wrapped: boolean; ordinal?: number }
@@ -123,14 +123,14 @@ export interface CsvOrderRef { csv: CsvRef; id: number }
 export interface CsvOrderInfo { order: CsvOrderRef; rows: number; column: number; direction: 'asc' | 'desc' | 'none' }
 export interface CsvFindRef { view: ViewRef; order: CsvOrderRef; id: number }
 export interface CsvFindHit { dataRow: number; sourceRecord: number; column: number; start: number; end: number; text?: string; matchStart?: number; matchEnd?: number }
-export interface CsvFindInfo { ref: CsvFindRef; count: number; scannedBytes: number; complete: boolean }
+export interface CsvFindInfo { ref: CsvFindRef; count: number; complete: boolean }
 export interface CsvFindPage extends CsvFindInfo { hits: CsvFindHit[] }
 export interface CsvFindSeek { hit?: CsvFindHit; ordinal?: number; wrapped: boolean }
 export interface CsvSpan { start: number; end: number }
 export interface CsvOptions { delimiter: 'auto' | CsvDelimiter; header: 'auto' | boolean }
 export interface CsvInfo {
   ref: CsvRef; status: 'indexing' | 'ready' | 'locked'; reason?: string; delimiter: CsvDelimiter; header: boolean; encoding: string
-  sourceRecords: number; indexedBytes: number; done: boolean; expectedColumns: number; maxColumnsKnown: number; metadataDone: boolean
+  sourceRecords: number; done: boolean; expectedColumns: number; maxColumnsKnown: number; metadataDone: boolean
   problems?: { kind: string; count: number; first: CsvSpan; sourceRecord?: number; sourceLine?: number }[]
 }
 export interface CsvContinuation { ref: CsvRef; sourceRecord: number; column: number; offset: number }
@@ -143,7 +143,6 @@ export interface CsvPage { ref: CsvRef; rows: CsvRow[]; completeRect: boolean; n
 export interface CsvColumn { column: number; name: string; nameMore: boolean; type: 'text' | 'number' | 'date' | 'boolean' | 'url'; widthUnits: number; pills?: string[] }
 export interface CsvColumnPage { ref: CsvRef; columns: CsvColumn[]; nextColumn?: number; metadataDone: boolean }
 export type CsvLocated = { kind: 'pending' } | { kind: 'located'; dataRow: number; sourceRecord: number; sourceLine: number; span: CsvSpan; column?: number }
-export type CsvSource = { kind: 'pending' } | { kind: 'located'; span: CsvSpan; rawLine: number }
 
 export interface FolderRef { session: number; root: string; node: string }
 export interface FolderRoot { ref: FolderRef; label: string; path: string; identity?: string }
@@ -183,7 +182,6 @@ export interface Methods {
   csvCell: { params: { ref: CsvRef; sourceRecord: number; column: number }; result: CsvCell }
   csvColumns: { params: { ref: CsvRef; start: number; count: number }; result: CsvColumnPage }
   csvLocate: { params: { ref: CsvRef; rawLine: number } | { ref: CsvRef; sourceOffset: number }; result: CsvLocated }
-  csvSource: { params: { ref: CsvRef; sourceRecord: number; column?: number }; result: CsvSource }
   createSurface: { params: Record<string, never>; result: SurfaceRef }
   /** Close native owners after detached-tree retirement has been paid by the window workspace share. */
   releaseSurface: { params: { surface: SurfaceRef; retiredBytes: number }; result: boolean }
@@ -296,8 +294,6 @@ export interface Charges {
   cache: number
   metadata: number
   total: number
-  /** The ledger stopped its line checkpoints: only the byte-bound ones were added after that. */
-  linesStopped: boolean
 }
 
 export type Method = keyof Methods

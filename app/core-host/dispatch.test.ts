@@ -906,7 +906,7 @@ describe('retained tab activation', () => {
       const reloading = dispatch({ id: 103, method: 'reload', params: { doc: 2, count: 1, bytes: 500 } })
       const currentFlag = flags.at(-1)!
       expect(b.data.generation).toBe(3)
-      onProgress({ lines: 3, bytes: 0, done: false, elapsedMs: 0, error: 'frozen: reloaded' })
+      onProgress({ lines: 3, bytes: 0, done: false, error: 'frozen: reloaded' })
       current.end()
       expect(await reloading).toMatchObject({ result: { doc: 2, gen: 3 } })
       expect(currentFlag.cancel).not.toHaveBeenCalled()
@@ -1405,7 +1405,7 @@ describe('cancels (plan C5, C6)', () => {
     void pendingRead()
     void dispatch({ id: 62, method: 'page', params: { doc: 1, lens: 'raw', gen: 1, start: 9, count: 1 } })
     const next = flags.at(-1)!
-    onProgress({ lines: 3, bytes: 0, done: false, elapsedMs: 0, error: 'frozen: changed on disk (chunk 2)' })
+    onProgress({ lines: 3, bytes: 0, done: false, error: 'frozen: changed on disk (chunk 2)' })
     expect(next.cancel).toHaveBeenCalledOnce()
   })
 
