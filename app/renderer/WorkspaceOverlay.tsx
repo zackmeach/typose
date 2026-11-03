@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Dialog, Modal, ModalOverlay } from 'react-aria-components'
 import { COMMANDS, COMMAND_GROUPS, commandShortcut } from '../shared/commands'
 import type { Command } from '../shared/protocol'
@@ -22,8 +22,6 @@ export function WorkspaceOverlay({ mode, indexes, recents, close, browse, choose
   choose(choice: QuickChoice, side: boolean): void; run(command: Command): void; enabled(command: Command): boolean; wrapLines: boolean
 }) {
   const [query, setQuery] = useState(''), [selected, setSelected] = useState(0)
-  const input = useRef<HTMLInputElement>(null)
-  useEffect(() => { input.current?.focus() }, [])
   const recentRows: Result[] = recents.map(recent => ({ id: recent.kind + ':' + recent.path, label: fileName(recent.path), path: recent.path, badge: badge(recent.path, recent.kind === 'folder'),
     choice: { recent } as QuickChoice, score: fuzzyScore(query, recent.path) }))
   const recentFiles = new Set(recents.filter(recent => recent.kind === 'file').map(recent => sameFile(recent.path)))
@@ -51,7 +49,7 @@ export function WorkspaceOverlay({ mode, indexes, recents, close, browse, choose
   let offset = 0
   return <ModalOverlay isOpen isDismissable className="workspace-overlay" onOpenChange={open => { if (!open) close() }}>
     <Modal className="workspace-search"><Dialog aria-label={mode === 'open' ? 'Quick open' : 'Command palette'}>
-      <input ref={input} aria-label={mode === 'open' ? 'Search files' : 'Search commands'} role="combobox" aria-expanded aria-controls="workspace-results" aria-activedescendant={matches[current] ? `workspace-result-${current}` : undefined}
+      <input autoFocus aria-label={mode === 'open' ? 'Search files' : 'Search commands'} role="combobox" aria-expanded aria-controls="workspace-results" aria-activedescendant={matches[current] ? `workspace-result-${current}` : undefined}
         placeholder={mode === 'open' ? 'Search files across open folders…' : 'Type a command…'} value={query} onChange={event => { setQuery(event.target.value); setSelected(0) }}
         onKeyDown={event => {
           if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); setSelected((current + (event.key === 'ArrowDown' ? 1 : -1) + matches.length) % Math.max(1, matches.length)) }
