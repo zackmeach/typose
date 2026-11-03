@@ -19,9 +19,6 @@ export function launchPaths(argv: string[], cwd: string, defaultApp: boolean): s
   return paths.filter(Boolean).map((file) => resolve(cwd, file))
 }
 
-/** Compatibility for callers that ask only for the newest named file. */
-export const launchPath = (argv: string[], cwd: string, defaultApp: boolean): string | null => launchPaths(argv, cwd, defaultApp).at(-1) ?? null
-
 /**
  * What a second instance sent (its argv and cwd), if it has the shape and size of a real launch's; otherwise null.
  * It's untrusted: the length is checked before any element is read, so a huge sparse array costs nothing.

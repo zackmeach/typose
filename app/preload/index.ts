@@ -112,7 +112,6 @@ const typose: TyposeApi = {
     ipcRenderer.on('capture-session', listener)
     return () => void ipcRenderer.off('capture-session', listener)
   },
-  launchPath: () => ipcRenderer.invoke('launch-path'),
   launchPaths: () => ipcRenderer.invoke('launch-paths'),
   onOpenPath: (cb) => {
     const listener = (_event: unknown, path: string) => cb(path)

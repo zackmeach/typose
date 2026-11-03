@@ -1,7 +1,7 @@
 // Spec §8.1 and plan C4 for what PR 8 adds: the path a launch names, and the untrusted message a second instance sends.
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { dropPaths, handoff, launchPath, launchPaths } from './launch'
+import { dropPaths, handoff, launchPaths } from './launch'
 
 const cwd = resolve('/launch-cwd')
 const exe = 'typose'
@@ -14,25 +14,25 @@ describe('launchPaths', () => {
   })
 })
 
-describe('launchPath', () => {
-  it('takes the last path, resolved against the cwd', () => expect(launchPath([exe, 'a.txt', 'b.txt'], cwd, false)).toBe(resolve(cwd, 'b.txt')))
+describe('launchPaths(...).at(-1): the newest path', () => {
+  it('takes the last path, resolved against the cwd', () => expect(launchPaths([exe, 'a.txt', 'b.txt'], cwd, false).at(-1)).toBe(resolve(cwd, 'b.txt')))
   it('skips switches before --, and takes anything after it as a path', () => {
-    expect(launchPath([exe, '--user-data-dir=x', 'a.txt', '--flag'], cwd, false)).toBe(resolve(cwd, 'a.txt'))
-    expect(launchPath([exe, '--x', '--', '--y=z.txt'], cwd, false)).toBe(resolve(cwd, '--y=z.txt'))
-    expect(launchPath([exe, '--', 'a.txt', '--', '-b.txt'], cwd, false)).toBe(resolve(cwd, '-b.txt'))
+    expect(launchPaths([exe, '--user-data-dir=x', 'a.txt', '--flag'], cwd, false).at(-1)).toBe(resolve(cwd, 'a.txt'))
+    expect(launchPaths([exe, '--x', '--', '--y=z.txt'], cwd, false).at(-1)).toBe(resolve(cwd, '--y=z.txt'))
+    expect(launchPaths([exe, '--', 'a.txt', '--', '-b.txt'], cwd, false).at(-1)).toBe(resolve(cwd, '-b.txt'))
   })
   it('names nothing without a path, and skips empty ones', () => {
-    expect(launchPath([exe, '--x'], cwd, false)).toBeNull()
-    expect(launchPath([exe, '--'], cwd, false)).toBeNull()
-    expect(launchPath([exe, 'a.txt', ''], cwd, false)).toBe(resolve(cwd, 'a.txt'))
+    expect(launchPaths([exe, '--x'], cwd, false).at(-1)).toBeUndefined()
+    expect(launchPaths([exe, '--'], cwd, false).at(-1)).toBeUndefined()
+    expect(launchPaths([exe, 'a.txt', ''], cwd, false).at(-1)).toBe(resolve(cwd, 'a.txt'))
   })
   it('skips the app in development (electron <app> <file>)', () => {
-    expect(launchPath(['electron', '--remote-debugging-port=0', 'app', 'a.txt'], cwd, true)).toBe(resolve(cwd, 'a.txt'))
-    expect(launchPath(['electron', 'app'], cwd, true)).toBeNull()
+    expect(launchPaths(['electron', '--remote-debugging-port=0', 'app', 'a.txt'], cwd, true).at(-1)).toBe(resolve(cwd, 'a.txt'))
+    expect(launchPaths(['electron', 'app'], cwd, true).at(-1)).toBeUndefined()
   })
   it('reads URL-like and device paths as paths', () => {
-    expect(launchPath([exe, '--', 'typose://app/x'], cwd, false)).toBe(resolve(cwd, 'typose://app/x'))
-    expect(launchPath([exe, '--', 'file:///etc/passwd'], cwd, false)).toBe(resolve(cwd, 'file:///etc/passwd'))
+    expect(launchPaths([exe, '--', 'typose://app/x'], cwd, false).at(-1)).toBe(resolve(cwd, 'typose://app/x'))
+    expect(launchPaths([exe, '--', 'file:///etc/passwd'], cwd, false).at(-1)).toBe(resolve(cwd, 'file:///etc/passwd'))
   })
 })
 

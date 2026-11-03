@@ -83,8 +83,7 @@ const grant = (path: string) => {
   if (granted.size > 1024) granted.delete(granted.values().next().value!)
 }
 pendingPaths.forEach(grant)
-let newest = pendingPaths.at(-1) ?? null
-let deliver = (path: string) => { grant(path); newest = path; pendingPaths.push(path) }
+let deliver = (path: string) => { grant(path); pendingPaths.push(path) }
 // macOS names files through open-file, not argv: before ready for the file a launch opens, and after.
 app.on('open-file', (event, path) => {
   event.preventDefault()
@@ -360,7 +359,6 @@ void app.whenReady().then(() => {
   const liveDelivery = () => {
     deliver = (path) => {
       grant(path)
-      newest = path
       if (!win.isDestroyed()) win.webContents.send('open-path', path)
     }
   }
@@ -369,11 +367,6 @@ void app.whenReady().then(() => {
     const paths = pendingPaths
     pendingPaths = []
     return paths
-  })
-  handle(win, 'launch-path', () => {
-    liveDelivery()
-    pendingPaths = []
-    return newest
   })
   handle(win, 'open-dialog', async () => {
     const r = await dialog.showOpenDialog(win, { properties: ['openFile'] })
