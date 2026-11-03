@@ -1,5 +1,5 @@
 import { expect, type Locator, type Page } from '@playwright/test'
-import { finish, fixture, launch, test } from './app'
+import { fixture, launch, test } from './app'
 import { ready } from './find-ui'
 
 async function goTo(win: Page, scope: Locator, value: number): Promise<void> {
@@ -21,34 +21,30 @@ test('Go to reaches a source line in Rendered and independently inside a Raw lin
     md.push('## Section ' + i, '', 'Paragraph ' + i, '')
   }
   const live = await launch({ file: fixture('goto-index.md', md.join('\n')) })
-  try {
-    const win = live.win, source = win.getByRole('region', { name: 'Reader card 1' })
-    await expect(source.locator('.md-scroller')).toHaveAttribute('data-ready', '1', ready)
-    if (process.platform === 'win32') {
-      await source.getByRole('link', { name: 'Preview lines' }).click()
-      const preview = win.getByRole('dialog', { name: 'Link preview' })
-      await preview.locator('.vl-scroller').focus()
-      await goTo(win, preview, 460)
-      await expect(preview.getByText('Raw entry 460', { exact: true })).toBeInViewport(ready)
-      await preview.getByRole('button', { name: 'Close preview' }).click()
-      await expect(preview).toHaveCount(0)
-      await expect(source.getByRole('heading', { name: 'Go to test' })).toBeInViewport()
-    }
-    await source.locator('.md-scroller').focus()
-    await goTo(win, source, target)
-    await expect(source.getByRole('heading', { name: 'Section 150', exact: true })).toBeInViewport(ready)
-    expect(live.pageErrors).toEqual([])
-  } finally { await finish(live) }
+  const win = live.win, source = win.getByRole('region', { name: 'Reader card 1' })
+  await expect(source.locator('.md-scroller')).toHaveAttribute('data-ready', '1', ready)
+  if (process.platform === 'win32') {
+    await source.getByRole('link', { name: 'Preview lines' }).click()
+    const preview = win.getByRole('dialog', { name: 'Link preview' })
+    await preview.locator('.vl-scroller').focus()
+    await goTo(win, preview, 460)
+    await expect(preview.getByText('Raw entry 460', { exact: true })).toBeInViewport(ready)
+    await preview.getByRole('button', { name: 'Close preview' }).click()
+    await expect(preview).toHaveCount(0)
+    await expect(source.getByRole('heading', { name: 'Go to test' })).toBeInViewport()
+  }
+  await source.locator('.md-scroller').focus()
+  await goTo(win, source, target)
+  await expect(source.getByRole('heading', { name: 'Section 150', exact: true })).toBeInViewport(ready)
+  expect(live.pageErrors).toEqual([])
 })
 
 test('Go to a Grid record puts the requested row in the viewport', async () => {
   const rows = Array.from({ length: 800 }, (_, i) => (i + 1) + ',Task ' + (i + 1))
   const live = await launch({ file: fixture('goto-tasks.csv', ['id,task', ...rows].join('\n')) })
-  try {
-    const scope = live.win.getByRole('region', { name: 'Reader card 1' })
-    await scope.getByRole('grid').focus()
-    await goTo(live.win, scope, 375)
-    await expect(scope.getByText('Task 375', { exact: true })).toBeInViewport(ready)
-    expect(live.pageErrors).toEqual([])
-  } finally { await finish(live) }
+  const scope = live.win.getByRole('region', { name: 'Reader card 1' })
+  await scope.getByRole('grid').focus()
+  await goTo(live.win, scope, 375)
+  await expect(scope.getByText('Task 375', { exact: true })).toBeInViewport(ready)
+  expect(live.pageErrors).toEqual([])
 })
