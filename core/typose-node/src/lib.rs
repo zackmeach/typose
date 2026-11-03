@@ -134,13 +134,11 @@ pub struct Range {
 #[napi(object)]
 pub struct Limits {
     pub piece_bytes: u32,
-    pub page_bytes: u32,
     pub max_items: u32,
     pub map_max: u32,
     pub item_wire_fixed: u32,
     pub page_wire_max: u32,
-    /// Plan C1: one page read's temporaries in Rust, and an open's.
-    pub page_temp: u32,
+    /// Plan C1: an open's temporaries in Rust.
     pub open_temp: u32,
     pub ranges: Vec<Range>,
 }
@@ -149,12 +147,10 @@ pub struct Limits {
 pub fn limits() -> Limits {
     Limits {
         piece_bytes: pages::PIECE_BYTES as u32,
-        page_bytes: pages::PAGE_BYTES as u32,
         max_items: pages::MAX_ITEMS as u32,
         map_max: pages::MAP_MAX as u32,
         item_wire_fixed: pages::ITEM_WIRE_FIXED as u32,
         page_wire_max: pages::PAGE_WIRE_MAX as u32,
-        page_temp: pages::PAGE_TEMP as u32,
         open_temp: typose_core::raw::OPEN_TEMP as u32,
         ranges: RANGES
             .iter()
@@ -212,7 +208,6 @@ pub struct IndexProgress {
     pub lines: f64,
     pub bytes: f64,
     pub done: bool,
-    pub elapsed_ms: f64,
     pub error: Option<String>,
 }
 
@@ -331,8 +326,7 @@ pub struct MdBuild {
 }
 
 /// One top-level block of a Markdown build: its index, its first line and how many lines it runs over (Raw's), its
-/// sanitized HTML, and a top-level heading's slug or a footnote definition's label. A block too large to render has
-/// no HTML, and a `note` saying why.
+/// sanitized HTML, and a top-level heading's slug. A block too large to render has no HTML, and a `note` saying why.
 #[napi(object)]
 pub struct MdItem {
     pub block: f64,
@@ -340,7 +334,6 @@ pub struct MdItem {
     pub lines: f64,
     pub html: String,
     pub slug: Option<String>,
-    pub footnote: Option<String>,
     pub note: Option<String>,
 }
 
@@ -422,7 +415,6 @@ impl Task for MdRead {
             })?;
             let start = usize::try_from(self.start).unwrap_or(usize::MAX);
             let page = rendered.page(start, self.count as usize);
-            let label = |s: &Option<Box<str>>| s.as_deref().map(String::from);
             Ok(page
                 .iter()
                 .enumerate()
@@ -431,8 +423,7 @@ impl Task for MdRead {
                     line: item.line as f64,
                     lines: item.lines as f64,
                     html: item.html.to_string(),
-                    slug: label(&item.slug),
-                    footnote: label(&item.footnote),
+                    slug: item.slug.as_deref().map(String::from),
                     note: item.note.map(|n| n.text().to_string()),
                 })
                 .collect())
@@ -1082,13 +1073,8 @@ impl Doc {
                     {
                         last = Some(Instant::now());
                         sent_lines = p.lines;
-                        let progress = IndexProgress {
-                            lines: p.lines as f64,
-                            bytes: p.bytes as f64,
-                            done: p.done,
-                            elapsed_ms: p.elapsed_ms as f64,
-                            error: None,
-                        };
+                        let progress =
+                            IndexProgress { lines: p.lines as f64, bytes: p.bytes as f64, done: p.done, error: None };
                         on_progress.call(progress, ThreadsafeFunctionCallMode::NonBlocking);
                     }
                     !cancel.load(Ordering::Relaxed)
@@ -1099,7 +1085,6 @@ impl Doc {
                     lines: raw.lines_known().0 as f64, // what the index published, not the last count sent
                     bytes: 0.0,
                     done: false,
-                    elapsed_ms: 0.0,
                     error: Some(e),
                 };
                 on_progress.call(progress, ThreadsafeFunctionCallMode::NonBlocking);
@@ -1261,7 +1246,7 @@ pub mod test_hooks {
         }
     }
 
-    /// One document's charges, itemized (plan C1, C6), and whether its line checkpoints stopped at the limit.
+    /// One document's charges, itemized (plan C1, C6).
     #[napi(object)]
     pub struct Charges {
         pub hashes: f64,
@@ -1269,7 +1254,6 @@ pub mod test_hooks {
         pub cache: f64,
         pub metadata: f64,
         pub total: f64,
-        pub lines_stopped: bool,
     }
 
     #[napi]
@@ -1285,7 +1269,7 @@ pub mod test_hooks {
         let [hashes, checkpoints, cache, metadata, total] =
             [c.hashes, c.checkpoints, c.cache, c.metadata, c.total() + rendered + images + csv + find + structured]
                 .map(|n| n as f64);
-        Ok(Charges { hashes, checkpoints, cache, metadata, total, lines_stopped: raw.lines_stopped() })
+        Ok(Charges { hashes, checkpoints, cache, metadata, total })
     }
 
     /// Starts the ledger's high-water mark again from what's charged now (plan C1's exhaustion test, per cycle).

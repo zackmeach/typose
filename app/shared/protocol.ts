@@ -294,8 +294,6 @@ export interface Charges {
   cache: number
   metadata: number
   total: number
-  /** The ledger stopped its line checkpoints: only the byte-bound ones were added after that. */
-  linesStopped: boolean
 }
 
 export type Method = keyof Methods

@@ -1,7 +1,6 @@
 //! Streaming line index with byte-bounded checkpoints (spec §3.5).
 use std::fs::File;
 use std::sync::RwLock;
-use std::time::Instant;
 
 use encoding_rs::{Encoding, UTF_16BE, UTF_16LE};
 use memchr::memchr_iter;
@@ -160,8 +159,6 @@ pub struct LineIndex {
     pub done: bool,
     /// Decides what a newline is: in UTF-16 it's a 2-byte unit.
     pub encoding: &'static Encoding,
-    /// Plan C1: the ledger refused more line checkpoints, so the index added only byte-bound ones after that.
-    pub lines_stopped: bool,
 }
 
 impl LineIndex {
@@ -174,7 +171,6 @@ impl LineIndex {
             indexed_bytes: 0,
             done: false,
             encoding,
-            lines_stopped: false,
         })
     }
 }
@@ -184,7 +180,6 @@ pub struct Progress {
     pub lines: u64,
     pub bytes: u64,
     pub done: bool,
-    pub elapsed_ms: u64,
 }
 
 impl LineIndex {
@@ -256,7 +251,6 @@ impl Builder {
         if done {
             w.checkpoints.trim();
         }
-        w.lines_stopped = !self.lines_on;
         w.newlines = self.newlines;
         w.last_line_start = self.last_line_start;
         w.indexed_bytes = indexed;
@@ -300,7 +294,6 @@ pub fn build(
     shared: &RwLock<LineIndex>,
     mut on_progress: impl FnMut(Progress) -> bool,
 ) -> Result<(), StoreError> {
-    let started = Instant::now();
     let encoding = {
         let index = shared.read().unwrap();
         assert_eq!(index.checkpoints.cp_bytes, cfg.cp_bytes, "the table's floor was sized for another byte bound");
@@ -327,12 +320,12 @@ pub fn build(
         }
         pos += n as u64;
         let lines = b.publish(shared, pos, false);
-        if !on_progress(Progress { lines, bytes: pos, done: false, elapsed_ms: started.elapsed().as_millis() as u64 }) {
+        if !on_progress(Progress { lines, bytes: pos, done: false }) {
             return Ok(());
         }
     }
     let lines = b.publish(shared, len, true);
-    on_progress(Progress { lines, bytes: len, done: true, elapsed_ms: started.elapsed().as_millis() as u64 });
+    on_progress(Progress { lines, bytes: len, done: true });
     Ok(())
 }
 
