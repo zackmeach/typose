@@ -120,7 +120,6 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   const [goToValue, setGoToValue] = useState('')
   const goToInput = useRef<HTMLInputElement>(null)
   const [printPlan, setPrintPlan] = useState<PrintPlan | null>(null)
-  const [printOpen, setPrintOpen] = useState(false)
   const [printMode, setPrintMode] = useState<'all' | 'around' | 'custom'>('around')
   const [printStart, setPrintStart] = useState('1')
   const [printEnd, setPrintEnd] = useState('1')
@@ -186,13 +185,12 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     setPrintStart(String(Math.max(1, plan.current + 1)))
     setPrintEnd(String(Math.min(plan.total, plan.current + PRINT_LINES_PER_PAGE)))
     setPrintConfirmed(false)
-    setPrintOpen(true)
   }
   function closePrint(): void {
     printAbort.current?.abort()
     printAbort.current = null
     setPrintBusy(false)
-    setPrintOpen(false)
+    setPrintPlan(null)
     requestAnimationFrame(() => lens.current?.focus())
   }
   function selectedPrintRange(plan: PrintPlan): { start: number; end: number; pages: number } | null {
@@ -1574,7 +1572,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   return <section className={preview ? 'reader-card preview-reader' : 'reader-card'} role="region" aria-label={preview ? 'Preview reader' : 'Reader card ' + label} data-card={id} data-focused={focused || undefined} onPointerDownCapture={onFocus} onFocusCapture={onFocus}
     onKeyDown={event => {
       if (event.defaultPrevented || event.key !== 'Escape' || event.nativeEvent.isComposing) return
-      if (printOpen) { closePrint(); event.preventDefault(); event.stopPropagation(); return }
+      if (printPlan) { closePrint(); event.preventDefault(); event.stopPropagation(); return }
       if (goToOpen) { setGoToOpen(false); lens.current?.focus(); event.preventDefault(); event.stopPropagation(); return }
       if (findAction('close')) { event.preventDefault(); event.stopPropagation() }
     }}>
@@ -1592,7 +1590,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
             <button type="button" aria-label="Close go to" onClick={() => { setGoToOpen(false); lens.current?.focus() }}>×</button>
           </form>
         ) : null}
-        {printOpen && printPlan ? (() => {
+        {printPlan ? (() => {
           const range = selectedPrintRange(printPlan)
           const pages = range?.pages ?? 0
           return <form className="print-sheet" role="dialog" aria-modal="true" aria-labelledby={`print-title-${id}`} onSubmit={event => { void submitPrint(event) }}>
