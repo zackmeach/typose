@@ -254,11 +254,11 @@ function macMenu(win: BrowserWindow): Menu {
   ])
 }
 
-/** Calls from the preload: only from this window's app page, and with no arguments (plan C4). */
-function handle(win: BrowserWindow, channel: string, fn: () => unknown): void {
+/** Calls from the preload: only from this window's app page, and with exactly `arity` arguments (plan C4). */
+function handle(win: BrowserWindow, channel: string, fn: (...args: unknown[]) => unknown, arity = 0): void {
   ipcMain.handle(channel, (event: IpcMainInvokeEvent, ...args: unknown[]) => {
-    if (!fromMainApp(win, event) || args.length > 0) throw new Error(`refused ${channel}`)
-    return fn()
+    if (!fromMainApp(win, event) || args.length !== arity) throw new Error(`refused ${channel}`)
+    return fn(...args)
   })
 }
 
@@ -279,24 +279,14 @@ void app.whenReady().then(() => {
   const rememberBounds = () => { if (!win.isDestroyed()) sessionStore.bounds({ ...win.getNormalBounds(), maximized: win.isMaximized() }) }
   win.on('resize', rememberBounds)
   win.on('move', rememberBounds)
-  ipcMain.handle('load-session', (event, ...args: unknown[]) => {
-    if (!fromMainApp(win, event) || args.length) throw new Error('refused load-session')
+  handle(win, 'load-session', () => {
     const workspace = sessionStore.snapshot()
     delete workspace.window
     return workspace
   })
-  ipcMain.handle('load-settings', (event, ...args: unknown[]) => {
-    if (!fromMainApp(win, event) || args.length) throw new Error('refused load-settings')
-    return configStore.snapshot()
-  })
-  ipcMain.handle('change-setting', (event, ...args: unknown[]) => {
-    if (!fromMainApp(win, event) || args.length !== 3) throw new Error('refused change-setting')
-    return configStore.update(args[0], args[1], args[2])
-  })
-  ipcMain.handle('export-theme', (event, ...args: unknown[]) => {
-    if (!fromMainApp(win, event) || args.length !== 2) throw new Error('refused export-theme')
-    return configStore.exportTheme(args[0], args[1])
-  })
+  handle(win, 'load-settings', () => configStore.snapshot())
+  handle(win, 'change-setting', (key, value, revision) => configStore.update(key, value, revision), 3)
+  handle(win, 'export-theme', (name, tokens) => configStore.exportTheme(name, tokens), 2)
   ipcMain.handle('chrome-theme', (event, ...args: unknown[]) => {
     if (!fromMainApp(win, event) || args.length !== 3 || typeof args[0] !== 'boolean' || typeof args[1] !== 'string' || typeof args[2] !== 'string' || !/^#[0-9a-f]{6}$/i.test(args[1]) || !/^#[0-9a-f]{6}$/i.test(args[2])) return false
     if (process.platform === 'win32') win.setTitleBarOverlay({ color: args[1], symbolColor: args[2] })
