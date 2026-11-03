@@ -14,8 +14,7 @@ import {
 export class CoreCallError extends Error {
   constructor(
     readonly code: ErrorCode,
-    message: string,
-    readonly field?: string
+    message: string
   ) {
     super(message)
   }
@@ -184,7 +183,7 @@ export class CoreClient {
     if (!call) return
     if ('error' in data) {
       const error: CoreError = data.error
-      call.fail(new CoreCallError(error.code, error.message, error.field))
+      call.fail(new CoreCallError(error.code, error.message))
     } else {
       call.ok(data.result)
     }

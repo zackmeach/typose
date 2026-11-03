@@ -92,7 +92,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   const workspace = { getSnapshot: () => ({ ready: !!hello.current, tabs: allGroups.current.flatMap(group => group.workspace.getSnapshot().tabs) }) }
   const navigating = { get current() { return splitBusy.current || [...handles.current.values()].some(handle => handle.busy()) } }
   const [shared] = useState<ReaderWindow>(() => ({ core, hello, groups: allGroups, closed, folders, pendingFolders,
-    budget: workspaceBudget, peak: workspacePeak, queue: metadataQueue, pendingWorkspace, pendingNative,
+    budget: workspaceBudget, queue: metadataQueue, pendingWorkspace, pendingNative,
     pendingHistory: pendingHistory.current, recharged, paid: () => payment.current,
     charge: async () => false, release: () => {}, releaseLocation: () => {}, notice: () => {}, opened: () => {}, addFolder: async () => {}, openLink: async () => false, report: () => {}, register: () => () => {} }))
 

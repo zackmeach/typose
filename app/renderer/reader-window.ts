@@ -49,7 +49,6 @@ export interface ReaderWindow {
   folders: RefObject<readonly RootView[]>
   pendingFolders: RefObject<Map<symbol, number>>
   budget: RefObject<WorkspaceBudget | null>
-  peak: RefObject<number>
   queue: WorkspaceMetadataQueue
   pendingWorkspace: RefObject<Map<TabId, { units: number }>>
   pendingNative: RefObject<Set<symbol>>
