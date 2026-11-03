@@ -126,6 +126,7 @@ jobs:
       - name: e2e ${{ inputs.e2e-label }} and the NetLog assertion (${{ runner.os }})
         if: ${{ !cancelled() && steps.package.outcome == 'success' && steps.electron.outcome == 'success' && runner.os != 'Linux' }}
         timeout-minutes: ${{ inputs.e2e-timeout }}
+        shell: bash # the expansions below are bash; Windows runners default to pwsh
         env: # through the environment, never pasted into the script
           E2E_SCRIPT: ${{ inputs.e2e-script }}
           GREP: ${{ inputs.grep }}
