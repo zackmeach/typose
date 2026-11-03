@@ -4,7 +4,6 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use memchr::{memchr, memchr_iter, memchr2, memrchr};
 use xxhash_rust::xxh3::{Xxh3, xxh3_128};
@@ -222,9 +221,10 @@ impl JsonIndex {
 }
 
 /// Builds the container index for `range` of the store (the whole file, or one JSONL record).
-/// Syntax, depth, budget and cancel errors land in `JsonIndex::error`, with everything before them kept. `jsonc`
-/// accepts `//` and `/* */` comments, trailing commas and `NaN`/`Infinity` (`.json` falls back to JSONC, spec §4.1).
-pub fn scan(store: &ByteStore, range: Range<u64>, jsonc: bool, cancel: &AtomicBool) -> Result<JsonIndex, StoreError> {
+/// Syntax, depth, budget and cancel (`store::cancellable`) errors land in `JsonIndex::error`, with everything before
+/// them kept. `jsonc` accepts `//` and `/* */` comments, trailing commas and `NaN`/`Infinity` (`.json` falls back to
+/// JSONC, spec §4.1).
+pub fn scan(store: &ByteStore, range: Range<u64>, jsonc: bool) -> Result<JsonIndex, StoreError> {
     let end = range.end.min(store.len());
     let mut start = range.start.min(end);
     if start == 0 && store.read(0, end.min(3))? == b"\xEF\xBB\xBF" {
@@ -234,7 +234,7 @@ pub fn scan(store: &ByteStore, range: Range<u64>, jsonc: bool, cancel: &AtomicBo
     let mut pos = start;
     let stopped = 'scan: {
         while pos < end {
-            if cancel.load(Ordering::Relaxed) || crate::store::cancelled() {
+            if crate::store::cancelled() {
                 break 'scan Some((ErrorKind::Cancelled, pos));
             }
             let bytes = store.read(pos, (pos + WINDOW as u64).min(end))?;
@@ -254,8 +254,7 @@ pub fn scan(store: &ByteStore, range: Range<u64>, jsonc: bool, cancel: &AtomicBo
     };
     if let Some((kind, offset)) = stopped {
         s.on_error();
-        let (line, column) =
-            if kind == ErrorKind::Cancelled { (0, 0) } else { line_col(store, start, offset, cancel)? };
+        let (line, column) = if kind == ErrorKind::Cancelled { (0, 0) } else { line_col(store, start, offset)? };
         s.idx.error = Some(ScanError { kind, offset, line, column });
     }
     let mut idx = s.idx;
@@ -299,17 +298,12 @@ pub fn children(
 /// `None` if cancelled (checked every 1,024 members). Runs over the whole object once; the Tree calls it when
 /// the object is first expanded. While it runs it holds a pre-sized set of 128-bit key hashes: 17–34 bytes
 /// per member (136 MB for a 5M-key object).
-pub fn duplicate_keys(
-    store: &ByteStore,
-    index: &JsonIndex,
-    container: u32,
-    cancel: &AtomicBool,
-) -> Result<Option<Vec<u64>>, StoreError> {
+pub fn duplicate_keys(store: &ByteStore, index: &JsonIndex, container: u32) -> Result<Option<Vec<u64>>, StoreError> {
     let members = index.containers.get(container as usize).filter(|c| c.kind == Kind::Object).map_or(0, |c| c.children);
     let (mut seen, mut dups, mut ordinal) = (HashSet::with_capacity(members as usize), Vec::new(), 0u64);
     let mut cancelled = false;
     walk(store, index, container, 0, |cur, child| {
-        if ordinal % 1024 == 0 && cancel.load(Ordering::Relaxed) {
+        if ordinal % 1024 == 0 && crate::store::cancelled() {
             cancelled = true;
             return Ok(false);
         }
@@ -753,10 +747,10 @@ impl Scanner {
 }
 
 /// 1-based line and character column of `offset`, counted from `from`; (0, 0) if cancelled first.
-fn line_col(store: &ByteStore, from: u64, offset: u64, cancel: &AtomicBool) -> Result<(u64, u64), StoreError> {
+fn line_col(store: &ByteStore, from: u64, offset: u64) -> Result<(u64, u64), StoreError> {
     let (mut line, mut column, mut pos) = (1u64, 1u64, from);
     while pos < offset {
-        if cancel.load(Ordering::Relaxed) {
+        if crate::store::cancelled() {
             return Ok((0, 0));
         }
         let bytes = store.read(pos, offset.min(pos + WINDOW as u64))?;

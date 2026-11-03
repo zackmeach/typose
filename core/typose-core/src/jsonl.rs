@@ -1,6 +1,5 @@
 //! Streaming JSONL metadata. Record payloads remain file-backed and are parsed only while in use.
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, RwLock};
 
 use crate::budget::Reservation;
@@ -84,22 +83,16 @@ impl Index {
         columns.values.push(Column { key, span });
         Ok(())
     }
-    pub fn build_reserved(
-        &self,
-        doc: &Document,
-        generation: u32,
-        flag: &AtomicBool,
-        _temp: Reservation,
-    ) -> Result<(), DocError> {
+    pub fn build_reserved(&self, doc: &Document, generation: u32, _temp: Reservation) -> Result<(), DocError> {
         let complete = doc.verified(generation, |store| {
             let (mut at, mut from, mut line) = (0, 0, 0);
             while at < store.len() {
-                if flag.load(Ordering::Relaxed) || cancelled() || doc.frozen().is_some() {
+                if cancelled() || doc.frozen().is_some() {
                     return Err(StoreError::Cancelled);
                 }
                 let bytes = store.read(at, (at + 65_536).min(store.len()))?;
                 for end in memchr::memchr_iter(b'\n', &bytes).map(|i| at + i as u64 + 1) {
-                    if !self.record(store, Span { start: from, end }, line, flag)? {
+                    if !self.record(store, Span { start: from, end }, line)? {
                         return Ok(false);
                     }
                     from = end;
@@ -108,7 +101,7 @@ impl Index {
                 at += bytes.len() as u64;
                 self.progress.write().unwrap().bytes = at;
             }
-            if from < store.len() && !self.record(store, Span { start: from, end: store.len() }, line, flag)? {
+            if from < store.len() && !self.record(store, Span { start: from, end: store.len() }, line)? {
                 return Ok(false);
             }
             Ok(true)
@@ -116,9 +109,9 @@ impl Index {
         self.progress.write().unwrap().done = complete;
         Ok(())
     }
-    fn record(&self, store: &ByteStore, span: Span, line: u64, flag: &AtomicBool) -> Result<bool, StoreError> {
+    fn record(&self, store: &ByteStore, span: Span, line: u64) -> Result<bool, StoreError> {
         let body = content(store, span)?;
-        let index = json::scan(store, body.start..body.end, false, flag)?;
+        let index = json::scan(store, body.start..body.end, false)?;
         if let Some(error) = index.error {
             match error.kind {
                 json::ErrorKind::Cancelled => return Err(StoreError::Cancelled),
@@ -285,7 +278,7 @@ mod tests {
         let file = temp_file("jsonl-metadata", b"{\"a\":1}\n\nnope\n{\"b\":2}\n");
         let doc = Document::open(&file).unwrap();
         let index = Index::with_encoding(encoding_rs::UTF_8).unwrap();
-        index.build_reserved(&doc, 1, &AtomicBool::new(false), Reservation::none()).unwrap();
+        index.build_reserved(&doc, 1, Reservation::none()).unwrap();
         let p = index.progress.read().unwrap();
         assert_eq!((p.lines, p.parsed, p.failed, p.blank, p.done), (4, 2, 1, 1, true));
         assert_eq!(index.columns(0, 128).iter().map(|c| c.key.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
@@ -300,14 +293,14 @@ mod tests {
             .verified(1, |store| {
                 let body = content(store, first)?;
                 assert_eq!(body.end, first.end - 2);
-                json::scan(store, body.start..body.end, true, &AtomicBool::new(false))
+                json::scan(store, body.start..body.end, true)
             })
             .unwrap()
             .error
             .unwrap();
         assert_eq!(error.kind, json::ErrorKind::Syntax("unexpected end of input"));
         let index = Index::with_encoding(encoding_rs::UTF_8).unwrap();
-        index.build_reserved(&doc, 1, &AtomicBool::new(false), Reservation::none()).unwrap();
+        index.build_reserved(&doc, 1, Reservation::none()).unwrap();
         let p = index.progress.read().unwrap();
         assert_eq!((p.lines, p.parsed, p.failed, p.blank), (3, 1, 1, 1));
     }
@@ -316,7 +309,7 @@ mod tests {
         let file = temp_file("jsonl-adapter-detection", b"{\"role\":\"user\",\"content\":\"hi\"}\n{\"messages\":[{\"role\":\"assistant\",\"content\":\"hello\"}],\"metadata\":{}}\n");
         let doc = Document::open(&file).unwrap();
         let index = Index::with_encoding(encoding_rs::UTF_8).unwrap();
-        index.build_reserved(&doc, 1, &AtomicBool::new(false), Reservation::none()).unwrap();
+        index.build_reserved(&doc, 1, Reservation::none()).unwrap();
         let p = index.progress.read().unwrap();
         assert_eq!((p.sample_parsed, p.openai_messages, p.openai_dataset), (2, 1, 1));
     }

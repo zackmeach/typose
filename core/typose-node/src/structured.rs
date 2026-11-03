@@ -311,7 +311,7 @@ impl Task for Build {
             })?);
             let utf16 = self.raw.encoding().starts_with("UTF-16");
             let tree = if self.format == "json" && !utf16 {
-                Some(core_structured::JsonTree::build(self.raw.document(), self.generation, &flag)?)
+                Some(core_structured::JsonTree::build(self.raw.document(), self.generation)?)
             } else {
                 None
             };
@@ -363,8 +363,7 @@ impl Task for Build {
                         let _slot = slot;
                         #[cfg(feature = "test-hooks")]
                         let _job = job;
-                        let result =
-                            cancellable(&flag, || index.build_reserved(raw.document(), generation, &flag, temp));
+                        let result = cancellable(&flag, || index.build_reserved(raw.document(), generation, temp));
                         if let Err(error) = result
                             && !matches!(error, DocError::Cancelled)
                         {
@@ -418,7 +417,6 @@ impl Task for Children {
                         self.entry.generation,
                         range.start..range.end,
                         false,
-                        &flag,
                     )?;
                     &record_tree
                 } else {
@@ -427,14 +425,8 @@ impl Task for Children {
                         .as_ref()
                         .ok_or_else(|| DocError::Invalid("This structured document has no JSON Tree".into()))?
                 };
-                let children = tree.children(
-                    self.raw.document(),
-                    self.entry.generation,
-                    self.container,
-                    self.start,
-                    self.count,
-                    &flag,
-                )?;
+                let children =
+                    tree.children(self.raw.document(), self.entry.generation, self.container, self.start, self.count)?;
                 let mut nodes = Vec::with_capacity(children.len());
                 let mut bytes = 1024;
                 for (ordinal, child, duplicate) in children {
@@ -639,10 +631,9 @@ fn row(
     generation: u32,
     line: u64,
     range: json::Span,
-    flag: &AtomicBool,
 ) -> std::result::Result<Option<StructuredRow>, DocError> {
     let body = record_body(raw, generation, range)?;
-    let tree = core_structured::JsonTree::build_range(raw.document(), generation, body.start..body.end, false, flag)?;
+    let tree = core_structured::JsonTree::build_range(raw.document(), generation, body.start..body.end, false)?;
     if tree.index.root.is_none() && tree.index.error.is_none() {
         return Ok(None);
     }
@@ -963,7 +954,7 @@ impl Task for Rows {
                     };
                     source_bytes += range.end - range.start;
                     scanned += 1;
-                    if let Some(value) = row(&self.raw, self.entry.generation, at, range, &flag)? {
+                    if let Some(value) = row(&self.raw, self.entry.generation, at, range)? {
                         let cost = 1024
                             + 6 * (value.summary.encode_utf16().count()
                                 + value.root.as_ref().map_or(0, |n| n.text.encode_utf16().count())

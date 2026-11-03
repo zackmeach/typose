@@ -2,8 +2,7 @@
 use crate::budget::Reservation;
 use crate::doc::{DocError, Document};
 use crate::json::{self, JsonIndex};
-use crate::store::StoreError;
-use std::sync::atomic::{AtomicBool, Ordering};
+use crate::store::{StoreError, cancelled};
 
 pub const TEMP_BYTES: u64 = 16 << 20;
 pub struct JsonTree {
@@ -20,14 +19,14 @@ fn key_workspace(members: u64) -> Result<Reservation, DocError> {
     Reservation::new(TEMP_BYTES + bytes).map_err(DocError::Memory)
 }
 impl JsonTree {
-    pub fn build(doc: &Document, generation: u32, cancel: &AtomicBool) -> Result<Self, DocError> {
-        let mut tree = Self::build_range(doc, generation, 0..doc.len(), true, cancel)?;
+    pub fn build(doc: &Document, generation: u32) -> Result<Self, DocError> {
+        let mut tree = Self::build_range(doc, generation, 0..doc.len(), true)?;
         tree.lazy_duplicates = false;
         let (index, duplicates, charge) = (&tree.index, &mut tree.duplicates, &mut tree.duplicate_charge);
         // One verified pass for every object: the identity check opens the file, so never once per object.
         doc.verified(generation, |store| {
             for (id, container) in index.containers.iter().enumerate() {
-                if cancel.load(Ordering::Relaxed) {
+                if cancelled() {
                     return Err(StoreError::Cancelled);
                 }
                 if container.kind != json::Kind::Object || container.children < 2 {
@@ -37,7 +36,7 @@ impl JsonTree {
                     Ok(keys) => keys,
                     Err(e) => return Ok(Err(e)),
                 };
-                let found = json::duplicate_keys(store, index, id as u32, cancel)?.ok_or(StoreError::Cancelled)?;
+                let found = json::duplicate_keys(store, index, id as u32)?.ok_or(StoreError::Cancelled)?;
                 for ordinal in found {
                     if duplicates.len() == duplicates.capacity() {
                         let old = duplicates.capacity();
@@ -60,10 +59,9 @@ impl JsonTree {
         generation: u32,
         range: std::ops::Range<u64>,
         jsonc: bool,
-        cancel: &AtomicBool,
     ) -> Result<Self, DocError> {
         let _temp = Reservation::new(TEMP_BYTES).map_err(DocError::Memory)?;
-        let index = doc.verified(generation, |store| json::scan(store, range, jsonc, cancel))?;
+        let index = doc.verified(generation, |store| json::scan(store, range, jsonc))?;
         if let Some(error) = index.error {
             match error.kind {
                 json::ErrorKind::Memory(e) => return Err(DocError::Memory(e)),
@@ -80,7 +78,6 @@ impl JsonTree {
         container: u32,
         start: u64,
         count: usize,
-        cancel: &AtomicBool,
     ) -> Result<Vec<(u64, json::Child, bool)>, DocError> {
         if count == 0 || count > 128 {
             return Err(DocError::Invalid("Tree child count must be 1–128".into()));
@@ -93,12 +90,12 @@ impl JsonTree {
             .filter(|c| self.lazy_duplicates && c.kind == json::Kind::Object && c.children >= 2);
         let _keys = lazy.map(|c| key_workspace(c.children)).transpose()?;
         doc.verified(generation, |store| {
-            if cancel.load(Ordering::Relaxed) {
+            if cancelled() {
                 return Err(StoreError::Cancelled);
             }
             let children = json::children(store, &self.index, container, start, count)?;
             let found = match lazy {
-                Some(_) => json::duplicate_keys(store, &self.index, container, cancel)?.ok_or(StoreError::Cancelled)?,
+                Some(_) => json::duplicate_keys(store, &self.index, container)?.ok_or(StoreError::Cancelled)?,
                 None => Vec::new(),
             };
             Ok(children
@@ -130,12 +127,11 @@ mod tests {
         let bytes = b"{/* note */\"n\":12345678901234567890,\"n\":3.10,\"x\":1e400,}";
         let file = temp_file("structured-jsonc-spans", bytes);
         let doc = Document::open(&file).unwrap();
-        let cancel = AtomicBool::new(false);
-        let tree = JsonTree::build(&doc, 1, &cancel).unwrap();
+        let tree = JsonTree::build(&doc, 1).unwrap();
         assert!(tree.index.error.is_none());
         assert_eq!(tree.index.trivia.comments, 1);
         assert_eq!(tree.index.trivia.trailing_commas, 1);
-        let nodes = tree.children(&doc, 1, 0, 0, 128, &cancel).unwrap();
+        let nodes = tree.children(&doc, 1, 0, 0, 128).unwrap();
         assert_eq!(nodes.len(), 3);
         assert!(nodes[1].2);
         assert!(!nodes[0].2);
@@ -154,26 +150,24 @@ mod tests {
         bytes.push(b']');
         let file = temp_file("structured-check-count", &bytes);
         let doc = Document::open(&file).unwrap();
-        let cancel = AtomicBool::new(false);
         let before = crate::doc::CHECKS.get();
-        let tree = JsonTree::build(&doc, 1, &cancel).unwrap();
+        let tree = JsonTree::build(&doc, 1).unwrap();
         assert_eq!(crate::doc::CHECKS.get() - before, 2); // the scan and the duplicate pass
         assert_eq!(tree.duplicates.len(), 2000);
         // A record-scoped tree finds duplicates only for the object a page lists.
         let before = crate::doc::CHECKS.get();
-        let record = JsonTree::build_range(&doc, 1, 1..40, false, &cancel).unwrap();
+        let record = JsonTree::build_range(&doc, 1, 1..40, false).unwrap();
         assert_eq!(crate::doc::CHECKS.get() - before, 1);
         assert!(record.duplicates.is_empty());
-        let marks: Vec<bool> = record.children(&doc, 1, 1, 0, 128, &cancel).unwrap().into_iter().map(|c| c.2).collect();
+        let marks: Vec<bool> = record.children(&doc, 1, 1, 0, 128).unwrap().into_iter().map(|c| c.2).collect();
         assert_eq!(marks, [false, true]);
     }
     #[test]
     fn partial_json_retains_prior_children_and_rejects_controls() {
         let file = temp_file("structured-json-partial", b"{\"a\":1,\"bad\":\"hello\nworld\"}");
         let doc = Document::open(&file).unwrap();
-        let cancel = AtomicBool::new(false);
-        let tree = JsonTree::build(&doc, 1, &cancel).unwrap();
+        let tree = JsonTree::build(&doc, 1).unwrap();
         assert!(tree.index.error.is_some());
-        assert_eq!(tree.children(&doc, 1, 0, 0, 128, &cancel).unwrap().len(), 1);
+        assert_eq!(tree.children(&doc, 1, 0, 0, 128).unwrap().len(), 1);
     }
 }
