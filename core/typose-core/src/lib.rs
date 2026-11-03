@@ -28,7 +28,3 @@ pub mod structured;
 
 #[cfg(test)]
 mod big_offsets;
-
-pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}

@@ -4,7 +4,7 @@
 use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE};
 
 use crate::bytemap::ByteMap;
-use crate::encoding::{decode_prefix, newline_and_cr, newline_ends};
+use crate::encoding::{bom_len, decode_prefix, newline_and_cr, newline_ends};
 use crate::index::{LineIndex, locate_line};
 use crate::store::{ByteStore, StoreError};
 
@@ -242,13 +242,6 @@ pub fn piece(
         return refuse("not an element boundary".into());
     }
     Ok(Ok(cut(store, index, line, line_start, offset, caps)?.0))
-}
-
-fn bom_len(bytes: &[u8], encoding: &'static Encoding) -> usize {
-    match Encoding::for_bom(bytes) {
-        Some((e, n)) if e == encoding => n,
-        _ => 0,
-    }
 }
 
 /// Plan C3: whether the whole line's decode has an element boundary at `at`, judged by the decoder that cuts

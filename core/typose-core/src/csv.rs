@@ -9,6 +9,7 @@ use crate::budget::Reservation;
 use crate::bytemap::{ByteMap, MapBuilder};
 use crate::doc::{DocError, Document};
 use crate::encoding::decode_prefix;
+pub use crate::json::Span;
 use crate::store::cancelled;
 #[path = "csv_metadata.rs"]
 pub mod metadata;
@@ -29,11 +30,6 @@ const DELIMITERS: [u8; 4] = [b',', b'\t', b';', b'|'];
 pub struct Options {
     pub delimiter: Option<u8>,
     pub header: Option<bool>,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Span {
-    pub start: u64,
-    pub end: u64,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct RowInfo {
@@ -289,7 +285,7 @@ impl Csv {
                 done: locked,
                 expected_columns: 0,
                 max_columns: 0,
-                metadata: metadata::Metadata::new(),
+                metadata: metadata::Metadata::default(),
                 _charge: charge,
             }),
         })
@@ -309,11 +305,6 @@ impl Csv {
             index.metadata.row(*row, expected, self.header);
         }
     }
-    pub fn build(&self, doc: &Document, mut progress: impl FnMut(u64, u64, bool) -> bool) -> Result<(), DocError> {
-        let temp = Reservation::new(TEMP_BYTES).map_err(DocError::Memory)?;
-        self.build_reserved(doc, &mut progress, temp)
-    }
-
     /// The NAPI candidate secures this allocation before replacing a usable configuration.
     pub fn build_reserved(
         &self,
@@ -352,13 +343,7 @@ impl Csv {
                 if let Event::Field { record, column, .. } = &event {
                     if sampling {
                         let text = self.encoding.decode_without_bom_handling(&sample).0;
-                        self.index.write().unwrap().metadata.sample(
-                            *record,
-                            *column,
-                            self.header,
-                            &text,
-                            !sample_more,
-                        )?;
+                        self.index.write().unwrap().metadata.sample(*record, *column, self.header, &text, !sample_more);
                     }
                     sample.clear();
                     sample_more = false;
@@ -376,13 +361,7 @@ impl Csv {
                     });
                     if let Event::Field { record, column, .. } = &event {
                         let text = self.encoding.decode_without_bom_handling(&sample).0;
-                        self.index.write().unwrap().metadata.sample(
-                            *record,
-                            *column,
-                            self.header,
-                            &text,
-                            !sample_more,
-                        )?;
+                        self.index.write().unwrap().metadata.sample(*record, *column, self.header, &text, !sample_more);
                     }
                     self.publish_row(&event);
                 }
@@ -569,16 +548,6 @@ impl Csv {
             _charge: None,
         })
     }
-    pub fn page(
-        &self,
-        doc: &Document,
-        row_start: u64,
-        row_count: usize,
-        column_start: u64,
-        column_count: usize,
-    ) -> Result<Page, DocError> {
-        self.ordered_page(doc, row_start, row_count, column_start, column_count, None)
-    }
     pub fn ordered_page(
         &self,
         doc: &Document,
@@ -664,7 +633,7 @@ mod tests {
         let path = temp_file(&name, bytes);
         let doc = Document::open(&path).unwrap();
         let csv = Csv::new(&doc, 1, 1, Options { delimiter: Some(delimiter), header: Some(false) }, UTF_8).unwrap();
-        csv.build(&doc, |_, _, _| true).unwrap();
+        csv.build_reserved(&doc, |_, _, _| true, Reservation::none()).unwrap();
         (path, doc, csv)
     }
     #[test]
@@ -743,7 +712,7 @@ mod tests {
     fn tiny_cells_and_escaped_controls_obey_all_page_bounds() {
         let data = ("a,".repeat(5000) + "end\n").repeat(3);
         let (_path, doc, csv) = csv(data.as_bytes(), b',');
-        let p = csv.page(&doc, 0, 128, 4900, 128).unwrap();
+        let p = csv.ordered_page(&doc, 0, 128, 4900, 128, None).unwrap();
         let mut cells = 0;
         let mut units = 0;
         let mut wire = 1024;
@@ -784,9 +753,9 @@ mod tests {
     fn header_is_a_projection_and_utf16_cannot_be_reinterpreted_into_grid() {
         let (_path, doc, base) = csv(b"name,value\nann,1", b',');
         let header = Csv::new(&doc, 1, 2, Options { delimiter: None, header: Some(true) }, UTF_8).unwrap();
-        header.build(&doc, |_, _, _| true).unwrap();
-        assert_eq!(base.page(&doc, 0, 1, 0, 1).unwrap().rows[0].info.record, 0);
-        assert_eq!(header.page(&doc, 0, 1, 0, 1).unwrap().rows[0].info.record, 1);
+        header.build_reserved(&doc, |_, _, _| true, Reservation::none()).unwrap();
+        assert_eq!(base.ordered_page(&doc, 0, 1, 0, 1, None).unwrap().rows[0].info.record, 0);
+        assert_eq!(header.ordered_page(&doc, 0, 1, 0, 1, None).unwrap().rows[0].info.record, 1);
         let (_path2, doc2, _) = csv(b"\xff\xfea\0,\0b\0", b',');
         assert!(Csv::new(&doc2, 1, 1, Options { delimiter: Some(b','), header: None }, UTF_8).unwrap().locked);
     }
@@ -1044,7 +1013,7 @@ mod interaction_tests {
         let file = temp_file("csv-sort", b"name,rank\na,10\nb,2\nc,2\n");
         let doc = Document::open(&file).unwrap();
         let csv = Csv::new(&doc, 1, 1, Options { delimiter: Some(b','), header: Some(true) }, UTF_8).unwrap();
-        csv.build(&doc, |_, _, _| true).unwrap();
+        csv.build_reserved(&doc, |_, _, _| true, Reservation::none()).unwrap();
         let order = csv.order(&doc, 1, 1).unwrap();
         assert_eq!((0..3).map(|r| order.source(r).unwrap()).collect::<Vec<_>>(), vec![2, 3, 1]);
         assert_eq!(order.locate(1), Some(2));
@@ -1081,6 +1050,21 @@ struct GridCursor {
     counts: Vec<u64>,
     complete: bool,
 }
+impl GridCursor {
+    fn new(csv: &Csv, pattern: &crate::find::Pattern, rows: u64) -> Self {
+        let scan = csv.index.read().unwrap().checkpoints[0].clone();
+        GridCursor {
+            pending_start: scan.field_start,
+            scan,
+            matcher: crate::find::Matcher::new(pattern),
+            pending: Vec::new(),
+            positions: Vec::new(),
+            count: 0,
+            counts: vec![0; rows as usize],
+            complete: false,
+        }
+    }
+}
 pub struct GridProgress {
     pub count: u64,
     pub bytes: u64,
@@ -1102,18 +1086,7 @@ impl GridFind {
         )
         .map_err(DocError::Memory)?;
         let pattern = crate::find::Pattern::new(query, match_case)?;
-        let scan = csv.index.read().unwrap().checkpoints[0].clone();
-        let matcher = crate::find::Matcher::new(&pattern);
-        let cursor = GridCursor {
-            pending_start: scan.field_start,
-            scan,
-            matcher,
-            pending: Vec::new(),
-            positions: Vec::new(),
-            count: 0,
-            counts: vec![0; order.rows as usize],
-            complete: false,
-        };
+        let cursor = GridCursor::new(csv, &pattern, order.rows);
         Ok(Self {
             pattern,
             order,
@@ -1243,17 +1216,7 @@ impl GridFind {
         previous: bool,
     ) -> Result<(Option<GridHit>, bool, Option<u64>), DocError> {
         let _temp = Reservation::new(TEMP_BYTES + self.order.rows * 8).map_err(DocError::Memory)?;
-        let scan = csv.index.read().unwrap().checkpoints[0].clone();
-        let mut c = GridCursor {
-            pending_start: scan.field_start,
-            scan,
-            matcher: crate::find::Matcher::new(&self.pattern),
-            pending: Vec::new(),
-            positions: Vec::new(),
-            count: 0,
-            counts: vec![0; self.order.rows as usize],
-            complete: false,
-        };
+        let mut c = GridCursor::new(csv, &self.pattern, self.order.rows);
         let (mut first, mut last, mut chosen): (Option<GridHit>, Option<GridHit>, Option<GridHit>) = (None, None, None);
         while !c.complete {
             self.step(csv, doc, &mut c, crate::find::SCAN_BYTES, |h| {
@@ -1296,7 +1259,7 @@ mod grid_find_tests {
         let file = temp_file("grid-find", &data);
         let doc = Document::open(&file).unwrap();
         let csv = Csv::new(&doc, 1, 1, Options { delimiter: Some(b','), header: Some(true) }, UTF_8).unwrap();
-        csv.build(&doc, |_, _, _| true).unwrap();
+        csv.build_reserved(&doc, |_, _, _| true, Reservation::none()).unwrap();
         let order = Arc::new(csv.order(&doc, 1, 1).unwrap());
         let search = GridFind::new(&csv, order, "école", false).unwrap();
         let p = search.scan(&csv, &doc).unwrap();

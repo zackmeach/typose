@@ -13,15 +13,12 @@ pub fn set_encoding_fallback(utf8: bool) {
 
 use crate::budget::{self, NoSlot, Reservation, Work};
 use crate::doc::{Charges, DocError, Document};
-use crate::encoding::{Sniffed, sniff};
+use crate::encoding::{Sniffed, bom_len, sniff};
 use crate::index::{IndexConfig, LineIndex, Progress, build};
 use crate::local::LocalRoute;
 use crate::md;
 use crate::pages::{self, Caps, LinePiece, MAX_PATH_BYTES};
-use crate::store::{CHUNK, cancelled};
-
-/// The chunk cache's size: 64 MiB, `Document::open`'s.
-const CACHE_CHUNKS: usize = 64;
+use crate::store::{CACHE_CHUNKS, CHUNK, cancelled};
 
 /// Plan C1: an open's own temporaries, reserved while it runs. The head it sniffs, and the chunk read for it on its way
 /// into the cache; a single-byte decode of that head for the blank check (3 bytes per byte at most); the path's copies.
@@ -234,10 +231,7 @@ impl Raw {
 
 /// Whether `head`, a whole file, holds only whitespace after its BOM.
 fn whitespace_only(head: &[u8], encoding: &'static Encoding) -> bool {
-    let bom = match Encoding::for_bom(head) {
-        Some((e, n)) if e == encoding => n,
-        _ => 0,
-    };
+    let bom = bom_len(head, encoding);
     encoding.decode_without_bom_handling(&head[bom..]).0.chars().all(char::is_whitespace)
 }
 

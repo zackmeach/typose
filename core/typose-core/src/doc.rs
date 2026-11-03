@@ -8,7 +8,7 @@ use std::time::SystemTime;
 
 use crate::budget::{OverBudget, Reservation};
 use crate::local::{LocalError, LocalRoute};
-use crate::store::{ByteStore, NotRegular, StoreError, refusal, route_refusal};
+use crate::store::{ByteStore, CACHE_CHUNKS, NotRegular, StoreError, refusal, route_refusal};
 
 thread_local! {
     /// The document whose identity check `Document::batch` holds to the end of its page, on this thread.
@@ -125,7 +125,7 @@ fn io_error(e: io::Error) -> DocError {
     }
 }
 
-fn local_error(e: LocalError) -> DocError {
+pub(crate) fn local_error(e: LocalError) -> DocError {
     match e {
         LocalError::Refused(why) => DocError::Refused(why.into()),
         LocalError::Io(e) => io_error(e),
@@ -183,7 +183,7 @@ pub struct Document {
 
 impl Document {
     pub fn open(path: &Path) -> Result<Document, DocError> {
-        Self::open_with(path, 64, 1)
+        Self::open_with(path, CACHE_CHUNKS, 1)
     }
 
     pub fn open_with(path: &Path, cache_chunks: usize, generation: u32) -> Result<Document, DocError> {
@@ -378,44 +378,20 @@ impl Document {
 
     /// Resolve a decoded local target without opening it. Only the source route is checked for mutation.
     pub fn local_path(&self, generation: u32, target: &str) -> Result<LocalRoute, DocError> {
-        self.local_target(generation, target)
-    }
-
-    /// An image target uses only this held capability. The codec, not a pathname extension, identifies its format.
-    pub(crate) fn image_route(&self, generation: u32, target: &str) -> Result<LocalRoute, DocError> {
-        if generation != self.generation {
-            return Err(DocError::Stale { current: self.generation, asked: generation });
-        }
-        if !crate::md::is_markdown(&self.path) {
-            return Err(DocError::Refused("local images require a Markdown source".into()));
-        }
-        if target.is_empty() || target.len() > 32 << 10 || target.chars().any(char::is_control) {
-            return Err(DocError::Invalid(
-                "image target must be a decoded path of at most 32 KiB, without controls".into(),
-            ));
-        }
-        let source = self.local.as_ref().ok_or_else(|| {
-            DocError::Refused("local images are unavailable for this source; select it manually again".into())
-        })?;
-        let route = source.resolve(target).map_err(local_error)?;
-        self.check_local_source(generation)?;
-        Ok(route)
+        self.link_target(generation, target, true)
     }
 
     pub fn open_local(&self, generation: u32, target: &str) -> Result<Document, DocError> {
-        let route = self.local_target(generation, target)?;
+        let route = self.link_target(generation, target, true)?;
         let next = Self::from_local(route, self.cache_chunks, 1).map_err(local_target_error)?;
         self.check_local_source(generation)?;
         Ok(next)
     }
 
-    /// Any extension: the hand-off sheet shows where a program or script is, and nothing here opens it.
+    /// Any extension: the hand-off sheet shows where a program or script is, and an image's codec, not its extension,
+    /// identifies its format. Nothing here opens the target.
     pub fn link_path(&self, generation: u32, target: &str) -> Result<LocalRoute, DocError> {
         self.link_target(generation, target, false)
-    }
-
-    fn local_target(&self, generation: u32, target: &str) -> Result<LocalRoute, DocError> {
-        self.link_target(generation, target, true)
     }
 
     fn link_target(&self, generation: u32, target: &str, supported_only: bool) -> Result<LocalRoute, DocError> {
@@ -448,7 +424,8 @@ impl Document {
         Ok(route)
     }
 
-    pub(crate) fn check_local_source(&self, generation: u32) -> Result<(), DocError> {
+    /// No pathname fallback. Image resources also check it before returning canonical chunks.
+    pub fn check_local_source(&self, generation: u32) -> Result<(), DocError> {
         self.checked_local_file(generation).map(drop)
     }
 

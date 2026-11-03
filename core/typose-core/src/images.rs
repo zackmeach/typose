@@ -270,7 +270,7 @@ fn encode_pixels_with(
     Ok(CanonicalImage { bytes: sink.bytes, width: pixels.width, height: pixels.height, resource: sink.resource })
 }
 
-// Reviewed against png =0.18.1, fdeflate =0.3.7, gif =0.14.2, weezl =0.1.10.
+// Reviewed against png =0.18.1, fdeflate =0.3.7, gif =0.14.2, weezl =0.1.10, crc32fast =1.5.3.
 // Caller owns and has charged `source`; no source copy is made here.
 
 struct PngPreflight {
@@ -284,31 +284,6 @@ struct PngPreflight {
 
 fn image_png_be32(bytes: &[u8]) -> u32 {
     u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
-}
-
-fn image_png_crc(bytes: &[u8]) -> u32 {
-    // Fixed table generated at compile time; validation does not allocate.
-    const fn table() -> [u32; 256] {
-        let mut out = [0; 256];
-        let mut i = 0;
-        while i < 256 {
-            let mut value = i as u32;
-            let mut bit = 0;
-            while bit < 8 {
-                value = (value >> 1) ^ (0xedb8_8320 & (0_u32.wrapping_sub(value & 1)));
-                bit += 1;
-            }
-            out[i] = value;
-            i += 1;
-        }
-        out
-    }
-    const TABLE: [u32; 256] = table();
-    let mut crc = u32::MAX;
-    for byte in bytes {
-        crc = (crc >> 8) ^ TABLE[((crc ^ u32::from(*byte)) & 255) as usize];
-    }
-    !crc
 }
 
 fn image_png_preflight(source: &[u8], cancel: &AtomicBool) -> Result<PngPreflight, ImageError> {
@@ -330,7 +305,7 @@ fn image_png_preflight(source: &[u8], cancel: &AtomicBool) -> Result<PngPrefligh
         let chunk_end = data_end.checked_add(4).ok_or(ImageError::Refused("invalid PNG length"))?;
         let data = source.get(header_end..data_end).ok_or(ImageError::Refused("truncated PNG chunk"))?;
         let crc = source.get(data_end..chunk_end).ok_or(ImageError::Refused("truncated PNG checksum"))?;
-        if image_png_crc(&source[position + 4..data_end]) != image_png_be32(crc) {
+        if crc32fast::hash(&source[position + 4..data_end]) != image_png_be32(crc) {
             return Err(ImageError::Refused("invalid PNG checksum"));
         }
         let kind = &header[4..8];
@@ -899,7 +874,7 @@ mod png_gif_tests {
         let crc_start = bytes.len();
         bytes.extend_from_slice(kind);
         bytes.extend_from_slice(data);
-        let crc = image_png_crc(&bytes[crc_start..]);
+        let crc = crc32fast::hash(&bytes[crc_start..]);
         bytes.extend_from_slice(&crc.to_be_bytes());
     }
 
@@ -916,7 +891,7 @@ mod png_gif_tests {
     fn png_repair_crc(bytes: &mut [u8], chunk_start: usize) {
         let length = image_png_be32(&bytes[chunk_start..chunk_start + 4]) as usize;
         let end = chunk_start + 8 + length;
-        let crc = image_png_crc(&bytes[chunk_start + 4..end]);
+        let crc = crc32fast::hash(&bytes[chunk_start + 4..end]);
         bytes[end..end + 4].copy_from_slice(&crc.to_be_bytes());
     }
 

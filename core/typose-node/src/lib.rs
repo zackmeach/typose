@@ -87,7 +87,7 @@ fn int(field: &str, x: f64) -> std::result::Result<u64, Error<Code>> {
 
 #[napi]
 pub fn core_version() -> String {
-    typose_core::version().to_string()
+    env!("CARGO_PKG_VERSION").to_string() // the workspace version, typose-core's too
 }
 
 /// Whether `path` reaches a network share, judged without opening anything (`store::network`).
@@ -484,7 +484,7 @@ impl Task for PrepareImage {
             if self.cancel.load(Ordering::Relaxed) {
                 return Err(DocError::Cancelled);
             }
-            image_resource::check_source(self.raw.document(), self.generation)?;
+            self.raw.document().check_local_source(self.generation)?;
             self.pending.publish(image)
         });
         match output {
@@ -523,9 +523,9 @@ impl Task for ImageChunk {
                 NoSlot::Cancelled => DocError::Cancelled,
                 NoSlot::Budget(error) => DocError::Memory(error),
             })?);
-            image_resource::check_source(self.raw.document(), self.generation)?;
+            self.raw.document().check_local_source(self.generation)?;
             let bytes = self.state.chunk(self.id, self.offset)?;
-            image_resource::check_source(self.raw.document(), self.generation)?;
+            self.raw.document().check_local_source(self.generation)?;
             Ok(bytes)
         }))
     }
@@ -535,7 +535,7 @@ impl Task for ImageChunk {
             if self.cancel.load(Ordering::Relaxed) || !self.state.contains(self.id) {
                 return Err(DocError::Cancelled);
             }
-            image_resource::check_source(self.raw.document(), self.generation)?;
+            self.raw.document().check_local_source(self.generation)?;
             Ok(bytes)
         });
         match output {
@@ -880,7 +880,7 @@ impl Doc {
         Ok((raw, generation))
     }
 
-    // The host has parsed src exactly once. Native still validates the decoded target through image_route.
+    // The host has parsed src exactly once. Native still validates the decoded target through link_path.
     #[napi(ts_return_type = "Promise<ImagePrepared>")]
     pub fn prepare_image(
         &mut self,

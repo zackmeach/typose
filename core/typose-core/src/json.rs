@@ -4,7 +4,6 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use memchr::{memchr, memchr_iter, memchr2, memrchr};
 use xxhash_rust::xxh3::{Xxh3, xxh3_128};
@@ -32,8 +31,6 @@ pub enum Kind {
     Null,
 }
 
-pub const NO_PARENT: u32 = u32::MAX;
-
 /// One object or array: 32 bytes, so the index costs 32 bytes per container (spec §3.5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Container {
@@ -41,7 +38,6 @@ pub struct Container {
     /// One past the closing bracket; 0 while unclosed (the scan stopped inside it).
     pub end: u64,
     pub children: u64,
-    pub parent: u32,
     pub kind: Kind,
 }
 
@@ -65,9 +61,9 @@ pub struct Trivia {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
     Syntax(&'static str),
-    /// Nesting deeper than `ScanOptions::max_depth`.
+    /// Nesting deeper than `MAX_DEPTH`.
     TooDeep,
-    /// More containers than `ScanOptions::max_containers`, the memory budget's share (spec §3.6).
+    /// More containers than `MAX_CONTAINERS`.
     TooManyContainers,
     Cancelled,
     Memory(OverBudget),
@@ -83,36 +79,18 @@ pub struct ScanError {
     pub column: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct ScanOptions {
-    /// Accept `//` and `/* */` comments, trailing commas and `NaN`/`Infinity` (`.json` falls back to JSONC, spec §4.1).
-    pub jsonc: bool,
-    /// Deeper nesting stops the scan with `TooDeep`. At 10,000 the index and stack hold about 560 KB.
-    pub max_depth: usize,
-    /// More containers stop the scan with `TooManyContainers`. Size it from the memory budget (spec §3.6) at
-    /// 32 bytes per container: the records are paged, so growth adds at most one 2 MiB page.
-    pub max_containers: usize,
-    /// An element checkpoint every `cp_children` children or `cp_bytes` bytes, whichever comes first (spec §3.5).
-    pub cp_children: u64,
-    pub cp_bytes: u64,
-    /// Bytes per step. Cancellation is checked before every step, and enumeration reads this much at a time.
-    pub window: usize,
-}
+/// Deeper nesting stops the scan with `TooDeep`. At 10,000 the index and stack hold about 560 KB.
+const MAX_DEPTH: usize = 10_000;
+/// More containers stop the scan with `TooManyContainers`. The records are charged to the memory budget (spec §3.6)
+/// and paged at 32 bytes per container, so growth adds at most one 128 KiB page.
+const MAX_CONTAINERS: usize = u32::MAX as usize;
+/// An element checkpoint every `CP_CHILDREN` children or `CP_BYTES` bytes, whichever comes first (spec §3.5).
+const CP_CHILDREN: u64 = 1024;
+const CP_BYTES: u64 = 1 << 20;
+/// Bytes per step. Cancellation is checked before every step, and enumeration reads this much at a time.
+const WINDOW: usize = 64 << 10;
 
-impl Default for ScanOptions {
-    fn default() -> Self {
-        ScanOptions {
-            jsonc: true,
-            max_depth: 10_000,
-            max_containers: NO_PARENT as usize,
-            cp_children: 1024,
-            cp_bytes: 1 << 20,
-            window: 64 << 10,
-        }
-    }
-}
-
-/// A vector kept in pages of 65,536 elements, so growing it never moves more than one page. A plain `Vec`
+/// A vector kept in pages of 4,096 elements, so growing it never moves more than one page. A plain `Vec`
 /// doubling past 2^24 containers copied 537 MB in one push and held off cancellation for up to 88 ms.
 #[derive(Debug)]
 pub struct Paged<T> {
@@ -122,7 +100,7 @@ pub struct Paged<T> {
 }
 
 const PAGE: usize = 4096;
-fn room<T>(values: &mut Vec<T>, charge: &mut Reservation) -> Result<(), OverBudget> {
+pub(crate) fn room<T>(values: &mut Vec<T>, charge: &mut Reservation) -> Result<(), OverBudget> {
     if values.len() == values.capacity() {
         let old = values.capacity();
         let next = old.max(32) * 2;
@@ -166,11 +144,6 @@ impl<T> Paged<T> {
         self.len += 1;
         Ok(())
     }
-
-    fn heap_bytes(&self) -> usize {
-        self.pages.iter().map(Vec::capacity).sum::<usize>() * size_of::<T>()
-            + self.pages.capacity() * size_of::<Vec<T>>()
-    }
 }
 
 impl<T> std::ops::Index<usize> for Paged<T> {
@@ -199,7 +172,6 @@ pub struct JsonIndex {
     pub long_scalars: Vec<Span>,
     pub trivia: Trivia,
     pub error: Option<ScanError>,
-    pub window: usize,
     allocation_error: Option<OverBudget>,
     charge: Reservation,
 }
@@ -221,12 +193,6 @@ impl JsonIndex {
     pub fn charged(&self) -> u64 {
         self.charge.bytes() + self.containers.charge.bytes()
     }
-    /// Resident size of the index (the scanner's own stack is freed when the scan returns).
-    pub fn heap_bytes(&self) -> usize {
-        self.containers.heap_bytes()
-            + self.checkpoints.capacity() * size_of::<ElementCheckpoint>()
-            + self.long_scalars.capacity() * size_of::<Span>()
-    }
 
     /// Enumeration never reads past this: the error offset, or the end of the range.
     fn stop(&self) -> u64 {
@@ -241,26 +207,23 @@ impl JsonIndex {
 }
 
 /// Builds the container index for `range` of the store (the whole file, or one JSONL record).
-/// Syntax, depth, budget and cancel errors land in `JsonIndex::error`, with everything before them kept.
-pub fn scan(
-    store: &ByteStore,
-    range: Range<u64>,
-    opts: &ScanOptions,
-    cancel: &AtomicBool,
-) -> Result<JsonIndex, StoreError> {
+/// Syntax, depth, budget and cancel (`store::cancellable`) errors land in `JsonIndex::error`, with everything before
+/// them kept. `jsonc` accepts `//` and `/* */` comments, trailing commas and `NaN`/`Infinity` (`.json` falls back to
+/// JSONC, spec §4.1).
+pub fn scan(store: &ByteStore, range: Range<u64>, jsonc: bool) -> Result<JsonIndex, StoreError> {
     let end = range.end.min(store.len());
     let mut start = range.start.min(end);
     if start == 0 && store.read(0, end.min(3))? == b"\xEF\xBB\xBF" {
         start = 3; // a UTF-8 BOM at the file's start (spec §4.1): the document starts after it
     }
-    let mut s = Scanner::new(opts, Span { start, end });
+    let mut s = Scanner::new(jsonc, Span { start, end });
     let mut pos = start;
     let stopped = 'scan: {
         while pos < end {
-            if cancel.load(Ordering::Relaxed) || crate::store::cancelled() {
+            if crate::store::cancelled() {
                 break 'scan Some((ErrorKind::Cancelled, pos));
             }
-            let bytes = store.read(pos, (pos + opts.window.clamp(1, 65536) as u64).min(end))?;
+            let bytes = store.read(pos, (pos + WINDOW as u64).min(end))?;
             if bytes.is_empty() {
                 break;
             }
@@ -277,8 +240,7 @@ pub fn scan(
     };
     if let Some((kind, offset)) = stopped {
         s.on_error();
-        let (line, column) =
-            if kind == ErrorKind::Cancelled { (0, 0) } else { line_col(store, start, offset, opts, cancel)? };
+        let (line, column) = if kind == ErrorKind::Cancelled { (0, 0) } else { line_col(store, start, offset)? };
         s.idx.error = Some(ScanError { kind, offset, line, column });
     }
     let mut idx = s.idx;
@@ -322,17 +284,12 @@ pub fn children(
 /// `None` if cancelled (checked every 1,024 members). Runs over the whole object once; the Tree calls it when
 /// the object is first expanded. While it runs it holds a pre-sized set of 128-bit key hashes: 17–34 bytes
 /// per member (136 MB for a 5M-key object).
-pub fn duplicate_keys(
-    store: &ByteStore,
-    index: &JsonIndex,
-    container: u32,
-    cancel: &AtomicBool,
-) -> Result<Option<Vec<u64>>, StoreError> {
+pub fn duplicate_keys(store: &ByteStore, index: &JsonIndex, container: u32) -> Result<Option<Vec<u64>>, StoreError> {
     let members = index.containers.get(container as usize).filter(|c| c.kind == Kind::Object).map_or(0, |c| c.children);
     let (mut seen, mut dups, mut ordinal) = (HashSet::with_capacity(members as usize), Vec::new(), 0u64);
     let mut cancelled = false;
     walk(store, index, container, 0, |cur, child| {
-        if ordinal % 1024 == 0 && cancel.load(Ordering::Relaxed) {
+        if ordinal % 1024 == 0 && crate::store::cancelled() {
             cancelled = true;
             return Ok(false);
         }
@@ -411,9 +368,9 @@ struct Frame {
 
 type Stop = (ErrorKind, u64);
 
-/// Push scanner: no recursion, so file-controlled depth only grows `stack`, which `max_depth` caps.
-struct Scanner<'o> {
-    o: &'o ScanOptions,
+/// Push scanner: no recursion, so file-controlled depth only grows `stack`, which `MAX_DEPTH` caps.
+struct Scanner {
+    jsonc: bool,
     idx: JsonIndex,
     stack: Vec<Frame>,
     expect: Expect,
@@ -438,8 +395,8 @@ fn num_next(n: Num, b: u8) -> Option<Num> {
     }
 }
 
-impl<'o> Scanner<'o> {
-    fn new(o: &'o ScanOptions, range: Span) -> Self {
+impl Scanner {
+    fn new(jsonc: bool, range: Span) -> Self {
         let idx = JsonIndex {
             range,
             root: None,
@@ -448,12 +405,11 @@ impl<'o> Scanner<'o> {
             long_scalars: Vec::new(),
             trivia: Trivia::default(),
             error: None,
-            window: o.window.max(1),
             allocation_error: None,
             charge: Reservation::none(),
         };
         Scanner {
-            o,
+            jsonc,
             idx,
             stack: Vec::new(),
             expect: Expect::Root,
@@ -509,7 +465,7 @@ impl<'o> Scanner<'o> {
                     self.lex = if left == 1 { Lex::Str } else { Lex::Hex(left - 1) };
                     i += 1;
                 }
-                Lex::Num(Num::Minus) if buf[i] == b'I' && self.o.jsonc => {
+                Lex::Num(Num::Minus) if buf[i] == b'I' && self.jsonc => {
                     self.idx.trivia.nonfinite += 1;
                     self.lex = Lex::Word(b"Infinity", 1);
                     i += 1;
@@ -593,7 +549,7 @@ impl<'o> Scanner<'o> {
             b't' => self.value(at, Lex::Word(b"true", 1), Kind::True),
             b'f' => self.value(at, Lex::Word(b"false", 1), Kind::False),
             b'n' => self.value(at, Lex::Word(b"null", 1), Kind::Null),
-            b'N' | b'I' if self.o.jsonc => {
+            b'N' | b'I' if self.jsonc => {
                 let word: &'static [u8] = if b == b'N' { b"NaN" } else { b"Infinity" };
                 self.value(at, Lex::Word(word, 1), Kind::Number)?;
                 self.idx.trivia.nonfinite += 1;
@@ -608,7 +564,7 @@ impl<'o> Scanner<'o> {
                 Ok(())
             }
             b']' | b'}' => self.close(b, at),
-            b'/' if self.o.jsonc => {
+            b'/' if self.jsonc => {
                 (self.tok, self.lex) = (at, Lex::Slash);
                 Ok(())
             }
@@ -640,7 +596,7 @@ impl<'o> Scanner<'o> {
         let c = &mut self.idx.containers[f.id as usize];
         let k = c.children;
         c.children += 1;
-        if k - f.cp_child >= self.o.cp_children || at - f.cp_offset >= self.o.cp_bytes {
+        if k - f.cp_child >= CP_CHILDREN || at - f.cp_offset >= CP_BYTES {
             if let Err(e) = room(&mut self.idx.checkpoints, &mut self.idx.charge) {
                 self.idx.allocation_error = Some(e);
                 return;
@@ -651,21 +607,20 @@ impl<'o> Scanner<'o> {
     }
 
     fn open(&mut self, b: u8, at: u64) -> Result<(), Stop> {
-        if self.stack.len() >= self.o.max_depth {
+        if self.stack.len() >= MAX_DEPTH {
             return Err((ErrorKind::TooDeep, at));
         }
-        if self.idx.containers.len() >= self.o.max_containers.min(NO_PARENT as usize) {
+        if self.idx.containers.len() >= MAX_CONTAINERS {
             return Err((ErrorKind::TooManyContainers, at));
         }
         let kind = if b == b'{' { Kind::Object } else { Kind::Array };
         let id = self.idx.containers.len() as u32;
-        let parent = self.stack.last().map_or(NO_PARENT, |f| f.id);
         if self.stack.is_empty() {
             self.idx.root = Some((kind, Span { start: at, end: 0 }));
         }
         self.idx
             .containers
-            .push(Container { start: at, end: 0, children: 0, parent, kind })
+            .push(Container { start: at, end: 0, children: 0, kind })
             .map_err(|e| (ErrorKind::Memory(e), at))?;
         self.stack.push(Frame { id, cp_child: 0, cp_offset: at });
         self.expect = if kind == Kind::Object { Expect::ObjFirst } else { Expect::ArrFirst };
@@ -679,7 +634,7 @@ impl<'o> Scanner<'o> {
             Expect::After => self.top_kind() == Some(kind),
             Expect::ArrFirst => kind == Kind::Array,
             Expect::ObjFirst => kind == Kind::Object,
-            Expect::ArrNext | Expect::ObjNext if self.o.jsonc && self.top_kind() == Some(kind) => {
+            Expect::ArrNext | Expect::ObjNext if self.jsonc && self.top_kind() == Some(kind) => {
                 self.idx.trivia.trailing_commas += 1;
                 true
             }
@@ -777,19 +732,13 @@ impl<'o> Scanner<'o> {
 }
 
 /// 1-based line and character column of `offset`, counted from `from`; (0, 0) if cancelled first.
-fn line_col(
-    store: &ByteStore,
-    from: u64,
-    offset: u64,
-    opts: &ScanOptions,
-    cancel: &AtomicBool,
-) -> Result<(u64, u64), StoreError> {
+fn line_col(store: &ByteStore, from: u64, offset: u64) -> Result<(u64, u64), StoreError> {
     let (mut line, mut column, mut pos) = (1u64, 1u64, from);
     while pos < offset {
-        if cancel.load(Ordering::Relaxed) {
+        if crate::store::cancelled() {
             return Ok((0, 0));
         }
-        let bytes = store.read(pos, offset.min(pos + opts.window.max(1) as u64))?;
+        let bytes = store.read(pos, offset.min(pos + WINDOW as u64))?;
         if bytes.is_empty() {
             break;
         }
@@ -807,12 +756,11 @@ fn line_col(
     Ok((line, column))
 }
 
-/// Pull reader for enumeration: `[pos, end)` through the store, `window` bytes at a time.
+/// Pull reader for enumeration: `[pos, end)` through the store, `WINDOW` bytes at a time.
 struct Cursor<'s> {
     store: &'s ByteStore,
     pos: u64,
     end: u64,
-    window: usize,
     buf: Vec<u8>,
     buf_start: u64,
 }
@@ -821,7 +769,7 @@ impl Cursor<'_> {
     /// The buffered bytes from `pos` on, refilled when used up; empty at `end`.
     fn rest(&mut self) -> Result<&[u8], StoreError> {
         if self.pos < self.buf_start || self.pos >= self.buf_start + self.buf.len() as u64 {
-            self.buf = self.store.read(self.pos, self.end.min(self.pos + self.window as u64))?;
+            self.buf = self.store.read(self.pos, self.end.min(self.pos + WINDOW as u64))?;
             self.buf_start = self.pos;
         }
         Ok(&self.buf[(self.pos - self.buf_start) as usize..])
@@ -941,7 +889,7 @@ fn walk(
         i => (cps[i - 1].child, cps[i - 1].offset),
     };
     let stop = if c.end > 0 { c.end.min(index.stop()) } else { index.stop() }; // never read past the container
-    let mut cur = Cursor { store, pos: from, end: stop, window: index.window, buf: Vec::new(), buf_start: from };
+    let mut cur = Cursor { store, pos: from, end: stop, buf: Vec::new(), buf_start: from };
     while ordinal < c.children {
         let key = match c.kind {
             Kind::Object => {
