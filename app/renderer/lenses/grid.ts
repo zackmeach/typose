@@ -300,18 +300,12 @@ export class GridLens {
     if (this.opened.view) {
       void this.core.call('csvOrderClose', { view: this.opened.view, order: this.order ?? { csv: this.info.ref, id: 0 }, interactionId: this.interactionId }).catch(() => {})
     }
-    this.cancelCopy()
-    this.cancelInspector()
-    this.closeContextMenu(false)
-    this.closeFind()
     this.freeze()
     this.observer.disconnect()
-    this.inspector?.remove()
     this.element.remove()
     this.status.remove()
     this.findExcerpt.remove()
     this.actionsButton.remove()
-    this.closeContextMenu(false)
     this.cells.clear(); this.rows.clear(); this.columns.clear(); this.mounted.clear(); this.rowElements.clear(); this.headerElements.clear()
     if (release) {
       if (this.options.budget) void this.options.budget.reserveGrid(this.opened.gen, 0)
