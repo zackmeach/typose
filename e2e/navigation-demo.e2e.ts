@@ -4,7 +4,7 @@ import { expect, type Locator, type Page } from '@playwright/test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { FIXTURES, test, visibleRows, waitIndexed, waitOpen } from './app'
-import { closePackaged, launchPackaged, unrequested } from './packaged'
+import { closeCleanly, closePackaged, launchPackaged } from './packaged'
 import { armPlaceProbe, readPlaceProbe } from './place-probe'
 
 const ready = (scope: Page | Locator) =>
@@ -13,12 +13,6 @@ const ready = (scope: Page | Locator) =>
 function demoDirectory(prefix: string): string {
   mkdirSync(FIXTURES, { recursive: true })
   return mkdtempSync(join(FIXTURES, `${prefix}-`))
-}
-
-async function closeCleanly(l: Awaited<ReturnType<typeof launchPackaged>>): Promise<void> {
-  const exit = await closePackaged(l)
-  expect(exit).toEqual({ code: 0, signal: null })
-  expect(unrequested(l, exit)).toEqual([])
 }
 
 async function openMenuItem(win: Page, name: string): Promise<void> {

@@ -1,16 +1,10 @@
 // Bounded packaged CSV preview workflows. These are demo smokes, not the parser's native/unit qualification.
 import { expect, type Page } from '@playwright/test'
 import { fixture, test } from './app'
-import { closePackaged, launchPackaged, unrequested } from './packaged'
+import { closeCleanly, closePackaged, launchPackaged } from './packaged'
 
 const grid = (page: Page) => page.getByRole('grid', { name: 'CSV grid', exact: true })
 const gridReady = (page: Page) => expect(grid(page)).toHaveAttribute('data-ready', '1', { timeout: 30_000 })
-
-async function closeCleanly(live: Awaited<ReturnType<typeof launchPackaged>>): Promise<void> {
-  const exit = await closePackaged(live)
-  expect(exit).toEqual({ code: 0, signal: null })
-  expect(unrequested(live, exit)).toEqual([])
-}
 
 function quotedRaggedCsv(): string {
   return [

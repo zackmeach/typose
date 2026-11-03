@@ -4,7 +4,7 @@ import { expect, type ElementHandle, type Locator, type Page } from '@playwright
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { debugStats, finish, fixture, FIXTURES, launch, test, waitIndexed } from './app'
-import { closePackaged, launchPackaged, unrequested } from './packaged'
+import { closeCleanly, closePackaged, launchPackaged } from './packaged'
 
 function makeLinkFixtures(sourceName: string, destinationName: string): { source: string; destination: string } {
   const anchor = 'Source place remains visible'
@@ -215,9 +215,7 @@ test('production package opens a relative tasks.csv as a Grid peek and to the si
     await expect(tabGrid.getByRole('gridcell').filter({ hasText: 'Write the brief' })).toBeVisible()
     expect(rendererErrors).toEqual([])
     expect(rendererCrashed).toBe(false)
-    const exit = await closePackaged(live)
-    expect(exit).toEqual({ code: 0, signal: null })
-    expect(unrequested(live, exit)).toEqual([])
+    await closeCleanly(live)
     live = undefined
   } finally {
     if (live) await closePackaged(live).catch(() => {})

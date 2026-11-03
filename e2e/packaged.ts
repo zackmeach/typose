@@ -2,7 +2,7 @@
 // inspector, which the fuse turns off. So the executable is spawned directly, with a private --user-data-dir, and
 // with `cdp` it gets --remote-debugging-port=0 and is attached with connectOverCDP. Startup marks come from the
 // read-only TYPOSE_MARKS hook, so a launch without `cdp` passes no debugging switch at all (a cold launch).
-import { type Browser, type Page, chromium } from '@playwright/test'
+import { type Browser, type Page, chromium, expect } from '@playwright/test'
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -167,4 +167,11 @@ export function unrequested(l: PackagedLaunch, exit: Exit): string[] {
     else if (r.event === 'utility-exit' && !quitting) problems.push(`pid ${l.pid}: the core host exited before the quit: ${line}`)
   }
   return problems
+}
+
+/** Closes the launch and expects a clean quit: exit 0 and nothing unrequested. */
+export async function closeCleanly(l: PackagedLaunch): Promise<void> {
+  const exit = await closePackaged(l)
+  expect(exit).toEqual({ code: 0, signal: null })
+  expect(unrequested(l, exit)).toEqual([])
 }

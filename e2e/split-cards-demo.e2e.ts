@@ -2,7 +2,7 @@
 // confirms that the visible Raw/Rendered split and card merge work without test hooks.
 import { expect, type Locator } from '@playwright/test'
 import { fixture, finish, launch, debugStats, stubOpenDialog, test } from './app'
-import { closePackaged, launchPackaged, unrequested } from './packaged'
+import { closeCleanly, closePackaged, launchPackaged } from './packaged'
 
 /** By its shortcut, as Reload and Open file… are below: macOS has the native menu, not the ☰. */
 async function splitRight(win: Awaited<ReturnType<typeof launch>>['win']): Promise<void> {
@@ -152,8 +152,7 @@ test('production package displays both lenses in split cards and merges the clos
     await expect(win.getByRole('region', { name: 'Reader card 2', exact: true })).toHaveCount(0)
     await expect(left.getByRole('tab', { name: /split-package-source\.md/ })).toHaveCount(2)
     await expect(left.getByText('Split source anchor stays visible', { exact: true })).toBeInViewport()
-    await closePackaged(live).then((exit) => expect(exit).toEqual({ code: 0, signal: null }))
-    expect(unrequested(live, await live.exited)).toEqual([])
+    await closeCleanly(live)
     live = undefined
   } finally {
     if (live) await closePackaged(live).catch(() => {})
