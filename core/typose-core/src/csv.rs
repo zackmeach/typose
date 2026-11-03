@@ -564,16 +564,6 @@ impl Csv {
             _charge: None,
         })
     }
-    pub fn page(
-        &self,
-        doc: &Document,
-        row_start: u64,
-        row_count: usize,
-        column_start: u64,
-        column_count: usize,
-    ) -> Result<Page, DocError> {
-        self.ordered_page(doc, row_start, row_count, column_start, column_count, None)
-    }
     pub fn ordered_page(
         &self,
         doc: &Document,
@@ -738,7 +728,7 @@ mod tests {
     fn tiny_cells_and_escaped_controls_obey_all_page_bounds() {
         let data = ("a,".repeat(5000) + "end\n").repeat(3);
         let (_path, doc, csv) = csv(data.as_bytes(), b',');
-        let p = csv.page(&doc, 0, 128, 4900, 128).unwrap();
+        let p = csv.ordered_page(&doc, 0, 128, 4900, 128, None).unwrap();
         let mut cells = 0;
         let mut units = 0;
         let mut wire = 1024;
@@ -780,8 +770,8 @@ mod tests {
         let (_path, doc, base) = csv(b"name,value\nann,1", b',');
         let header = Csv::new(&doc, 1, 2, Options { delimiter: None, header: Some(true) }, UTF_8).unwrap();
         header.build_reserved(&doc, |_, _, _| true, Reservation::none()).unwrap();
-        assert_eq!(base.page(&doc, 0, 1, 0, 1).unwrap().rows[0].info.record, 0);
-        assert_eq!(header.page(&doc, 0, 1, 0, 1).unwrap().rows[0].info.record, 1);
+        assert_eq!(base.ordered_page(&doc, 0, 1, 0, 1, None).unwrap().rows[0].info.record, 0);
+        assert_eq!(header.ordered_page(&doc, 0, 1, 0, 1, None).unwrap().rows[0].info.record, 1);
         let (_path2, doc2, _) = csv(b"\xff\xfea\0,\0b\0", b',');
         assert!(Csv::new(&doc2, 1, 1, Options { delimiter: Some(b','), header: None }, UTF_8).unwrap().locked);
     }
