@@ -309,11 +309,6 @@ impl Csv {
             index.metadata.row(*row, expected, self.header);
         }
     }
-    pub fn build(&self, doc: &Document, mut progress: impl FnMut(u64, u64, bool) -> bool) -> Result<(), DocError> {
-        let temp = Reservation::new(TEMP_BYTES).map_err(DocError::Memory)?;
-        self.build_reserved(doc, &mut progress, temp)
-    }
-
     /// The NAPI candidate secures this allocation before replacing a usable configuration.
     pub fn build_reserved(
         &self,
@@ -664,7 +659,7 @@ mod tests {
         let path = temp_file(&name, bytes);
         let doc = Document::open(&path).unwrap();
         let csv = Csv::new(&doc, 1, 1, Options { delimiter: Some(delimiter), header: Some(false) }, UTF_8).unwrap();
-        csv.build(&doc, |_, _, _| true).unwrap();
+        csv.build_reserved(&doc, |_, _, _| true, Reservation::none()).unwrap();
         (path, doc, csv)
     }
     #[test]
@@ -784,7 +779,7 @@ mod tests {
     fn header_is_a_projection_and_utf16_cannot_be_reinterpreted_into_grid() {
         let (_path, doc, base) = csv(b"name,value\nann,1", b',');
         let header = Csv::new(&doc, 1, 2, Options { delimiter: None, header: Some(true) }, UTF_8).unwrap();
-        header.build(&doc, |_, _, _| true).unwrap();
+        header.build_reserved(&doc, |_, _, _| true, Reservation::none()).unwrap();
         assert_eq!(base.page(&doc, 0, 1, 0, 1).unwrap().rows[0].info.record, 0);
         assert_eq!(header.page(&doc, 0, 1, 0, 1).unwrap().rows[0].info.record, 1);
         let (_path2, doc2, _) = csv(b"\xff\xfea\0,\0b\0", b',');
@@ -1044,7 +1039,7 @@ mod interaction_tests {
         let file = temp_file("csv-sort", b"name,rank\na,10\nb,2\nc,2\n");
         let doc = Document::open(&file).unwrap();
         let csv = Csv::new(&doc, 1, 1, Options { delimiter: Some(b','), header: Some(true) }, UTF_8).unwrap();
-        csv.build(&doc, |_, _, _| true).unwrap();
+        csv.build_reserved(&doc, |_, _, _| true, Reservation::none()).unwrap();
         let order = csv.order(&doc, 1, 1).unwrap();
         assert_eq!((0..3).map(|r| order.source(r).unwrap()).collect::<Vec<_>>(), vec![2, 3, 1]);
         assert_eq!(order.locate(1), Some(2));
@@ -1296,7 +1291,7 @@ mod grid_find_tests {
         let file = temp_file("grid-find", &data);
         let doc = Document::open(&file).unwrap();
         let csv = Csv::new(&doc, 1, 1, Options { delimiter: Some(b','), header: Some(true) }, UTF_8).unwrap();
-        csv.build(&doc, |_, _, _| true).unwrap();
+        csv.build_reserved(&doc, |_, _, _| true, Reservation::none()).unwrap();
         let order = Arc::new(csv.order(&doc, 1, 1).unwrap());
         let search = GridFind::new(&csv, order, "école", false).unwrap();
         let p = search.scan(&csv, &doc).unwrap();

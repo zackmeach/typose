@@ -8,8 +8,6 @@ use crate::doc::{DocError, Document};
 use crate::json::{self, Child, JsonIndex, Kind, Span};
 use crate::store::{ByteStore, StoreError, cancelled};
 
-const TEMP_BYTES: u64 = 16 << 20;
-
 #[derive(Default, Clone)]
 pub struct Progress {
     pub lines: u64,
@@ -44,9 +42,6 @@ pub struct Index {
     encoding: &'static encoding_rs::Encoding,
 }
 impl Index {
-    pub fn new() -> Result<Self, DocError> {
-        Self::with_encoding(encoding_rs::UTF_8)
-    }
     pub fn with_encoding(encoding: &'static encoding_rs::Encoding) -> Result<Self, DocError> {
         Ok(Self {
             progress: RwLock::new(Progress::default()),
@@ -88,10 +83,6 @@ impl Index {
         columns.by_key.insert(key.clone(), id);
         columns.values.push(Column { key, span });
         Ok(())
-    }
-    pub fn build(&self, doc: &Document, generation: u32, flag: &AtomicBool) -> Result<(), DocError> {
-        let temp = Reservation::new(TEMP_BYTES).map_err(DocError::Memory)?;
-        self.build_reserved(doc, generation, flag, temp)
     }
     pub fn build_reserved(
         &self,
@@ -293,8 +284,8 @@ mod tests {
     fn metadata_preserves_failed_and_blank_lines_and_grows_columns() {
         let file = temp_file("jsonl-metadata", b"{\"a\":1}\n\nnope\n{\"b\":2}\n");
         let doc = Document::open(&file).unwrap();
-        let index = Index::new().unwrap();
-        index.build(&doc, 1, &AtomicBool::new(false)).unwrap();
+        let index = Index::with_encoding(encoding_rs::UTF_8).unwrap();
+        index.build_reserved(&doc, 1, &AtomicBool::new(false), Reservation::none()).unwrap();
         let p = index.progress.read().unwrap();
         assert_eq!((p.lines, p.parsed, p.failed, p.blank, p.done), (4, 2, 1, 1, true));
         assert_eq!(index.columns(0, 128).iter().map(|c| c.key.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
@@ -315,8 +306,8 @@ mod tests {
             .error
             .unwrap();
         assert_eq!(error.kind, json::ErrorKind::Syntax("unexpected end of input"));
-        let index = Index::new().unwrap();
-        index.build(&doc, 1, &AtomicBool::new(false)).unwrap();
+        let index = Index::with_encoding(encoding_rs::UTF_8).unwrap();
+        index.build_reserved(&doc, 1, &AtomicBool::new(false), Reservation::none()).unwrap();
         let p = index.progress.read().unwrap();
         assert_eq!((p.lines, p.parsed, p.failed, p.blank), (3, 1, 1, 1));
     }
@@ -324,8 +315,8 @@ mod tests {
     fn detects_openai_message_and_dataset_records_without_loading_a_js_ast() {
         let file = temp_file("jsonl-adapter-detection", b"{\"role\":\"user\",\"content\":\"hi\"}\n{\"messages\":[{\"role\":\"assistant\",\"content\":\"hello\"}],\"metadata\":{}}\n");
         let doc = Document::open(&file).unwrap();
-        let index = Index::new().unwrap();
-        index.build(&doc, 1, &AtomicBool::new(false)).unwrap();
+        let index = Index::with_encoding(encoding_rs::UTF_8).unwrap();
+        index.build_reserved(&doc, 1, &AtomicBool::new(false), Reservation::none()).unwrap();
         let p = index.progress.read().unwrap();
         assert_eq!((p.sample_parsed, p.openai_messages, p.openai_dataset), (2, 1, 1));
     }
