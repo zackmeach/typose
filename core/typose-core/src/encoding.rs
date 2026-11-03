@@ -12,11 +12,7 @@ pub const NUL_WINDOW: usize = 8 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sniffed {
     Binary,
-    /// `bom` is the BOM's length in bytes, 0 without one.
-    Text {
-        encoding: &'static Encoding,
-        bom: usize,
-    },
+    Text { encoding: &'static Encoding },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -30,21 +26,21 @@ pub struct TextSlice {
 /// `head` is the start of the file (the caller passes its first chunk); `whole_file` says it's all of it.
 /// A head cut inside a UTF-8 sequence still counts as UTF-8, unless the file itself ends there.
 pub fn sniff(head: &[u8], whole_file: bool, fallback: &'static Encoding) -> Sniffed {
-    let bom = Encoding::for_bom(head);
-    if let Some((encoding, bom)) = bom
+    let bom = Encoding::for_bom(head).map(|(encoding, _)| encoding);
+    if let Some(encoding) = bom
         && encoding != UTF_8
     {
-        return Sniffed::Text { encoding, bom }; // UTF-16 text is full of NULs: no NUL test
+        return Sniffed::Text { encoding }; // UTF-16 text is full of NULs: no NUL test
     }
     if memchr(0, &head[..head.len().min(NUL_WINDOW)]).is_some() {
         return Sniffed::Binary;
     }
-    if let Some((encoding, bom)) = bom {
-        return Sniffed::Text { encoding, bom };
+    if let Some(encoding) = bom {
+        return Sniffed::Text { encoding };
     }
     match std::str::from_utf8(head) {
-        Err(e) if e.error_len().is_some() || whole_file => Sniffed::Text { encoding: fallback, bom: 0 },
-        _ => Sniffed::Text { encoding: UTF_8, bom: 0 },
+        Err(e) if e.error_len().is_some() || whole_file => Sniffed::Text { encoding: fallback },
+        _ => Sniffed::Text { encoding: UTF_8 },
     }
 }
 
@@ -185,20 +181,20 @@ mod tests {
     #[test]
     fn sniff_follows_the_spec_order() {
         let le = [b"\xFF\xFE".as_slice(), &utf16("a\0b", false)].concat();
-        assert_eq!(sniff(&le, true, WINDOWS_1252), Sniffed::Text { encoding: UTF_16LE, bom: 2 });
-        assert_eq!(sniff(b"\xFE\xFF\0a", true, WINDOWS_1252), Sniffed::Text { encoding: UTF_16BE, bom: 2 });
-        assert_eq!(sniff(b"\xEF\xBB\xBFhi", true, WINDOWS_1252), Sniffed::Text { encoding: UTF_8, bom: 3 });
+        assert_eq!(sniff(&le, true, WINDOWS_1252), Sniffed::Text { encoding: UTF_16LE });
+        assert_eq!(sniff(b"\xFE\xFF\0a", true, WINDOWS_1252), Sniffed::Text { encoding: UTF_16BE });
+        assert_eq!(sniff(b"\xEF\xBB\xBFhi", true, WINDOWS_1252), Sniffed::Text { encoding: UTF_8 });
         assert_eq!(sniff(b"\xEF\xBB\xBFh\0i", true, WINDOWS_1252), Sniffed::Binary); // a UTF-8 BOM keeps the NUL test
         assert_eq!(sniff(&utf16("BOM-less", false), true, WINDOWS_1252), Sniffed::Binary);
         let mut late_nul = vec![b'a'; NUL_WINDOW + 1];
         late_nul[NUL_WINDOW] = 0;
-        assert_eq!(sniff(&late_nul, true, WINDOWS_1252), Sniffed::Text { encoding: UTF_8, bom: 0 });
+        assert_eq!(sniff(&late_nul, true, WINDOWS_1252), Sniffed::Text { encoding: UTF_8 });
         late_nul[NUL_WINDOW - 1] = 0;
         assert_eq!(sniff(&late_nul, true, WINDOWS_1252), Sniffed::Binary);
-        assert_eq!(sniff("héllo".as_bytes(), true, WINDOWS_1252), Sniffed::Text { encoding: UTF_8, bom: 0 });
-        assert_eq!(sniff(b"caf\xE9 au lait", true, WINDOWS_1252), Sniffed::Text { encoding: WINDOWS_1252, bom: 0 });
-        assert_eq!(sniff(b"ab\xE2\x82", false, WINDOWS_1252), Sniffed::Text { encoding: UTF_8, bom: 0 });
-        assert_eq!(sniff(b"ab\xE2\x82", true, WINDOWS_1252), Sniffed::Text { encoding: WINDOWS_1252, bom: 0 });
+        assert_eq!(sniff("héllo".as_bytes(), true, WINDOWS_1252), Sniffed::Text { encoding: UTF_8 });
+        assert_eq!(sniff(b"caf\xE9 au lait", true, WINDOWS_1252), Sniffed::Text { encoding: WINDOWS_1252 });
+        assert_eq!(sniff(b"ab\xE2\x82", false, WINDOWS_1252), Sniffed::Text { encoding: UTF_8 });
+        assert_eq!(sniff(b"ab\xE2\x82", true, WINDOWS_1252), Sniffed::Text { encoding: WINDOWS_1252 });
     }
 
     /// encoding_rs's real UTF-8 behaviour (WHATWG "maximal subpart"): one U+FFFD for 1–3 bytes.
