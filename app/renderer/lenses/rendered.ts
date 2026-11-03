@@ -10,6 +10,7 @@ import { markdownRichPrintNodes } from './markdown-rich-print'
 import { PRINT_LINES_PER_PAGE, type PrintPayload, type PrintPlan } from '../print'
 import { utf8ByteLength } from './grid-interactions'
 import { copySourceSpan } from './source-copy'
+import { SourceCopyQueue } from './source-copy-queue'
 import { renderedSelection } from './rendered-selection'
 import { markdownExtras } from './markdown-extras'
 import '../markdown-extras.css'
@@ -72,8 +73,7 @@ export class RenderedLens {
   private indexed: boolean
   private totalLines: number
   private copyAll = false
-  private copyAbort: AbortController | undefined
-  private copyToken: string | null = null
+  private readonly copies = new SourceCopyQueue(token => window.typose.cancelClipboardWrite(token))
   private copyStatus: HTMLDivElement
   private readonly outline: HTMLElement
   private readonly outlineNav: HTMLElement
@@ -137,14 +137,14 @@ export class RenderedLens {
       if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'a' && !(event.target instanceof HTMLInputElement)) {
         event.preventDefault()
         this.copyAll = true
-        this.cancelCopy()
+        this.copies.cancel()
         this.copyStatus.textContent = 'All source text selected · press Ctrl+C to copy'
       } else if (!['Control', 'Meta', 'Shift', 'Alt'].includes(event.key) && !((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c')) {
         this.copyAll = false
-        this.cancelCopy()
+        this.copies.cancel()
       }
     }, { capture: true })
-    for (const type of ['pointerdown', 'wheel'] as const) this.scroller.addEventListener(type, () => { this.copyAll = false; this.cancelCopy() }, { passive: true })
+    for (const type of ['pointerdown', 'wheel'] as const) this.scroller.addEventListener(type, () => { this.copyAll = false; this.copies.cancel() }, { passive: true })
     // Remember the top line while the view is on screen. Unmount hides the panel first, and every block's box is then
     // empty, so reading geometry in dispose would report the last block.
     this.scroller.addEventListener('scroll', () => this.remember(), { passive: true })
@@ -216,7 +216,7 @@ export class RenderedLens {
 
   /** Ctrl+A then Copy returns the original source; a partial visual selection needs per-run native maps. */
   async copy(): Promise<boolean> {
-    this.cancelCopy()
+    this.copies.cancel()
     const token = window.typose.beginClipboardWrite()
     if (!token) { this.copyStatus.textContent = 'Copy unavailable · use the reader Copy command'; return false }
     const all = this.copyAll
@@ -229,46 +229,34 @@ export class RenderedLens {
       this.copyStatus.textContent = 'Copy refused · source is unavailable or exceeds the 16 MiB limit'
       return false
     }
-    const controller = new AbortController()
-    this.copyAbort = controller
-    this.copyToken = token
-    const current = () => {
-      if (this.copyAbort !== controller || controller.signal.aborted || this.stopped || this.paused || this.copyAll !== all || !owner.current(generation)) return false
+    const valid = () => {
+      if (this.stopped || this.paused || this.copyAll !== all || !owner.current(generation)) return false
       if (all) return true
       const selected = renderedSelection(this.column, window.getSelection())
       return selected?.start === start && selected?.end === end
     }
     this.copyStatus.textContent = 'Preparing source copy…'
-    try {
-      const copied = await copySourceSpan({
-        valid: current,
-        reserve: bytes => owner.reserveCopy(generation, bytes),
-        read: (start, count, signal) => this.core.call('sourceBytes', { view, start, count }, signal),
-        verify: signal => this.core.call('sourceVerify', { view, start, end }, signal),
-        confirm: async bytes => window.confirm(`Copy ${new Intl.NumberFormat('en').format(bytes)} bytes to the clipboard?`),
-        write: text => window.typose.writeClipboardText(text, token),
-        cancelWrite: () => window.typose.cancelClipboardWrite(token),
-        status: message => { this.copyStatus.textContent = message }
-      }, start, end, this.opened.encoding, controller.signal)
-      if (copied) this.copyStatus.textContent = 'Copied source text'
-      else if (controller.signal.aborted) this.copyStatus.textContent = 'Copy cancelled'
-      return copied
-    } catch (error) {
-      if (!controller.signal.aborted) this.copyStatus.textContent = error instanceof Error ? `Copy failed · ${error.message}` : 'Copy failed'
-      return false
-    } finally {
-      await owner.reserveCopy(generation, 0)
-      if (this.copyAbort === controller) this.copyAbort = undefined
-      if (this.copyToken === token) this.copyToken = null
-      window.typose.cancelClipboardWrite(token)
-    }
-  }
-
-  private cancelCopy(): void {
-    this.copyAbort?.abort()
-    this.copyAbort = undefined
-    if (this.copyToken) window.typose.cancelClipboardWrite(this.copyToken)
-    this.copyToken = null
+    // The queue starts this copy only once the one it cancelled has released its share.
+    return this.copies.run(token, async (current, signal) => {
+      try {
+        const copied = await copySourceSpan({
+          valid: () => current() && valid(),
+          reserve: bytes => owner.reserveCopy(generation, bytes),
+          read: (start, count, signal) => this.core.call('sourceBytes', { view, start, count }, signal),
+          verify: signal => this.core.call('sourceVerify', { view, start, end }, signal),
+          confirm: async bytes => window.confirm(`Copy ${new Intl.NumberFormat('en').format(bytes)} bytes to the clipboard?`),
+          write: text => window.typose.writeClipboardText(text, token),
+          cancelWrite: () => window.typose.cancelClipboardWrite(token),
+          status: message => { this.copyStatus.textContent = message }
+        }, start, end, this.opened.encoding, signal)
+        if (copied) this.copyStatus.textContent = 'Copied source text'
+        else if (signal.aborted) this.copyStatus.textContent = 'Copy cancelled'
+        return copied
+      } catch (error) {
+        if (!signal.aborted) this.copyStatus.textContent = error instanceof Error ? `Copy failed · ${error.message}` : 'Copy failed'
+        return false
+      }
+    }, async () => { await owner.reserveCopy(generation, 0) })
   }
 
   printPlan(): PrintPlan {
@@ -383,7 +371,7 @@ export class RenderedLens {
 
   /** `release` is Raw's. Closing the document releases the reservation; a lens switch must not zero it first. */
   dispose(_release = true): void {
-    this.cancelCopy()
+    this.copies.cancel()
     this.find.destroy()
     this.stopped = true
     this.images.dispose()
