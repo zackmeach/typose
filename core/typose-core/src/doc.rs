@@ -378,11 +378,11 @@ impl Document {
 
     /// Resolve a decoded local target without opening it. Only the source route is checked for mutation.
     pub fn local_path(&self, generation: u32, target: &str) -> Result<LocalRoute, DocError> {
-        self.local_target(generation, target)
+        self.link_target(generation, target, true)
     }
 
     pub fn open_local(&self, generation: u32, target: &str) -> Result<Document, DocError> {
-        let route = self.local_target(generation, target)?;
+        let route = self.link_target(generation, target, true)?;
         let next = Self::from_local(route, self.cache_chunks, 1).map_err(local_target_error)?;
         self.check_local_source(generation)?;
         Ok(next)
@@ -391,10 +391,6 @@ impl Document {
     /// Any extension: the hand-off sheet shows where a program or script is, and nothing here opens it.
     pub fn link_path(&self, generation: u32, target: &str) -> Result<LocalRoute, DocError> {
         self.link_target(generation, target, false)
-    }
-
-    fn local_target(&self, generation: u32, target: &str) -> Result<LocalRoute, DocError> {
-        self.link_target(generation, target, true)
     }
 
     fn link_target(&self, generation: u32, target: &str, supported_only: bool) -> Result<LocalRoute, DocError> {
