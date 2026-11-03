@@ -46,12 +46,6 @@ pub struct SourceFindPage {
     pub wrapped: bool,
     pub ordinal: Option<f64>,
 }
-#[napi(object)]
-pub struct SourceFindSeek {
-    pub hit: Option<SourceHit>,
-    pub wrapped: bool,
-    pub ordinal: Option<f64>,
-}
 fn hit(raw: &Raw, generation: u32, h: core_find::Hit) -> std::result::Result<SourceHit, DocError> {
     let (slice, units) = core_find::snippet(raw.document(), generation, raw.source_encoding(), h)?;
     Ok(SourceHit {
@@ -80,10 +74,6 @@ pub struct FindTask {
     #[cfg(feature = "test-hooks")]
     _task: hooks::Live,
 }
-pub struct Output {
-    page: SourceFindPage,
-    seek: SourceFindSeek,
-}
 impl FindTask {
     fn check(&self) -> std::result::Result<(), DocError> {
         if self.cancel.load(Ordering::Relaxed) {
@@ -96,7 +86,7 @@ impl FindTask {
     }
 }
 impl Task for FindTask {
-    type Output = std::result::Result<Output, DocError>;
+    type Output = std::result::Result<SourceFindPage, DocError>;
     type JsValue = SourceFindPage;
     fn compute(&mut self) -> Result<Self::Output> {
         let flag = self.cancel.clone();
@@ -111,7 +101,6 @@ impl Task for FindTask {
                 wrapped: false,
                 ordinal: None,
             };
-            let mut seek = SourceFindSeek { hit: None, wrapped: false, ordinal: None };
             match self.want {
                 Want::Scan => {
                     let p = self.entry.source.scan(self.raw.document(), self.raw.source_encoding())?;
@@ -131,28 +120,21 @@ impl Task for FindTask {
                 Want::Seek { from, previous } => {
                     let (h, wrapped) =
                         self.entry.source.seek(self.raw.document(), self.raw.source_encoding(), from, previous)?;
-                    seek = SourceFindSeek {
-                        ordinal: h.map(|h| h.ordinal as f64),
-                        hit: h.map(|h| hit(&self.raw, self.entry.source.generation, h)).transpose()?,
-                        wrapped,
-                    };
+                    page.ordinal = h.map(|h| h.ordinal as f64);
+                    page.hit = h.map(|h| hit(&self.raw, self.entry.source.generation, h)).transpose()?;
+                    page.wrapped = wrapped;
                 }
             }
-            Ok(Output { page, seek })
+            Ok(page)
         }))
     }
     fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        let result = output
-            .and_then(|out| {
+        output
+            .and_then(|page| {
                 self.check()?;
-                Ok(out)
+                Ok(page)
             })
-            .map_err(|e| err(env, e))?;
-        let mut page = result.page;
-        page.hit = result.seek.hit;
-        page.wrapped = result.seek.wrapped;
-        page.ordinal = result.seek.ordinal;
-        Ok(page)
+            .map_err(|e| err(env, e))
     }
 }
 #[napi]
@@ -223,7 +205,7 @@ impl Doc {
     ) -> std::result::Result<AsyncTask<FindTask>, Error<Code>> {
         self.source_find_task(generation, id, cancel, Want::Scan)
     }
-    #[napi(ts_return_type = "Promise<SourceFindSeek>")]
+    #[napi(ts_return_type = "Promise<SourceFindPage>")]
     pub fn source_find_seek(
         &self,
         generation: f64,
