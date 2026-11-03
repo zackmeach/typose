@@ -125,9 +125,9 @@ export async function waitMarks(l: PackagedLaunch, names: string[], timeout = 30
 
 /**
  * Closes the app the way a user does, without CDP: on Windows, taskkill without /F posts WM_CLOSE to its window;
- * elsewhere, SIGTERM. Then keeps the run's evidence (plan C9) and deletes the profile unless `keep`.
+ * elsewhere, SIGTERM. Then keeps the run's evidence (plan C9) and deletes the profile.
  */
-export async function closePackaged(l: PackagedLaunch, keep = false): Promise<Exit> {
+export async function closePackaged(l: PackagedLaunch): Promise<Exit> {
   cleanups.delete(l.cleanup)
   await l.browser?.close().catch(() => {}) // disconnects; the app stays up
   if (l.proc.exitCode === null && l.proc.signalCode === null) {
@@ -136,7 +136,7 @@ export async function closePackaged(l: PackagedLaunch, keep = false): Promise<Ex
   }
   const closed = await Promise.race([l.exited, new Promise<null>((ok) => setTimeout(() => ok(null), 15_000))])
   const exit = closed ?? (l.proc.kill('SIGKILL'), await l.exited)
-  keepEvidence(l.userData, l.pid, exit, keep)
+  keepEvidence(l.userData, l.pid, exit, false)
   if (!closed) throw new Error(`pid ${l.pid} didn't exit within 15 s of its close, and was killed`)
   return exit
 }

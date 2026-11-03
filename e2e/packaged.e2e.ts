@@ -75,17 +75,14 @@ test('the fused build listens on --remote-debugging-port=0, connectOverCDP attac
 
 test('a TYPOSE_MARKS that names a directory is refused and logged, and the app still starts with its window', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'typose-marks-dir-'))
-  let kept: string | undefined // the profile closePackaged keeps, removed whether or not the expectations hold
   try {
     const l = await launchPackaged({ cdp: true, env: { TYPOSE_MARKS: dir } })
     await expect(l.page!.getByRole('button', { name: /^Open file…/ })).toBeVisible() // the window, its page and the core are up
     const log = lifecycle(l.userData)
-    kept = l.userData
-    expect(await closePackaged(l, true)).toEqual({ code: 0, signal: null })
+    expect(await closePackaged(l)).toEqual({ code: 0, signal: null })
     expect(log.find((r) => r.event === 'hook-refused')).toMatchObject({ hook: 'TYPOSE_MARKS', reason: expect.stringMatching(/regular file/) })
   } finally {
     rmSync(dir, { recursive: true, force: true })
-    if (kept) rmSync(kept, { recursive: true, force: true })
   }
 })
 
