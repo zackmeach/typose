@@ -9,6 +9,7 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{JsError, Task};
 use napi_derive::napi;
 use typose_core::budget::{self, NoSlot, Reservation, Slot, Work};
+use typose_core::bytemap::ByteMap;
 use typose_core::doc::DocError;
 #[cfg(feature = "test-hooks")]
 use typose_core::hooks;
@@ -222,16 +223,20 @@ pub struct IndexProgress {
     pub error: Option<String>,
 }
 
-fn item(generation: u32, p: LinePiece) -> PageItem {
-    let w = p.map.to_wire();
-    let map = WireMap {
+fn wire(map: &ByteMap) -> WireMap {
+    let w = map.to_wire();
+    WireMap {
         uniform: w.uniform,
         start: w.start as f64,
         end: w.end as f64,
         units: w.units,
         unit_bytes: w.unit_bytes,
         points: Uint32Array::new(w.points),
-    };
+    }
+}
+
+fn item(generation: u32, p: LinePiece) -> PageItem {
+    let map = wire(&p.map);
     let next = p.next.map(|offset| Continuation { generation, line: p.line as f64, offset: offset as f64 });
     let (line, offset, rest) = (p.line as f64, p.offset as f64, p.rest.map(|r| r as f64));
     PageItem { generation, line, offset, text: p.text, more: p.more, map, next, rest }

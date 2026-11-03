@@ -54,21 +54,13 @@ pub struct SourceFindSeek {
 }
 fn hit(raw: &Raw, generation: u32, h: core_find::Hit) -> std::result::Result<SourceHit, DocError> {
     let (slice, units) = core_find::snippet(raw.document(), generation, raw.source_encoding(), h)?;
-    let w = slice.map.to_wire();
     Ok(SourceHit {
         start: h.start as f64,
         end: h.end as f64,
         line: h.line as f64,
         line_start: h.line_start as f64,
         text: slice.text,
-        map: WireMap {
-            uniform: w.uniform,
-            start: w.start as f64,
-            end: w.end as f64,
-            units: w.units,
-            unit_bytes: w.unit_bytes,
-            points: Uint32Array::new(w.points),
-        },
+        map: wire(&slice.map),
         match_start: 0,
         match_end: units,
     })

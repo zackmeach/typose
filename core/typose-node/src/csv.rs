@@ -144,21 +144,13 @@ pub struct CsvLocated {
 }
 
 fn piece(p: core_csv::Piece) -> CsvCellPiece {
-    let w = p.map.to_wire();
     CsvCellPiece {
         source_record: p.record as f64,
         column: p.column as f64,
         span: span(p.span),
         piece_span: span(p.piece),
         text: p.text,
-        map: WireMap {
-            uniform: w.uniform,
-            start: w.start as f64,
-            end: w.end as f64,
-            units: w.units,
-            unit_bytes: w.unit_bytes,
-            points: Uint32Array::new(w.points),
-        },
+        map: wire(&p.map),
         replacements: p.replacements,
         next: p.next.map(|offset| CsvContinuation {
             source_record: p.record as f64,
