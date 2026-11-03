@@ -250,6 +250,26 @@ export function fixturesGen(...args: string[]): void {
   execFileSync('cargo', ['run', '--release', '-q', '-p', 'fixtures-gen', '--', ...args], { cwd: resolve(__dirname, '../core'), stdio: 'inherit' })
 }
 
+/**
+ * Holds the page core client's reply to `method` (every call, or only the first when `once`) until the test calls
+ * `window[name]()`; the test waits for it with `typeof window[name] === 'function'`. Test-hooks build only.
+ */
+export async function holdReply(win: Page, method: string, name: string, once = false): Promise<void> {
+  await win.evaluate(({ method, name, once }) => {
+    const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core
+    const call = core.call.bind(core)
+    let first = true
+    core.call = async (m, params) => {
+      const reply = await call(m, params)
+      if (m === method && (first || !once)) {
+        first = false
+        await new Promise<void>((done) => { (window as unknown as Record<string, () => void>)[name] = done })
+      }
+      return reply
+    }
+  }, { method, name, once })
+}
+
 /** Main's clipboard writes, recorded instead of reaching the system clipboard (the user's is private). */
 export async function recordClipboard(app: ElectronApplication): Promise<() => Promise<string[]>> {
   await app.evaluate(({ clipboard }) => {

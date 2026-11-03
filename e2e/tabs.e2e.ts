@@ -1,7 +1,7 @@
 import { type Page, expect } from '@playwright/test'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { FIXTURES, type TestHooks, axe, debugStats, expectReleasedDocuments, finish, fixture, killCore, launch, osFocus, pressAsOS, stubOpenDialog, test, visibleRows, waitIndexed, waitOpen, waitRendered } from './app'
+import { FIXTURES, type TestHooks, axe, debugStats, expectReleasedDocuments, finish, fixture, holdReply, killCore, launch, osFocus, pressAsOS, stubOpenDialog, test, visibleRows, waitIndexed, waitOpen, waitRendered } from './app'
 import { processMemory } from './memory'
 import { workspaceCharge } from '../app/renderer/workspace-budget'
 
@@ -153,19 +153,7 @@ test('an activation overtaken by A-B-A cannot steal the view or close an owned d
   await open(l, b)
   await expect(win.locator('.card-name')).toHaveText('tabs-race-b.txt')
   await waitOpen(win)
-  await win.evaluate(() => {
-    const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core
-    const call = core.call.bind(core)
-    let first = true
-    core.call = async (method, params) => {
-      const reply = await call(method, params)
-      if (method === 'activate' && first) {
-        first = false
-        await new Promise<void>((done) => { (window as unknown as { tabsRelease: () => void }).tabsRelease = done })
-      }
-      return reply
-    }
-  })
+  await holdReply(win, 'activate', 'tabsRelease', true)
   await tab(win, 'tabs-race-a.txt').click()
   await expect.poll(() => win.evaluate(() => typeof (window as unknown as { tabsRelease?: () => void }).tabsRelease)).toBe('function')
   await tab(win, 'tabs-race-b.txt').click()
@@ -310,17 +298,7 @@ test('leaving a pending activation for a failed tab does not leave a hidden acti
   await open(l, missing)
   await expect(win.locator('.card-message p')).toContainText('File not found')
   const workspace = await documentAndWorkspaceCache(win)
-  await win.evaluate(() => {
-    const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core
-    const call = core.call.bind(core)
-    core.call = async (method, params) => {
-      const reply = await call(method, params)
-      if (method === 'activate' && !(window as unknown as { pendingTabRelease?: () => void }).pendingTabRelease) await new Promise<void>((done) => {
-        (window as unknown as { pendingTabRelease: () => void }).pendingTabRelease = done
-      })
-      return reply
-    }
-  })
+  await holdReply(win, 'activate', 'pendingTabRelease', true)
   await tab(win, 'tabs-pending-a.txt').click()
   await expect.poll(() => win.evaluate(() => typeof (window as unknown as { pendingTabRelease?: () => void }).pendingTabRelease)).toBe('function')
   await win.getByRole('tab', { name: /tabs-pending-missing-/ }).click()
@@ -344,17 +322,7 @@ test('a fresh open completed behind a failed tab retains its document without a 
   await waitOpen(win)
   await open(l, missing)
   await expect(win.locator('.card-message p')).toContainText('File not found')
-  await win.evaluate(() => {
-    const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core
-    const call = core.call.bind(core)
-    core.call = async (method, params) => {
-      const reply = await call(method, params)
-      if (method === 'open') await new Promise<void>((done) => {
-        (window as unknown as { backgroundRelease: () => void }).backgroundRelease = done
-      })
-      return reply
-    }
-  })
+  await holdReply(win, 'open', 'backgroundRelease')
   await open(l, b)
   await expect.poll(() => win.evaluate(() => typeof (window as unknown as { backgroundRelease?: () => void }).backgroundRelease)).toBe('function')
   await win.getByRole('tab', { name: /tabs-background-missing-/ }).click()

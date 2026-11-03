@@ -1,20 +1,8 @@
 import { type Page, expect } from '@playwright/test'
 import { mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { FIXTURES, type TestHooks, assertNetLog, debugStats, finish, fixture, killCore, launch, stubExternal, stubOpenDialog, test, waitRendered } from './app'
+import { FIXTURES, assertNetLog, debugStats, finish, fixture, holdReply, killCore, launch, stubExternal, stubOpenDialog, test, waitRendered } from './app'
 
-
-async function holdResolve(win: Page): Promise<void> {
-  await win.evaluate(() => {
-    const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core
-    const call = core.call.bind(core)
-    core.call = async (method, params) => {
-      const reply = await call(method, params)
-      if (method === 'resolve') await new Promise<void>((done) => { (window as unknown as { releaseLink: () => void }).releaseLink = done })
-      return reply
-    }
-  })
-}
 
 const waitHeld = (win: Page) => expect.poll(() => win.evaluate(() => typeof (window as unknown as { releaseLink?: () => void }).releaseLink)).toBe('function')
 const release = (win: Page) => win.evaluate(() => (window as unknown as { releaseLink: () => void }).releaseLink())
@@ -85,7 +73,7 @@ test('a delayed fragment response cannot override reading after the reader moves
   ].join('\n')) })
   const { win } = l
   await waitRendered(win)
-  await holdResolve(win)
+  await holdReply(win, 'resolve', 'releaseLink')
   await win.getByRole('link', { name: 'Jump', exact: true }).click()
   await waitHeld(win)
   await win.locator('.md-scroller').focus()
@@ -108,7 +96,7 @@ test('a replaced document cannot hand off a delayed external target', async () =
   const { win } = l
   const calls = await stubExternal(l.app)
   await waitRendered(win)
-  await holdResolve(win)
+  await holdReply(win, 'resolve', 'releaseLink')
   await win.getByRole('link', { name: 'External', exact: true }).click()
   await waitHeld(win)
   const next = fixture('new-link.md', '# New document\n')
@@ -190,7 +178,7 @@ test('a source change after local resolution keeps the current view and raises i
   const { win } = l
   await waitRendered(win)
   await expect.poll(async () => (await debugStats(win)).jobs).toBe(0)
-  await holdResolve(win)
+  await holdReply(win, 'resolve', 'releaseLink')
   await win.getByRole('link', { name: 'Next', exact: true }).click()
   await waitHeld(win)
   writeFileSync(source, '# Changed source\n')
@@ -243,15 +231,7 @@ test('dismissing a pending preview retires the target before showing a queued fi
   const l = await launch({ hooks: true, file: fixture('local-delayed-start.md', '# Start\n\n[Next](local-delayed-target.md)\n') })
   const { win } = l
   await waitRendered(win)
-  await win.evaluate(() => {
-    const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core
-    const call = core.call.bind(core)
-    core.call = async (method, params) => {
-      const reply = await call(method, params)
-      if (method === 'openLocal') await new Promise<void>((done) => { (window as unknown as { releaseLink: () => void }).releaseLink = done })
-      return reply
-    }
-  })
+  await holdReply(win, 'openLocal', 'releaseLink')
   await win.getByRole('link', { name: 'Next', exact: true }).click()
   await waitHeld(win)
   const replacement = fixture('local-delayed-replacement.md', '# Replacement\n')

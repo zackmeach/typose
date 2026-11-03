@@ -1,7 +1,7 @@
 import { type Page, expect } from '@playwright/test'
 import { writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
-import { type TestHooks, assertNetLog, debugStats, expectReleasedDocuments, finish, fixture, launch, test, waitRendered } from './app'
+import { type TestHooks, assertNetLog, debugStats, expectReleasedDocuments, finish, fixture, holdReply, launch, test, waitRendered } from './app'
 import { imageGif, imageJpeg, imagePng, imageWebp } from './image-fixtures'
 import { processMemory } from './memory'
 
@@ -101,15 +101,7 @@ test('a tight image budget keeps alt text and the reader; a delayed resource can
   const l = await launch({ hooks: true })
   const { win } = l
   await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
-  await win.evaluate(() => {
-    const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core
-    const call = core.call.bind(core)
-    core.call = async (method, params) => {
-      const reply = await call(method, params)
-      if (method === 'prepareImage') await new Promise<void>((done) => { (window as unknown as { releaseImageTest: () => void }).releaseImageTest = done })
-      return reply
-    }
-  })
+  await holdReply(win, 'prepareImage', 'releaseImageTest')
   await open(l, file)
   await waitRendered(win)
   const held = () => expect.poll(() => win.evaluate(() => typeof (window as unknown as { releaseImageTest?: () => void }).releaseImageTest)).toBe('function')
@@ -264,19 +256,7 @@ for (const side of [1024, 2048]) test(`local image ${side}px allocation, switche
   await cdp.send('HeapProfiler.collectGarbage')
   const renderer = async () => (await processMemory(l.app)).find((p) => p.type === 'Tab')!
   const baseline = (await renderer()).private!
-  await win.evaluate(() => {
-    const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core
-    const call = core.call.bind(core)
-    let first = true
-    core.call = async (method, params) => {
-      const reply = await call(method, params)
-      if (method === 'prepareImage' && first) {
-        first = false
-        await new Promise<void>((done) => { (window as unknown as { memoryImageHeld: () => void }).memoryImageHeld = done })
-      }
-      return reply
-    }
-  })
+  await holdReply(win, 'prepareImage', 'memoryImageHeld', true)
   await open(l, file)
   await waitRendered(win)
   await expect.poll(() => win.evaluate(() => typeof (window as unknown as { memoryImageHeld?: () => void }).memoryImageHeld)).toBe('function')
