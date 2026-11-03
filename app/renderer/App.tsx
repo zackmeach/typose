@@ -542,12 +542,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
         return opened
       }
       let destination = groupRef.current.find(group => group.id === sourceId) ?? groupRef.current[0]
-      if (gesture.mode === 'side') {
-        const index = groupRef.current.indexOf(destination)
-        const neighbor = groupRef.current[index + 1] ?? groupRef.current[index - 1]
-        if (neighbor) destination = neighbor
-        else { created = await newRight(destination.id); if (created) destination = created }
-      }
+      if (gesture.mode === 'side') [destination, created] = await sideCard(destination)
       const reader = await waitForReader(destination.id)
       if (reader.busy() || closingCards.current.has(destination.id)) return false
       const opened = await reader.openDerived(source, target, path)
@@ -612,12 +607,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     let b: ReturnType<ReaderHandle['prepareRetirement']> | undefined
     let detached = false, moved = false
     try {
-      if (side) {
-        const index = groupRef.current.indexOf(destination)
-        const neighbor = groupRef.current[index + 1] ?? groupRef.current[index - 1]
-        if (neighbor) destination = neighbor
-        else { created = await newRight(destination.id); if (created) destination = created }
-      }
+      if (side) [destination, created] = await sideCard(destination)
       if (closingCards.current.has(destination.id)) throw new Error('The destination card is busy')
       closingCards.current.add(destination.id)
       target = await waitForReader(destination.id)
@@ -710,6 +700,13 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     next.splice(next.findIndex(item => item.id === sourceId) + 1, 0, group)
     updateGroups(next)
     return group
+  }
+  /** The card right of `from`, else left of it, else a new card split right (and `created`); `from` when there's no room. */
+  async function sideCard(from: ReaderGroup): Promise<[card: ReaderGroup, created: ReaderGroup | null]> {
+    const index = groupRef.current.indexOf(from)
+    const neighbor = groupRef.current[index + 1] ?? groupRef.current[index - 1]
+    const created = neighbor ? null : await newRight(from.id)
+    return [neighbor ?? created ?? from, created]
   }
   async function splitRight(): Promise<void> {
     const sourceId = focusedRef.current, source = handles.current.get(sourceId)
@@ -853,10 +850,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     if (previewRef.current) { setWorkspaceNotice('Close the preview before changing the workspace'); return }
     const sourceId = focusedRef.current
     let destination = groupRef.current.find(group => group.id === sourceId)!
-    if (side) {
-      const at = groupRef.current.indexOf(destination)
-      destination = groupRef.current[at + 1] ?? groupRef.current[at - 1] ?? await newRight(sourceId) ?? destination
-    }
+    if (side) [destination] = await sideCard(destination)
     try {
       const target = await waitForReader(destination.id)
       settingsTab(destination.id, 'file'); focusCard(destination.id)
