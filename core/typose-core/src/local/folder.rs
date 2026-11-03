@@ -5,6 +5,8 @@ use super::LocalRoute;
 #[cfg(windows)]
 use crate::budget::Reservation;
 use crate::doc::DocError;
+#[cfg(windows)]
+use crate::doc::local_error as error;
 use std::path::Path;
 
 pub const PAGE_ITEMS: usize = 128;
@@ -21,15 +23,6 @@ pub struct Entry {
 pub struct Page {
     pub entries: Vec<Entry>,
     pub cursor: Option<u32>,
-}
-
-#[cfg(windows)]
-fn error(e: LocalError) -> DocError {
-    match e {
-        LocalError::Refused(s) => DocError::Refused(s.into()),
-        LocalError::Io(e) => DocError::Io(e),
-        LocalError::Memory(e) => DocError::Memory(e),
-    }
 }
 
 pub struct Folder {

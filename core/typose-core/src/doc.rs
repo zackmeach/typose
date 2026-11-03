@@ -125,7 +125,7 @@ fn io_error(e: io::Error) -> DocError {
     }
 }
 
-fn local_error(e: LocalError) -> DocError {
+pub(crate) fn local_error(e: LocalError) -> DocError {
     match e {
         LocalError::Refused(why) => DocError::Refused(why.into()),
         LocalError::Io(e) => io_error(e),

@@ -6,21 +6,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::budget::Reservation;
-use crate::doc::{DocError, Document, FileId, MAX_SAFE};
+use crate::doc::{DocError, Document, FileId, MAX_SAFE, local_error};
 use crate::images::{self, CanonicalImage, ImageError, MAX_SOURCE};
-use crate::local::{LocalError, LocalRoute};
+use crate::local::LocalRoute;
 
 pub const CHUNK: usize = 256 << 10;
 const STATE_BYTES: u64 = 4096; // fixed two-slot state, Mutex, Arc and allocator overhead
 static CODEC_BUSY: AtomicBool = AtomicBool::new(false);
-
-fn local_error(error: LocalError) -> DocError {
-    match error {
-        LocalError::Refused(why) => DocError::Refused(why.into()),
-        LocalError::Io(error) => DocError::Io(error),
-        LocalError::Memory(error) => DocError::Memory(error),
-    }
-}
 
 fn image_error(error: ImageError) -> DocError {
     match error {
