@@ -582,6 +582,15 @@ pub struct FolderContext {
     pub segments: Vec<String>,
 }
 
+/// A folder entry's node, as `FolderRoot` lists it.
+fn folder_node(node: f64) -> std::result::Result<u32, Error<Code>> {
+    let node = int("start", node)?;
+    if node >= folder::MAX_NODES as u64 {
+        return Err(Error::new(Code::InvalidParams, "invalid folder node"));
+    }
+    Ok(node as u32)
+}
+
 /// No constructor: only an explicit selected-directory capture creates authority.
 #[napi]
 pub struct FolderRoot {
@@ -628,10 +637,7 @@ impl FolderRoot {
         hidden: bool,
         cancel: &Cancel,
     ) -> std::result::Result<AsyncTask<ListFolder>, Error<Code>> {
-        let node = int("start", node)?;
-        if node >= folder::MAX_NODES as u64 {
-            return Err(Error::new(Code::InvalidParams, "invalid folder node"));
-        }
+        let node = folder_node(node)?;
         let cursor = cursor
             .map(|x| {
                 int("id", x).and_then(|n| {
@@ -642,7 +648,7 @@ impl FolderRoot {
         let charge = Reservation::new(folder::PAGE_WORK).map_err(|e| doc_error(DocError::Memory(e)))?;
         Ok(AsyncTask::new(ListFolder {
             state: self.state.clone(),
-            node: node as u32,
+            node,
             cursor,
             hidden,
             cancel: cancel.flag.clone(),
@@ -652,19 +658,11 @@ impl FolderRoot {
     /// A listed entry's path, for main's OS hand-off. It opens nothing.
     #[napi]
     pub fn entry_path(&self, node: f64) -> std::result::Result<String, Error<Code>> {
-        let node = int("start", node)?;
-        if node >= folder::MAX_NODES as u64 {
-            return Err(Error::new(Code::InvalidParams, "invalid folder node"));
-        }
-        self.state.entry_path(node as u32).map_err(doc_error)
+        self.state.entry_path(folder_node(node)?).map_err(doc_error)
     }
     #[napi]
     pub fn open(&self, node: f64) -> std::result::Result<Doc, Error<Code>> {
-        let node = int("start", node)?;
-        if node >= folder::MAX_NODES as u64 {
-            return Err(Error::new(Code::InvalidParams, "invalid folder node"));
-        }
-        let raw = self.state.open(node as u32).map_err(doc_error)?;
+        let raw = self.state.open(folder_node(node)?).map_err(doc_error)?;
         Ok(Doc::wrap(raw))
     }
     #[napi]
