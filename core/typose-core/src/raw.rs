@@ -18,10 +18,7 @@ use crate::index::{IndexConfig, LineIndex, Progress, build};
 use crate::local::LocalRoute;
 use crate::md;
 use crate::pages::{self, Caps, LinePiece, MAX_PATH_BYTES};
-use crate::store::{CHUNK, cancelled};
-
-/// The chunk cache's size: 64 MiB, `Document::open`'s.
-const CACHE_CHUNKS: usize = 64;
+use crate::store::{CACHE_CHUNKS, CHUNK, cancelled};
 
 /// Plan C1: an open's own temporaries, reserved while it runs. The head it sniffs, and the chunk read for it on its way
 /// into the cache; a single-byte decode of that head for the blank check (3 bytes per byte at most); the path's copies.

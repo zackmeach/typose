@@ -8,7 +8,7 @@ use std::time::SystemTime;
 
 use crate::budget::{OverBudget, Reservation};
 use crate::local::{LocalError, LocalRoute};
-use crate::store::{ByteStore, NotRegular, StoreError, refusal, route_refusal};
+use crate::store::{ByteStore, CACHE_CHUNKS, NotRegular, StoreError, refusal, route_refusal};
 
 thread_local! {
     /// The document whose identity check `Document::batch` holds to the end of its page, on this thread.
@@ -183,7 +183,7 @@ pub struct Document {
 
 impl Document {
     pub fn open(path: &Path) -> Result<Document, DocError> {
-        Self::open_with(path, 64, 1)
+        Self::open_with(path, CACHE_CHUNKS, 1)
     }
 
     pub fn open_with(path: &Path, cache_chunks: usize, generation: u32) -> Result<Document, DocError> {

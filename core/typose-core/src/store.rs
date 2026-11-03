@@ -13,7 +13,8 @@ use xxhash_rust::xxh3::xxh3_64;
 use crate::budget::{OverBudget, Reservation};
 
 pub const CHUNK: usize = 1 << 20;
-const DEFAULT_CACHE_CHUNKS: usize = 64;
+/// The chunk cache's size: 64 MiB.
+pub const CACHE_CHUNKS: usize = 64;
 /// Plan C1's Raw floor: the cache keeps 4 chunks whatever the ledger holds (or the whole file, if it's smaller).
 pub const FLOOR_CHUNKS: usize = 4;
 
@@ -530,7 +531,7 @@ impl Cache {
 
 impl ByteStore {
     pub fn open(path: &Path) -> io::Result<ByteStore> {
-        Self::open_with(path, DEFAULT_CACHE_CHUNKS)
+        Self::open_with(path, CACHE_CHUNKS)
     }
 
     /// Opens `path` and reserves its share of plan C1's floor: the hash tables and the cache's floor. A refused
