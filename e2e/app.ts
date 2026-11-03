@@ -202,8 +202,8 @@ export async function stubOpenDialog(app: ElectronApplication, path: string, cha
   await expect(app.evaluate(({ dialog }) => dialog.showOpenDialog({}))).rejects.toThrow('the real dialog was reached')
 }
 
-/** The card is showing a file's lines once its first row has text. */
-export async function waitOpen(win: Page): Promise<void> {
+/** The card (or page) is showing a file's lines once its first row has text. */
+export async function waitOpen(win: Page | Locator): Promise<void> {
   await expect(win.locator('.vl-row .text').first()).toBeAttached({ timeout: 30_000 })
 }
 
@@ -213,7 +213,7 @@ export async function waitRendered(scope: Page | Locator, timeout = 60_000): Pro
 }
 
 /** Waits until the index reports done (the status shows the line count and encoding), and returns the count. */
-export async function waitIndexed(win: Page, timeout = 120_000): Promise<number> {
+export async function waitIndexed(win: Page | Locator, timeout = 120_000): Promise<number> {
   const status = win.locator('.card-status')
   await expect(status).toHaveText(/^[\d,]+ lines? · /, { timeout })
   return Number((await status.textContent())!.split(' ')[0].replaceAll(',', ''))

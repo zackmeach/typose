@@ -1,20 +1,12 @@
 // Focused split-surface workflow smoke. Native IDs are checked in the hooks build; the production package
 // confirms that the visible Raw/Rendered split and card merge work without test hooks.
-import { expect, type Locator } from '@playwright/test'
-import { fixture, finish, launch, debugStats, stubOpenDialog, test, waitRendered } from './app'
+import { expect } from '@playwright/test'
+import { fixture, finish, launch, debugStats, stubOpenDialog, test, waitIndexed, waitOpen, waitRendered } from './app'
 import { closeCleanly, closePackaged, launchPackaged } from './packaged'
 
 /** By its shortcut, as Reload and Open file… are below: macOS has the native menu, not the ☰. */
 async function splitRight(win: Awaited<ReturnType<typeof launch>>['win']): Promise<void> {
   await win.keyboard.press('ControlOrMeta+\\')
-}
-
-async function rawReady(card: Locator): Promise<void> {
-  await expect(card.locator('.vl-row .text').first()).toBeAttached({ timeout: 30_000 })
-}
-
-async function cardIndexed(card: Locator): Promise<void> {
-  await expect(card.locator('.card-status')).toHaveText(/^[\d,]+ lines? · /, { timeout: 120_000 })
 }
 
 function splitSource(name: string): string {
@@ -34,9 +26,9 @@ test('split clones the source place, opens into the focused card, and preserves 
     const { win } = live
     const left = win.getByRole('region', { name: 'Reader card 1', exact: true })
     await waitRendered(left)
-    await cardIndexed(left)
+    await waitIndexed(left)
     await left.getByRole('tab', { name: 'Raw', exact: true }).click()
-    await rawReady(left)
+    await waitOpen(left)
     const anchorText = left.getByText('Split source anchor stays visible', { exact: true })
     await anchorText.scrollIntoViewIfNeeded()
     await expect(anchorText).toBeInViewport()
@@ -92,7 +84,7 @@ test('split clones the source place, opens into the focused card, and preserves 
     await win.keyboard.press('ControlOrMeta+O')
     await win.getByRole('button', { name: 'Browse…', exact: true }).click()
     await expect(right.locator('.card-name')).toHaveText('split-destination-b.md')
-    await cardIndexed(right)
+    await waitIndexed(right)
     await expect(right.locator('.md-scroller, .vl-row .text').first()).toBeAttached({ timeout: 30_000 })
     await expect(left.getByText('Split source anchor stays visible', { exact: true })).toBeInViewport()
     const afterDestination = Object.keys((await debugStats(win)).charges).sort()
@@ -128,7 +120,7 @@ test('production package displays both lenses in split cards and merges the clos
     await waitRendered(win.getByRole('region', { name: 'Reader card 1', exact: true }))
     const left = win.getByRole('region', { name: 'Reader card 1', exact: true })
     await left.getByRole('tab', { name: 'Raw', exact: true }).click()
-    await rawReady(left)
+    await waitOpen(left)
     const anchorText = left.getByText('Split source anchor stays visible', { exact: true })
     await anchorText.scrollIntoViewIfNeeded()
     await expect(anchorText).toBeInViewport()
