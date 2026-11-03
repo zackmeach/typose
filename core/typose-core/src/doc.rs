@@ -381,27 +381,6 @@ impl Document {
         self.local_target(generation, target)
     }
 
-    /// An image target uses only this held capability. The codec, not a pathname extension, identifies its format.
-    pub(crate) fn image_route(&self, generation: u32, target: &str) -> Result<LocalRoute, DocError> {
-        if generation != self.generation {
-            return Err(DocError::Stale { current: self.generation, asked: generation });
-        }
-        if !crate::md::is_markdown(&self.path) {
-            return Err(DocError::Refused("local images require a Markdown source".into()));
-        }
-        if target.is_empty() || target.len() > 32 << 10 || target.chars().any(char::is_control) {
-            return Err(DocError::Invalid(
-                "image target must be a decoded path of at most 32 KiB, without controls".into(),
-            ));
-        }
-        let source = self.local.as_ref().ok_or_else(|| {
-            DocError::Refused("local images are unavailable for this source; select it manually again".into())
-        })?;
-        let route = source.resolve(target).map_err(local_error)?;
-        self.check_local_source(generation)?;
-        Ok(route)
-    }
-
     pub fn open_local(&self, generation: u32, target: &str) -> Result<Document, DocError> {
         let route = self.local_target(generation, target)?;
         let next = Self::from_local(route, self.cache_chunks, 1).map_err(local_target_error)?;

@@ -54,7 +54,8 @@ struct Snapshot {
 impl Snapshot {
     fn read(source: &Document, generation: u32, target: &str, cancel: &AtomicBool) -> Result<Self, DocError> {
         cancelled(cancel)?;
-        let route = source.image_route(generation, target)?;
+        // Only the held capability, any extension: the codec, not a pathname extension, identifies the format.
+        let route = source.link_path(generation, target)?;
         let mut file = route.open().map_err(local_error)?;
         #[cfg(feature = "test-hooks")]
         let handle = crate::hooks::Live::new(&crate::hooks::HANDLES);
