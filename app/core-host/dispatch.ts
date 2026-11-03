@@ -148,18 +148,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       throw new Refusal('Stale', 'the CSV configuration was replaced')
     return doc
   }
-  const cancelCsvReads = (doc: number, except?: number): void => {
-    for (const [req, entry] of reads) if (req !== except && entry.doc === doc && entry.csv) {
-      entry.cancelled = true
-      entry.cancel.cancel()
-    }
-  }
-  const cancelCsvConfigurations = (doc: number): void => {
-    for (const entry of reads.values()) if (entry.doc === doc && entry.csvConfig) {
-      entry.cancelled = true
-      entry.cancel.cancel()
-    }
-  }
+  const cancelCsvReads = (doc: number, except?: number): void => stopReads((entry, req) => req !== except && entry.doc === doc && entry.csv)
   const invalidateCsv = (doc: number): void => {
     closeDocumentCsvInteractions(doc)
     cancelCsvReads(doc)
@@ -298,6 +287,11 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     findView?: number; findId?: number; findKind?: 'source' | 'csv'; findOp?: 'scan' | 'seek'; csvSort?: true
   }
   const reads = new Map<number, ReadEntry>()
+  /** Marks a read cancelled, then cancels its native flag. */
+  const stop = (entry?: ReadEntry): void => { if (entry) { entry.cancelled = true; entry.cancel.cancel() } }
+  const stopReads = (match: (entry: ReadEntry, req: number) => boolean | undefined): void => {
+    for (const [req, entry] of reads) if (match(entry, req)) stop(entry)
+  }
   const saved = new Map<string, SavedRoute>()
   let savedPeak = 0
   let savedHostBytes = 0
@@ -414,8 +408,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     const previous = surface.latest
     if (previous?.kind === 'activate') {
       previous.disposed = true
-      const entry = reads.get(previous.request)
-      if (entry) { entry.cancelled = true; entry.cancel.cancel() }
+      stop(reads.get(previous.request))
     }
     surface.latest = pending
     return pending
@@ -427,12 +420,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     if (!transferred) account()
   }
   /** Leaving a view retains Reload's first page for its new metadata/index. */
-  const cancelReads = (doc: number, leaving = false) => {
-    for (const read of reads.values()) if (read.doc === doc && (!leaving || !read.retainOnLeave)) {
-      read.cancelled = true
-      read.cancel.cancel()
-    }
-  }
+  const cancelReads = (doc: number, leaving = false) => stopReads((read) => read.doc === doc && (!leaving || !read.retainOnLeave))
   const reclaimInactive = (): void => {
     for (const [id, doc] of docs) if (!viewed(id, doc.generation) && ![...pendingViews.values()].some((pending) => pending.doc === id)) {
       doc.setCacheActive(doc.generation, false)
@@ -517,11 +505,8 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     if (lease.sourceFind !== id) throw new Refusal('Stale', 'the Find query was replaced')
     return { ref: { view: lease.ref, id }, lease, doc: getDoc(lease.ref.doc) }
   }
-  const cancelFindReads = (lease: Lease, id: number, kind: 'source' | 'csv' = 'source'): void => {
-    for (const entry of reads.values()) if (entry.findView === lease.ref.id && entry.findId === id && entry.findKind === kind) {
-      entry.cancelled = true; entry.cancel.cancel()
-    }
-  }
+  const cancelFindReads = (lease: Lease, id: number, kind: 'source' | 'csv' = 'source'): void =>
+    stopReads((entry) => entry.findView === lease.ref.id && entry.findId === id && entry.findKind === kind)
   const closeSourceFind = (lease: Lease): void => {
     const id = lease.sourceFind
     if (id === undefined) return
@@ -534,8 +519,8 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     for (const surface of surfaces.values()) for (const lease of surface.views.values()) if (lease.ref.doc === id) closeSourceFind(lease)
   }
   const beginFindRead = (req: number, lease: Lease, id: number, kind: 'source' | 'csv', op: 'scan' | 'seek'): void => {
-    for (const [other, entry] of reads) if (other !== req && entry.findView === lease.ref.id && entry.findId === id
-      && entry.findKind === kind && entry.findOp === op) { entry.cancelled = true; entry.cancel.cancel() }
+    stopReads((entry, other) => other !== req && entry.findView === lease.ref.id && entry.findId === id
+      && entry.findKind === kind && entry.findOp === op)
     Object.assign(reads.get(req)!, { findView: lease.ref.id, findId: id, findKind: kind, findOp: op })
   }
   const sourceFindRead = <T>(req: number, ref: SourceFindRef, lease: Lease, op: 'scan' | 'seek', start: (cancel: Cancel) => Promise<T>): Promise<T> =>
@@ -881,7 +866,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       if (!Number.isSafeInteger(nextSort)) throw new Refusal('Refused', 'sort intents are exhausted')
       const intent = nextSort++
       config.sort = intent; config.sortView = lease.ref.id; config.interactionId = interactionId
-      for (const entry of reads.values()) if (entry.doc === ref.doc && entry.csvSort) { entry.cancelled = true; entry.cancel.cancel() }
+      stopReads((entry) => entry.doc === ref.doc && entry.csvSort)
       return csvRead(req, ref.doc, ref.gen, ref.revision, async (cancel) => {
         reads.get(req)!.csvSort = true
         const value = await doc.csvSort(ref.gen, ref.revision, column, p.direction as string, cancel)
@@ -1003,7 +988,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       if (workspaceBytes < retired) throw new Refusal('Memory', 'precharge the window retirement allowance before closing this card')
       surface.alive = false
       for (const pending of pendingViews.values()) if (pending.surface === surface) pending.disposed = true
-      for (const entry of reads.values()) if (entry.surface === id) { entry.cancelled = true; entry.cancel.cancel() }
+      stopReads((entry) => entry.surface === id)
       for (const [doc, owner] of docOwners) if (owner === id) closeDoc(doc)
       surface.views.clear()
       surfaces.delete(id)
@@ -1096,7 +1081,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       if (ownerSession !== session) return false
       const root = roots.get(p.root)
       if (!root) return false
-      for (const entry of reads.values()) if (entry.folder === root.native) { entry.cancelled = true; entry.cancel.cancel() }
+      stopReads((entry) => entry.folder === root.native)
       roots.delete(p.root)
       root.native.close()
       return true
@@ -1112,7 +1097,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const doc = ownedDoc(surface, id)
       if (doc.generation !== gen) throw new Refusal('Stale', 'the CSV document generation was replaced')
       if (!csvFormat(doc)) throw new Refusal('Unsupported', 'Grid is available for .csv and .tsv files')
-      cancelCsvConfigurations(id)
+      stopReads((entry) => entry.doc === id && entry.csvConfig)
       const configuration = nextCsvConfig(id)
       return read(req, id, async (cancel) => {
         const native = await doc.csvConfigure(gen, options.delimiter, options.header, cancel)
@@ -1264,8 +1249,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const pending = surface.latest
       if (pending?.kind !== 'activate' || pending.activationId !== p.activationId) return false
       pending.disposed = true
-      const entry = reads.get(pending.request)
-      if (entry) { entry.cancelled = true; entry.cancel.cancel() }
+      stop(reads.get(pending.request))
       return true
     },
     openLocal: async (p, req): Promise<Opened> => {
@@ -1347,10 +1331,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const ticket = savedTicket(p)
       const route = ticket.session === session ? saved.get(ticket.id) : undefined
       if (!route) return false
-      for (const entry of reads.values()) if (entry.candidate && entry.saved === route) {
-        entry.cancelled = true
-        entry.cancel.cancel()
-      }
+      stopReads((entry) => entry.candidate && entry.saved === route)
       saved.delete(ticket.id)
       route.release()
       return true
@@ -1506,8 +1487,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     cancel: (p) => {
       const running = reads.get(int(p, 'id'))
       if (!running) return false
-      running.cancelled = true
-      running.cancel.cancel()
+      stop(running)
       if (__TEST_HOOKS__) {
         cancels.cancels++
         running.cancelledAt ??= performance.now()
