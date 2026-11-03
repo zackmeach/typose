@@ -30,7 +30,7 @@ impl Task for SourceBytes {
             self.raw.document().verified(self.generation, |_| Ok(()))?;
             Ok(bytes)
         });
-        result.map(Uint8Array::new).map_err(|e| Error::from(JsError::from(doc_error(e)).into_unknown(env)))
+        result.map(Uint8Array::new).map_err(|e| err(env, e))
     }
 }
 #[napi]
@@ -105,7 +105,7 @@ impl Task for Location {
                 self.raw.document().verified(self.generation, |_| Ok(()))?;
                 Ok(location)
             })
-            .map_err(|e| Error::from(JsError::from(doc_error(e)).into_unknown(env)))
+            .map_err(|e| err(env, e))
     }
 }
 pub struct LineRange {
@@ -153,7 +153,7 @@ impl Task for LineRange {
                 self.raw.document().verified(self.generation, |_| Ok(()))?;
                 Ok(range)
             })
-            .map_err(|e| Error::from(JsError::from(doc_error(e)).into_unknown(env)))
+            .map_err(|e| err(env, e))
     }
 }
 pub struct Verify {
@@ -193,7 +193,7 @@ impl Task for Verify {
                 self.raw.document().verified(self.generation, |_| Ok(()))?;
                 Ok(result)
             })
-            .map_err(|e| Error::from(JsError::from(doc_error(e)).into_unknown(env)))
+            .map_err(|e| err(env, e))
     }
 }
 #[napi]

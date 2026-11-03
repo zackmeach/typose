@@ -90,6 +90,17 @@ fn slot(work: Work, stop: &dyn Fn() -> bool) -> std::result::Result<Slot, DocErr
     })
 }
 
+/// A promise rejects with the JS value an error holds, so the typed code survives.
+fn err(env: Env, e: DocError) -> Error {
+    Error::from(JsError::from(doc_error(e)).into_unknown(env))
+}
+
+/// A cancel that arrives after the work, while the result is on its way to JS, still rejects it.
+fn settle<T>(env: Env, cancel: &AtomicBool, output: std::result::Result<T, DocError>) -> Result<T> {
+    let output = if cancel.load(Ordering::Relaxed) { Err(DocError::Cancelled) } else { output };
+    output.map_err(|e| err(env, e))
+}
+
 fn int(field: &str, x: f64) -> std::result::Result<u64, Error<Code>> {
     limits::int(field, x).map_err(|why| Error::new(Code::InvalidParams, why))
 }
@@ -326,12 +337,8 @@ impl Task for Read {
     /// A cancel that arrives after the reads, while the result is on its way to JS, still ends the read: once the
     /// core host has cancelled a read, it never resolves.
     fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Page> {
-        let output = if self.cancel.load(Ordering::Relaxed) { Err(DocError::Cancelled) } else { output };
-        match output {
-            Ok(pieces) => Ok(Page { items: pieces.into_iter().map(|p| item(self.generation, p)).collect() }),
-            // A promise rejects with the JS value an error holds, so the typed code survives.
-            Err(e) => Err(Error::from(JsError::from(doc_error(e)).into_unknown(env))),
-        }
+        let pieces = settle(env, &self.cancel, output)?;
+        Ok(Page { items: pieces.into_iter().map(|p| item(self.generation, p)).collect() })
     }
 }
 
@@ -388,17 +395,12 @@ impl Task for Render {
 
     /// As `Read`'s: once the core host has cancelled a build, it never resolves, and what it built drops here.
     fn resolve(&mut self, env: Env, output: Self::Output) -> Result<MdBuild> {
-        let output = if self.cancel.load(Ordering::Relaxed) { Err(DocError::Cancelled) } else { output };
-        match output {
-            Ok(rendered) => {
-                let size = rendered.items().len() as f64;
-                let (units, html_bytes) = (rendered.units() as f64, rendered.html_bytes() as f64);
-                let (nodes, note_units) = (rendered.nodes() as f64, rendered.note_units() as f64);
-                *self.built.lock().unwrap() = Some(rendered); // the build it replaces drops
-                Ok(MdBuild { blocks: size, units, html_bytes, nodes, note_units })
-            }
-            Err(e) => Err(Error::from(JsError::from(doc_error(e)).into_unknown(env))),
-        }
+        let rendered = settle(env, &self.cancel, output)?;
+        let size = rendered.items().len() as f64;
+        let (units, html_bytes) = (rendered.units() as f64, rendered.html_bytes() as f64);
+        let (nodes, note_units) = (rendered.nodes() as f64, rendered.note_units() as f64);
+        *self.built.lock().unwrap() = Some(rendered); // the build it replaces drops
+        Ok(MdBuild { blocks: size, units, html_bytes, nodes, note_units })
     }
 }
 
@@ -449,11 +451,7 @@ impl Task for MdRead {
     }
 
     fn resolve(&mut self, env: Env, output: Self::Output) -> Result<MdPage> {
-        let output = if self.cancel.load(Ordering::Relaxed) { Err(DocError::Cancelled) } else { output };
-        match output {
-            Ok(items) => Ok(MdPage { items }),
-            Err(e) => Err(Error::from(JsError::from(doc_error(e)).into_unknown(env))),
-        }
+        settle(env, &self.cancel, output).map(|items| MdPage { items })
     }
 }
 
@@ -504,7 +502,7 @@ impl Task for PrepareImage {
                 encoded_bytes: metadata.encoded_bytes,
                 pixel_bytes: metadata.pixel_bytes,
             }),
-            Err(error) => Err(Error::from(JsError::from(doc_error(error)).into_unknown(env))),
+            Err(error) => Err(err(env, error)),
         }
     }
 }
@@ -546,7 +544,7 @@ impl Task for ImageChunk {
         });
         match output {
             Ok(bytes) => Ok(Uint8Array::new(bytes)), // Work::Page slot survives through this NAPI conversion
-            Err(error) => Err(Error::from(JsError::from(doc_error(error)).into_unknown(env))),
+            Err(error) => Err(err(env, error)),
         }
     }
 }
@@ -697,18 +695,14 @@ impl Task for ListFolder {
         Ok(self.state.list(self.node, self.cursor, self.hidden, &|| self.cancel.load(Ordering::Relaxed)))
     }
     fn resolve(&mut self, env: Env, output: Self::Output) -> Result<FolderPage> {
-        let output = if self.cancel.load(Ordering::Relaxed) { Err(DocError::Cancelled) } else { output };
-        match output {
-            Ok(p) => Ok(FolderPage {
-                entries: p
-                    .entries
-                    .into_iter()
-                    .map(|e| FolderEntry { id: e.id, name: e.name, kind: e.kind.into(), hidden: e.hidden })
-                    .collect(),
-                cursor: p.cursor,
-            }),
-            Err(e) => Err(Error::from(JsError::from(doc_error(e)).into_unknown(env))),
-        }
+        settle(env, &self.cancel, output).map(|p| FolderPage {
+            entries: p
+                .entries
+                .into_iter()
+                .map(|e| FolderEntry { id: e.id, name: e.name, kind: e.kind.into(), hidden: e.hidden })
+                .collect(),
+            cursor: p.cursor,
+        })
     }
 }
 

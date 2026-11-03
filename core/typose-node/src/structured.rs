@@ -364,7 +364,7 @@ impl Task for Build {
             self.owner.state.lock().unwrap().replace(entry);
             Ok(info)
         });
-        result.map_err(|e| Error::from(JsError::from(doc_error(e)).into_unknown(env)))
+        result.map_err(|e| err(env, e))
     }
 }
 pub struct Children {
@@ -443,7 +443,7 @@ impl Task for Children {
             self.raw.document().verified(self.entry.generation, |_| Ok(()))?;
             Ok(page)
         });
-        result.map_err(|e| Error::from(JsError::from(doc_error(e)).into_unknown(env)))
+        result.map_err(|e| err(env, e))
     }
 }
 #[napi]
@@ -965,7 +965,7 @@ impl Task for Rows {
                 check_read(&self.raw, &self.owner, &self.entry, &self.cancel)?;
                 Ok(page)
             })
-            .map_err(|e| Error::from(JsError::from(doc_error(e)).into_unknown(env)))
+            .map_err(|e| err(env, e))
     }
 }
 pub struct Columns {
@@ -1014,7 +1014,7 @@ impl Task for Columns {
                 check_read(&self.raw, &self.owner, &self.entry, &self.cancel)?;
                 Ok(page)
             })
-            .map_err(|e| Error::from(JsError::from(doc_error(e)).into_unknown(env)))
+            .map_err(|e| err(env, e))
     }
 }
 #[napi]

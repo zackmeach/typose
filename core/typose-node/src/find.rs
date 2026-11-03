@@ -147,7 +147,7 @@ impl Task for FindTask {
                 self.check()?;
                 Ok(out)
             })
-            .map_err(|e| Error::from(JsError::from(doc_error(e)).into_unknown(env)))?;
+            .map_err(|e| err(env, e))?;
         let mut page = result.page;
         page.hit = result.seek.hit;
         page.wrapped = result.seek.wrapped;

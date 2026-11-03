@@ -201,9 +201,6 @@ fn stale(revision: u32) -> DocError {
 fn source_check(raw: &Raw, generation: u32) -> std::result::Result<(), DocError> {
     raw.document().verified(generation, |_| Ok(()))
 }
-fn err(env: Env, e: DocError) -> Error {
-    Error::from(JsError::from(doc_error(e)).into_unknown(env))
-}
 
 pub struct Configure {
     raw: Arc<Raw>,
