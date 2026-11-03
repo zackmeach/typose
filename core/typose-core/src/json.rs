@@ -31,8 +31,6 @@ pub enum Kind {
     Null,
 }
 
-pub const NO_PARENT: u32 = u32::MAX;
-
 /// One object or array: 32 bytes, so the index costs 32 bytes per container (spec §3.5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Container {
@@ -40,7 +38,6 @@ pub struct Container {
     /// One past the closing bracket; 0 while unclosed (the scan stopped inside it).
     pub end: u64,
     pub children: u64,
-    pub parent: u32,
     pub kind: Kind,
 }
 
@@ -86,7 +83,7 @@ pub struct ScanError {
 const MAX_DEPTH: usize = 10_000;
 /// More containers stop the scan with `TooManyContainers`. The records are charged to the memory budget (spec §3.6)
 /// and paged at 32 bytes per container, so growth adds at most one 2 MiB page.
-const MAX_CONTAINERS: usize = NO_PARENT as usize;
+const MAX_CONTAINERS: usize = u32::MAX as usize;
 /// An element checkpoint every `CP_CHILDREN` children or `CP_BYTES` bytes, whichever comes first (spec §3.5).
 const CP_CHILDREN: u64 = 1024;
 const CP_BYTES: u64 = 1 << 20;
@@ -618,13 +615,12 @@ impl Scanner {
         }
         let kind = if b == b'{' { Kind::Object } else { Kind::Array };
         let id = self.idx.containers.len() as u32;
-        let parent = self.stack.last().map_or(NO_PARENT, |f| f.id);
         if self.stack.is_empty() {
             self.idx.root = Some((kind, Span { start: at, end: 0 }));
         }
         self.idx
             .containers
-            .push(Container { start: at, end: 0, children: 0, parent, kind })
+            .push(Container { start: at, end: 0, children: 0, kind })
             .map_err(|e| (ErrorKind::Memory(e), at))?;
         self.stack.push(Frame { id, cp_child: 0, cp_offset: at });
         self.expect = if kind == Kind::Object { Expect::ObjFirst } else { Expect::ArrFirst };
