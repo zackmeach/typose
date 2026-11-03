@@ -7,7 +7,7 @@ import coreHostPath from '../core-host/index?modulePath'
 import { MAX_PRINT_PAGES, type Command, type PrintDocumentResult } from '../shared/protocol'
 import { openExternal } from './external'
 import { writeClipboardText } from './clipboard'
-import { dropPaths, handoff, isFolder, launchPaths } from './launch'
+import { dropPaths, handoff, launchPaths } from './launch'
 import { gestures, handOff, type HandoffAction } from './handoff'
 import { startLifecycle } from './lifecycle'
 import { envWhole, isMark, marksHook } from './marks'
@@ -376,28 +376,18 @@ void app.whenReady().then(() => {
     if (win.isMinimized()) win.restore()
     if (win.isVisible()) win.focus() // focus() would show a window that isn't shown yet, ahead of plan C8's show
   })
-  // Main owns argv, so main says what a path names: a folder goes to the page as 'open-folder' and becomes a root, every
-  // other path (one that can't be statted too) as 'open-path', where the core's checks and refusals apply. One at a time,
-  // so what a launch names arrives in the order it named it.
-  let routing = Promise.resolve()
   const liveDelivery = () => {
     deliver = (path) => {
       grant(path)
       newest = path
-      routing = routing.then(async () => {
-        const channel = await isFolder(path) ? 'open-folder' : 'open-path'
-        if (!win.isDestroyed()) win.webContents.send(channel, path)
-      })
+      if (!win.isDestroyed()) win.webContents.send('open-path', path)
     }
   }
-  // The startup batch: its files are the reply, and its folders follow as 'open-folder', which the page holds until its session is restored.
-  handle(win, 'launch-paths', async () => {
+  handle(win, 'launch-paths', () => {
     liveDelivery()
     const paths = pendingPaths
     pendingPaths = []
-    const folders = await Promise.all(paths.map(path => isFolder(path)))
-    paths.forEach((path, i) => { if (folders[i] && !win.isDestroyed()) win.webContents.send('open-folder', path) })
-    return paths.filter((_, i) => !folders[i])
+    return paths
   })
   handle(win, 'launch-path', () => {
     liveDelivery()

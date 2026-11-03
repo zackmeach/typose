@@ -347,8 +347,6 @@ export interface TyposeApi {
   launchPaths(): Promise<string[]>
   /** Called with each file named after that: by a second launch, or macOS's open-file. Returns the unsubscribe. */
   onOpenPath(cb: (path: string) => void): () => void
-  /** Called with each folder named at startup or after, which main (where the argv is) found to be a folder: a root, as a dropped one is. */
-  onOpenFolder(cb: (path: string) => void): () => void
   /** The OS Open dialog; null when cancelled. */
   openDialog(): Promise<string | null>
   folderDialog(): Promise<string | null>

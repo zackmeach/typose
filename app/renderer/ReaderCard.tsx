@@ -33,11 +33,9 @@ const markOnce = (name: string) => performance.getEntriesByName(name).length ===
 const firstCount = (l: Limits) => Math.min(l.maxItems, 3 * Math.ceil(window.innerHeight / ROW_HEIGHT) + 1)
 const CSV_OPTIONS: CsvOptions = { delimiter: 'auto', header: 'auto' }
 
-/** The core's manual open refused a folder (or another non-file) before reading anything. */
-const NOT_REGULAR = 'refused: not a regular file'
-/** Past the core's route walk, Windows has no non-file but a folder; elsewhere a FIFO or a device is one too (see App's 'open-folder'). */
-const WINDOWS = navigator.platform.startsWith('Win')
-const notRegular = (e: unknown) => e instanceof CoreCallError && e.code === 'Refused' && e.message === NOT_REGULAR
+/** The core's manual open refused a folder before reading anything (a FIFO or a device is "not a regular file"). */
+const FOLDER = 'refused: a folder'
+const folderRefused = (e: unknown) => e instanceof CoreCallError && e.code === 'Refused' && e.message === FOLDER
 
 const failed = (path: string, e: unknown): Extract<Card, { kind: 'failed' }> => ({
   kind: 'failed',
@@ -667,8 +665,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   }
 
   /** Manual paths create permanent tabs; an equal caller key focuses the existing tab. `named`: a launch, a second
-   *  instance or a drop named it, so on Windows a folder becomes a root instead of a refused tab. Elsewhere main has already
-   *  sent a folder named at launch to 'open-folder' (it can stat there), and a drop's folders never come here. */
+   *  instance or a drop named it, so a folder becomes a root instead of a refused tab. */
   async function open(path: string, atLine?: number, replace?: TabId, named = false): Promise<void> {
     if (!latest.current.limits || !workspace.getSnapshot().ready || !surface.current) {
       waiting.current.push({ path, atLine, replace, named }) // the whole request, so a replay can't change what it does
@@ -730,12 +727,10 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       else deactivateInactive({ session: ticket.session, doc: opened.doc, gen: opened.gen, view: opened.view })
     } catch (e) {
       if (!workspace.current(ticket) || e instanceof CoreCallError && e.code === 'CoreGone') return
-      // On Windows, a folder a launch, a second instance or Explorer named (the core's manual open refuses it before
-      // reading anything) becomes a root through Open folder…'s own capture and checks, instead of a refused tab: main
-      // can't stat there without risking a pipe (spec §3.3), and nothing else is a non-file there. Elsewhere a refused
-      // non-file stays a refused tab, since it may be a FIFO or a device. Never a restored or queued record: only that
-      // explicit gesture grants a root.
-      if (WINDOWS && named && !previous && notRegular(e)) {
+      // A folder a launch, a second instance, Explorer or a drop named (the core's manual open refuses it before
+      // reading anything) becomes a root through Open folder…'s own capture and checks, instead of a refused tab.
+      // Never a restored or queued record: only that explicit gesture grants a root.
+      if (named && !previous && folderRefused(e)) {
         const wasSelected = workspace.selected(selection)
         workspace.close(ticket.tab)
         if (wasSelected) {

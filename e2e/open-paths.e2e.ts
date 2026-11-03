@@ -2,6 +2,7 @@
 // UNC path is refused unopened; a folder named on the command line becomes a sidebar root; Raw's Wrap lines wraps to
 // the card as continuation rows; and a file the core died reading comes back unopened after a restart.
 import { type Page, expect } from '@playwright/test'
+import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -140,7 +141,19 @@ test('a folder named on the command line becomes a sidebar root, and a file besi
   await expect(win.getByRole('treeitem', { name: basename(root), exact: true })).toBeVisible({ timeout: 30_000 })
   await expect(win.getByRole('treeitem', { name: 'notes.md', exact: true })).toBeVisible()
   await expect(tabs(win)).toHaveText(['open-paths-argv.md'])
-  await expect(win.getByText('not a regular file')).toHaveCount(0)
+  await expect(win.getByText('refused: a folder')).toHaveCount(0)
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+test('a FIFO named on the command line stays a refused tab, never a root', async () => {
+  test.skip(process.platform === 'win32', 'Windows has no FIFOs')
+  const fifo = join(mkdtempSync(join(tmpdir(), 'typose-fifo-')), 'named.fifo')
+  expect(spawnSync('mkfifo', [fifo]).status).toBe(0)
+  const l = await launch({ file: [fifo] })
+  const { win } = l
+  await expect(win.locator('.card-message p')).toHaveText(`Can't open ${fifo} · refused: not a regular file`, { timeout: 30_000 })
+  await expect(win.getByRole('treeitem')).toHaveCount(0)
   expect(l.pageErrors).toEqual([])
   await finish(l)
 })
@@ -307,7 +320,7 @@ test('a restored record that names a folder opens as a refused tab, never a root
   ], selected: 0, weight: 1 }] }))
   const l = await launch({ hooks: true, userData })
   const { win } = l
-  await expect(win.locator('.card-message p')).toHaveText(`Can't open ${folder} · refused: not a regular file`, { timeout: 30_000 })
+  await expect(win.locator('.card-message p')).toHaveText(`Can't open ${folder} · refused: a folder`, { timeout: 30_000 })
   await win.waitForTimeout(500)
   await expect(win.getByRole('treeitem')).toHaveCount(0)
   expect(l.pageErrors).toEqual([])

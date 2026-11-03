@@ -1,5 +1,4 @@
 // Spec §8.1: files a launch names, from its argv and cwd: this launch's own, or a second instance's; and what a drop names.
-import { stat } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { MAX_DROP, type DroppedPaths } from '../shared/protocol'
 
@@ -36,27 +35,6 @@ export function handoff(data: unknown): { argv: string[]; cwd: string } | null {
 }
 
 /**
- * A plain local path: a drive-letter one on Windows, an absolute one without a leading double slash elsewhere, and no
- * control character. UNC, device and virtual paths are none of these.
- */
-const isLocal = (path: string, windows: boolean): boolean =>
-  // oxlint-disable-next-line no-control-regex -- a path with a control character names nothing to open
-  !/[\u0000-\u001f]/.test(path) && (windows ? /^[A-Za-z]:[\\/]/.test(path) : path.startsWith('/') && !path.startsWith('//'))
-
-/**
- * Whether a path a launch named is a folder, for main to send over 'open-folder' rather than 'open-path': the core's
- * refusal says "not a regular file" of a folder, a FIFO and a device alike, and a FIFO named on a command line must stay
- * a refused tab. Only plain local paths are asked about, so a UNC share's host is never reached, and not on Windows at
- * all: there a stat connects to a named pipe through a link in the path (spec §3.3), which only the core's own walk
- * refuses, so a Windows path goes to the core, whose "not a regular file" can only be a folder there (the renderer's
- * fallback). Elsewhere a stat opens nothing. One that fails (missing, denied) is no folder: the open reports that.
- */
-export async function isFolder(path: string, windows = process.platform === 'win32', isDirectory = async (p: string) => (await stat(p)).isDirectory()): Promise<boolean> {
-  if (windows || !isLocal(path, false)) return false
-  return isDirectory(path).catch(() => false)
-}
-
-/**
  * A drop is an explicit choice, as Open file… and Open folder… are, of what the preload read from it (untrusted): items
  * of `{ path, folder }`, or null when the message has another shape. A drop of more than `MAX_DROP` items opens nothing
  * and says how many it held. UNC, device, relative and empty paths are refused here, before anything touches them: a
@@ -71,7 +49,9 @@ export function dropPaths(items: unknown, windows = process.platform === 'win32'
   for (const item of items as unknown[]) {
     const { path, folder } = (item ?? {}) as { path?: unknown; folder?: unknown }
     if (typeof path !== 'string' || path.length > MAX_CHARS || typeof folder !== 'boolean') return null
-    if (!isLocal(path, windows)) drop.refused.push(path)
+    // oxlint-disable-next-line no-control-regex -- a path with a control character names nothing to open
+    const local = !/[\u0000-\u001f]/.test(path) && (windows ? /^[A-Za-z]:[\\/]/.test(path) : path.startsWith('/') && !path.startsWith('//'))
+    if (!local) drop.refused.push(path)
     else (folder ? drop.folders : drop.files).push(path)
   }
   return drop

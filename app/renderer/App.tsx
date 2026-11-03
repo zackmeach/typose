@@ -343,10 +343,6 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       else openInFocused(path)
     }
     const offOpen = window.typose.onOpenPath(openPath)
-    // A folder a launch named becomes a root as a dropped one does, one at a time; one that arrives before the session is restored waits for it.
-    let restored!: () => void
-    let adding = new Promise<void>(ok => (restored = ok))
-    const offFolder = window.typose.onOpenFolder(path => { adding = adding.then(() => pickFolder(undefined, path)) })
     // A drop is the dialogs' explicit choice: files open as tabs in the focused card, folders become roots, in order.
     const offDrop = window.typose.onDrop(drop => {
       for (const path of drop.files) openPath(path)
@@ -386,10 +382,9 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       await restoreWindowSession(saved)
       sessionReady.current = true
       for (const path of paths) openPath(path)
-      restored()
       scheduleSession()
-    }).catch(error => { sessionReady.current = true; restored(); setWorkspaceNotice('Cannot restore workspace · ' + String(error)) })
-    return () => { cancelReaderWaiters('The workspace was unmounted'); gone(); ready(); offOpen(); offFolder(); offDrop(); offCommand(); window.removeEventListener('keydown', key) }
+    }).catch(error => { sessionReady.current = true; setWorkspaceNotice('Cannot restore workspace · ' + String(error)) })
+    return () => { cancelReaderWaiters('The workspace was unmounted'); gone(); ready(); offOpen(); offDrop(); offCommand(); window.removeEventListener('keydown', key) }
   }, [core])
 
   function setFolders(next: readonly RootView[]): void {
