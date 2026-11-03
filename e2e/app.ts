@@ -3,7 +3,7 @@
 // observed exit status. `finish` keeps each run's lifecycle log, exit status and any new dumps (plan C9); a test
 // that fails before calling it gets the same from the `test` exported here.
 import AxeBuilder from '@axe-core/playwright'
-import { type ElectronApplication, type Page, test as base, _electron as electron, expect } from '@playwright/test'
+import { type ElectronApplication, type Locator, type Page, test as base, _electron as electron, expect } from '@playwright/test'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -205,6 +205,11 @@ export async function stubOpenDialog(app: ElectronApplication, path: string, cha
 /** The card is showing a file's lines once its first row has text. */
 export async function waitOpen(win: Page): Promise<void> {
   await expect(win.locator('.vl-row .text').first()).toBeAttached({ timeout: 30_000 })
+}
+
+/** The Markdown view in `scope` (a page or a card) has rendered: its scroller reports ready. */
+export async function waitRendered(scope: Page | Locator, timeout = 60_000): Promise<void> {
+  await expect(scope.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout })
 }
 
 /** Waits until the index reports done (the status shows the line count and encoding), and returns the count. */

@@ -3,7 +3,7 @@
 import { expect, type ElementHandle, type Locator, type Page } from '@playwright/test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { debugStats, finish, fixture, FIXTURES, launch, test, waitIndexed } from './app'
+import { debugStats, finish, fixture, FIXTURES, launch, test, waitIndexed, waitRendered } from './app'
 import { closeCleanly, closePackaged, launchPackaged } from './packaged'
 
 function makeLinkFixtures(sourceName: string, destinationName: string): { source: string; destination: string } {
@@ -13,10 +13,6 @@ function makeLinkFixtures(sourceName: string, destinationName: string): { source
   const source = fixture(sourceName, `# Peek source\n\n${paragraphs.join('\n\n')}\n\n[Preview destination](${destinationName})\n`)
   const destination = fixture(destinationName, '# Peek destination B\n\nLocal preview content.\n')
   return { source, destination }
-}
-
-async function renderedReady(card: Locator): Promise<void> {
-  await expect(card.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 30_000 })
 }
 
 interface SourceSnapshot {
@@ -78,14 +74,14 @@ test('local-link preview closes with button, Escape, or Ctrl+W and transfers its
     await waitIndexed(win)
     const card = win.locator('.reader-card').first()
     await card.getByRole('tab', { name: 'Rendered', exact: true }).click()
-    await renderedReady(card)
+    await waitRendered(card)
     const anchor = card.getByText('Source place remains visible', { exact: true })
     const originalIds = Object.keys((await debugStats(win)).charges).sort()
     expect(originalIds).toHaveLength(1)
 
     let { dialog, link, source: sourceState } = await openPreview(win, card)
     await expect(dialog.getByRole('heading', { name: 'Peek destination B', exact: true })).toBeVisible()
-    await renderedReady(dialog)
+    await waitRendered(dialog)
     await expectSourceStable(card, sourceState)
     let previewIds = Object.keys((await debugStats(win)).charges).sort()
     expect(previewIds).toHaveLength(2)
@@ -100,7 +96,7 @@ test('local-link preview closes with button, Escape, or Ctrl+W and transfers its
     link = escapePreview.link
     sourceState = escapePreview.source
     await expect(dialog.getByRole('heading', { name: 'Peek destination B', exact: true })).toBeVisible()
-    await renderedReady(dialog)
+    await waitRendered(dialog)
     await expectSourceStable(card, sourceState)
     await win.keyboard.press('Escape')
     await expect(dialog).toHaveCount(0)
@@ -113,7 +109,7 @@ test('local-link preview closes with button, Escape, or Ctrl+W and transfers its
     link = shortcutPreview.link
     sourceState = shortcutPreview.source
     await expect(dialog.getByRole('heading', { name: 'Peek destination B', exact: true })).toBeVisible()
-    await renderedReady(dialog)
+    await waitRendered(dialog)
     await expectSourceStable(card, sourceState)
     await win.keyboard.press('ControlOrMeta+W')
     await expect(dialog).toHaveCount(0)
@@ -125,7 +121,7 @@ test('local-link preview closes with button, Escape, or Ctrl+W and transfers its
     dialog = tabPreview.dialog
     sourceState = tabPreview.source
     await expect(dialog.getByRole('heading', { name: 'Peek destination B', exact: true })).toBeVisible()
-    await renderedReady(dialog)
+    await waitRendered(dialog)
     await expectSourceStable(card, sourceState)
     previewIds = Object.keys((await debugStats(win)).charges).sort()
     expect(previewIds).toHaveLength(2)
@@ -133,7 +129,7 @@ test('local-link preview closes with button, Escape, or Ctrl+W and transfers its
     await dialog.getByRole('button', { name: 'Open as tab', exact: true }).click()
     await expect(dialog).toHaveCount(0)
     await expect(card.locator('.card-name')).toHaveText('peek-destination-hooks.md')
-    await renderedReady(card)
+    await waitRendered(card)
     const promotedIds = Object.keys((await debugStats(win)).charges).sort()
     expect(promotedIds).toEqual(previewIds)
 
@@ -149,14 +145,14 @@ test('local-link preview closes with button, Escape, or Ctrl+W and transfers its
     link = sidePreview.link
     sourceState = sidePreview.source
     await expect(dialog.getByRole('heading', { name: 'Peek destination B', exact: true })).toBeVisible()
-    await renderedReady(dialog)
+    await waitRendered(dialog)
     await expectSourceStable(card, sourceState)
     const beforeSide = Object.keys((await debugStats(win)).charges).sort()
     await dialog.getByRole('button', { name: 'Open to side', exact: true }).click()
     await expect(dialog).toHaveCount(0)
     const right = win.getByRole('region', { name: 'Reader card 2', exact: true })
     await expect(right.locator('.card-name')).toHaveText('peek-destination-hooks.md')
-    await renderedReady(right)
+    await waitRendered(right)
     await expectSourceStable(card, sourceState)
     expect(Object.keys((await debugStats(win)).charges).sort()).toEqual(beforeSide)
     await right.getByRole('button', { name: 'Close card', exact: true }).click()
@@ -185,7 +181,7 @@ test('production package opens a relative tasks.csv as a Grid peek and to the si
     win.on('console', message => { if (message.type() === 'error') rendererErrors.push(message.text()) })
     win.on('crash', () => { rendererCrashed = true })
     const card = win.locator('.reader-card').first()
-    await renderedReady(card)
+    await waitRendered(card)
     const { dialog, link, source: sourceSnapshot } = await openPreview(win, card)
     const previewGrid = dialog.getByRole('grid', { name: 'CSV grid', exact: true })
     await expect(previewGrid).toHaveAttribute('data-ready', '1', { timeout: 30_000 })

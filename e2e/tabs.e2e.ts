@@ -1,12 +1,11 @@
 import { type Page, expect } from '@playwright/test'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { FIXTURES, type TestHooks, axe, debugStats, expectReleasedDocuments, finish, fixture, killCore, launch, osFocus, pressAsOS, stubOpenDialog, test, visibleRows, waitIndexed, waitOpen } from './app'
+import { FIXTURES, type TestHooks, axe, debugStats, expectReleasedDocuments, finish, fixture, killCore, launch, osFocus, pressAsOS, stubOpenDialog, test, visibleRows, waitIndexed, waitOpen, waitRendered } from './app'
 import { processMemory } from './memory'
 import { workspaceCharge } from '../app/renderer/workspace-budget'
 
 const open = (l: Awaited<ReturnType<typeof launch>>, path: string) => l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), path)
-const rendered = (win: Page) => expect(win.locator('.md-scroller')).toHaveAttribute('data-ready', '1')
 const tab = (win: Page, name: string) => win.getByRole('tab', { name, exact: true })
 
 async function documentAndWorkspaceCache(win: Page): Promise<number> {
@@ -78,7 +77,7 @@ test('permanent tabs retain document identity, Raw choice and source position; d
   const b = fixture('tabs-b.txt', 'Document B.\n')
   const l = await launch({ hooks: true, file: a })
   const { win } = l
-  await rendered(win)
+  await waitRendered(win)
   await win.getByRole('tab', { name: 'Raw', exact: true }).click()
   await waitOpen(win)
   await waitIndexed(win)
@@ -116,9 +115,9 @@ test('file pills disambiguate names, support keyboard selection and have no axe 
   const two = fixture('tabs-two/README.md', '# Second readme\n')
   const l = await launch({ hooks: true, file: one })
   const { win } = l
-  await rendered(win)
+  await waitRendered(win)
   await open(l, two)
-  await rendered(win)
+  await waitRendered(win)
   await expect(win.locator('.file-tab-parent')).toHaveText([' · tabs-one', ' · tabs-two'])
   await tab(win, 'README.md · tabs-two').focus()
   await win.keyboard.press('ArrowLeft')
@@ -233,10 +232,10 @@ test('a delayed replacement after A-B-A displays the new owned document identity
   const c = fixture('tabs-replace-c.txt', 'C replacement\n')
   const l = await launch({ hooks: true, file: source })
   const { win } = l
-  await rendered(win)
+  await waitRendered(win)
   await win.getByRole('link', { name: 'Next', exact: true }).click({ modifiers: ['Control'] })
   await expect(win.locator('.card-name')).toHaveText('tabs-replace-a.md')
-  await rendered(win)
+  await waitRendered(win)
   await open(l, b)
   await waitOpen(win)
   await win.evaluate(() => {
@@ -268,7 +267,7 @@ test('a delayed replacement after A-B-A displays the new owned document identity
   await tab(win, 'tabs-replace-b.txt').click()
   await waitOpen(win)
   await tab(win, 'tabs-replace-a.md').click()
-  await rendered(win)
+  await waitRendered(win)
   await expect(win.getByRole('heading', { name: 'Original A' })).toBeVisible()
   await win.evaluate(() => (window as unknown as { replacementRelease: () => void }).replacementRelease())
   await expect(win.locator('.card-name')).toHaveText('tabs-replace-c.txt', { timeout: 10_000 })
@@ -419,14 +418,14 @@ test('derived local tabs retain their capability across selection and cannot reg
   const other = fixture('tabs-derived-other.txt', 'Manual other\n')
   const l = await launch({ hooks: true, file: source })
   const { win } = l
-  await rendered(win)
+  await waitRendered(win)
   await win.getByRole('link', { name: 'Next', exact: true }).click({ modifiers: ['Control'] })
   await expect(win.locator('.card-name')).toHaveText('tabs-derived-target.md')
-  await rendered(win)
+  await waitRendered(win)
   await open(l, other)
   await waitOpen(win)
   await tab(win, 'tabs-derived-target.md').click()
-  await rendered(win)
+  await waitRendered(win)
   await expect(win.getByRole('heading', { name: 'Derived target' })).toBeVisible()
   await tab(win, 'tabs-derived-other.txt').click()
   await waitOpen(win)
@@ -454,7 +453,7 @@ test('an unexpected local result path is abandoned and the still-owned source ca
   fixture('tabs-mismatch-target.md', '# Target\n')
   const l = await launch({ hooks: true, file: fixture('tabs-mismatch-source.md', '# Original source\n\n[Next](tabs-mismatch-target.md)\n') })
   const { win } = l
-  await rendered(win)
+  await waitRendered(win)
   await win.evaluate(() => {
     const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core
     const call = core.call.bind(core)

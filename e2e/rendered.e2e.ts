@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { RENDERED_OFF } from '../app/renderer/card'
 import { viewportCap } from '../app/renderer/lenses/page-cache'
 import type { Limits } from '../app/shared/protocol'
-import { type TestHooks, assertNetLog, axe, debugStats, expectReleasedDocuments, finish, fixture, killCore, launch, stubExternal, test, visibleRows, waitIndexed, waitOpen, workspaceHeld } from './app'
+import { type TestHooks, assertNetLog, axe, debugStats, expectReleasedDocuments, finish, fixture, killCore, launch, stubExternal, test, visibleRows, waitIndexed, waitOpen, waitRendered, workspaceHeld } from './app'
 
 type ReserveProbe = { held: boolean; bRendered: boolean; release?: () => void }
 type ShrinkProbe = { held: boolean; bytes?: number; release?: () => void }
@@ -96,11 +96,6 @@ function corpusFile(): string {
   expect(payloads.length).toBeGreaterThan(80)
   const contexts = (p: string) => [`intro\n\n${p}\n`, `x ${p} y\n`, `- ${p}\n`, `> ${p}\n`, `| a |\n| --- |\n| ${p} |\n`, `# ${p}\n`, `---\n${p}\n---\n`]
   return fixture('corpus.md', ['# Corpus', '', ...payloads.flatMap(contexts)].join('\n'))
-}
-
-async function waitRendered(win: Page): Promise<void> {
-  await expect(win.locator('.md-scroller')).toBeAttached({ timeout: 30_000 })
-  await expect(win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 60_000 })
 }
 
 /** The block at the top of the Rendered view, and the source lines it covers (1-based, like Raw's gutter). */

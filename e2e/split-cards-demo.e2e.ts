@@ -1,16 +1,12 @@
 // Focused split-surface workflow smoke. Native IDs are checked in the hooks build; the production package
 // confirms that the visible Raw/Rendered split and card merge work without test hooks.
 import { expect, type Locator } from '@playwright/test'
-import { fixture, finish, launch, debugStats, stubOpenDialog, test } from './app'
+import { fixture, finish, launch, debugStats, stubOpenDialog, test, waitRendered } from './app'
 import { closeCleanly, closePackaged, launchPackaged } from './packaged'
 
 /** By its shortcut, as Reload and Open file… are below: macOS has the native menu, not the ☰. */
 async function splitRight(win: Awaited<ReturnType<typeof launch>>['win']): Promise<void> {
   await win.keyboard.press('ControlOrMeta+\\')
-}
-
-async function renderedReady(card: Locator): Promise<void> {
-  await expect(card.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 30_000 })
 }
 
 async function rawReady(card: Locator): Promise<void> {
@@ -37,7 +33,7 @@ test('split clones the source place, opens into the focused card, and preserves 
     live = await launch({ hooks: true, file: a })
     const { win } = live
     const left = win.getByRole('region', { name: 'Reader card 1', exact: true })
-    await renderedReady(left)
+    await waitRendered(left)
     await cardIndexed(left)
     await left.getByRole('tab', { name: 'Raw', exact: true }).click()
     await rawReady(left)
@@ -60,7 +56,7 @@ test('split clones the source place, opens into the focused card, and preserves 
     const clonedId = clonedSourceId!
 
     await right.getByRole('tab', { name: 'Rendered', exact: true }).click()
-    await renderedReady(right)
+    await waitRendered(right)
     await expect(left.getByRole('tab', { name: 'Raw', exact: true })).toHaveAttribute('aria-selected', 'true')
     await expect(right.getByRole('tab', { name: 'Rendered', exact: true })).toHaveAttribute('aria-selected', 'true')
     await expect(left.getByText('Split source anchor stays visible', { exact: true })).toBeInViewport()
@@ -129,7 +125,7 @@ test('production package displays both lenses in split cards and merges the clos
   try {
     live = await launchPackaged({ cdp: true, file: a })
     const win = live.page!
-    await renderedReady(win.getByRole('region', { name: 'Reader card 1', exact: true }))
+    await waitRendered(win.getByRole('region', { name: 'Reader card 1', exact: true }))
     const left = win.getByRole('region', { name: 'Reader card 1', exact: true })
     await left.getByRole('tab', { name: 'Raw', exact: true }).click()
     await rawReady(left)
@@ -141,7 +137,7 @@ test('production package displays both lenses in split cards and merges the clos
     const right = win.getByRole('region', { name: 'Reader card 2', exact: true })
     await expect(right).toHaveAttribute('data-focused', 'true')
     await right.getByRole('tab', { name: 'Rendered', exact: true }).click()
-    await renderedReady(right)
+    await waitRendered(right)
     await expect(left.getByRole('tab', { name: 'Raw', exact: true })).toHaveAttribute('aria-selected', 'true')
     await expect(right.getByRole('tab', { name: 'Rendered', exact: true })).toHaveAttribute('aria-selected', 'true')
     await expect(left.getByText('Split source anchor stays visible', { exact: true })).toBeInViewport()
