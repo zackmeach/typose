@@ -49,7 +49,7 @@ test('Rendered partial selection across distant blocks preserves the intervening
   const body = paragraphs.join('\n\n')
   const file = fixture('rendered-copy-distant.md', '# Distant\n\n' + body + '\n')
   const live = await launch({ file, hooks: true })
-  await live.app.evaluate(({ clipboard }) => { clipboard.writeText = async text => { (globalThis as { copiedSource?: string }).copiedSource = text } })
+  const clipboard = await recordClipboard(live.app)
   const scroller = live.win.locator('.md-scroller')
   await expect(scroller).toHaveAttribute('data-ready', '1', { timeout: 30_000 })
   await scroller.click()
@@ -64,7 +64,7 @@ test('Rendered partial selection across distant blocks preserves the intervening
     const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range)
   })
   await live.win.keyboard.press('ControlOrMeta+c')
-  await expect.poll(() => live.app.evaluate(() => (globalThis as { copiedSource?: string }).copiedSource)).toBe(body)
+  await expect.poll(async () => (await clipboard()).at(-1)).toBe(body)
   expect(live.pageErrors).toEqual([])
 })
 
@@ -72,7 +72,7 @@ test('Rendered partial source maps retain UTF-16 BOM offsets and multibyte scala
   const source = '# Encoding\n\nA **café 😀** &amp; 界.\n'
   const file = fixture('rendered-copy-utf16.md', Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(source, 'utf16le')]))
   const live = await launch({ file, hooks: true })
-  await live.app.evaluate(({ clipboard }) => { clipboard.writeText = async text => { (globalThis as { copiedSource?: string }).copiedSource = text } })
+  const clipboard = await recordClipboard(live.app)
   const scroller = live.win.locator('.md-scroller').first()
   await expect(scroller).toBeVisible(ready)
   await scroller.click()
@@ -84,7 +84,7 @@ test('Rendered partial source maps retain UTF-16 BOM offsets and multibyte scala
     const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range)
   })
   await live.win.keyboard.press('ControlOrMeta+c')
-  await expect.poll(() => live.app.evaluate(() => (globalThis as { copiedSource?: string }).copiedSource)).toBe('A **café 😀** &amp; 界.')
+  await expect.poll(async () => (await clipboard()).at(-1)).toBe('A **café 😀** &amp; 界.')
   expect(live.pageErrors).toEqual([])
 })
 
@@ -93,8 +93,8 @@ test('Rendered partial selections map exact source bytes across mixed byte width
   const code = 'x'.repeat(12_500) + 'café ·' + 'y'.repeat(12_500)
   const file = fixture('rendered-copy-mixed.md', `# Mixed widths\n\n${prose}\n\n\`\`\`text\n${code}\n\`\`\`\n`)
   const live = await launch({ file, hooks: true })
-  await live.app.evaluate(({ clipboard }) => { clipboard.writeText = async text => { (globalThis as { copiedSource?: string }).copiedSource = text } })
-  const copied = () => live.app.evaluate(() => (globalThis as { copiedSource?: string }).copiedSource)
+  const clipboard = await recordClipboard(live.app)
+  const copied = async () => (await clipboard()).at(-1)
   const scroller = live.win.locator('.md-scroller').first()
   await expect(scroller).toHaveAttribute('data-ready', '1', ready)
   await expect(scroller.locator('.md-note')).toHaveCount(0) // one `·` no longer makes the block "renders too large"

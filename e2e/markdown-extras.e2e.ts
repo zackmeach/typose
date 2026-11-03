@@ -1,7 +1,7 @@
 import { type Page, expect } from '@playwright/test'
 import { join } from 'node:path'
 import { HOSTILE_HTML, HOSTILE_MERMAID, HOSTILE_TEX, MATH_BOMB, MATH_BOMB_3 } from '../app/renderer/math/hostile'
-import { FIXTURES, type Launched, type TestHooks, assertNetLog, fixture, launch, test, waitIndexed } from './app'
+import { FIXTURES, type Launched, type TestHooks, assertNetLog, finish, fixture, launch, test, waitIndexed } from './app'
 import { processMemory } from './memory'
 
 /**
@@ -146,6 +146,7 @@ test('offline Markdown extras render securely and offscreen math/diagrams reach 
   }
   await expect(link('Top')).not.toHaveClass(/md-unresolved/)
   expect(live.pageErrors).toEqual([])
+  await finish(live)
   expect(assertNetLog(netlog)).toContain('PASS: no Chromium network-stack activity')
 })
 
@@ -166,6 +167,7 @@ test('every hostile Mermaid diagram type and hostile TeX settle in script-less f
   expect(frames.every(Boolean)).toBe(true)
   expect(live.win.url()).toContain('typose://')
   expect(live.pageErrors).toEqual([])
+  await finish(live)
   expect(assertNetLog(netlog)).toContain('PASS: no Chromium network-stack activity')
 })
 
@@ -209,6 +211,7 @@ test('math bombs, oversized formulas and hostile sanitizer input stay bounded an
   }, HOSTILE_HTML)
   expect(leaks).toEqual([])
   expect(live.pageErrors).toEqual([])
+  await finish(live)
   expect(assertNetLog(netlog)).toContain('PASS: no Chromium network-stack activity')
 })
 
@@ -235,7 +238,9 @@ test('dense highlighting pays for its spans before inserting them, and never sta
     const spans = await live.win.locator('.tp-token').count()
     const memory = (await processMemory(live.app)).find(p => p.type === 'Tab')!.private ?? 0
     expect(live.pageErrors).toEqual([])
-    return { ...timing, spans, memory, extras: await extrasReserved(live.win) }
+    const result = { ...timing, spans, memory, extras: await extrasReserved(live.win) }
+    await finish(live)
+    return result
   }
   const plain = await measure('markdown-extras-dense-plain.md', markdown('text', 'text'), 0)
   expect(plain.extras).toBe(0) // unlabeled blocks pay nothing
@@ -283,7 +288,9 @@ test('two thousand small formulas, or two thousand one-line code blocks, all ren
       await expect(live.win.locator(done)).toHaveCount(count, { timeout: 120_000 })
       expect(await live.win.locator('.tp-math[title], code[title]').count()).toBe(0) // nothing refused or stopped
       expect(live.pageErrors).toEqual([])
-      return { kept: await keptPrivate(live), extras: await extrasReserved(live.win) }
+      const result = { kept: await keptPrivate(live), extras: await extrasReserved(live.win) }
+      await finish(live)
+      return result
     }
     const before = await measure('plain', plain, 0)
     const after = await measure('lit', lit, 2000)

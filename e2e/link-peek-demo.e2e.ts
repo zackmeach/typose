@@ -166,7 +166,8 @@ test('production package opens a relative tasks.csv as a Grid peek and to the si
   writeFileSync(source, `# Peek source\n\nSource place remains visible\n\n[Preview destination](tasks.csv)\n`)
   writeFileSync(join(directory, 'tasks.csv'), 'id,title\r\n001,Write the brief\r\n002,Review the draft\r\n')
   const live = await launchPackaged({ cdp: true, file: source })
-  cleanups.add(async () => rmSync(directory, { recursive: true, force: true })) // after the launch's own cleanup, which closes the app first
+  const rm = async () => { cleanups.delete(rm); rmSync(directory, { recursive: true, force: true }) }
+  cleanups.add(rm) // after the launch's own cleanup, which closes the app first
   const win = live.page!
   const rendererErrors: string[] = []
   let rendererCrashed = false

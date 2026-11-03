@@ -57,7 +57,8 @@ export const test = base.extend<{ finishLaunches: void }>({
         for (const l of running) {
           const at = n++
           await l.win.screenshot({ path: testInfo.outputPath(`failure-${at}.png`), timeout: 5000 }).catch(() => {})
-          const page = await l.win.evaluate(() => ({ inner: [innerWidth, innerHeight], screen: [screen.width, screen.height], ratio: devicePixelRatio, focus: document.hasFocus() })).catch((e: unknown) => String(e))
+          const probe = l.win.evaluate(() => ({ inner: [innerWidth, innerHeight], screen: [screen.width, screen.height], ratio: devicePixelRatio, focus: document.hasFocus() }))
+          const page = await Promise.race([probe, new Promise<string>((ok) => setTimeout(() => ok('timed out after 5 s'), 5000))]).catch((e: unknown) => String(e))
           const main = await l.app.evaluate(({ BrowserWindow, screen }) => {
             const w = BrowserWindow.getAllWindows()[0]
             return { bounds: w?.getBounds(), content: w?.getContentBounds(), focused: w?.isFocused(), workArea: screen.getPrimaryDisplay().workArea, scale: screen.getPrimaryDisplay().scaleFactor }
@@ -65,11 +66,10 @@ export const test = base.extend<{ finishLaunches: void }>({
           writeFileSync(testInfo.outputPath(`failure-${at}.json`), JSON.stringify({ page, main }, null, 2))
         }
       }
-      try {
-        for (const l of running) await finish(l)
-      } finally {
-        for (const cleanup of cleanups) await cleanup().catch(() => {}) // each removes itself, which a Set allows mid-loop
-      }
+      const errors: unknown[] = []
+      for (const l of running) await finish(l).catch((e: unknown) => errors.push(e)) // one launch's failure doesn't strand the rest
+      for (const cleanup of cleanups) await cleanup().catch(() => {}) // each removes itself, which a Set allows mid-loop
+      if (errors.length) throw errors[0]
     },
     { auto: true }
   ]
