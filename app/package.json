@@ -47,7 +47,6 @@
     "electronDist": "../node_modules/electron/dist",
     "npmRebuild": false,
     "win": {
-      "target": "dir",
       "signAndEditExecutable": false
     },
     "mac": {
