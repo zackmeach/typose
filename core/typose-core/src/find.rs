@@ -144,10 +144,6 @@ impl Source {
     pub fn charged(&self) -> u64 {
         self._charge.bytes()
     }
-    pub fn snapshot(&self) -> Progress {
-        let c = self.cursor.lock().unwrap();
-        Progress { count: c.count, bytes: c.offset, complete: c.complete, hits: Vec::new() }
-    }
     fn step(
         &self,
         doc: &Document,
