@@ -513,8 +513,6 @@ impl Doc {
         cancel: &Cancel,
         record: Option<f64>,
     ) -> std::result::Result<AsyncTask<Children>, Error<Code>> {
-        let generation = int("gen", generation)? as u32;
-        let revision = int("gen", revision)? as u32;
         let container = u32::try_from(int("start", container)?)
             .map_err(|_| Error::new(Code::InvalidParams, "container exceeds u32"))?;
         let start = int("start", start)?;
@@ -522,19 +520,10 @@ impl Doc {
         if count > 128 {
             return Err(Error::new(Code::InvalidParams, "Tree count exceeds 128"));
         }
-        let raw = self.raw()?;
-        let entry = self
-            .structured
-            .state
-            .lock()
-            .unwrap()
-            .as_ref()
-            .filter(|e| e.generation == generation && e.revision == revision)
-            .cloned()
-            .ok_or_else(|| Error::new(Code::Stale, "structured index was replaced"))?;
+        let (raw, entry) = self.structured_entry(generation, revision)?;
         let charge = Reservation::new(core_structured::TEMP_BYTES).map_err(|e| doc_error(DocError::Memory(e)))?;
         Ok(AsyncTask::new(Children {
-            raw: raw.clone(),
+            raw,
             owner: self.structured.clone(),
             entry,
             container,
