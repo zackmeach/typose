@@ -82,7 +82,7 @@ pub struct ScanError {
 /// Deeper nesting stops the scan with `TooDeep`. At 10,000 the index and stack hold about 560 KB.
 const MAX_DEPTH: usize = 10_000;
 /// More containers stop the scan with `TooManyContainers`. The records are charged to the memory budget (spec §3.6)
-/// and paged at 32 bytes per container, so growth adds at most one 2 MiB page.
+/// and paged at 32 bytes per container, so growth adds at most one 128 KiB page.
 const MAX_CONTAINERS: usize = u32::MAX as usize;
 /// An element checkpoint every `CP_CHILDREN` children or `CP_BYTES` bytes, whichever comes first (spec §3.5).
 const CP_CHILDREN: u64 = 1024;
@@ -90,7 +90,7 @@ const CP_BYTES: u64 = 1 << 20;
 /// Bytes per step. Cancellation is checked before every step, and enumeration reads this much at a time.
 const WINDOW: usize = 64 << 10;
 
-/// A vector kept in pages of 65,536 elements, so growing it never moves more than one page. A plain `Vec`
+/// A vector kept in pages of 4,096 elements, so growing it never moves more than one page. A plain `Vec`
 /// doubling past 2^24 containers copied 537 MB in one push and held off cancellation for up to 88 ms.
 #[derive(Debug)]
 pub struct Paged<T> {
