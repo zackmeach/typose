@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { openExternal } from './external'
+import { fromMainApp, openExternal } from './external'
 
 const HTTPS = 'https://example.invalid/path'
 
@@ -119,5 +119,29 @@ describe('open-external validates this app main frame before invoking an OS URL 
     open.mockRejectedValue(new Error('OS handler failed'))
     expect(await openExternal(win, event, [HTTPS], open)).toBe(false)
     expect(open.mock.calls).toEqual([[HTTPS]])
+  })
+})
+
+// Every IPC channel's check. The dialogs, launch-paths and 'mark' once took any typose://app/ URL from any frame.
+describe('fromMainApp takes only the live window app page, from its main frame', () => {
+  it('takes the app page, with or without its load query', () => {
+    const { win, event, frame } = caller()
+    expect(fromMainApp(win, event)).toBe(true)
+    frame.url = 'typose://app/index.html?delayMount=10'
+    expect(fromMainApp(win, event)).toBe(true)
+  })
+
+  it('refuses a same-origin subframe, another app URL and a destroyed window', () => {
+    const { win, event, frame } = caller()
+    event.senderFrame = { ...frame }
+    expect(fromMainApp(win, event)).toBe(false)
+    event.senderFrame = frame
+    for (const url of ['typose://app/other.html', 'typose://app/index.html/extra', 'typose://app/', 'TYPOSE://app/index.html']) {
+      frame.url = url
+      expect(fromMainApp(win, event), url).toBe(false)
+    }
+    frame.url = 'typose://app/index.html'
+    win.isDestroyed = () => true
+    expect(fromMainApp(win, event)).toBe(false)
   })
 })
