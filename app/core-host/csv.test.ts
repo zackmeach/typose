@@ -10,7 +10,7 @@ type TestPage = { rows: Array<{ dataRow: number; sourceRecord: number; sourceLin
 
 function nativeInfo(revision = 1, delimiter = ';') {
   return { revision, status: 'indexing', delimiter, header: true, encoding: 'UTF-8', sourceRecords: 2,
-    indexedBytes: 24, done: false, expectedColumns: 2, maxColumnsKnown: 2, metadataDone: false } as const
+    done: false, expectedColumns: 2, maxColumnsKnown: 2, metadataDone: false } as const
 }
 
 function setup(path = 'tasks.csv') {
@@ -80,7 +80,7 @@ describe('CSV core-host bridge', () => {
     const info = await configure(s, doc, surface)
     expect(s.doc.csvConfigure).toHaveBeenCalledWith(1, ';', 1, expect.anything())
     expect(info).toMatchObject({ ref: { session: 9, doc, gen: 1, revision: 1 }, status: 'indexing', delimiter: ';', header: true,
-      sourceRecords: 2, indexedBytes: 24, expectedColumns: 2, maxColumnsKnown: 2, metadataDone: false })
+      sourceRecords: 2, expectedColumns: 2, maxColumnsKnown: 2, metadataDone: false })
     expect(info).not.toHaveProperty('revision')
   })
 

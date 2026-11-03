@@ -27,13 +27,6 @@ impl Owner {
     }
 }
 #[napi(object)]
-pub struct SourceFindInfo {
-    pub id: u32,
-    pub count: f64,
-    pub scanned_bytes: f64,
-    pub complete: bool,
-}
-#[napi(object)]
 pub struct SourceHit {
     pub start: f64,
     pub end: f64,
@@ -47,7 +40,6 @@ pub struct SourceHit {
 #[napi(object)]
 pub struct SourceFindPage {
     pub count: f64,
-    pub scanned_bytes: f64,
     pub complete: bool,
     pub hits: Vec<SourceHit>,
     pub hit: Option<SourceHit>,
@@ -124,7 +116,6 @@ impl Task for FindTask {
             self.check()?;
             let mut page = SourceFindPage {
                 count: 0.,
-                scanned_bytes: 0.,
                 complete: false,
                 hits: Vec::new(),
                 hit: None,
@@ -136,7 +127,6 @@ impl Task for FindTask {
                 Want::Scan => {
                     let p = self.entry.source.scan(self.raw.document(), self.raw.source_encoding())?;
                     page.count = p.count as f64;
-                    page.scanned_bytes = p.bytes as f64;
                     page.complete = p.complete;
                     let mut wire = 1024;
                     for h in p.hits {
@@ -184,7 +174,7 @@ impl Doc {
         generation: f64,
         query: String,
         match_case: bool,
-    ) -> std::result::Result<SourceFindInfo, Error<Code>> {
+    ) -> std::result::Result<u32, Error<Code>> {
         let generation = int("gen", generation)? as u32;
         let raw = self.raw()?;
         if raw.document().generation() != generation {
@@ -201,7 +191,7 @@ impl Doc {
         if let Some(old) = self.find.state.lock().unwrap().replace(entry) {
             old.source.close();
         }
-        Ok(SourceFindInfo { id, count: 0., scanned_bytes: 0., complete: false })
+        Ok(id)
     }
     fn source_find_task(
         &self,

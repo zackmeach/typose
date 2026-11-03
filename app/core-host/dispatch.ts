@@ -282,7 +282,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       ref: { session, doc: id, gen, revision }, status: value.status as CsvInfo['status'], ...(reason == null ? {} : { reason }),
       delimiter: value.delimiter as CsvInfo['delimiter'], header: value.header, encoding: value.encoding,
       sourceRecords: csvResultNumber(value.sourceRecords, 'source records'),
-      indexedBytes: csvResultNumber(value.indexedBytes, 'indexed bytes'), done: value.done,
+      done: value.done,
       expectedColumns: csvResultNumber(value.expectedColumns, 'expected columns'),
       maxColumnsKnown: csvResultNumber(value.maxColumnsKnown, 'maximum known columns'), metadataDone: value.metadataDone, problems
     }
@@ -838,20 +838,19 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const query = findQuery(p), lease = findLease(p.view)
       const doc = getDoc(lease.ref.doc)
       const native = doc.sourceFindStart(lease.ref.gen, query, p.matchCase as boolean)
-      const id = findNumber(native.id, 0xffff_ffff)
+      const id = findNumber(native, 0xffff_ffff)
       if (id === 0) throw new Refusal('Internal', 'the core returned an invalid Find identity')
       try {
-        const progress = findProgress(native, doc.size)
         closeDocumentFind(lease.ref.doc)
         lease.sourceFind = id
-        return { ref: { view: lease.ref, id }, ...progress }
+        return { ref: { view: lease.ref, id }, count: 0, complete: false }
       } catch (e) { doc.sourceFindClose(lease.ref.gen, id); throw e }
     },
     sourceFindScan: (p, req): Promise<SourceFindPage> => {
       const { ref, lease, doc } = sourceFindRef(p.ref)
       return sourceFindRead(req, ref, lease, 'scan', async (cancel) => {
         const value = await doc.sourceFindScan(ref.view.gen, ref.id, cancel)
-        return { ref, ...findProgress(value, doc.size), hits: sourceHits(value.hits, doc.size) }
+        return { ref, ...findProgress(value), hits: sourceHits(value.hits, doc.size) }
       })
     },
     sourceFindSeek: (p, req): Promise<SourceFindSeek> => {
@@ -948,19 +947,18 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const { order, lease, doc } = orderRef(p.order)
       if (lease !== explicit) throw new Refusal('Stale', 'the Find view does not own this Grid')
       const value = doc.csvFindStart(order.csv.gen, order.csv.revision, order.id, query, p.matchCase as boolean)
-      const id = csvResultNumber(value.id, 'Find identity', 1, 0xffff_ffff)
+      const id = csvResultNumber(value, 'Find identity', 1, 0xffff_ffff)
       try {
-        const progress = findProgress(value, doc.size)
         closeCsvFind(lease)
         lease.csvFind = { id, order }
-        return { ref: { view: lease.ref, order, id }, ...progress }
+        return { ref: { view: lease.ref, order, id }, count: 0, complete: false }
       } catch (e) { doc.csvFindClose(order.csv.gen, order.csv.revision, id); throw e }
     },
     csvFindScan: (p, req): Promise<CsvFindPage> => {
       const { ref, lease, doc } = csvSearchRef(p.ref)
       return csvFindRead(req, ref, lease, 'scan', async (cancel) => {
         const value = await doc.csvFindScan(ref.view.gen, ref.order.csv.revision, ref.id, cancel)
-        return { ref, ...findProgress(value, doc.size), hits: csvFindHits(value.hits, doc.size) }
+        return { ref, ...findProgress(value), hits: csvFindHits(value.hits, doc.size) }
       })
     },
     csvFindSeek: (p, req): Promise<CsvFindSeek> => {

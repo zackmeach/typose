@@ -19,18 +19,18 @@ function setup() {
     generation: 1, path: 'a.csv', format: 'csv', size: 100, encoding: 'UTF-8', lines: 1, indexed: true, blank: false,
     page: vi.fn(async () => ({ items: [] })), setCacheActive: vi.fn(), startIndex: vi.fn(), close: vi.fn(),
     reload: vi.fn(() => { doc.generation++ }),
-    sourceFindStart: vi.fn(() => ({ id: ++find, count: 0, scannedBytes: 0, complete: false })),
-    sourceFindScan: vi.fn(async () => ({ count: 1, scannedBytes: 100, complete: true, hits: [hit()] })),
+    sourceFindStart: vi.fn(() => ++find),
+    sourceFindScan: vi.fn(async () => ({ count: 1, complete: true, hits: [hit()] })),
     sourceFindSeek: vi.fn(async () => ({ hit: hit(), wrapped: true, ordinal: 1 })), sourceFindClose: vi.fn(() => true),
     csvConfigure: vi.fn(async () => ({ revision: 1, status: 'ready', delimiter: ',', header: true, encoding: 'UTF-8',
-      sourceRecords: 2, indexedBytes: 100, done: true, expectedColumns: 2, maxColumnsKnown: 2, metadataDone: true })),
+      sourceRecords: 2, done: true, expectedColumns: 2, maxColumnsKnown: 2, metadataDone: true })),
     csvSort: vi.fn(async (_gen: number, _revision: number, column: number, direction: string) => ({ id: ++order, rows: 2, column, direction })),
     csvOrderClose: vi.fn(() => true), csvOrderedPage: vi.fn(async () => ({ rows: [], completeRect: true, indexing: false })),
     csvOrderLocate: vi.fn(async () => ({ dataRow: 1 })),
     csvCell: vi.fn(async (_gen: number, _revision: number, sourceRecord: number, column: number): Promise<NativeCsvCell> => ({ column, value: { sourceRecord, column,
       span: { start: 0, end: 1 }, pieceSpan: { start: 0, end: 1 }, text: 'x', map: hit().map, replacements: 0 } })),
-    csvFindStart: vi.fn(() => ({ id: ++csvFind, count: 0, scannedBytes: 0, complete: false })),
-    csvFindClose: vi.fn(() => true), csvFindScan: vi.fn(async () => ({ count: 1, scannedBytes: 100, complete: true, hits: [gridHit] })),
+    csvFindStart: vi.fn(() => ++csvFind),
+    csvFindClose: vi.fn(() => true), csvFindScan: vi.fn(async () => ({ count: 1, complete: true, hits: [gridHit] })),
     csvFindSeek: vi.fn(async () => ({ hit: gridHit, ordinal: 1, wrapped: true })),
   }
   const dispatcher = makeDispatcher({ limits, coreVersion: () => 'test', openDoc: () => doc as unknown as Doc,
@@ -51,7 +51,7 @@ function setup() {
 describe('exact-view source Find host bridge', () => {
   it('stamps source hits and accepts uniform CJK UTF-8 maps', async () => {
     const s = setup(), opened = await s.open(), found = await s.start(opened.view)
-    s.doc.sourceFindScan.mockResolvedValue({ count: 1, scannedBytes: 100, complete: true, hits: [hit('検索', 3)] })
+    s.doc.sourceFindScan.mockResolvedValue({ count: 1, complete: true, hits: [hit('検索', 3)] })
     expect(await s.call('sourceFindScan', { ref: found.ref })).toMatchObject({ result: { ref: found.ref, hits: [{ text: '検索', map: { unitBytes: 3 } }] } })
     expect(await s.call('sourceFindSeek', { ref: found.ref, direction: 'previous', from: 100 })).toMatchObject({ result: { wrapped: true, ordinal: 1 } })
     expect(s.doc.sourceFindSeek).toHaveBeenCalledWith(1, 1, 100, true, expect.anything())
@@ -75,7 +75,7 @@ describe('exact-view source Find host bridge', () => {
     const pending = s.call('sourceFindScan', { ref: found.ref }), flag = s.flags.at(-1)!
     const next = await s.start(opened.view)
     expect(flag.cancel).toHaveBeenCalled()
-    finish({ count: 1, scannedBytes: 100, complete: true, hits: [hit()] })
+    finish({ count: 1, complete: true, hits: [hit()] })
     expect(await pending).toMatchObject({ error: { code: 'Cancelled' } })
     expect(await s.call('sourceFindClose', { ref: found.ref })).toMatchObject({ error: { code: 'Stale' } })
     expect(await s.call('sourceFindScan', { ref: next.ref })).toHaveProperty('result')
@@ -96,9 +96,9 @@ describe('exact-view source Find host bridge', () => {
   })
   it('drops oversized/malformed native result envelopes', async () => {
     const s = setup(), opened = await s.open(), found = await s.start(opened.view)
-    s.doc.sourceFindScan.mockResolvedValueOnce({ count: 1, scannedBytes: 101, complete: true, hits: [] })
+    s.doc.sourceFindScan.mockResolvedValueOnce({ count: -1, complete: true, hits: [] })
     expect(await s.call('sourceFindScan', { ref: found.ref })).toMatchObject({ error: { code: 'Internal' } })
-    s.doc.sourceFindScan.mockResolvedValueOnce({ count: 129, scannedBytes: 100, complete: true, hits: Array.from({ length: 129 }, () => hit()) })
+    s.doc.sourceFindScan.mockResolvedValueOnce({ count: 129, complete: true, hits: Array.from({ length: 129 }, () => hit()) })
     expect(await s.call('sourceFindScan', { ref: found.ref })).toMatchObject({ error: { code: 'Internal' } })
   })
   it('freeze closes native Find ownership and rejects further scans', async () => {
@@ -244,7 +244,7 @@ describe('Grid interactions host bridge', () => {
     expect(flag.cancel).toHaveBeenCalled()
     expect(s.doc.csvFindClose).toHaveBeenCalledWith(1, 1, 1)
     expect(s.doc.csvOrderClose).toHaveBeenCalledWith(1, 1, 0)
-    finish({ count: 0, scannedBytes: 100, complete: true, hits: [] })
+    finish({ count: 0, complete: true, hits: [] })
     expect(await pending).toHaveProperty('error')
   })
   it('retiring an old lease cannot close a newer view Find/order', async () => {

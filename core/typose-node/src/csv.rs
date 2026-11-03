@@ -68,7 +68,6 @@ pub struct CsvInfo {
     pub header: bool,
     pub encoding: String,
     pub source_records: f64,
-    pub indexed_bytes: f64,
     pub done: bool,
     pub expected_columns: f64,
     pub max_columns_known: f64,
@@ -194,7 +193,6 @@ fn info(state: &State) -> CsvInfo {
         header: state.csv.header,
         encoding: state.csv.encoding.name().into(),
         source_records: index.records as f64,
-        indexed_bytes: index.indexed_bytes as f64,
         done: index.done,
         expected_columns: index.expected_columns as f64,
         max_columns_known: index.max_columns as f64,
@@ -983,16 +981,8 @@ pub struct CsvFindHit {
     pub match_end: Option<u32>,
 }
 #[napi(object)]
-pub struct CsvFindInfo {
-    pub id: u32,
-    pub count: f64,
-    pub scanned_bytes: f64,
-    pub complete: bool,
-}
-#[napi(object)]
 pub struct CsvFindPage {
     pub count: f64,
-    pub scanned_bytes: f64,
     pub complete: bool,
     pub hits: Vec<CsvFindHit>,
     pub hit: Option<CsvFindHit>,
@@ -1074,7 +1064,6 @@ impl Query for GridFindQuery {
             let (hit, wrapped, ordinal) = self.search.seek(&c.state.csv, c.raw.document(), self.from, self.previous)?;
             Ok(CsvFindPage {
                 count: 0.,
-                scanned_bytes: 0.,
                 complete: false,
                 hits: Vec::new(),
                 hit: hit.map(|h| grid_excerpt(c, h)).transpose()?,
@@ -1085,7 +1074,6 @@ impl Query for GridFindQuery {
             let p = self.search.scan(&c.state.csv, c.raw.document())?;
             Ok(CsvFindPage {
                 count: p.count as f64,
-                scanned_bytes: p.bytes as f64,
                 complete: p.complete,
                 hits: p.hits.into_iter().map(grid_hit).collect(),
                 hit: None,
@@ -1136,7 +1124,7 @@ impl Doc {
         order: f64,
         query: String,
         match_case: bool,
-    ) -> std::result::Result<CsvFindInfo, Error<Code>> {
+    ) -> std::result::Result<u32, Error<Code>> {
         let generation = int("gen", generation)? as u32;
         let revision = int("gen", revision)? as u32;
         let order_id = order_id(order)?;
@@ -1166,7 +1154,7 @@ impl Doc {
         if let Some((_, _, old)) = state.find.lock().unwrap().replace((id, order_id, search)) {
             old.close();
         }
-        Ok(CsvFindInfo { id, count: 0., scanned_bytes: 0., complete: false })
+        Ok(id)
     }
     fn grid_find_query(
         &self,
