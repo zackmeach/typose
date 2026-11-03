@@ -26,27 +26,26 @@ ipcRenderer.on('a11y', (_event, on: boolean) => window.postMessage({ type: 'a11y
 let clipboardGesture = false
 let clipboardTokenSerial = 0
 let clipboardToken: string | undefined
+const armCopy = () => {
+  clipboardGesture = true
+  setTimeout(() => { clipboardGesture = false }, 0)
+}
 window.addEventListener('keydown', event => {
   if (!event.isTrusted || event.isComposing || event.shiftKey || event.altKey || event.key.toLowerCase() !== 'c' || !(event.ctrlKey || event.metaKey) || !(event.target instanceof Element)) return
   const target = event.target
   if (target.closest('input, textarea, select, [contenteditable="true"], [role="textbox"]')) return
-  if (target.closest('[data-card]')) {
-    clipboardGesture = true
-    setTimeout(() => { clipboardGesture = false }, 0)
-  }
+  if (target.closest('[data-card]')) armCopy()
 }, { capture: true })
 window.addEventListener('click', event => {
   if (!event.isTrusted || !(event.target instanceof Element) || !event.target.closest('[data-clipboard-copy="true"]')) return
-  clipboardGesture = true
-  setTimeout(() => { clipboardGesture = false }, 0)
+  armCopy()
 }, { capture: true })
 window.addEventListener('keydown', event => {
   if (!event.isTrusted || event.isComposing || event.key !== 'Enter' || !(event.target instanceof Element)) return
   const active = event.target.getAttribute('aria-activedescendant')
   const command = active ? document.getElementById(active) : event.target.closest('[role="menuitem"]')
   if (command?.getAttribute('data-clipboard-copy') !== 'true') return
-  clipboardGesture = true
-  setTimeout(() => { clipboardGesture = false }, 0)
+  armCopy()
 }, { capture: true })
 
 // Files and folders dropped anywhere on the window: their real paths, read here (only a trusted drop has them), go to
@@ -145,10 +144,7 @@ const typose: TyposeApi = {
   onShown: (cb) => void ipcRenderer.once('shown', () => cb()),
   onCommand: (cb) => {
     const listener = (_event: unknown, command: Command) => {
-      if (command === 'copy') {
-        clipboardGesture = true
-        setTimeout(() => { clipboardGesture = false }, 0)
-      }
+      if (command === 'copy') armCopy()
       cb(command)
     }
     ipcRenderer.on('command', listener)
