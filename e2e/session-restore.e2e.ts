@@ -128,7 +128,7 @@ test('sidebar tasks.csv restores through its approved root in a split with the s
   writeFileSync(join(root, 'tasks.csv'), 'id,title\n' + Array.from({ length: 500 }, (_, row) => `${row + 1},Task ${row + 1}`).join('\n'))
   const live = await launch({ file: source })
   await expect(live.win.getByRole('heading', { name: 'Launch plan' })).toBeVisible({ timeout: 30_000 })
-  await live.app.evaluate(({ ipcMain }, path) => { ipcMain.removeHandler('folder-dialog'); ipcMain.handle('folder-dialog', () => path) }, root)
+  await stubOpenDialog(live.app, root, 'folder-dialog')
   await live.win.getByRole('button', { name: 'Menu', exact: true }).click()
   await live.win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
   await expect(live.win.getByRole('treeitem', { name: 'tasks.csv', exact: true })).toBeVisible()

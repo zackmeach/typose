@@ -17,7 +17,7 @@ test('quick open browses through the real command surface and opens fuzzy root r
   mkdirSync(join(root, 'node_modules')); writeFileSync(join(root, 'node_modules', 'hidden-report.md'), '# Excluded report\n')
   const live = await launch()
   await expect(live.win.getByRole('button', { name: /^Open file/ })).toBeVisible()
-  await live.app.evaluate(({ ipcMain }, path) => { ipcMain.removeHandler('folder-dialog'); ipcMain.handle('folder-dialog', () => path) }, root)
+  await stubOpenDialog(live.app, root, 'folder-dialog')
   await live.win.getByRole('button', { name: 'Menu', exact: true }).click()
   await live.win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
   await expect(live.win.getByRole('treeitem', { name: 'reports', exact: true })).toBeVisible()
@@ -171,7 +171,7 @@ test('palette groups commands under LENS, VIEW and FILE; quick open separates RE
   await expect(palette.getByRole('group').nth(2).getByRole('option', { name: /Open with default app/ })).toBeVisible()
   await live.win.keyboard.press('Escape')
   if (FOLDERS) {
-    await live.app.evaluate(({ ipcMain }, path) => { ipcMain.removeHandler('folder-dialog'); ipcMain.handle('folder-dialog', () => path) }, root)
+    await stubOpenDialog(live.app, root, 'folder-dialog')
     await live.win.getByRole('button', { name: 'Menu', exact: true }).click()
     await live.win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
     await expect(live.win.getByRole('treeitem', { name: 'reports', exact: true })).toBeVisible()
@@ -199,7 +199,7 @@ test('a file or folder that failed to open is not recorded as a recent', async (
   await live.win.keyboard.press('ControlOrMeta+O')
   await live.win.getByRole('button', { name: 'Browse…', exact: true }).click()
   await expect(live.win.getByRole('tab', { name: 'no-such-file.md', exact: true })).toBeVisible()
-  const folderDialog = (path: string) => live.app.evaluate(({ ipcMain }, path) => { ipcMain.removeHandler('folder-dialog'); ipcMain.handle('folder-dialog', () => path) }, path)
+  const folderDialog = (path: string) => stubOpenDialog(live.app, path, 'folder-dialog')
   await folderDialog(missingFolder)
   await live.win.keyboard.press('ControlOrMeta+K') // the palette: macOS has the native menu, not the ☰
   await live.win.getByRole('combobox', { name: 'Search commands' }).fill('Open folder')
@@ -229,7 +229,7 @@ test('quick open walks lazily with its own root, so it never spends the sidebar 
   }
   const live = await launch()
   await expect(live.win.getByRole('button', { name: /^Open file/ })).toBeVisible()
-  await live.app.evaluate(({ ipcMain }, path) => { ipcMain.removeHandler('folder-dialog'); ipcMain.handle('folder-dialog', () => path) }, root)
+  await stubOpenDialog(live.app, root, 'folder-dialog')
   await live.win.getByRole('button', { name: 'Menu', exact: true }).click()
   await live.win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
   await expect(live.win.getByRole('treeitem', { name: 'd15', exact: true })).toBeVisible()
@@ -255,7 +255,7 @@ test('quick open skips a root whose folder was replaced, and lists past an unrea
     const live = await launch()
     await expect(live.win.getByRole('button', { name: /^Open file/ })).toBeVisible()
     for (const [root, row] of [[swapped, 'original.md'], [mixed, 'c']]) {
-      await live.app.evaluate(({ ipcMain }, path) => { ipcMain.removeHandler('folder-dialog'); ipcMain.handle('folder-dialog', () => path) }, root)
+      await stubOpenDialog(live.app, root, 'folder-dialog')
       await live.win.getByRole('button', { name: 'Menu', exact: true }).click()
       await live.win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
       await expect(live.win.getByRole('treeitem', { name: row, exact: true })).toBeVisible()
@@ -399,7 +399,7 @@ test('Copy path confirms for 3 s; Settings names the window; the palette says Sh
 
   // Quick open's status is a row of its own below the list, not against the list's last, partly visible result.
   if (FOLDERS) {
-    await live.app.evaluate(({ ipcMain }, path) => { ipcMain.removeHandler('folder-dialog'); ipcMain.handle('folder-dialog', () => path) }, root)
+    await stubOpenDialog(live.app, root, 'folder-dialog')
     await win.getByRole('button', { name: 'Menu', exact: true }).click()
     await win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
     await expect(win.getByRole('treeitem', { name: 'file-39.md', exact: true })).toBeVisible()

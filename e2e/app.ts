@@ -186,18 +186,19 @@ export const pressAsOS = (l: Launched, keyCode: string, modifiers: ('control' | 
   )
 
 /**
- * Open file… without the OS dialog, which must never open on the desktop the tests run on: main's handler is replaced
- * by one that answers `path` and counts its calls (`globalThis.dialogCalls`), and the dialog itself rejects.
+ * Open file… (or, with `channel` 'folder-dialog', Open folder…) without the OS dialog, which must never open on the
+ * desktop the tests run on: main's handler is replaced by one that answers `path` and counts its calls
+ * (`globalThis.dialogCalls`), and the dialog itself rejects.
  */
-export async function stubOpenDialog(app: ElectronApplication, path: string): Promise<void> {
-  await app.evaluate(({ dialog, ipcMain }, path) => {
+export async function stubOpenDialog(app: ElectronApplication, path: string, channel = 'open-dialog'): Promise<void> {
+  await app.evaluate(({ dialog, ipcMain }, { path, channel }) => {
     dialog.showOpenDialog = () => Promise.reject(new Error('the real dialog was reached'))
-    ipcMain.removeHandler('open-dialog')
-    ipcMain.handle('open-dialog', () => {
+    ipcMain.removeHandler(channel)
+    ipcMain.handle(channel, () => {
       ;(globalThis as { dialogCalls?: number }).dialogCalls = ((globalThis as { dialogCalls?: number }).dialogCalls ?? 0) + 1
       return path
     })
-  }, path)
+  }, { path, channel })
   await expect(app.evaluate(({ dialog }) => dialog.showOpenDialog({}))).rejects.toThrow('the real dialog was reached')
 }
 
