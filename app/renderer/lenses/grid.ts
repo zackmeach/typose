@@ -70,7 +70,6 @@ export class GridLens {
   private findAbort: AbortController | undefined
   private pendingFind = false
   private findNavigation: Promise<void> = Promise.resolve()
-  private readonly findHits = new Map<number, CsvFindHit>()
   private copyJob: GridCopyJobType | undefined
   private copyPending = false
   private copyDialog: HTMLDivElement | undefined
@@ -780,9 +779,6 @@ export class GridLens {
       while (current() && !info.complete) {
         const page = await this.core.call('csvFindScan', { ref }, controller.signal)
         if (!current() || page.ref.id !== ref.id || page.ref.order.id !== ref.order.id) return
-        const first = Math.max(1, page.count - page.hits.length + 1)
-        page.hits.forEach((hit, index) => this.findHits.set(first + index, hit))
-        while (this.findHits.size > 128) this.findHits.delete(this.findHits.keys().next().value!)
         info = { count: page.count, complete: page.complete, current: this.findSignal.snapshot().current, busy: !page.complete }
         this.findSignal.publish(info)
         if (!this.findHit && page.hits.length) await this.queueFindSeek(1, epoch, ref, controller)
@@ -846,7 +842,6 @@ export class GridLens {
     this.findHit = undefined
     this.findCell = undefined
     this.paintFindExcerpt(undefined)
-    this.findHits.clear()
     controller?.abort()
     if (ref) void this.core.call('csvFindClose', { ref }).catch(() => {})
     this.findSignal.publish(EMPTY_FIND)
