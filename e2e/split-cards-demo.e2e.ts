@@ -2,11 +2,12 @@
 // confirms that the visible Raw/Rendered split and card merge work without test hooks.
 import { expect, type Locator } from '@playwright/test'
 import { fixture, finish, launch, debugStats, stubOpenDialog, test } from './app'
+import { command } from './find-ui'
 import { closePackaged, launchPackaged, unrequested } from './packaged'
 
+/** By its shortcut, as Reload and Open file… are below: macOS has the native menu, not the ☰. */
 async function splitRight(win: Awaited<ReturnType<typeof launch>>['win']): Promise<void> {
-  await win.getByRole('button', { name: 'Menu', exact: true }).click()
-  await win.getByRole('menuitem', { name: 'Split right', exact: true }).click()
+  await win.keyboard.press(command + '+\\')
 }
 
 async function renderedReady(card: Locator): Promise<void> {
@@ -70,8 +71,7 @@ test('split clones the source place, opens into the focused card, and preserves 
     const leftRawGeneration = await left.locator('.raw-host').getAttribute('data-gen')
     const rightRendered = right.locator('.rendered-host')
     const rightGeneration = Number(await rightRendered.getAttribute('data-gen'))
-    await win.getByRole('button', { name: 'Menu', exact: true }).click()
-    await win.getByRole('menuitem', { name: 'Reload', exact: true }).click()
+    await win.keyboard.press(command + '+R')
     await expect(rightRendered).toHaveAttribute('data-gen', String(rightGeneration + 1), { timeout: 30_000 })
     await expect(right.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 30_000 })
     await expect(left.locator('.raw-host')).toHaveAttribute('data-gen', leftRawGeneration!)
@@ -94,8 +94,7 @@ test('split clones the source place, opens into the focused card, and preserves 
     await expect(left.getByText('Split source anchor stays visible', { exact: true })).toBeInViewport()
 
     await stubOpenDialog(live.app, b)
-    await win.getByRole('button', { name: 'Menu', exact: true }).click()
-    await win.getByRole('menuitem', { name: 'Open file…', exact: true }).click()
+    await win.keyboard.press(command + '+O')
     await win.getByRole('button', { name: 'Browse…', exact: true }).click()
     await expect(right.locator('.card-name')).toHaveText('split-destination-b.md')
     await cardIndexed(right)
