@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { emptySession } from '../app/shared/session'
-import { FIXTURES, type Launched, type TestHooks, debugStats, finish, fixture, launch, lifecycle, test, visibleRows, waitIndexed, waitOpen } from './app'
+import { FIXTURES, type TestHooks, debugStats, finish, fixture, killCore, launch, lifecycle, test, visibleRows, waitIndexed, waitOpen } from './app'
 import { query } from './find-ui'
 
 type Item = { path: string; folder: boolean }
@@ -260,12 +260,6 @@ test('Raw wraps a 10,000-character line and CJK to the card when Wrap lines is o
   expect(l.pageErrors).toEqual([])
   await finish(l)
 })
-
-/** Kills the newest session's core host by its pid, as core-death.e2e.ts does. */
-function killCore(l: Launched): void {
-  const spawned = lifecycle(l.userData).filter(r => r.event === 'utility-spawn').at(-1)!
-  process.kill(spawned.utilityPid as number)
-}
 
 test("a file the core died reading comes back unopened after a restart, and opens only when asked", async () => {
   const file = fixture('open-paths-crash.txt', Array.from({ length: 50 }, (_, i) => `crash line ${i + 1}`).join('\n') + '\n')

@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { RENDERED_OFF } from '../app/renderer/card'
 import { viewportCap } from '../app/renderer/lenses/page-cache'
 import type { Limits } from '../app/shared/protocol'
-import { type TestHooks, assertNetLog, debugStats, expectReleasedDocuments, finish, fixture, launch, lifecycle, stubExternal, test, visibleRows, waitIndexed, waitOpen, workspaceHeld } from './app'
+import { type TestHooks, assertNetLog, debugStats, expectReleasedDocuments, finish, fixture, killCore, launch, stubExternal, test, visibleRows, waitIndexed, waitOpen, workspaceHeld } from './app'
 
 type ReserveProbe = { held: boolean; bRendered: boolean; release?: () => void }
 type ShrinkProbe = { held: boolean; bytes?: number; release?: () => void }
@@ -247,8 +247,7 @@ test('a different file after a core restart starts at its first line despite reu
   await waitIndexed(win)
   await win.locator('.vl-scroller').evaluate((el) => { el.scrollTop = 200 * 20 })
   await expect.poll(async () => (await visibleRows(win))[0]).toEqual({ line: 201, text: 'A line 201' })
-  const spawned = lifecycle(l.userData).filter((r) => r.event === 'utility-spawn').at(-1)!
-  process.kill(spawned.utilityPid as number)
+  killCore(l)
   await expect(win.locator('.card-message p')).toHaveText("Typose's core stopped")
   await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), fixture('session-place-b.txt', body('B')))
   await expect(win.locator('.card-name')).toHaveText('session-place-b.txt')
@@ -516,8 +515,7 @@ test('retired Rendered allowance survives Close, refused open and core restart w
   const reopened = await win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.client.rendered!())
   expect(reopened.retiredReserved).toBe(2 * original.reserved)
   expect(reopened.totalReserved).toBe(reopened.rawReserved + reopened.reserved + 2 * original.reserved)
-  const spawned = lifecycle(l.userData).filter((r) => r.event === 'utility-spawn').at(-1)!
-  process.kill(spawned.utilityPid as number)
+  killCore(l)
   await expect(win.locator('.card-message p')).toHaveText("Typose's core stopped")
   await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), text)
   await expect(win.locator('.card-name')).toHaveText('retired-restart.txt')

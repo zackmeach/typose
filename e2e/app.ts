@@ -223,6 +223,14 @@ export function lifecycle(userData: string): LifecycleRecord[] {
     .map((l) => JSON.parse(l) as LifecycleRecord)
 }
 
+/** Kills the newest session's core host by its pid; returns the session and when (wall clock). */
+export function killCore(l: Launched): { session: number; at: number } {
+  const spawned = lifecycle(l.userData).filter((r) => r.event === 'utility-spawn').at(-1)!
+  const at = Date.now()
+  process.kill(spawned.utilityPid as number)
+  return { session: spawned.session as number, at }
+}
+
 /** Runs netlog-assert.mjs on a log, as CI does. */
 export function assertNetLog(log: string): string {
   expect(statSync(log).size).toBeGreaterThan(0) // a NetLog always holds metadata; emptiness isn't the test

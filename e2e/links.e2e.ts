@@ -1,7 +1,7 @@
 import { type Locator, type Page, expect } from '@playwright/test'
 import { mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { FIXTURES, type TestHooks, assertNetLog, debugStats, finish, fixture, launch, lifecycle, stubExternal, stubOpenDialog, test } from './app'
+import { FIXTURES, type TestHooks, assertNetLog, debugStats, finish, fixture, killCore, launch, stubExternal, stubOpenDialog, test } from './app'
 
 const ready = (reader: Page | Locator) => expect(reader.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 30_000 })
 
@@ -171,8 +171,7 @@ test('a local target cannot regain manual path privileges after a core restart',
   await win.getByRole('link', { name: 'Next', exact: true }).click({ modifiers: ['Control'] })
   await expect(win.locator('.card-name')).toHaveText('local-restart-next.md')
   await ready(win)
-  const spawned = lifecycle(l.userData).filter((r) => r.event === 'utility-spawn').at(-1)!
-  process.kill(spawned.utilityPid as number)
+  killCore(l)
   await expect(win.locator('.card-message p')).toContainText("Typose's core stopped")
   await expect(win.locator('.card-message .open-button')).toHaveText(['Open file…'])
   await expect(win.getByRole('button', { name: 'Reopen', exact: true })).toHaveCount(0)

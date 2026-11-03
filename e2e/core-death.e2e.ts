@@ -5,7 +5,7 @@
 import { type Page, expect } from '@playwright/test'
 import { rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { FIXTURES, type Launched, type TestHooks, debugStats, finish, fixture, launch, lifecycle, sparseFixture, stubOpenDialog, test, visibleRows, waitIndexed, waitOpen } from './app'
+import { FIXTURES, type Launched, type TestHooks, debugStats, finish, fixture, killCore, launch, lifecycle, sparseFixture, stubOpenDialog, test, visibleRows, waitIndexed, waitOpen } from './app'
 
 const hooks = (win: Page) => win.evaluate(() => (({ held, ...rest }) => ({ ...rest, held: held.length }))((window as unknown as { typoseTest: TestHooks }).typoseTest.client))
 /** Holds back what `session`'s core host sends from now on, until `deliverHeld`. */
@@ -15,14 +15,6 @@ const lines = (n: number) => Array.from({ length: n }, (_, i) => `line ${i}`).jo
 const sparse = join(FIXTURES, 'core-death-10gib.txt')
 
 test.afterEach(() => rmSync(sparse, { force: true }))
-
-/** Kills the newest session's core host by its pid; returns the session and when (wall clock). */
-function killCore(l: Launched): { session: number; at: number } {
-  const spawned = lifecycle(l.userData).filter((r) => r.event === 'utility-spawn').at(-1)!
-  const at = Date.now()
-  process.kill(spawned.utilityPid as number)
-  return { session: spawned.session as number, at }
-}
 
 /** The death of `session` was reported, and pending calls rejected, within 1 s of `at`; main lives and logged it. */
 async function diedWithin1s(l: Launched, { session, at }: { session: number; at: number }): Promise<number> {

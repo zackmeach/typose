@@ -2,7 +2,7 @@ import AxeBuilder from '@axe-core/playwright'
 import { type Page, expect } from '@playwright/test'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { FIXTURES, type TestHooks, debugStats, expectReleasedDocuments, finish, fixture, launch, lifecycle, osFocus, pressAsOS, stubOpenDialog, test, visibleRows, waitIndexed, waitOpen } from './app'
+import { FIXTURES, type TestHooks, debugStats, expectReleasedDocuments, finish, fixture, killCore, launch, osFocus, pressAsOS, stubOpenDialog, test, visibleRows, waitIndexed, waitOpen } from './app'
 import { processMemory } from './memory'
 import { workspaceCharge } from '../app/renderer/workspace-budget'
 
@@ -431,8 +431,7 @@ test('derived local tabs retain their capability across selection and cannot reg
   await expect(win.getByRole('heading', { name: 'Derived target' })).toBeVisible()
   await tab(win, 'tabs-derived-other.txt').click()
   await waitOpen(win)
-  const spawned = lifecycle(l.userData).filter((r) => r.event === 'utility-spawn').at(-1)!
-  process.kill(spawned.utilityPid as number)
+  killCore(l)
   await expect(win.locator('.card-message p')).toContainText("Typose's core stopped")
   await expect(win.getByRole('button', { name: 'Reopen', exact: true })).toBeEnabled()
   await tab(win, 'tabs-derived-target.md').click()
