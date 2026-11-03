@@ -9,6 +9,7 @@ use crate::budget::Reservation;
 use crate::bytemap::{ByteMap, MapBuilder};
 use crate::doc::{DocError, Document};
 use crate::encoding::decode_prefix;
+pub use crate::json::Span;
 use crate::store::cancelled;
 #[path = "csv_metadata.rs"]
 pub mod metadata;
@@ -29,11 +30,6 @@ const DELIMITERS: [u8; 4] = [b',', b'\t', b';', b'|'];
 pub struct Options {
     pub delimiter: Option<u8>,
     pub header: Option<bool>,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Span {
-    pub start: u64,
-    pub end: u64,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct RowInfo {
