@@ -921,10 +921,7 @@ pub fn build(
     let decoded = encoding.new_decoder_with_bom_removal().max_utf8_buffer_length(len as usize);
     let mut temp = Reservation::new(read_temp(len, decoded)).map_err(DocError::Memory)?; // released last
     let bytes = doc.verified(generation, |store| store.read(0, len))?;
-    let bom = match Encoding::for_bom(&bytes) {
-        Some((e, n)) if e == encoding => n,
-        _ => 0,
-    };
+    let bom = crate::encoding::bom_len(&bytes, encoding);
     temp.grow(len.saturating_mul(40)).map_err(DocError::Memory)?;
     let decoded = crate::encoding::decode(&bytes, encoding, 0);
     let edges = byte_edges(&decoded.text, &decoded.map);

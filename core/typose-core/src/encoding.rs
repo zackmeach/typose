@@ -56,6 +56,14 @@ pub fn decode(bytes: &[u8], encoding: &'static Encoding, start_offset: u64) -> T
     decode_prefix(bytes, encoding, start_offset, usize::MAX, true).0
 }
 
+/// The length of `encoding`'s BOM at the start of `bytes`, 0 without one.
+pub(crate) fn bom_len(bytes: &[u8], encoding: &'static Encoding) -> usize {
+    match Encoding::for_bom(bytes) {
+        Some((e, n)) if e == encoding => n,
+        _ => 0,
+    }
+}
+
 /// Like `decode`, but stops at the last element boundary within `max` bytes (a BOM included) and returns how many
 /// bytes the slice covers. An element is a char or one U+FFFD with the bytes it replaced.
 ///
@@ -70,10 +78,7 @@ pub fn decode_prefix(
     max: usize,
     last: bool,
 ) -> (TextSlice, usize) {
-    let bom = match Encoding::for_bom(bytes) {
-        Some((e, n)) if e == encoding && start_offset == 0 => n,
-        _ => 0,
-    };
+    let bom = if start_offset == 0 { bom_len(bytes, encoding) } else { 0 };
     let src = &bytes[bom..];
     let budget = max - bom;
     if encoding.is_ascii_compatible() && src.is_ascii() {
