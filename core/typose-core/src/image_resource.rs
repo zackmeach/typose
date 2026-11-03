@@ -26,11 +26,6 @@ fn cancelled(cancel: &AtomicBool) -> Result<(), DocError> {
     if cancel.load(Ordering::Relaxed) { Err(DocError::Cancelled) } else { Ok(()) }
 }
 
-/// No pathname fallback. This function is also used before returning canonical chunks.
-pub fn check_source(source: &Document, generation: u32) -> Result<(), DocError> {
-    source.check_local_source(generation)
-}
-
 /// Holds the input buffer and its charge together. Read once from the inherited route, with bounded capacity.
 struct Snapshot {
     route: LocalRoute,

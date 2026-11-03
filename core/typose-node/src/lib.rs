@@ -484,7 +484,7 @@ impl Task for PrepareImage {
             if self.cancel.load(Ordering::Relaxed) {
                 return Err(DocError::Cancelled);
             }
-            image_resource::check_source(self.raw.document(), self.generation)?;
+            self.raw.document().check_local_source(self.generation)?;
             self.pending.publish(image)
         });
         match output {
@@ -523,9 +523,9 @@ impl Task for ImageChunk {
                 NoSlot::Cancelled => DocError::Cancelled,
                 NoSlot::Budget(error) => DocError::Memory(error),
             })?);
-            image_resource::check_source(self.raw.document(), self.generation)?;
+            self.raw.document().check_local_source(self.generation)?;
             let bytes = self.state.chunk(self.id, self.offset)?;
-            image_resource::check_source(self.raw.document(), self.generation)?;
+            self.raw.document().check_local_source(self.generation)?;
             Ok(bytes)
         }))
     }
@@ -535,7 +535,7 @@ impl Task for ImageChunk {
             if self.cancel.load(Ordering::Relaxed) || !self.state.contains(self.id) {
                 return Err(DocError::Cancelled);
             }
-            image_resource::check_source(self.raw.document(), self.generation)?;
+            self.raw.document().check_local_source(self.generation)?;
             Ok(bytes)
         });
         match output {

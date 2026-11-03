@@ -427,7 +427,8 @@ impl Document {
         Ok(route)
     }
 
-    pub(crate) fn check_local_source(&self, generation: u32) -> Result<(), DocError> {
+    /// No pathname fallback. Image resources also check it before returning canonical chunks.
+    pub fn check_local_source(&self, generation: u32) -> Result<(), DocError> {
         self.checked_local_file(generation).map(drop)
     }
 
