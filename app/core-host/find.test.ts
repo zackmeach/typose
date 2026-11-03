@@ -49,6 +49,10 @@ function setup() {
 }
 
 describe('exact-view source Find host bridge', () => {
+  it('starts a find empty and incomplete, so the page scans it', async () => {
+    const s = setup(), opened = await s.open()
+    expect(await s.start(opened.view)).toMatchObject({ count: 0, complete: false })
+  })
   it('stamps source hits and accepts uniform CJK UTF-8 maps', async () => {
     const s = setup(), opened = await s.open(), found = await s.start(opened.view)
     s.doc.sourceFindScan.mockResolvedValue({ count: 1, complete: true, hits: [hit('検索', 3)] })
@@ -118,6 +122,9 @@ describe('Grid interactions host bridge', () => {
     const find = (current = order) => s.value<CsvFindInfo>(s.call('csvFindStart', { view: opened.view, order: current, query: 'x', matchCase: false }))
     return { ...s, opened, info, order, sort, find, interactionId: GRID_INTERACTION }
   }
+  it('starts a find empty and incomplete, so the page scans it', async () => {
+    expect(await (await ready()).find()).toMatchObject({ count: 0, complete: false })
+  })
   it('supports identity order, publishes exact sort refs, locates source records, and reads header cells', async () => {
     const s = await ready()
     expect(await s.call('csvOrderedPage', { order: s.order, rowStart: 0, rowCount: 2, columnStart: 0, columnCount: 2 })).toMatchObject({ result: { ref: s.info.ref } })
