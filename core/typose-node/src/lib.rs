@@ -665,14 +665,7 @@ impl FolderRoot {
             return Err(Error::new(Code::InvalidParams, "invalid folder node"));
         }
         let raw = self.state.open(node as u32).map_err(doc_error)?;
-        Ok(Doc {
-            images: None,
-            raw: Some(Arc::new(raw)),
-            built: Built::default(),
-            csv: Arc::default(),
-            find: Arc::default(),
-            structured: Arc::default(),
-        })
+        Ok(Doc::wrap(raw))
     }
     #[napi]
     pub fn close(&self) -> bool {
@@ -712,14 +705,7 @@ impl SavedRoute {
     pub fn open(&self) -> std::result::Result<Doc, Error<Code>> {
         let route = self.route.as_ref().ok_or_else(|| Error::new(Code::NoDocument, "the saved route was released"))?;
         let raw = Raw::open_saved(route).map_err(doc_error)?;
-        Ok(Doc {
-            images: None,
-            raw: Some(Arc::new(raw)),
-            built: Built::default(),
-            csv: Arc::default(),
-            find: Arc::default(),
-            structured: Arc::default(),
-        })
+        Ok(Doc::wrap(raw))
     }
 
     #[napi]
@@ -758,14 +744,30 @@ impl Doc {
             return Err(Error::new(Code::InvalidParams, why));
         }
         let raw = Raw::open(std::path::Path::new(&path)).map_err(doc_error)?;
-        Ok(Doc {
+        Ok(Doc::wrap(raw))
+    }
+
+    fn wrap(raw: Raw) -> Doc {
+        Doc {
             images: None,
             raw: Some(Arc::new(raw)),
             built: Built::default(),
             csv: Arc::default(),
             find: Arc::default(),
             structured: Arc::default(),
-        })
+        }
+    }
+
+    /// Ends this generation's CSV, structured, Find and image work; `next` takes its place, or nothing on close.
+    fn retire(&mut self, next: Option<Raw>) {
+        self.csv.close();
+        self.structured.close();
+        self.find.close();
+        self.clear_images();
+        self.csv = Arc::default();
+        self.structured = Arc::default();
+        self.raw = next.map(Arc::new);
+        self.built = Built::default();
     }
 
     fn raw(&self) -> std::result::Result<&Arc<Raw>, Error<Code>> {
@@ -993,14 +995,7 @@ impl Doc {
     pub fn open_local(&self, generation: f64, target: String) -> std::result::Result<Doc, Error<Code>> {
         let (raw, generation) = self.local_source(generation)?;
         let next = raw.open_local(generation, &target).map_err(doc_error)?;
-        Ok(Doc {
-            images: None,
-            raw: Some(Arc::new(next)),
-            built: Built::default(),
-            csv: Arc::default(),
-            find: Arc::default(),
-            structured: Arc::default(),
-        })
+        Ok(Doc::wrap(next))
     }
 
     /// Ctrl+R (spec §3.1): the same path at the next generation, which `startIndex` then indexes. Every page and
@@ -1008,28 +1003,14 @@ impl Doc {
     #[napi]
     pub fn reload(&mut self) -> std::result::Result<(), Error<Code>> {
         let next = self.raw()?.reload().map_err(doc_error)?;
-        self.csv.close();
-        self.structured.close();
-        self.structured = Arc::default();
-        self.find.close();
-        self.csv = Arc::default();
-        self.clear_images();
-        self.raw = Some(Arc::new(next));
-        self.built = Built::default();
+        self.retire(Some(next));
         Ok(())
     }
 
     #[napi]
     pub fn reload_in_folder(&mut self, root: &FolderRoot) -> std::result::Result<(), Error<Code>> {
         let next = self.raw()?.reload_in_folder(Some(&root.state)).map_err(doc_error)?;
-        self.csv.close();
-        self.structured.close();
-        self.structured = Arc::default();
-        self.find.close();
-        self.csv = Arc::default();
-        self.clear_images();
-        self.raw = Some(Arc::new(next));
-        self.built = Built::default();
+        self.retire(Some(next));
         Ok(())
     }
 
@@ -1037,12 +1018,7 @@ impl Doc {
     /// stopped, which the core host cancels first. Every later call is `NoDocument`.
     #[napi]
     pub fn close(&mut self) {
-        self.csv.close();
-        self.structured.close();
-        self.find.close();
-        self.clear_images();
-        self.raw = None;
-        self.built = Built::default();
+        self.retire(None);
     }
 
     /// Lines found so far by the index, and whether it's done.
