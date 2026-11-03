@@ -119,6 +119,11 @@ const typose: TyposeApi = {
     ipcRenderer.on('open-path', listener)
     return () => void ipcRenderer.off('open-path', listener)
   },
+  onOpenFolder: (cb) => {
+    const listener = (_event: unknown, path: string) => cb(path)
+    ipcRenderer.on('open-folder', listener)
+    return () => void ipcRenderer.off('open-folder', listener)
+  },
   openDialog: () => ipcRenderer.invoke('open-dialog'),
   folderDialog: () => ipcRenderer.invoke('folder-dialog'),
   onDrop: (cb) => {

@@ -9,6 +9,7 @@ import { RENDERED_OFF } from '../app/renderer/card'
 import { viewportCap } from '../app/renderer/lenses/page-cache'
 import type { Limits } from '../app/shared/protocol'
 import { type TestHooks, assertNetLog, debugStats, expectReleasedDocuments, finish, fixture, launch, lifecycle, stubExternal, test, visibleRows, waitIndexed, waitOpen, workspaceHeld } from './app'
+import { command } from './find-ui'
 
 type ReserveProbe = { held: boolean; bRendered: boolean; release?: () => void }
 type ShrinkProbe = { held: boolean; bytes?: number; release?: () => void }
@@ -200,7 +201,7 @@ test('Ctrl+R keeps the reader on the same block', async () => {
   })
   const before = await topBlock(win)
   await win.locator('.md-scroller').focus()
-  await win.keyboard.press('Control+r')
+  await win.keyboard.press(command + '+r')
   await expect(win.locator('[data-lens="rendered"]')).toHaveAttribute('data-gen', '2')
   await waitRendered(win)
   const after = await topBlock(win)
@@ -538,7 +539,7 @@ test('terminal Reload failure disposes the retained Rendered tree and releases t
   await waitRendered(win)
   rmSync(file)
   await win.locator('.md-scroller').focus()
-  await win.keyboard.press('Control+R')
+  await win.keyboard.press(command + '+R')
   await expect(win.locator('.card-message p')).toContainText('File not found')
   expect(await win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.client.rendered)).toBeNull()
   await expect.poll(async () => (await debugStats(win)).docs).toBe(0)
@@ -664,7 +665,7 @@ test('Ctrl+R keeps keyboard focus on the Rendered scroller', async () => {
   const scroller = win.locator('.md-scroller')
   await scroller.focus()
   await expect(scroller).toBeFocused()
-  await win.keyboard.press('Control+r')
+  await win.keyboard.press(command + '+r')
   await expect(win.locator('[data-lens="rendered"]')).toHaveAttribute('data-gen', '2')
   await waitRendered(win)
   const focused = await win.evaluate(() => document.activeElement?.className ?? '')

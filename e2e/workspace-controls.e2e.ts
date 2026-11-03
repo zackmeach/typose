@@ -4,10 +4,15 @@ import { mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { finish, fixture, launch, stubOpenDialog, test } from './app'
+import { command as modifier } from './find-ui'
 import { SHOW } from './menu-fixture'
 import { emptySession } from '../app/shared/session'
 
+/** The core refuses folder browsing off Windows, so a root (and quick open's files in one) exists only there. */
+const FOLDERS = process.platform === 'win32'
+
 test('quick open browses through the real command surface and opens fuzzy root results to a side card', async () => {
+  test.skip(process.platform !== 'win32', 'local capability backend is currently Windows-only')
   const root = mkdtempSync(join(tmpdir(), 'typose-quick-root-'))
   mkdirSync(join(root, 'reports')); writeFileSync(join(root, 'reports', 'quarterly-report.md'), '# Quarterly report\n')
   mkdirSync(join(root, 'node_modules')); writeFileSync(join(root, 'node_modules', 'hidden-report.md'), '# Excluded report\n')
@@ -17,19 +22,19 @@ test('quick open browses through the real command surface and opens fuzzy root r
   await live.win.getByRole('button', { name: 'Menu', exact: true }).click()
   await live.win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
   await expect(live.win.getByRole('treeitem', { name: 'reports', exact: true })).toBeVisible()
-  await live.win.keyboard.press('Control+O')
+  await live.win.keyboard.press(modifier + '+O')
   await expect(live.win.getByRole('dialog', { name: 'Quick open' })).toBeVisible()
   await live.win.getByRole('combobox', { name: 'Search files' }).fill('qtrpt')
   await expect(live.win.getByRole('option', { name: /quarterly-report.md/ })).toBeVisible()
   await live.win.keyboard.press('Shift+Enter')
   await expect(live.win.getByRole('region', { name: 'Reader card 2', exact: true }).getByRole('heading', { name: 'Quarterly report' })).toBeVisible()
-  await live.win.keyboard.press('Control+O')
+  await live.win.keyboard.press(modifier + '+O')
   await live.win.getByRole('combobox', { name: 'Search files' }).fill('hidden-report')
   await expect(live.win.getByRole('option')).toHaveCount(0)
   await live.win.keyboard.press('Escape')
   const browsed = fixture('quick-browsed.txt', 'Browse uses the selected OS dialog result\n')
   await stubOpenDialog(live.app, browsed)
-  await live.win.keyboard.press('Control+O')
+  await live.win.keyboard.press(modifier + '+O')
   await live.win.getByRole('button', { name: 'Browse…', exact: true }).click()
   await expect(live.win.getByRole('tab', { name: 'quick-browsed.txt', exact: true })).toHaveAttribute('aria-selected', 'true')
   expect(live.pageErrors).toEqual([])
@@ -42,7 +47,7 @@ test('palette opens Settings and persists live themes while preserving hand-writ
   writeFileSync(config, '# Keep my comment\ntheme_mode  = "dark" # Keep this note\n\n# Hand setting\nshow_hidden = false\n')
   const live = await launch({ userData, file: fixture('settings-document.md', '# Settings document\n') })
   await expect(live.win.getByRole('heading', { name: 'Settings document' })).toBeVisible()
-  await live.win.keyboard.press('Control+K')
+  await live.win.keyboard.press(modifier + '+K')
   await live.win.getByRole('combobox', { name: 'Search commands' }).fill('Settings')
   await live.win.keyboard.press('Enter')
   await expect(live.win.getByRole('tab', { name: '⚙ Settings', exact: true })).toHaveAttribute('aria-selected', 'true')
@@ -77,7 +82,7 @@ test('invalid hand edits retain last good settings and never overwrite the inval
   writeFileSync(config, 'theme_mode = "dark"\n')
   const live = await launch({ userData })
   await expect(live.win.getByRole('button', { name: /^Open file/ })).toBeVisible()
-  await live.win.keyboard.press('Control+K'); await live.win.getByRole('combobox', { name: 'Search commands' }).fill('Settings'); await live.win.keyboard.press('Enter')
+  await live.win.keyboard.press(modifier + '+K'); await live.win.getByRole('combobox', { name: 'Search commands' }).fill('Settings'); await live.win.keyboard.press('Enter')
   await expect(live.win.getByRole('button', { name: 'Always dark', exact: true })).toHaveAttribute('aria-pressed', 'true')
   writeFileSync(config, 'theme_mode = [broken\n')
   await live.win.getByRole('tab', { name: '⚙ Settings', exact: true }).focus()
@@ -113,7 +118,7 @@ test('persisted lens and encoding preferences affect real documents and palette 
   await live.win.getByRole('tab', { name: 'settings-default-raw.md', exact: true }).click()
   await expect(live.win.locator('.raw-host')).toBeVisible()
   await expect(live.win.getByRole('heading', { name: 'Raw by preference', exact: true })).toHaveCount(0)
-  await live.win.keyboard.press('Control+K')
+  await live.win.keyboard.press(modifier + '+K')
   await live.win.getByRole('combobox', { name: 'Search commands' }).fill('Switch lens')
   await live.win.keyboard.press('Enter')
   await expect(live.win.getByRole('heading', { name: 'Raw by preference', exact: true })).toBeVisible()
@@ -124,7 +129,7 @@ test('persisted lens and encoding preferences affect real documents and palette 
 test('Ctrl+, opens Settings with a segmented theme control and the hidden-files checkbox beside its label', async () => {
   const live = await launch({ file: fixture('settings-polish.md', '# Settings polish\n') })
   await expect(live.win.getByRole('heading', { name: 'Settings polish' })).toBeVisible()
-  await live.win.keyboard.press('Control+,')
+  await live.win.keyboard.press(modifier + '+,')
   await expect(live.win.getByRole('tab', { name: '⚙ Settings', exact: true })).toHaveAttribute('aria-selected', 'true')
   const modes = live.win.getByRole('group', { name: 'Theme mode', exact: true })
   await expect(modes.getByRole('button')).toHaveText(['System', 'Always light', 'Always dark'])
@@ -153,7 +158,7 @@ test('palette groups commands under LENS, VIEW and FILE; quick open separates RE
   writeFileSync(join(userData, 'session.json'), JSON.stringify({ ...emptySession(), recents: [{ kind: 'file', path: seen }, { kind: 'folder', path: root }] }))
   const live = await launch({ userData, file: fixture('overlay-doc.md', '# Overlay doc\n') })
   await expect(live.win.getByRole('heading', { name: 'Overlay doc' })).toBeVisible()
-  await live.win.keyboard.press('Control+K')
+  await live.win.keyboard.press(modifier + '+K')
   const palette = live.win.getByRole('dialog', { name: 'Command palette' })
   await expect(palette.getByRole('group')).toHaveCount(3)
   await expect(palette.getByRole('group').nth(0)).toHaveAccessibleName('LENS')
@@ -166,19 +171,21 @@ test('palette groups commands under LENS, VIEW and FILE; quick open separates RE
   await expect(palette.getByRole('group').nth(2).getByRole('option', { name: SHOW })).toBeVisible()
   await expect(palette.getByRole('group').nth(2).getByRole('option', { name: /Open with default app/ })).toBeVisible()
   await live.win.keyboard.press('Escape')
-  await live.app.evaluate(({ ipcMain }, path) => { ipcMain.removeHandler('folder-dialog'); ipcMain.handle('folder-dialog', () => path) }, root)
-  await live.win.getByRole('button', { name: 'Menu', exact: true }).click()
-  await live.win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
-  await expect(live.win.getByRole('treeitem', { name: 'reports', exact: true })).toBeVisible()
-  await live.win.keyboard.press('Control+O')
-  const quick = live.win.getByRole('dialog', { name: 'Quick open' })
-  const recent = quick.getByRole('group', { name: 'RECENT', exact: true }), indexed = quick.getByRole('group', { name: 'IN OPEN FOLDERS', exact: true })
-  await expect(indexed.getByRole('option', { name: /fresh\.csv/ })).toBeVisible()
-  await expect(indexed.getByRole('option', { name: /fresh\.csv/ })).toContainText('CSV')
-  await expect(recent.getByRole('option', { name: /seen\.md/ })).toContainText('MD')
-  await expect(recent.getByRole('option').filter({ hasText: 'DIR' })).toHaveCount(1)
-  await expect(quick.getByRole('option', { name: /seen\.md/ })).toHaveCount(1)
-  await expect(indexed.getByRole('option', { name: /seen\.md/ })).toHaveCount(0)
+  if (FOLDERS) {
+    await live.app.evaluate(({ ipcMain }, path) => { ipcMain.removeHandler('folder-dialog'); ipcMain.handle('folder-dialog', () => path) }, root)
+    await live.win.getByRole('button', { name: 'Menu', exact: true }).click()
+    await live.win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
+    await expect(live.win.getByRole('treeitem', { name: 'reports', exact: true })).toBeVisible()
+    await live.win.keyboard.press(modifier + '+O')
+    const quick = live.win.getByRole('dialog', { name: 'Quick open' })
+    const recent = quick.getByRole('group', { name: 'RECENT', exact: true }), indexed = quick.getByRole('group', { name: 'IN OPEN FOLDERS', exact: true })
+    await expect(indexed.getByRole('option', { name: /fresh\.csv/ })).toBeVisible()
+    await expect(indexed.getByRole('option', { name: /fresh\.csv/ })).toContainText('CSV')
+    await expect(recent.getByRole('option', { name: /seen\.md/ })).toContainText('MD')
+    await expect(recent.getByRole('option').filter({ hasText: 'DIR' })).toHaveCount(1)
+    await expect(quick.getByRole('option', { name: /seen\.md/ })).toHaveCount(1)
+    await expect(indexed.getByRole('option', { name: /seen\.md/ })).toHaveCount(0)
+  }
   expect(live.pageErrors).toEqual([])
   expect(await finish(live)).toEqual({ code: 0, signal: null })
 })
@@ -190,7 +197,7 @@ test('a file or folder that failed to open is not recorded as a recent', async (
   const live = await launch({ userData })
   await expect(live.win.getByRole('button', { name: /^Open file/ })).toBeVisible()
   await stubOpenDialog(live.app, missingFile)
-  await live.win.keyboard.press('Control+O')
+  await live.win.keyboard.press(modifier + '+O')
   await live.win.getByRole('button', { name: 'Browse…', exact: true }).click()
   await expect(live.win.getByRole('tab', { name: 'no-such-file.md', exact: true })).toBeVisible()
   const folderDialog = (path: string) => live.app.evaluate(({ ipcMain }, path) => { ipcMain.removeHandler('folder-dialog'); ipcMain.handle('folder-dialog', () => path) }, path)
@@ -198,19 +205,22 @@ test('a file or folder that failed to open is not recorded as a recent', async (
   await live.win.getByRole('button', { name: 'Menu', exact: true }).click()
   await live.win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
   await expect(live.win.getByText(/Cannot add folder/)).toBeVisible()
-  await folderDialog(good)
-  await live.win.getByRole('button', { name: 'Menu', exact: true }).click()
-  await live.win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
-  await expect(live.win.getByRole('tree')).toBeVisible()
+  if (FOLDERS) {
+    await folderDialog(good)
+    await live.win.getByRole('button', { name: 'Menu', exact: true }).click()
+    await live.win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
+    await expect(live.win.getByRole('tree')).toBeVisible()
+  }
   expect(live.pageErrors).toEqual([])
   expect(await finish(live, true)).toEqual({ code: 0, signal: null })
   const recents = JSON.parse(readFileSync(join(userData, 'session.json'), 'utf8')).recents as { kind: string; path: string }[]
   expect(recents.map(recent => recent.path)).not.toContain(missingFile)
   expect(recents.map(recent => recent.path)).not.toContain(missingFolder)
-  expect(recents.some(recent => recent.kind === 'folder' && recent.path.toLowerCase().includes('typose-recents-good-'))).toBe(true)
+  if (FOLDERS) expect(recents.some(recent => recent.kind === 'folder' && recent.path.toLowerCase().includes('typose-recents-good-'))).toBe(true)
 })
 
 test('quick open walks lazily with its own root, so it never spends the sidebar node table on a 4,800-file folder', async () => {
+  test.skip(process.platform !== 'win32', 'local capability backend is currently Windows-only')
   const root = mkdtempSync(join(tmpdir(), 'typose-quick-big-'))
   for (let d = 0; d < 16; d++) {
     const dir = join(root, 'd' + String(d).padStart(2, '0'))
@@ -223,7 +233,7 @@ test('quick open walks lazily with its own root, so it never spends the sidebar 
   await live.win.getByRole('button', { name: 'Menu', exact: true }).click()
   await live.win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
   await expect(live.win.getByRole('treeitem', { name: 'd15', exact: true })).toBeVisible()
-  await live.win.keyboard.press('Control+O')
+  await live.win.keyboard.press(modifier + '+O')
   await expect(live.win.getByRole('status').filter({ hasText: /Quick open shows the first [\d,]+ entries of / })).toBeVisible({ timeout: 60_000 })
   await expect(live.win.getByText(/refused/i)).toHaveCount(0)
   await live.win.keyboard.press('Escape')
@@ -251,7 +261,7 @@ test('quick open skips a root whose folder was replaced, and lists past an unrea
       await expect(live.win.getByRole('treeitem', { name: row, exact: true })).toBeVisible()
     }
     renameSync(swapped, swapped + '-moved'); mkdirSync(swapped); writeFileSync(join(swapped, 'impostor.md'), '# impostor\n')
-    await live.win.keyboard.press('Control+O')
+    await live.win.keyboard.press(modifier + '+O')
     await expect(live.win.getByRole('status').filter({ hasText: 'Quick open skipped swapped · the folder changed since it was added' })).toBeVisible({ timeout: 30_000 })
     await expect(live.win.getByRole('status').filter({ hasText: 'mixed · 6 files · 1 unreadable folder skipped' })).toBeVisible({ timeout: 30_000 })
     await live.win.getByRole('combobox', { name: 'Search files' }).fill('file')
@@ -269,7 +279,7 @@ test('a setting changes and saves while config.toml is open in a Typose tab', as
   writeFileSync(config, 'theme_mode = [broken\n')
   const live = await launch({ userData })
   await expect(live.win.getByRole('button', { name: /^Open file/ })).toBeVisible()
-  await live.win.keyboard.press('Control+,')
+  await live.win.keyboard.press(modifier + '+,')
   await live.win.getByRole('button', { name: 'Open config.toml', exact: true }).click()
   await expect(live.win.getByRole('tab', { name: 'config.toml', exact: true })).toHaveAttribute('aria-selected', 'true')
   await expect(live.win.locator('.raw-host')).toBeVisible()
@@ -293,7 +303,7 @@ test('F5 retries a file that was missing and now exists', async () => {
   const live = await launch()
   await expect(live.win.getByRole('button', { name: /^Open file/ })).toBeVisible()
   await stubOpenDialog(live.app, later)
-  await live.win.keyboard.press('Control+O')
+  await live.win.keyboard.press(modifier + '+O')
   await live.win.getByRole('button', { name: 'Browse…', exact: true }).click()
   await expect(live.win.getByRole('tab', { name: 'later.txt', exact: true })).toBeVisible()
   await expect(live.win.getByText(/File not found/)).toBeVisible()
@@ -308,7 +318,7 @@ test('Settings has a level-one heading and the size fields can be typed into', a
   const userData = mkdtempSync(join(tmpdir(), 'typose-sizes-'))
   const live = await launch({ userData })
   await expect(live.win.getByRole('button', { name: /^Open file/ })).toBeVisible()
-  await live.win.keyboard.press('Control+,')
+  await live.win.keyboard.press(modifier + '+,')
   await expect(live.win.getByRole('heading', { level: 1, name: /Settings/ })).toBeVisible()
   const size = live.win.getByLabel('Interface size', { exact: true })
   await size.click()
@@ -330,11 +340,11 @@ test('zoom shortcuts clamp at 50% and 200% and reset, and F11 toggles full scree
     const w = BrowserWindow.getAllWindows()[0]
     return { zoom: Math.round(w.webContents.getZoomFactor() * 100) / 100, fullScreen: w.isFullScreen() }
   })
-  for (let i = 0; i < 12; i++) await live.win.keyboard.press('Control+=')
+  for (let i = 0; i < 12; i++) await live.win.keyboard.press(modifier + '+=')
   await expect.poll(async () => (await state()).zoom).toBe(2)
-  for (let i = 0; i < 30; i++) await live.win.keyboard.press('Control+-')
+  for (let i = 0; i < 30; i++) await live.win.keyboard.press(modifier + '+-')
   await expect.poll(async () => (await state()).zoom).toBe(0.5)
-  await live.win.keyboard.press('Control+0')
+  await live.win.keyboard.press(modifier + '+0')
   await expect.poll(async () => (await state()).zoom).toBe(1)
   await live.win.keyboard.press('F11')
   await expect.poll(async () => (await state()).fullScreen).toBe(true)
@@ -351,7 +361,7 @@ test('Copy path confirms for 3 s; Settings names the window; the palette says Sh
   const { win } = live
   await expect(win.getByRole('heading', { name: 'Polish doc' })).toBeVisible()
   const palette = win.getByRole('dialog', { name: 'Command palette' })
-  const command = async (name: string) => { await win.keyboard.press('Control+K'); await win.getByRole('combobox', { name: 'Search commands' }).fill(name); await win.keyboard.press('Enter') }
+  const command = async (name: string) => { await win.keyboard.press(modifier + '+K'); await win.getByRole('combobox', { name: 'Search commands' }).fill(name); await win.keyboard.press('Enter') }
 
   // Copy path's confirmation goes by itself: the clipboard is stubbed, so nothing reaches the OS clipboard.
   await win.evaluate(() => { navigator.clipboard.writeText = async () => {} })
@@ -362,7 +372,7 @@ test('Copy path confirms for 3 s; Settings names the window; the palette says Sh
 
   // The title bar and the window say Settings while it shows, and the file again once its tab is selected.
   await expect(win).toHaveTitle('polish-doc.md — Typose')
-  await win.keyboard.press('Control+,')
+  await win.keyboard.press(modifier + '+,')
   await expect(win).toHaveTitle('Settings — Typose')
   await expect(win.locator('.titlebar .title')).toHaveText('Settings — Typose')
   await win.getByRole('tab', { name: 'polish-doc.md', exact: true }).click()
@@ -370,7 +380,7 @@ test('Copy path confirms for 3 s; Settings names the window; the palette says Sh
   await expect(win.locator('.titlebar .title')).toHaveText('polish-doc.md — Typose')
 
   // The palette and ☰ use the platform's name for revealing a file, and the palette shows Wrap lines' state.
-  await win.keyboard.press('Control+K')
+  await win.keyboard.press(modifier + '+K')
   await expect(palette.getByRole('option', { name: SHOW, exact: true })).toBeVisible()
   await expect(palette.getByRole('option', { name: 'Wrap lines, Off', exact: true }).locator('.workspace-badge')).toHaveText('Off')
   await win.getByRole('combobox', { name: 'Search commands' }).fill(SHOW.split(' ').at(-1)!.toLowerCase())
@@ -378,7 +388,7 @@ test('Copy path confirms for 3 s; Settings names the window; the palette says Sh
   await win.keyboard.press('Escape')
   await command('Wrap lines')
   await expect(win.locator('html')).toHaveAttribute('data-wrap-lines', 'true')
-  await win.keyboard.press('Control+K')
+  await win.keyboard.press(modifier + '+K')
   await expect(palette.getByRole('option', { name: 'Wrap lines, On', exact: true }).locator('.workspace-badge')).toHaveText('On')
   await win.keyboard.press('Escape')
   if (process.platform !== 'darwin') {
@@ -388,20 +398,22 @@ test('Copy path confirms for 3 s; Settings names the window; the palette says Sh
   }
 
   // Quick open's status is a row of its own below the list, not against the list's last, partly visible result.
-  await live.app.evaluate(({ ipcMain }, path) => { ipcMain.removeHandler('folder-dialog'); ipcMain.handle('folder-dialog', () => path) }, root)
-  await win.getByRole('button', { name: 'Menu', exact: true }).click()
-  await win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
-  await expect(win.getByRole('treeitem', { name: 'file-39.md', exact: true })).toBeVisible()
-  await win.keyboard.press('Control+O')
-  await expect(win.getByRole('status').filter({ hasText: '40 files' })).toBeVisible()
-  const layout = await win.evaluate(() => {
-    const list = document.querySelector('.workspace-results')!, status = document.querySelector('.index-status')!, text = document.createRange()
-    text.selectNodeContents(status)
-    return { scrolls: list.scrollHeight > list.clientHeight, overlap: list.getBoundingClientRect().bottom - status.getBoundingClientRect().top, gap: text.getBoundingClientRect().top - list.getBoundingClientRect().bottom }
-  })
-  expect(layout.scrolls).toBe(true)
-  expect(layout.overlap).toBeLessThanOrEqual(0)
-  expect(layout.gap).toBeGreaterThanOrEqual(6)
+  if (FOLDERS) {
+    await live.app.evaluate(({ ipcMain }, path) => { ipcMain.removeHandler('folder-dialog'); ipcMain.handle('folder-dialog', () => path) }, root)
+    await win.getByRole('button', { name: 'Menu', exact: true }).click()
+    await win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
+    await expect(win.getByRole('treeitem', { name: 'file-39.md', exact: true })).toBeVisible()
+    await win.keyboard.press(modifier + '+O')
+    await expect(win.getByRole('status').filter({ hasText: '40 files' })).toBeVisible()
+    const layout = await win.evaluate(() => {
+      const list = document.querySelector('.workspace-results')!, status = document.querySelector('.index-status')!, text = document.createRange()
+      text.selectNodeContents(status)
+      return { scrolls: list.scrollHeight > list.clientHeight, overlap: list.getBoundingClientRect().bottom - status.getBoundingClientRect().top, gap: text.getBoundingClientRect().top - list.getBoundingClientRect().bottom }
+    })
+    expect(layout.scrolls).toBe(true)
+    expect(layout.overlap).toBeLessThanOrEqual(0)
+    expect(layout.gap).toBeGreaterThanOrEqual(6)
+  }
   expect(live.pageErrors).toEqual([])
   expect(await finish(live)).toEqual({ code: 0, signal: null })
 })

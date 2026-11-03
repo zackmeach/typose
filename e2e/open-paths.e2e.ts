@@ -10,6 +10,8 @@ import { FIXTURES, type Launched, type TestHooks, debugStats, finish, fixture, l
 import { command, query } from './find-ui'
 
 type Item = { path: string; folder: boolean }
+/** The core refuses folder browsing off Windows, so a dropped or named folder becomes a root only there. */
+const FOLDERS = process.platform === 'win32'
 
 /**
  * A drag over the window (`enter`) or its drop, as a page script's DragEvents. A script's File has no path, so the
@@ -55,15 +57,19 @@ test('a drop shows its target, opens files as tabs in the focused card and folde
   await expect(tabs(win)).toHaveText(['open-paths-drop.md'], { timeout: 30_000 })
   await expect(win.getByRole('heading', { name: 'Dropped' })).toBeVisible({ timeout: 30_000 })
 
-  await drag(win, 'drop', [{ path: root, folder: true }])
-  await expect(win.getByRole('treeitem', { name: basename(root), exact: true })).toBeVisible()
-  await expect(win.getByRole('treeitem', { name: 'inside.md', exact: true })).toBeVisible()
-  expect(await tabs(win).count()).toBe(1) // a folder opens no tab
+  if (FOLDERS) {
+    await drag(win, 'drop', [{ path: root, folder: true }])
+    await expect(win.getByRole('treeitem', { name: basename(root), exact: true })).toBeVisible()
+    await expect(win.getByRole('treeitem', { name: 'inside.md', exact: true })).toBeVisible()
+    expect(await tabs(win).count()).toBe(1) // a folder opens no tab
+  }
 
-  await drag(win, 'drop', [{ path: second, folder: false }, { path: other, folder: true }])
+  await drag(win, 'drop', [{ path: second, folder: false }, ...(FOLDERS ? [{ path: other, folder: true }] : [])])
   await expect(tabs(win)).toHaveText(['open-paths-drop.md', 'open-paths-drop-2.txt'])
-  await expect(win.getByRole('treeitem', { name: basename(other), exact: true })).toBeVisible()
-  await expect(win.getByRole('treeitem', { name: 'other.csv', exact: true })).toBeVisible()
+  if (FOLDERS) {
+    await expect(win.getByRole('treeitem', { name: basename(other), exact: true })).toBeVisible()
+    await expect(win.getByRole('treeitem', { name: 'other.csv', exact: true })).toBeVisible()
+  }
   await waitOpen(win)
   expect(win.url()).toBe('typose://app/index.html') // the window never navigated to a dropped file
   expect(l.pageErrors).toEqual([])
@@ -88,9 +94,11 @@ test('a real drop, in the shipping build, opens a file as a tab and a folder as 
   await expect(tabs(win)).toHaveText(['open-paths-cdp.txt'], { timeout: 30_000 })
   await waitOpen(win)
   expect((await visibleRows(win))[0]).toEqual({ line: 1, text: 'dropped for real' })
-  await drop([root])
-  await expect(win.getByRole('treeitem', { name: basename(root), exact: true })).toBeVisible({ timeout: 30_000 })
-  await expect(win.getByRole('treeitem', { name: 'real.md', exact: true })).toBeVisible()
+  if (FOLDERS) {
+    await drop([root])
+    await expect(win.getByRole('treeitem', { name: basename(root), exact: true })).toBeVisible({ timeout: 30_000 })
+    await expect(win.getByRole('treeitem', { name: 'real.md', exact: true })).toBeVisible()
+  }
   await expect(tabs(win)).toHaveText(['open-paths-cdp.txt'])
   expect(win.url()).toBe('typose://app/index.html')
   expect(l.pageErrors).toEqual([])
@@ -124,6 +132,7 @@ test('a UNC drop is refused before anything opens it, and text or link drags are
 })
 
 test('a folder named on the command line becomes a sidebar root, and a file beside it still opens as a tab', async () => {
+  test.skip(process.platform !== 'win32', 'local capability backend is currently Windows-only')
   const file = fixture('open-paths-argv.md', '# Argv file\n')
   const root = folderFixture('open-paths-argv-root', { 'notes.md': '# Notes\n' })
   const l = await launch({ file: [file, root] })
@@ -142,14 +151,14 @@ test('a second-instance open while Settings shows switches the card back to the 
   const l = await launch({ file: first })
   const { win, app } = l
   await waitOpen(win)
-  await win.keyboard.press('Control+,')
+  await win.keyboard.press(command + '+,')
   const settings = win.getByRole('tab', { name: '⚙ Settings', exact: true })
   await expect(settings).toHaveAttribute('aria-selected', 'true')
   // main's second-instance handler sends exactly this for a path named on a later command line.
   await app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), second)
   await expect(win.getByRole('tab', { name: 'open-paths-settings-b.txt' })).toHaveAttribute('aria-selected', 'true')
   await expect(settings).toHaveAttribute('aria-selected', 'false')
-  await win.keyboard.press('Control+K')
+  await win.keyboard.press(command + '+K')
   await win.getByRole('combobox', { name: 'Search commands' }).fill('Wrap lines')
   await win.keyboard.press('Enter')
   await expect(win.locator('html')).toHaveAttribute('data-wrap-lines', 'true')

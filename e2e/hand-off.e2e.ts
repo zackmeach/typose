@@ -131,18 +131,21 @@ test('a hand-off from page script without a user gesture is refused, and a trust
 
 test('Open with default app hands off only documents and media: .jnlp and a trailing \\. are refused', async () => {
   const jnlp = fixture('rv-never.jnlp', '<jnlp codebase="https://example.invalid/"></jnlp>\n')
-  const bat = fixture('trailing.bat', '@echo off\n')
   const l = await launch({ hooks: true, file: jnlp, env: RECORD })
   const { win } = l
   const calls = await shellCalls(l.app)
   await waitOpen(win)
   await fileAction(win, 'Open with default app')
   await expect(notice(win)).toHaveText(MEDIA_ONLY)
-  // The core opens any path the page names (pre-existing), so a page can hold `trailing.bat\.`: main refuses its shape.
-  const held = await win.evaluate((path) => (window as unknown as { typoseTest: { core: { call(method: string, params: object): Promise<unknown> } } })
-    .typoseTest.core.call('open', { path, count: 1, bytes: 100 }), bat + '\\.') as { doc: number; gen: number }
-  expect(await viaGesture(win, 'openWithDefault', { session: 1, doc: held.doc, gen: held.gen })).toEqual({ ok: false, reason: 'Typose hands off only plain file paths' })
-  expect(await viaGesture(win, 'showInFolder', { session: 1, doc: held.doc, gen: held.gen })).toEqual({ ok: false, reason: 'Typose hands off only plain file paths' })
+  if (process.platform === 'win32') {
+    // `trailing.bat\.` is Windows path semantics: elsewhere it names no file, and the core's open throws. The core opens
+    // any path the page names (pre-existing), so on Windows a page can hold it: main refuses its shape.
+    const bat = fixture('trailing.bat', '@echo off\n')
+    const held = await win.evaluate((path) => (window as unknown as { typoseTest: { core: { call(method: string, params: object): Promise<unknown> } } })
+      .typoseTest.core.call('open', { path, count: 1, bytes: 100 }), bat + '\\.') as { doc: number; gen: number }
+    expect(await viaGesture(win, 'openWithDefault', { session: 1, doc: held.doc, gen: held.gen })).toEqual({ ok: false, reason: 'Typose hands off only plain file paths' })
+    expect(await viaGesture(win, 'showInFolder', { session: 1, doc: held.doc, gen: held.gen })).toEqual({ ok: false, reason: 'Typose hands off only plain file paths' })
+  }
   expect(await calls()).toEqual([])
   expect(l.pageErrors).toEqual([])
   await finish(l)
@@ -194,10 +197,17 @@ test('Open with default app refuses programs, scripts and shortcuts with a messa
 test('the bridge refuses paths Typose never held, other sessions’ documents, and network and device paths', async () => {
   const held = fixture('handoff-held.txt', 'held\n')
   const elsewhere = fixture('handoff-elsewhere.txt', 'never opened\n')
-  const device = '\\\\?\\' + fixture('handoff-device.txt', 'device path\n')
-  const l = await launch({ hooks: true, file: [held, device], env: RECORD })
+  // Windows' device namespace is the \\?\ prefix; POSIX refuses any path with two leading slashes as network or device. A launch's
+  // argv is resolved first, which collapses a leading `//` on POSIX, so there the page is sent the path as it is.
+  const windows = process.platform === 'win32'
+  const device = (windows ? '\\\\?\\' : '/') + fixture('handoff-device.txt', 'device path\n')
+  const l = await launch({ hooks: true, file: windows ? [held, device] : held, env: RECORD })
   const { win } = l
   const calls = await shellCalls(l.app)
+  if (!windows) {
+    await expect(win.getByRole('tab')).toHaveCount(1) // the page is listening once the launch's file has a tab
+    await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), device)
+  }
   await expect(win.getByRole('tab')).toHaveCount(2)
   // Each call carries a real click's gesture, so what refuses it is the subject.
   const results: unknown[] = []

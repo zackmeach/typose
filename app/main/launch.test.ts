@@ -1,7 +1,10 @@
 // Spec §8.1 and plan C4 for what PR 8 adds: the path a launch names, and the untrusted message a second instance sends.
-import { resolve } from 'node:path'
+import { spawnSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { dropPaths, handoff, launchPath, launchPaths } from './launch'
+import { dropPaths, handoff, isFolder, launchPath, launchPaths } from './launch'
 
 const cwd = resolve('/launch-cwd')
 const exe = 'typose'
@@ -60,6 +63,34 @@ describe("handoff: a second instance's argv and cwd, refused unless they have a 
       expect(handoff({ argv, cwd }), JSON.stringify(argv)).toBeNull()
     for (const data of [undefined, null, 1, 'x', [], { argv: [exe] }, { argv: [exe], cwd: 1 }, { cwd }])
       expect(handoff(data), JSON.stringify(data)).toBeNull()
+  })
+})
+
+describe('isFolder: a launch path is a folder only where a stat is safe, and says so', () => {
+  it('takes a local path whose stat says directory, and leaves any other to the open', async () => {
+    expect(await isFolder('/home/docs', false, async () => true)).toBe(true)
+    expect(await isFolder('/home/a.txt', false, async () => false)).toBe(false)
+    expect(await isFolder('/home/gone', false, async () => { throw new Error('ENOENT') })).toBe(false) // the open reports it
+  })
+  it('never stats a UNC, device, relative or control-character path, nor anything on Windows', async () => {
+    const asked: string[] = []
+    const stat = async (path: string) => { asked.push(path); return true }
+    for (const path of ['//example.invalid/share', '\\\\example.invalid\\share', '\\\\.\\pipe\\x', 'docs', '', '/home/a\u0000b']) expect(await isFolder(path, false, stat), path).toBe(false)
+    for (const path of ['C:\\docs', 'C:/docs', '/home/docs']) expect(await isFolder(path, true, stat), path).toBe(false) // a stat there can connect to a pipe through a link
+    expect(asked).toEqual([])
+  })
+  it.runIf(process.platform !== 'win32')('says a real folder is one, and a file, a FIFO and a missing path are not', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'typose-folder-'))
+    try {
+      const folder = join(root, 'folder'), file = join(root, 'file.txt'), fifo = join(root, 'fifo')
+      mkdirSync(folder)
+      writeFileSync(file, 'x')
+      expect(spawnSync('mkfifo', [fifo]).status).toBe(0)
+      expect(await isFolder(folder)).toBe(true)
+      for (const other of [file, fifo, join(root, 'missing')]) expect(await isFolder(other), other).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
 

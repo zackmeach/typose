@@ -2,6 +2,7 @@ import { expect } from '@playwright/test'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { FIXTURES, finish, fixture, launch, test, waitIndexed, waitOpen } from './app'
+import { command } from './find-ui'
 
 const source = '# Launch plan\n\nA reading paragraph with *emphasis* and **`strong code`**.\n\n## Milestones\n\n### Decisions\n\n```ts\nconst shipped = true\n```\n\n' + 'A paragraph to read.\n\n'.repeat(120)
 
@@ -99,7 +100,7 @@ test('opening, switching and reloading at the top preserve the reading inset whi
   await win.getByRole('tab', { name: 'Rendered', exact: true }).click()
   await atTop()
   await win.locator('.md-scroller').focus()
-  await win.keyboard.press('Control+r')
+  await win.keyboard.press(command + '+r')
   await expect(win.locator('.rendered-host')).toHaveAttribute('data-gen', '2')
   await atTop()
 
