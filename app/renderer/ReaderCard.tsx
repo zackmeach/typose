@@ -33,8 +33,9 @@ const markOnce = (name: string) => performance.getEntriesByName(name).length ===
 const firstCount = (l: Limits) => Math.min(l.maxItems, 3 * Math.ceil(window.innerHeight / ROW_HEIGHT) + 1)
 const CSV_OPTIONS: CsvOptions = { delimiter: 'auto', header: 'auto' }
 
-/** The core's manual open refused a folder before reading anything (a FIFO or a device is "not a regular file"). */
+/** The core's manual open refused a folder, or another non-file (a FIFO, a device), before reading anything. */
 const FOLDER = 'refused: a folder'
+const NOT_REGULAR = 'refused: not a regular file'
 const folderRefused = (e: unknown) => e instanceof CoreCallError && e.code === 'Refused' && e.message === FOLDER
 
 const failed = (path: string, e: unknown): Extract<Card, { kind: 'failed' }> => ({
@@ -1465,8 +1466,8 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
             root: { path: root.path, identity: root.identity }, segments: [...folder.segments] }
         }
       } else if (tab.key === manualKey(tab.path) && (!(tab.card.kind === 'failed' || tab.card.kind === 'gone') || !tab.card.localOnly)
-        // A refused folder stays a reselect record: a restart must never retry it as a manual open.
-        && !(tab.card.kind === 'failed' && tab.card.code === 'Refused' && tab.card.message === NOT_REGULAR)) {
+        // A refused folder (or other non-file) stays a reselect record: a restart must never retry it as a manual open.
+        && !(tab.card.kind === 'failed' && tab.card.code === 'Refused' && [FOLDER, NOT_REGULAR].includes(tab.card.message))) {
         location = { kind: 'manual', path: tab.path }
       }
       const visible = tab.id === before.selected && displayed.current === tab.id ? latest.current.card : tab.card
