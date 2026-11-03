@@ -5,7 +5,7 @@ import { ScrollState, isLogical, spacerHeight, visibleRows, wheelPixels } from '
 import type { LensBudget } from './lens-budget'
 import { viewportCap } from './page-cache'
 import { GRID_TEXT_UNITS as TEXT_UNITS, MAX_GRID_CELLS as MAX_CELLS, gridCellPreview, gridTextPreview as preview, nextGridCell, type GridCellPreview, type GridRange } from './grid-cache'
-import { extendSelection, nextGridSort, selectCell, type GridSelection, type GridSort, selectionBounds, utf8ByteLength } from './grid-interactions'
+import { extendSelection, nextGridSort, selectCell, selectColumn, selectRow, type GridSelection, type GridSort, selectionBounds, utf8ByteLength } from './grid-interactions'
 import { GridCopyJob } from './grid-copy'
 import { PRINT_LINES_PER_PAGE, type PrintPayload, type PrintPlan } from '../print'
 import { GridColumns } from './grid-columns'
@@ -878,8 +878,8 @@ export class GridLens {
       item.addEventListener('click', () => { this.closeContextMenu(true); action() })
       menu.append(item)
     }
-    add('Select row', () => this.setSelection({ kind: 'row', anchor: { row, column: 0 }, focus: { row, column: this.columnCount - 1 } }, { row, column: 0 }))
-    add('Select column', () => this.setSelection({ kind: 'column', anchor: { row: 0, column }, focus: { row: this.rowCount - 1, column } }, { row, column }))
+    add('Select row', () => this.setSelection(selectRow(row, this.columnCount), { row, column: 0 }))
+    add('Select column', () => this.setSelection(selectColumn(column, this.rowCount), { row, column }))
     add('Copy selection', () => { void this.copy() }, true)
     add(`Sort ${header ? 'this column' : 'column'} ascending`, () => { void this.requestSort(column, 'asc') })
     add(`Sort ${header ? 'this column' : 'column'} descending`, () => { void this.requestSort(column, 'desc') })
@@ -938,7 +938,7 @@ export class GridLens {
     const rowElement = rowHeader?.closest<HTMLElement>('.csv-row')
     if (rowElement) {
       const row = Number(rowElement.dataset.row)
-      this.setSelection({ kind: 'row', anchor: { row, column: 0 }, focus: { row, column: this.columnCount - 1 } }, { row, column: 0 })
+      this.setSelection(selectRow(row, this.columnCount), { row, column: 0 })
       this.element.focus({ preventScroll: true })
     }
   }
@@ -1052,14 +1052,12 @@ export class GridLens {
     }
     if (event.shiftKey && event.code === 'Space') {
       event.preventDefault()
-      const selection = { kind: 'row' as const, anchor: { row: this.active.row, column: 0 }, focus: { row: this.active.row, column: this.columnCount - 1 } }
-      this.setSelection(selection, { row: this.active.row, column: 0 })
+      this.setSelection(selectRow(this.active.row, this.columnCount), { row: this.active.row, column: 0 })
       return
     }
     if (event.ctrlKey && event.code === 'Space') {
       event.preventDefault()
-      const selection = { kind: 'column' as const, anchor: { row: 0, column: this.active.column }, focus: { row: this.rowCount - 1, column: this.active.column } }
-      this.setSelection(selection, { row: this.active.row, column: this.active.column })
+      this.setSelection(selectColumn(this.active.column, this.rowCount), { row: this.active.row, column: this.active.column })
       return
     }
     if (event.key === 'Enter') {
