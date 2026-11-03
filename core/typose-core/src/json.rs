@@ -147,11 +147,6 @@ impl<T> Paged<T> {
         self.len += 1;
         Ok(())
     }
-
-    fn heap_bytes(&self) -> usize {
-        self.pages.iter().map(Vec::capacity).sum::<usize>() * size_of::<T>()
-            + self.pages.capacity() * size_of::<Vec<T>>()
-    }
 }
 
 impl<T> std::ops::Index<usize> for Paged<T> {
@@ -200,12 +195,6 @@ pub struct Child {
 impl JsonIndex {
     pub fn charged(&self) -> u64 {
         self.charge.bytes() + self.containers.charge.bytes()
-    }
-    /// Resident size of the index (the scanner's own stack is freed when the scan returns).
-    pub fn heap_bytes(&self) -> usize {
-        self.containers.heap_bytes()
-            + self.checkpoints.capacity() * size_of::<ElementCheckpoint>()
-            + self.long_scalars.capacity() * size_of::<Span>()
     }
 
     /// Enumeration never reads past this: the error offset, or the end of the range.
