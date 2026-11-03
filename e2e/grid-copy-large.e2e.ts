@@ -19,7 +19,7 @@ test('Grid asks before a 10 MiB copy and writes the full cell only after confirm
     await expect(grid).toHaveAttribute('data-ready', '1', { timeout: 30_000 })
     const cell = grid.getByRole('gridcell', { name: /^xxx/ }).first()
     const prompt = live.win.getByRole('alertdialog', { name: 'Confirm large copy' })
-    const copy = process.platform === 'darwin' ? 'Meta+c' : 'Control+c'
+    const copy = 'ControlOrMeta+c'
 
     await cell.click()
     await live.win.keyboard.press(copy)

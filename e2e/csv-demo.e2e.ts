@@ -114,7 +114,7 @@ test('Grid keyboard far-seeks to data column 5,000', async () => {
     await expect(firstCell).toHaveText('value-0000')
     await expect(firstCell).toBeVisible()
     await firstCell.focus()
-    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+End' : 'Control+End')
+    await page.keyboard.press('ControlOrMeta+End')
 
     const lastCell = csvGrid.locator('[role="gridcell"][aria-colindex="5001"]')
     await expect(lastCell).toContainText('value-4999')

@@ -1,6 +1,5 @@
 import { expect } from '@playwright/test'
 import { fixture, launch, finish, test } from './app'
-import { command } from './find-ui'
 import { mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 
@@ -272,7 +271,7 @@ test('JSONL Table discovers a global key after line 1,000 and retains original s
     await expect(card.locator('[data-lens="rows"]')).toBeVisible({ timeout: 30_000 })
     await card.getByRole('tab', { name: 'Table', exact: true }).click()
     await expect(card.getByRole('columnheader', { name: 'late', exact: true })).toBeVisible({ timeout: 30_000 })
-    await live.win.keyboard.press(command + '+g')
+    await live.win.keyboard.press('ControlOrMeta+g')
     await card.locator('.go-to-bar input').fill('1002')
     await card.locator('.go-to-bar input').press('Enter')
     await expect(card.getByRole('cell', { name: '"revealed"', exact: true })).toBeVisible()
@@ -298,7 +297,7 @@ test('CSV sampled metadata adds types, fitted widths and stable pills without re
     const width = await grid.getByRole('columnheader', { name: 'note', exact: true }).evaluate(node => node.getBoundingClientRect().width)
     expect(width).toBe(360)
     await screenshot(live.win, 'csv-sampled-metadata')
-    await live.win.keyboard.press(command + '+g')
+    await live.win.keyboard.press('ControlOrMeta+g')
     await card.locator('.go-to-bar input').fill('1002'); await card.locator('.go-to-bar input').press('Enter')
     await expect(grid.locator('[role="row"][aria-rowindex="1003"] [aria-colindex="4"] .csv-value-pill')).toHaveText('late')
     await expect(grid.locator('[role="row"][aria-rowindex="1003"] [aria-colindex="4"] .csv-value-pill')).toHaveAttribute('data-tint', 'neutral')
@@ -325,7 +324,7 @@ for (const [name, source, value, key] of [
     await expect(card.locator('[data-lens="tree"]')).toBeVisible({ timeout: 30_000 })
     const row = card.locator('.tree-row').filter({ hasText: 'name:' })
     await row.click()
-    await live.win.keyboard.press(command + '+c')
+    await live.win.keyboard.press('ControlOrMeta+c')
     await expect.poll(copied).toEqual([value])
     for (const item of ['Copy value (source text)', 'Copy key', 'Copy path']) {
       await row.click({ button: 'right' })

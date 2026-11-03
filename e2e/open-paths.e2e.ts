@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { emptySession } from '../app/shared/session'
 import { FIXTURES, type Launched, type TestHooks, debugStats, finish, fixture, launch, lifecycle, test, visibleRows, waitIndexed, waitOpen } from './app'
-import { command, query } from './find-ui'
+import { query } from './find-ui'
 
 type Item = { path: string; folder: boolean }
 /** The core refuses folder browsing off Windows, so a dropped or named folder becomes a root only there. */
@@ -169,14 +169,14 @@ test('a second-instance open while Settings shows switches the card back to the 
   const l = await launch({ file: first })
   const { win, app } = l
   await waitOpen(win)
-  await win.keyboard.press(command + '+,')
+  await win.keyboard.press('ControlOrMeta+,')
   const settings = win.getByRole('tab', { name: '⚙ Settings', exact: true })
   await expect(settings).toHaveAttribute('aria-selected', 'true')
   // main's second-instance handler sends exactly this for a path named on a later command line.
   await app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), second)
   await expect(win.getByRole('tab', { name: 'open-paths-settings-b.txt' })).toHaveAttribute('aria-selected', 'true')
   await expect(settings).toHaveAttribute('aria-selected', 'false')
-  await win.keyboard.press(command + '+K')
+  await win.keyboard.press('ControlOrMeta+K')
   await win.getByRole('combobox', { name: 'Search commands' }).fill('Wrap lines')
   await win.keyboard.press('Enter')
   await expect(win.locator('html')).toHaveAttribute('data-wrap-lines', 'true')
@@ -218,7 +218,7 @@ test('Raw wraps a 10,000-character line and CJK to the card when Wrap lines is o
 
   const goTo = async (line: number) => {
     await win.locator('.vl-scroller').focus()
-    await win.keyboard.press(command + '+g')
+    await win.keyboard.press('ControlOrMeta+g')
     const input = win.getByRole('form', { name: 'Go to line' }).getByRole('spinbutton')
     await input.fill(String(line))
     await input.press('Enter')

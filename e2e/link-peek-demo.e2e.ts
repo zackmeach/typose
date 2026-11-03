@@ -115,7 +115,7 @@ test('local-link preview closes with button, Escape, or Ctrl+W and transfers its
     await expect(dialog.getByRole('heading', { name: 'Peek destination B', exact: true })).toBeVisible()
     await renderedReady(dialog)
     await expectSourceStable(card, sourceState)
-    await win.keyboard.press(process.platform === 'darwin' ? 'Meta+W' : 'Control+W')
+    await win.keyboard.press('ControlOrMeta+W')
     await expect(dialog).toHaveCount(0)
     await expect(link).toBeFocused()
     await expectSourceStable(card, sourceState)
@@ -208,7 +208,7 @@ test('production package opens a relative tasks.csv as a Grid peek and to the si
 
     // Reusing the open Markdown document through a modifier-click promotes its relative CSV into a tab.
     // This used to throw in React Aria's Document collection and leave the window blank.
-    await link.click({ modifiers: [process.platform === 'darwin' ? 'Meta' : 'Control'] })
+    await link.click({ modifiers: ['ControlOrMeta'] })
     await expect(card.locator('.card-name')).toHaveText('tasks.csv')
     const tabGrid = card.getByRole('grid', { name: 'CSV grid', exact: true })
     await expect(tabGrid).toHaveAttribute('data-ready', '1', { timeout: 30_000 })

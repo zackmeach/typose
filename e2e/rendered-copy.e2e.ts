@@ -1,6 +1,6 @@
 import { expect } from '@playwright/test'
 import { type TestHooks, finish, fixture, launch, test } from './app'
-import { command, ready } from './find-ui'
+import { ready } from './find-ui'
 import { writeFileSync } from 'node:fs'
 
 test('Rendered Ctrl+A and partial selections copy source markup, entities and current-generation bytes', async () => {
@@ -17,16 +17,16 @@ test('Rendered Ctrl+A and partial selections copy source markup, entities and cu
     await expect(scroller).toBeVisible(ready)
     await scroller.click()
     await expect(card).toHaveAttribute('data-focused', 'true')
-    await live.win.keyboard.press(command + '+a')
+    await live.win.keyboard.press('ControlOrMeta+a')
     await expect(card.locator('.md-copy-status')).toHaveText('All source text selected · press Ctrl+C to copy')
     expect(await live.win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.client.rendered?.().copyAll)).toBe(true)
-    await live.win.keyboard.press(command + '+c')
+    await live.win.keyboard.press('ControlOrMeta+c')
     await expect(card.locator('.md-copy-status')).toHaveText('Copied source text')
     await expect.poll(copied).toBe(source)
 
     const renderedText = card.locator('strong [data-source-map]').first()
     await renderedText.dblclick()
-    await live.win.keyboard.press(command + '+c')
+    await live.win.keyboard.press('ControlOrMeta+c')
     await expect(card.locator('.md-copy-status')).toHaveText('Copied source text')
     await expect.poll(copied).not.toBe(source)
     await card.locator('.md-column p').first().evaluate(paragraph => {
@@ -36,12 +36,12 @@ test('Rendered Ctrl+A and partial selections copy source markup, entities and cu
       range.setStart(first, 0); range.setEnd(last, last.textContent!.length)
       const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range)
     })
-    await live.win.keyboard.press(command + '+c')
+    await live.win.keyboard.press('ControlOrMeta+c')
     await expect.poll(copied).toBe('A **bold** line with &amp; markup.')
     await card.getByRole('button', { name: 'Copy code' }).click()
     await expect.poll(copied).toBe('const value = "kept"\n')
     writeFileSync(file, source.replace('bold', 'changed'))
-    await live.win.keyboard.press(command + '+c')
+    await live.win.keyboard.press('ControlOrMeta+c')
     await expect(card.locator('.md-copy-status')).toContainText(/changed|failed|frozen/i)
     await expect.poll(copied).toBe('const value = "kept"\n')
     expect(live.pageErrors).toEqual([])
@@ -70,7 +70,7 @@ test('Rendered partial selection across distant blocks preserves the intervening
       range.setStart(first, 0); range.setEnd(last, last.textContent!.length)
       const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range)
     })
-    await live.win.keyboard.press(command + '+c')
+    await live.win.keyboard.press('ControlOrMeta+c')
     await expect.poll(() => live.app.evaluate(() => (globalThis as { copiedSource?: string }).copiedSource)).toBe(body)
     expect(live.pageErrors).toEqual([])
   } finally { await finish(live) }
@@ -92,7 +92,7 @@ test('Rendered partial source maps retain UTF-16 BOM offsets and multibyte scala
       range.setEnd(runs.at(-1)!.firstChild!, runs.at(-1)!.textContent!.length)
       const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range)
     })
-    await live.win.keyboard.press(command + '+c')
+    await live.win.keyboard.press('ControlOrMeta+c')
     await expect.poll(() => live.app.evaluate(() => (globalThis as { copiedSource?: string }).copiedSource)).toBe('A **café 😀** &amp; 界.')
     expect(live.pageErrors).toEqual([])
   } finally { await finish(live) }
@@ -119,10 +119,10 @@ test('Rendered partial selections map exact source bytes across mixed byte width
       const selection = window.getSelection()!; selection.removeAllRanges(); selection.addRange(range)
     }, part)
     await select('p', 'brûlée, très légère, à côté')
-    await live.win.keyboard.press(command + '+c')
+    await live.win.keyboard.press('ControlOrMeta+c')
     await expect.poll(copied).toBe('brûlée, très légère, à côté')
     await select('pre code', 'xcafé ·y')
-    await live.win.keyboard.press(command + '+c')
+    await live.win.keyboard.press('ControlOrMeta+c')
     await expect.poll(copied).toBe('xcafé ·y')
     expect(live.pageErrors).toEqual([])
   } finally { await finish(live) }

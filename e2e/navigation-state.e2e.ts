@@ -65,7 +65,7 @@ test('Reopen clamps a saved Raw anchor when the file became shorter', async () =
   await win.getByRole('button', { name: 'Close navigation-shorter.txt', exact: true }).click()
   await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
   writeFileSync(file, 'one\ntwo\nthree')
-  await win.keyboard.press(process.platform === 'darwin' ? 'Meta+Shift+T' : 'Control+Shift+T')
+  await win.keyboard.press('ControlOrMeta+Shift+T')
   await waitOpen(win)
   expect(await waitIndexed(win)).toBe(3)
   await expect.poll(async () => (await visibleRows(win)).map(row => row.text)).toEqual(['one', 'two', 'three'])

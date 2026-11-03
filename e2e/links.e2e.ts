@@ -2,7 +2,6 @@ import { type Locator, type Page, expect } from '@playwright/test'
 import { mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { FIXTURES, type TestHooks, assertNetLog, debugStats, finish, fixture, launch, lifecycle, stubExternal, stubOpenDialog, test } from './app'
-import { command } from './find-ui'
 
 const ready = (reader: Page | Locator) => expect(reader.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 30_000 })
 
@@ -156,7 +155,7 @@ test('nested local Markdown and text links inherit the preview route and Reload 
   await expect(preview.locator('.card-name')).toHaveText('local-text.txt')
   await expect(preview.locator('.vl-row .text').first()).toHaveText('First local text')
   writeFileSync(text, 'Second local text\n')
-  await win.keyboard.press(command + '+r')
+  await win.keyboard.press('ControlOrMeta+r')
   await expect(preview.locator('.raw-host')).toHaveAttribute('data-gen', '2')
   await expect(preview.locator('.vl-row .text').first()).toHaveText('Second local text')
   expect(l.pageErrors).toEqual([])
@@ -229,7 +228,7 @@ test('retargeting a local ancestor to a junction refuses Reload without reopenin
     renameSync(root, moved)
     renameSync(held, join(moved, 'next.md'))
     symlinkSync(other, root, 'junction')
-    await win.keyboard.press(command + '+r')
+    await win.keyboard.press('ControlOrMeta+r')
     await expect(win.locator('.card-message p')).toContainText("Can't open")
     await expect(win.locator('.card-message .open-button')).toHaveText(['Locate…', 'Close'])
     await expect(win.locator('.card')).not.toContainText('Wrong target')

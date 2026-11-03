@@ -102,7 +102,7 @@ test('packaged Ctrl+Shift+T reopens a closed scrolled text file at the same line
 
     await win.getByRole('button', { name: 'Close scroll-place.txt', exact: true }).click()
     await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
-    await win.keyboard.press(process.platform === 'darwin' ? 'Meta+Shift+T' : 'Control+Shift+T')
+    await win.keyboard.press('ControlOrMeta+Shift+T')
     await expect(win.locator('.card-name')).toHaveText('scroll-place.txt')
     await waitOpen(win)
     await waitIndexed(win)

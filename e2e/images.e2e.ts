@@ -2,7 +2,6 @@ import { type Page, expect } from '@playwright/test'
 import { writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { type TestHooks, assertNetLog, debugStats, expectReleasedDocuments, finish, fixture, launch, test } from './app'
-import { command } from './find-ui'
 import { imageGif, imageJpeg, imagePng, imageWebp } from './image-fixtures'
 import { processMemory } from './memory'
 
@@ -123,7 +122,7 @@ test('a tight image budget keeps alt text and the reader; a delayed resource can
   await expect(win.getByRole('heading', { name: 'Delayed', exact: true })).toBeVisible()
   // Restore a normal test limit; Reload has a new resource generation.
   await debugStats(win, { limit: 2 ** 30 })
-  await win.keyboard.press(command + '+r')
+  await win.keyboard.press('ControlOrMeta+r')
   await held()
   await open(l, fixture('image-replacement.md', '# Replacement\n'))
   await ready(win)
@@ -241,7 +240,7 @@ for (const method of ['reload', 'openLocal'] as const) test(`${method} freezes l
   await open(l, source)
   await ready(win)
   await expect.poll(() => win.evaluate(() => typeof (window as unknown as { imageHandoff: { image?: () => void } }).imageHandoff.image)).toBe('function')
-  if (method === 'reload') await win.keyboard.press(command + '+r')
+  if (method === 'reload') await win.keyboard.press('ControlOrMeta+r')
   else await win.getByRole('link', { name: 'Next', exact: true }).click({ modifiers: ['Control'] })
   await expect.poll(() => win.evaluate(() => typeof (window as unknown as { imageHandoff: { handoff?: () => void } }).imageHandoff.handoff)).toBe('function')
   await win.evaluate(() => (window as unknown as { imageHandoff: { image: () => void } }).imageHandoff.image())
@@ -308,7 +307,7 @@ for (const side of [1024, 2048]) test(`local image ${side}px allocation, switche
   }
   for (let i = 0; i < 2; i++) {
     const previous = await win.getByRole('img', { name: 'Memory image' }).getAttribute('src')
-    await win.keyboard.press(command + '+r')
+    await win.keyboard.press('ControlOrMeta+r')
     await expect(win.getByRole('img', { name: 'Memory image' })).toBeVisible()
     await expect(win.getByRole('img', { name: 'Memory image' })).not.toHaveAttribute('src', previous!)
     await expect.poll(async () => (await stats(win))!.retiredReserved).toBeGreaterThan(0)

@@ -3,7 +3,6 @@ import { type Page, expect } from '@playwright/test'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { FIXTURES, type TestHooks, debugStats, expectReleasedDocuments, finish, fixture, launch, lifecycle, osFocus, pressAsOS, stubOpenDialog, test, visibleRows, waitIndexed, waitOpen } from './app'
-import { command } from './find-ui'
 import { processMemory } from './memory'
 import { workspaceCharge } from '../app/renderer/workspace-budget'
 
@@ -104,7 +103,7 @@ test('permanent tabs retain document identity, Raw choice and source position; d
   await expect(win.locator('.card-name')).toHaveText('tabs-b.txt')
   await expect(win.locator('.file-tab')).toHaveCount(2)
   expect(Object.keys((await debugStats(win)).charges).sort()).toEqual(identities)
-  await win.keyboard.press(command + '+w')
+  await win.keyboard.press('ControlOrMeta+w')
   await expect(win.locator('.card-name')).toHaveText('tabs-a.md')
   await expect.poll(async () => (await debugStats(win)).docs).toBe(1)
   await closeTabs(win)
@@ -397,7 +396,7 @@ for (const stage of ['native read', 'reply'] as const) test('leaving during Relo
       return reply
     }
   }, stage)
-  await win.keyboard.press(command + '+r')
+  await win.keyboard.press('ControlOrMeta+r')
   await expect.poll(() => win.evaluate(() => !!(window as unknown as { reloadStarted: boolean }).reloadStarted)).toBe(true)
   if (stage === 'reply') await expect.poll(() => win.evaluate(() => typeof (window as unknown as { reloadRelease?: () => void }).reloadRelease)).toBe('function')
   else await debugStats(win) // ordered after Reload entered the host; its new-generation read is still delayed

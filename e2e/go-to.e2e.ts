@@ -1,9 +1,9 @@
 import { expect, type Locator, type Page } from '@playwright/test'
 import { finish, fixture, launch, test } from './app'
-import { command, ready } from './find-ui'
+import { ready } from './find-ui'
 
 async function goTo(win: Page, scope: Locator, value: number): Promise<void> {
-  await win.keyboard.press(command + '+g')
+  await win.keyboard.press('ControlOrMeta+g')
   const field = scope.getByRole('spinbutton')
   await expect(field).toBeFocused()
   await field.fill(String(value))

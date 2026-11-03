@@ -4,7 +4,6 @@ import { execFileSync } from 'node:child_process'
 import { chmodSync, closeSync, openSync, rmSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
 import { FIXTURES, finish, fixture, launch, osFocus, pressAsOS, test, visibleRows, waitIndexed, waitOpen } from './app'
-import { command } from './find-ui'
 
 test('an empty file and a whitespace-only one show "Empty file"', async () => {
   for (const [name, bytes] of [
@@ -129,7 +128,7 @@ test('Ctrl+R on a file deleted since it opened shows it missing', async () => {
   const { win } = l
   await waitOpen(win)
   rmSync(file)
-  await win.keyboard.press(command + '+R')
+  await win.keyboard.press('ControlOrMeta+R')
   await expect(win.locator('.card-message p')).toHaveText(`File not found at ${file}`)
   await finish(l)
 })

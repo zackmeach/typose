@@ -1,6 +1,5 @@
 import { expect } from '@playwright/test'
 import { finish, fixture, launch, test, waitIndexed, waitOpen } from './app'
-import { command } from './find-ui'
 
 test('Raw Ctrl+A/Ctrl+C copies exact source bytes and Ctrl+G goes to a distant line', async () => {
   const source = Array.from({ length: 240 }, (_, index) => `line ${index + 1} · café`).join('\r\n') + '\r\n'
@@ -15,11 +14,11 @@ test('Raw Ctrl+A/Ctrl+C copies exact source bytes and Ctrl+G goes to a distant l
     await waitIndexed(live.win)
     const scroller = live.win.locator('.vl-scroller')
     await scroller.click()
-    await live.win.keyboard.press(command + '+a')
-    await live.win.keyboard.press(command + '+c')
+    await live.win.keyboard.press('ControlOrMeta+a')
+    await live.win.keyboard.press('ControlOrMeta+c')
     await expect.poll(copied).toBe(source)
 
-    await live.win.keyboard.press(command + '+g')
+    await live.win.keyboard.press('ControlOrMeta+g')
     const goTo = live.win.getByRole('form', { name: 'Go to line' })
     const input = goTo.getByRole('spinbutton')
     await expect(input).toBeFocused()

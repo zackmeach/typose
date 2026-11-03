@@ -6,7 +6,6 @@ import AxeBuilder from '@axe-core/playwright'
 import { type Page, expect } from '@playwright/test'
 import { closeSync, openSync, writeSync } from 'node:fs'
 import { type Launched, finish, fixture, launch, test, visibleRows, waitIndexed, waitOpen } from './app'
-import { command } from './find-ui'
 import { HT, hitTest, uiaNodes, uiaTree } from './win32'
 
 const MAC = process.platform === 'darwin'
@@ -157,7 +156,7 @@ test('focus stays in Raw across scrolling, far jumps and page replacement', asyn
   await expect.poll(async () => (await visibleRows(win))[0]).toEqual({ line: 1, text: LINES[0] })
   await inRaw('after Ctrl+Home')
   // Reload replaces every page with the next generation's (a new lens).
-  await win.keyboard.press(command + '+R')
+  await win.keyboard.press('ControlOrMeta+R')
   await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '2')
   await expect.poll(async () => (await visibleRows(win))[0]).toEqual({ line: 1, text: LINES[0] })
   await inRaw('after Reload')
