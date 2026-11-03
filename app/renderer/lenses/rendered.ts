@@ -464,15 +464,11 @@ export class RenderedLens {
       })
   }
 
-  private markReady(): void {
-    this.scroller.dataset.ready = '1'
-  }
-
   /** Scroll to the block that contains `atLine` once it, or the nearest block above it, is mounted. */
   private settle(): void {
     const line = this.atLine
     if (line === undefined) {
-      if (this.cursor >= this.blocks) this.markReady()
+      if (this.cursor >= this.blocks) this.scroller.dataset.ready = '1'
       return
     }
     const blocks = this.column.children
@@ -526,7 +522,7 @@ export class RenderedLens {
   }
 
   private finishPlace(): void {
-    if (this.cursor >= this.blocks) this.markReady()
+    if (this.cursor >= this.blocks) this.scroller.dataset.ready = '1'
   }
 
   private block(item: MdItem): HTMLElement {
