@@ -337,8 +337,6 @@ export interface TyposeApi {
   loadSession(): Promise<import('./session').SessionWorkspace>
   saveSession(session: import('./session').SessionWorkspace): Promise<boolean>
   onSessionCapture(cb: () => Promise<boolean>): () => void
-  /** The file named on the command line, if any: the newest named before the page asked (spec §8.1). */
-  launchPath(): Promise<string | null>
   /** Every file named at startup, consumed as one batch for serial tab creation. */
   launchPaths(): Promise<string[]>
   /** Called with each file named after that: by a second launch, or macOS's open-file. Returns the unsubscribe. */

@@ -1,9 +1,9 @@
-/** The only privileged link action: an allowed URL from this window's current app main frame. */
+/** Main's trust boundary for the page: every IPC channel's sender check, and the one privileged link action, an allowed URL from that sender. */
 interface Frame {
   readonly url: string
 }
 
-interface AppWindow {
+export interface AppWindow {
   isDestroyed(): boolean
   readonly webContents: {
     isDestroyed(): boolean
@@ -11,9 +11,22 @@ interface AppWindow {
   }
 }
 
-interface Caller {
+export interface Caller {
   readonly sender: unknown
   readonly senderFrame: Frame | null
+}
+
+/** Every IPC channel's sender check (plan C4): this live window's app page, typose://app/index.html, in its main frame. */
+export function fromMainApp(win: AppWindow, event: Caller): boolean {
+  try {
+    if (win.isDestroyed() || win.webContents.isDestroyed() || event.sender !== win.webContents) return false
+    const frame = event.senderFrame
+    if (!frame || frame !== win.webContents.mainFrame || !frame.url.startsWith('typose://app/')) return false
+    const page = new URL(frame.url)
+    return page.protocol === 'typose:' && page.host === 'app' && !page.username && !page.password && page.pathname === '/index.html'
+  } catch {
+    return false // a frame that was destroyed before its properties could be read
+  }
 }
 
 const MAX_URL = 32 << 10
@@ -23,17 +36,12 @@ const fits = (url: string) => url.length <= MAX_URL && Buffer.byteLength(url, 'u
 
 function target(win: AppWindow, event: Caller, args: unknown[]): string | null {
   try {
-    if (win.isDestroyed() || win.webContents.isDestroyed() || event.sender !== win.webContents) return null
-    const frame = event.senderFrame
-    if (!frame || frame !== win.webContents.mainFrame) return null
-    const page = new URL(frame.url)
-    if (page.protocol !== 'typose:' || page.host !== 'app' || page.username || page.password || page.pathname !== '/index.html') return null
-    if (args.length !== 1 || typeof args[0] !== 'string' || !fits(args[0]) || controls.test(args[0])) return null
+    if (!fromMainApp(win, event) || args.length !== 1 || typeof args[0] !== 'string' || !fits(args[0]) || controls.test(args[0])) return null
     const url = new URL(args[0])
     if (url.protocol !== 'http:' && url.protocol !== 'https:' && url.protocol !== 'mailto:') return null
     return fits(url.href) ? url.href : null
   } catch {
-    return null // a malformed URL, or a frame that was destroyed before its properties could be read
+    return null // a malformed URL
   }
 }
 

@@ -1,11 +1,11 @@
 import { BrowserWindow, Menu, MessageChannelMain, app, clipboard, crashReporter, dialog, ipcMain, protocol, screen, session, shell, systemPreferences, utilityProcess } from 'electron'
-import type { IpcMainEvent, IpcMainInvokeEvent } from 'electron'
+import type { IpcMainInvokeEvent } from 'electron'
 import { once } from 'node:events'
 import { readFile, stat } from 'node:fs/promises'
 import { extname, join, sep } from 'node:path'
 import coreHostPath from '../core-host/index?modulePath'
 import { MAX_PRINT_PAGES, type Command, type PrintDocumentResult } from '../shared/protocol'
-import { openExternal } from './external'
+import { fromMainApp, openExternal } from './external'
 import { writeClipboardText } from './clipboard'
 import { dropPaths, handoff, launchPaths } from './launch'
 import { gestures, handOff, type HandoffAction } from './handoff'
@@ -83,8 +83,7 @@ const grant = (path: string) => {
   if (granted.size > 1024) granted.delete(granted.values().next().value!)
 }
 pendingPaths.forEach(grant)
-let newest = pendingPaths.at(-1) ?? null
-let deliver = (path: string) => { grant(path); newest = path; pendingPaths.push(path) }
+let deliver = (path: string) => { grant(path); pendingPaths.push(path) }
 // macOS names files through open-file, not argv: before ready for the file a launch opens, and after.
 app.on('open-file', (event, path) => {
   event.preventDefault()
@@ -254,14 +253,11 @@ function macMenu(win: BrowserWindow): Menu {
   ])
 }
 
-const fromApp = (win: BrowserWindow, event: IpcMainEvent | IpcMainInvokeEvent): boolean =>
-  event.sender === win.webContents && !!event.senderFrame?.url.startsWith(`${ORIGIN}/`)
-
-/** Calls from the preload: only from this window's app page, and with no arguments (plan C4). */
-function handle(win: BrowserWindow, channel: string, fn: () => unknown): void {
+/** Calls from the preload: only from this window's app page, and with exactly `arity` arguments (plan C4). */
+function handle(win: BrowserWindow, channel: string, fn: (...args: unknown[]) => unknown, arity = 0): void {
   ipcMain.handle(channel, (event: IpcMainInvokeEvent, ...args: unknown[]) => {
-    if (!fromApp(win, event) || args.length > 0) throw new Error(`refused ${channel}`)
-    return fn()
+    if (!fromMainApp(win, event) || args.length !== arity) throw new Error(`refused ${channel}`)
+    return fn(...args)
   })
 }
 
@@ -282,47 +278,31 @@ void app.whenReady().then(() => {
   const rememberBounds = () => { if (!win.isDestroyed()) sessionStore.bounds({ ...win.getNormalBounds(), maximized: win.isMaximized() }) }
   win.on('resize', rememberBounds)
   win.on('move', rememberBounds)
-  const fromMainApp = (event: IpcMainEvent | IpcMainInvokeEvent) => {
-    try {
-      const url = new URL(event.senderFrame!.url)
-      return event.sender === win.webContents && event.senderFrame === win.webContents.mainFrame && url.protocol === 'typose:' && url.host === 'app' && url.pathname === '/index.html'
-    } catch { return false }
-  }
-  ipcMain.handle('load-session', (event, ...args: unknown[]) => {
-    if (!fromMainApp(event) || args.length) throw new Error('refused load-session')
+  handle(win, 'load-session', () => {
     const workspace = sessionStore.snapshot()
     delete workspace.window
     return workspace
   })
-  ipcMain.handle('load-settings', (event, ...args: unknown[]) => {
-    if (!fromMainApp(event) || args.length) throw new Error('refused load-settings')
-    return configStore.snapshot()
-  })
-  ipcMain.handle('change-setting', (event, ...args: unknown[]) => {
-    if (!fromMainApp(event) || args.length !== 3) throw new Error('refused change-setting')
-    return configStore.update(args[0], args[1], args[2])
-  })
-  ipcMain.handle('export-theme', (event, ...args: unknown[]) => {
-    if (!fromMainApp(event) || args.length !== 2) throw new Error('refused export-theme')
-    return configStore.exportTheme(args[0], args[1])
-  })
+  handle(win, 'load-settings', () => configStore.snapshot())
+  handle(win, 'change-setting', (key, value, revision) => configStore.update(key, value, revision), 3)
+  handle(win, 'export-theme', (name, tokens) => configStore.exportTheme(name, tokens), 2)
   ipcMain.handle('chrome-theme', (event, ...args: unknown[]) => {
-    if (!fromMainApp(event) || args.length !== 3 || typeof args[0] !== 'boolean' || typeof args[1] !== 'string' || typeof args[2] !== 'string' || !/^#[0-9a-f]{6}$/i.test(args[1]) || !/^#[0-9a-f]{6}$/i.test(args[2])) return false
+    if (!fromMainApp(win, event) || args.length !== 3 || typeof args[0] !== 'boolean' || typeof args[1] !== 'string' || typeof args[2] !== 'string' || !/^#[0-9a-f]{6}$/i.test(args[1]) || !/^#[0-9a-f]{6}$/i.test(args[2])) return false
     if (process.platform === 'win32') win.setTitleBarOverlay({ color: args[1], symbolColor: args[2] })
     win.setBackgroundColor(args[1])
     return true
   })
   ipcMain.handle('full-screen', (event, ...args: unknown[]) => {
-    if (!fromMainApp(event) || args.length) return false
+    if (!fromMainApp(win, event) || args.length) return false
     win.setFullScreen(!win.isFullScreen()); return true
   })
   ipcMain.handle('save-session', (event, ...args: unknown[]) => {
-    if (!fromMainApp(event) || args.length !== 1) return false
+    if (!fromMainApp(win, event) || args.length !== 1) return false
     return sessionStore.update(args[0])
   })
   let closeRequest = 0, allowClose = false, finishClose: (() => void) | undefined
   ipcMain.on('session-captured', (event, request: unknown) => {
-    if (fromMainApp(event) && request === closeRequest) finishClose?.()
+    if (fromMainApp(win, event) && request === closeRequest) finishClose?.()
   })
   win.on('close', event => {
     rememberBounds()
@@ -353,7 +333,7 @@ void app.whenReady().then(() => {
   } else win.webContents.on('did-finish-load', () => win.isDestroyed() || win.webContents.send('a11y', true))
   // The renderer's startup marks (plan C8): a known name and a whole-ms time, from this window's app page (C4).
   ipcMain.on('mark', (event, name: unknown, t: unknown) => {
-    if (!fromApp(win, event) || !isMark(name, t)) return
+    if (!fromMainApp(win, event) || !isMark(name, t)) return
     mark?.(name, { t })
     if (__TEST_HOOKS__ && name === 'titlebarPainted') titlebarPainted()
   })
@@ -379,7 +359,6 @@ void app.whenReady().then(() => {
   const liveDelivery = () => {
     deliver = (path) => {
       grant(path)
-      newest = path
       if (!win.isDestroyed()) win.webContents.send('open-path', path)
     }
   }
@@ -388,11 +367,6 @@ void app.whenReady().then(() => {
     const paths = pendingPaths
     pendingPaths = []
     return paths
-  })
-  handle(win, 'launch-path', () => {
-    liveDelivery()
-    pendingPaths = []
-    return newest
   })
   handle(win, 'open-dialog', async () => {
     const r = await dialog.showOpenDialog(win, { properties: ['openFile'] })
@@ -407,7 +381,7 @@ void app.whenReady().then(() => {
   // A drop names files and folders as the dialogs above do; the preload sends only a trusted drop's items. Its files are
   // granted as Open file…'s choice is, so a hand-off may name them.
   ipcMain.handle('drop-paths', (event, ...args: unknown[]) => {
-    const drop = fromMainApp(event) && args.length === 1 ? dropPaths(args[0]) : null
+    const drop = fromMainApp(win, event) && args.length === 1 ? dropPaths(args[0]) : null
     drop?.files.forEach(grant)
     return drop
   })
@@ -424,9 +398,9 @@ void app.whenReady().then(() => {
     return recorded
   }
   const gesture = gestures()
-  ipcMain.on('handoff-gesture', (event, token: unknown) => { if (fromMainApp(event)) gesture.arm(token) })
+  ipcMain.on('handoff-gesture', (event, token: unknown) => { if (fromMainApp(win, event)) gesture.arm(token) })
   for (const [channel, action] of [['show-in-folder', 'show'], ['open-with-default', 'open']] as const)
-    ipcMain.handle(channel, (event: IpcMainInvokeEvent, ...args: unknown[]) => fromMainApp(event)
+    ipcMain.handle(channel, (event: IpcMainInvokeEvent, ...args: unknown[]) => fromMainApp(win, event)
       ? handOff(action, args, {
         takeGesture: token => gesture.take(token),
         granted, resolve: subject => askCore(subject), platform: process.platform, pathext: process.env.PATHEXT ?? '',
@@ -438,7 +412,7 @@ void app.whenReady().then(() => {
   ipcMain.handle('write-clipboard', (event: IpcMainInvokeEvent, ...args: unknown[]) =>
     writeClipboardText(win, event, args, (text) => clipboard.writeText(text)))
   ipcMain.handle('print-document', async (event: IpcMainInvokeEvent, ...args: unknown[]) => {
-    if (!fromMainApp(event) || args.length !== 4) return { kind: 'refused', reason: 'Invalid print request' } satisfies PrintDocumentResult
+    if (!fromMainApp(win, event) || args.length !== 4) return { kind: 'refused', reason: 'Invalid print request' } satisfies PrintDocumentResult
     const [title, blocks, pages, confirmed] = args
     const checked = validatePrintDocument(title, blocks, pages)
     if (!checked.ok) return { kind: 'refused', reason: checked.reason } satisfies PrintDocumentResult
@@ -504,16 +478,13 @@ void app.whenReady().then(() => {
       return await new Promise<PrintDocumentResult>(resolve => {
         try {
           target.webContents.print({ silent: false, printBackground: true, pageSize: 'Letter', margins: { marginType: 'none' } }, success => {
-            if (!target.isDestroyed()) target.close()
             resolve(success ? { kind: 'printed', pages: physicalPages } : { kind: 'cancelled' })
           })
         } catch {
-          if (!target.isDestroyed()) target.close()
           resolve({ kind: 'refused', reason: 'The OS print dialog could not be opened' })
         }
       })
     } catch {
-      if (!target.isDestroyed()) target.close()
       return { kind: 'refused', reason: 'The print document could not be prepared' } satisfies PrintDocumentResult
     } finally {
       if (!target.isDestroyed()) target.close()
