@@ -880,7 +880,7 @@ impl Doc {
         Ok((raw, generation))
     }
 
-    // The host has parsed src exactly once. Native still validates the decoded target through image_route.
+    // The host has parsed src exactly once. Native still validates the decoded target through link_path.
     #[napi(ts_return_type = "Promise<ImagePrepared>")]
     pub fn prepare_image(
         &mut self,

@@ -388,7 +388,8 @@ impl Document {
         Ok(next)
     }
 
-    /// Any extension: the hand-off sheet shows where a program or script is, and nothing here opens it.
+    /// Any extension: the hand-off sheet shows where a program or script is, and an image's codec, not its extension,
+    /// identifies its format. Nothing here opens the target.
     pub fn link_path(&self, generation: u32, target: &str) -> Result<LocalRoute, DocError> {
         self.link_target(generation, target, false)
     }
