@@ -8,13 +8,11 @@ export function markdownPrintNodes(html: string, note?: string): PrintNode[] {
   if (html.length > 256 << 10) throw new Error('A Markdown block exceeds the print block limit')
   const root: PrintNode[] = []
   const stack: Array<{ tag: PrintTag | null; children: PrintNode[] }> = [{ tag: null, children: root }]
-  const decode = typeof document === 'undefined' ? null : document.createElement('textarea')
   let nodes = 0
   const text = (value: string) => {
     if (!value) return
-    let decoded = value
-    if (decode) { decode.innerHTML = value; decoded = decode.value }
-    else decoded = value.replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, entity => {
+    // Its input is serialized HTML (ammonia's html5ever, or Chromium's innerHTML), which escapes only as &amp; &lt; &gt; &quot; &nbsp;.
+    const decoded = value.replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, entity => {
       const key = entity.slice(1, -1).toLowerCase()
       if (key === 'amp') return '&'
       if (key === 'lt') return '<'
