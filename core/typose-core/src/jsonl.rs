@@ -313,4 +313,14 @@ mod tests {
         let p = index.progress.read().unwrap();
         assert_eq!((p.sample_parsed, p.openai_messages, p.openai_dataset), (2, 1, 1));
     }
+    #[test]
+    fn the_reads_cancel_flag_stops_an_index_build() {
+        let file = temp_file("jsonl-cancelled", b"{\"a\":1}\n{\"b\":2}\n");
+        let doc = Document::open(&file).unwrap();
+        let index = Index::with_encoding(encoding_rs::UTF_8).unwrap();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let cancelled = crate::store::cancellable(&cancel, || index.build_reserved(&doc, 1, Reservation::none()));
+        assert!(matches!(cancelled, Err(DocError::Cancelled)), "{cancelled:?}");
+        assert!(!index.progress.read().unwrap().done);
+    }
 }

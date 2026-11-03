@@ -164,4 +164,13 @@ mod tests {
         assert!(tree.index.error.is_some());
         assert_eq!(tree.children(&doc, 1, 0, 0, 128).unwrap().len(), 1);
     }
+    #[test]
+    fn the_reads_cancel_flag_stops_a_tree_build() {
+        let file = temp_file("structured-cancelled", br#"{"a":1,"a":2}"#);
+        let doc = Document::open(&file).unwrap();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let cancelled = crate::store::cancellable(&cancel, || JsonTree::build(&doc, 1));
+        assert!(matches!(cancelled, Err(DocError::Cancelled)), "{:?}", cancelled.map(|t| t.duplicates));
+        assert!(JsonTree::build(&doc, 1).is_ok()); // a cancel freezes nothing
+    }
 }
