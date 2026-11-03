@@ -48,6 +48,10 @@ impl Owner {
             }
         }
     }
+    /// The configuration at `revision`, while it's the current one.
+    fn at(&self, revision: u32) -> Option<Arc<State>> {
+        self.state.lock().unwrap().as_ref().filter(|s| s.csv.revision == revision).cloned()
+    }
     fn current(&self, state: &Arc<State>) -> bool {
         !self.closed.load(Ordering::Relaxed)
             && self.state.lock().unwrap().as_ref().is_some_and(|s| Arc::ptr_eq(s, state))
@@ -624,15 +628,7 @@ impl Doc {
         if raw.document().generation() != generation {
             return Err(doc_error(DocError::Stale { current: raw.document().generation(), asked: generation }));
         }
-        let state = self
-            .csv
-            .state
-            .lock()
-            .unwrap()
-            .as_ref()
-            .filter(|s| s.csv.revision == revision)
-            .cloned()
-            .ok_or_else(|| Error::new(Code::Stale, "CSV configuration was replaced"))?;
+        let state = self.csv.at(revision).ok_or_else(|| Error::new(Code::Stale, "CSV configuration was replaced"))?;
         if state.csv.locked {
             return Err(Error::new(Code::Refused, core_csv::UTF16_REASON));
         }
@@ -844,15 +840,7 @@ impl Doc {
             return Err(doc_error(DocError::Stale { current, asked: asked_generation }));
         }
         let revision_id = int("gen", revision)? as u32;
-        let state = self
-            .csv
-            .state
-            .lock()
-            .unwrap()
-            .as_ref()
-            .filter(|s| s.csv.revision == revision_id)
-            .cloned()
-            .ok_or_else(|| Error::new(Code::Stale, "CSV configuration replaced"))?;
+        let state = self.csv.at(revision_id).ok_or_else(|| Error::new(Code::Stale, "CSV configuration replaced"))?;
         let column = int("start", column)?;
         let direction = match direction.as_str() {
             "asc" => 1,
@@ -884,15 +872,7 @@ impl Doc {
         let id = order_id(order)?;
         let revision_id = int("gen", revision)? as u32;
         let raw = self.raw()?;
-        let state = self
-            .csv
-            .state
-            .lock()
-            .unwrap()
-            .as_ref()
-            .filter(|s| s.csv.revision == revision_id)
-            .cloned()
-            .ok_or_else(|| Error::new(Code::Stale, "CSV configuration replaced"))?;
+        let state = self.csv.at(revision_id).ok_or_else(|| Error::new(Code::Stale, "CSV configuration replaced"))?;
         let order = get_order(&state, id, raw).map_err(doc_error)?;
         self.csv_context(
             generation,
@@ -1074,8 +1054,7 @@ impl Doc {
         if raw.document().generation() != generation {
             return Ok(false);
         }
-        let state = self.csv.state.lock().unwrap().as_ref().filter(|s| s.csv.revision == revision).cloned();
-        let Some(state) = state else {
+        let Some(state) = self.csv.at(revision) else {
             return Ok(false);
         };
         if check_order(&state, order).is_err() {
@@ -1104,15 +1083,7 @@ impl Doc {
         if raw.document().generation() != generation {
             return Err(doc_error(DocError::Stale { current: raw.document().generation(), asked: generation }));
         }
-        let state = self
-            .csv
-            .state
-            .lock()
-            .unwrap()
-            .as_ref()
-            .filter(|s| s.csv.revision == revision)
-            .cloned()
-            .ok_or_else(|| Error::new(Code::Stale, "CSV configuration replaced"))?;
+        let state = self.csv.at(revision).ok_or_else(|| Error::new(Code::Stale, "CSV configuration replaced"))?;
         if state.csv.locked {
             return Err(Error::new(Code::Refused, core_csv::UTF16_REASON));
         }
@@ -1138,15 +1109,7 @@ impl Doc {
     ) -> std::result::Result<GridFindQuery, Error<Code>> {
         let revision = int("gen", revision)? as u32;
         let id = int("gen", id)? as u32;
-        let state = self
-            .csv
-            .state
-            .lock()
-            .unwrap()
-            .as_ref()
-            .filter(|s| s.csv.revision == revision)
-            .cloned()
-            .ok_or_else(|| Error::new(Code::Stale, "CSV configuration replaced"))?;
+        let state = self.csv.at(revision).ok_or_else(|| Error::new(Code::Stale, "CSV configuration replaced"))?;
         let held = state.find.lock().unwrap();
         let (_, order, search) = held
             .as_ref()
@@ -1197,15 +1160,7 @@ impl Doc {
         let generation = int("gen", generation)? as u32;
         let revision = int("gen", revision)? as u32;
         let id = int("gen", id)? as u32;
-        let state = self
-            .csv
-            .state
-            .lock()
-            .unwrap()
-            .as_ref()
-            .filter(|s| s.csv.revision == revision && s.csv.generation == generation)
-            .cloned();
-        let Some(state) = state else {
+        let Some(state) = self.csv.at(revision).filter(|s| s.csv.generation == generation) else {
             return Ok(false);
         };
         let mut held = state.find.lock().unwrap();
