@@ -1,7 +1,6 @@
 import { Composer, Lexer, Parser, isAlias, isMap, isScalar, isSeq, type Document, type Node } from 'yaml'
-import type { StructuredChildren, StructuredInfo, StructuredNode, StructuredProblem } from '../../shared/protocol'
+import type { StructuredChildren, StructuredNode, StructuredProblem } from '../../shared/protocol'
 
-export const YAML_MAX_BYTES = 8 << 20
 const MAX_NODES = 100_000
 const MAX_DEPTH = 100
 /** CST-backed projection. Aliases remain references; never call toJS/toJSON. */
@@ -157,4 +156,3 @@ export function yamlModel(source: string, encoding = 'utf-8', bom = 0) {
 }
 
 export type YamlModel = ReturnType<typeof yamlModel>
-export type YamlInfo = Pick<StructuredInfo, 'root' | 'problems'>
