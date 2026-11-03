@@ -1709,18 +1709,8 @@ interface LensHostProps {
 /** Mounts Raw or Rendered into the card body. A switch or Reload of this document keeps the previous lens's top line. */
 function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place, hadFocus, restoreFocus, atLine, opened, name, lines, indexed, limits, frozen, mode, build, csv, csvOptions, onCsvInfo, structured, onRows, onFrozen, notice, onShowRaw, onOpenLocal, onExecutable, onDisposed }: LensHostProps) {
   const host = useRef<HTMLDivElement>(null)
-  const onFrozenNow = useRef(onFrozen)
-  onFrozenNow.current = onFrozen
-  const onShowRawNow = useRef(onShowRaw)
-  onShowRawNow.current = onShowRaw
-  const onOpenLocalNow = useRef(onOpenLocal)
-  onOpenLocalNow.current = onOpenLocal
-  const onExecutableNow = useRef(onExecutable)
-  onExecutableNow.current = onExecutable
-  const onDisposedNow = useRef(onDisposed)
-  onDisposedNow.current = onDisposed
-  const onCsvInfoNow = useRef(onCsvInfo)
-  onCsvInfoNow.current = onCsvInfo
+  const handlers = useRef({ onFrozen, onShowRaw, onOpenLocal, onExecutable, onDisposed, onCsvInfo })
+  handlers.current = { onFrozen, onShowRaw, onOpenLocal, onExecutable, onDisposed, onCsvInfo }
   useEffect(() => {
     // `place` outlives the document. Use it only for the document that saved it, so a second file opens at `atLine`
     // (or the top). Clear it only after that check: Reload is the same document, and its line has to survive.
@@ -1728,14 +1718,14 @@ function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place
     const at = saved ?? jumpTo.current ?? atLine
     if (saved !== undefined) place.current = undefined
     jumpTo.current = undefined
-    const onFrozenHere = (why: string) => onFrozenNow.current(why)
+    const onFrozenHere = (why: string) => handlers.current.onFrozen(why)
     let view: ShownLens
     if (structured && (mode === 'tree' || mode === 'rows' || mode === 'table' || mode === 'transcript')) {
-      view = new StructuredLens(host.current!, core, opened, structured, mode, { budget, atLine: at, notice, onFrozen: onFrozenHere, onShowRaw: line => onShowRawNow.current(line), onRows: () => onRows?.() })
+      view = new StructuredLens(host.current!, core, opened, structured, mode, { budget, atLine: at, notice, onFrozen: onFrozenHere, onShowRaw: line => handlers.current.onShowRaw(line), onRows: () => onRows?.() })
     } else if (mode === 'grid' && csv) {
       view = new GridLens(host.current!, core, opened, csv, limits, { atLine: at, options: csvOptions ?? CSV_OPTIONS,
-        onFrozen: onFrozenHere, budget, onInfo: info => onCsvInfoNow.current?.(info),
-        onShowRaw: line => onShowRawNow.current(line) })
+        onFrozen: onFrozenHere, budget, onInfo: info => handlers.current.onCsvInfo?.(info),
+        onShowRaw: line => handlers.current.onShowRaw(line) })
     } else if (mode === 'rendered' && build) {
       const kept = retained.current
       if (kept?.session === session && kept.doc === opened.doc && kept.gen === opened.gen) {
@@ -1744,9 +1734,9 @@ function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place
       } else {
         kept?.view.dispose()
         const made = new RenderedLens(host.current!, core, opened, build, limits, {
-          onFrozen: onFrozenHere, atLine: at, onShowRaw: (line) => onShowRawNow.current(line),
-          onOpenLocal: (target, path, gesture) => onOpenLocalNow.current(target, path, gesture), budget: budget ?? undefined,
-          onExecutable: (href, path) => onExecutableNow.current?.(href, path)
+          onFrozen: onFrozenHere, atLine: at, onShowRaw: (line) => handlers.current.onShowRaw(line),
+          onOpenLocal: (target, path, gesture) => handlers.current.onOpenLocal(target, path, gesture), budget: budget ?? undefined,
+          onExecutable: (href, path) => handlers.current.onExecutable?.(href, path)
         })
         retained.current = { session, doc: opened.doc, gen: opened.gen, view: made }
         view = made
@@ -1768,7 +1758,7 @@ function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place
       if (lens.current === view) lens.current = null
       if (view instanceof RenderedLens && budget?.current(opened.gen) && retained.current?.view === view) view.pause()
       else view.dispose(false)
-      onDisposedNow.current(opened)
+      handlers.current.onDisposed(opened)
     }
   }, [core, session, budget, retained, opened, name, limits, lens, atLine, mode, build, csv?.ref.revision, csvOptions, structured, jumpTo, place, hadFocus, restoreFocus])
   useEffect(() => lens.current?.setLineCount(lines), [lines])
