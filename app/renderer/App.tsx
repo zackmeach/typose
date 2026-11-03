@@ -866,6 +866,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   }
   function run(command: Command): void {
     if (!commandEnabled(command)) return
+    const reader = previewRef.current ? handles.current.get(previewRef.current.id) : focusedReader()
     if (command === 'palette' || command === 'open') { showOverlay(command === 'open' ? 'open' : 'palette'); return }
     if (command === 'settings' || command === 'shortcuts') {
       if (previewRef.current) { setWorkspaceNotice('Close the preview before opening Settings'); return }
@@ -875,34 +876,30 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     if (command.startsWith('zoom-')) { window.typose.zoom(command === 'zoom-reset' ? 'reset' : command === 'zoom-in' ? 'in' : 'out'); return }
     if (command === 'full-screen') { void window.typose.fullScreen(); return }
     if (command === 'wrap-lines') { settings.change('wrap_lines', !settings.getSnapshot().values.wrap_lines); return }
-    if (command === 'switch-lens') { (previewRef.current ? handles.current.get(previewRef.current.id) : focusedReader())?.switchLens(); return }
+    if (command === 'switch-lens') { reader?.switchLens(); return }
     if (command === 'close-tab' && settingsTabsRef.current[focusedRef.current]?.active && !previewRef.current) { settingsTab(focusedRef.current, 'close'); return }
     if (command === 'go-to' || command === 'copy' || command === 'print') {
-      const reader = previewRef.current ? handles.current.get(previewRef.current.id) : focusedReader()
       if (command === 'go-to') reader?.goTo()
       else if (command === 'copy') void reader?.copy()
       else reader?.print()
       return
     }
     if (command === 'copy-path' || command === 'show-in-folder' || command === 'open-default') {
-      const reader = previewRef.current ? handles.current.get(previewRef.current.id) : focusedReader()
       reader?.handOff(command === 'copy-path' ? 'copy' : command === 'show-in-folder' ? 'show' : 'open')
       return
     }
     if (command === 'find' || command === 'find-next' || command === 'find-previous') {
-      const reader = previewRef.current ? handles.current.get(previewRef.current.id) : focusedReader()
       reader?.find(command === 'find' ? 'open' : command === 'find-next' ? 'next' : 'previous')
       return
     }
     if (previewRef.current) {
       if (command === 'close-tab' || command === 'close-card') void closePreview()
       else if (command === 'split-right' || command === 'move-tab-right') void promotePreview(true)
-      else if (command === 'reload') void handles.current.get(previewRef.current.id)?.reload()
+      else if (command === 'reload') void reader?.reload()
       else if (command === 'exit') window.close()
       else setWorkspaceNotice('Close the preview before changing the workspace')
       return
     }
-    const reader = focusedReader()
     if (command === 'browse') { settingsTab(focusedRef.current, 'file'); void reader?.pick() }
     else if (command === 'open-folder') void pickFolder()
     else if (command === 'toggle-sidebar') setSidebarOpen(open => !open)
