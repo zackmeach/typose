@@ -15,7 +15,7 @@ import { renderedSelection } from './rendered-selection'
 import { markdownExtras } from './markdown-extras'
 import '../markdown-extras.css'
 
-export { RENDERED_PER_UNIT, renderedCharge } from './rendered-charge'
+export { renderedCharge } from './rendered-charge'
 
 /** A link with nothing to open: a dashed grey underline (markdown-extras.css), and the target in its tooltip. */
 function unresolved(a: HTMLElement, target: string): void {

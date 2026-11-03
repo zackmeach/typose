@@ -1,10 +1,10 @@
 export type GridSort = 'none' | 'asc' | 'desc'
-export interface GridPosition { row: number; column: number }
+interface GridPosition { row: number; column: number }
 export type GridSelection =
   | { kind: 'cell' | 'range'; anchor: GridPosition; focus: GridPosition }
   | { kind: 'row'; anchor: GridPosition; focus: GridPosition }
   | { kind: 'column'; anchor: GridPosition; focus: GridPosition }
-export interface GridBounds { firstRow: number; lastRow: number; firstColumn: number; lastColumn: number }
+interface GridBounds { firstRow: number; lastRow: number; firstColumn: number; lastColumn: number }
 
 export const nextGridSort = (current: GridSort): GridSort => current === 'none' ? 'asc' : current === 'asc' ? 'desc' : 'none'
 

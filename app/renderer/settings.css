@@ -35,7 +35,7 @@
 body { font-size: var(--ui-size, 13px); }
 .vl-row { font-size: var(--mono-size, 13px); }
 .md-column :where(pre, code) { font-size: var(--mono-size, 13px); }
-.csv-grid, .structured-tree, .structured-rows { font-size: var(--ui-size, 13px); }
+.csv-grid { font-size: var(--ui-size, 13px); }
 :root[data-density=compact] { --density-row: 24px; }
 :root[data-density=default] { --density-row: 28px; }
 :root[data-density=spacious] { --density-row: 34px; }

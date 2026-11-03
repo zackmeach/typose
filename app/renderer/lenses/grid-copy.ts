@@ -17,7 +17,7 @@ export interface GridCopyPort {
   valid(): boolean
 }
 
-export type GridCopyResult =
+type GridCopyResult =
   | { kind: 'copied'; bytes: number }
   | { kind: 'cancelled' }
   | { kind: 'refused'; reason: string }

@@ -3,7 +3,7 @@ import { utf8ByteLength } from './grid-interactions'
 
 export const SOURCE_COPY_CHUNK = 64 << 10
 
-export interface SourceCopyPort {
+interface SourceCopyPort {
   valid(): boolean
   reserve(bytes: number, signal: AbortSignal): Promise<boolean>
   read(start: number, count: number, signal: AbortSignal): Promise<Uint8Array>
