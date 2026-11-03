@@ -37,10 +37,6 @@ export interface RenderedOptions {
   budget?: LensBudget
 }
 
-interface Flight {
-  abort: AbortController
-}
-
 /**
  * Rendered (brief §5.2) for one Markdown build. Every block is mounted; Chromium skips offscreen work
  * (`content-visibility`), and the blocks stay in the accessibility tree (plan §2.2, Z72). The core already sanitized
@@ -52,7 +48,7 @@ export class RenderedLens {
   private readonly scroller: HTMLElement
   private readonly column: HTMLElement
   private readonly images: RenderedImages
-  private readonly flight: Flight[] = []
+  private flight: AbortController | undefined
   /** The next block to ask for. A page ends where the 256 KiB cap stops it, so that start isn't known ahead of the answer. */
   private cursor = 0
   private readonly blocks: number
@@ -353,7 +349,7 @@ export class RenderedLens {
     this.linkGeneration++
     this.focusJump = false
     this.placeGen++
-    for (const f of this.flight) f.abort.abort()
+    this.flight?.abort()
     this.scroller.remove()
   }
 
@@ -377,7 +373,7 @@ export class RenderedLens {
     this.images.dispose()
     this.outlineResize.disconnect()
     this.placeGen++
-    for (const f of this.flight) f.abort.abort()
+    this.flight?.abort()
     this.scroller.removeEventListener('click', this.onLink, true)
     this.scroller.removeEventListener('auxclick', this.onLink, true)
     this.scroller.removeEventListener('dragstart', this.onLink, true)
@@ -430,7 +426,7 @@ export class RenderedLens {
     }
   }
 
-  /** One page per frame, and at most 2 in flight (plan §2.2, C5). */
+  /** One page per frame, and one in flight (plan §2.2, C5). */
   private schedule(): void {
     if (this.scheduled) return
     this.scheduled = true
@@ -441,18 +437,16 @@ export class RenderedLens {
   }
 
   private pump(): void {
-    if (this.stopped || this.paused || this.flight.length >= 2) return
     // The next page begins where this one stops, and the 256 KiB cap chooses that, so a second request would guess it.
-    if (this.flight.length >= 1) return
+    if (this.stopped || this.paused || this.flight) return
     if (this.cursor >= this.blocks) return this.settle()
     const start = this.cursor
-    const flight: Flight = { abort: new AbortController() }
-    this.flight.push(flight)
+    const flight = this.flight = new AbortController()
     const { doc, gen } = this.opened
     void this.core
-      .call('page', { doc, lens: 'rendered', gen, start, count: this.limits.maxItems }, flight.abort.signal)
+      .call('page', { doc, lens: 'rendered', gen, start, count: this.limits.maxItems }, flight.signal)
       .then((page) => {
-        if (this.stopped || flight.abort.signal.aborted) return
+        if (this.stopped || flight.signal.aborted) return
         if (page.items.length === 0) {
           this.stopped = true // nothing more there; asking again would spin
           return
@@ -465,8 +459,7 @@ export class RenderedLens {
       })
       .catch((err: unknown) => this.failed(err))
       .finally(() => {
-        const i = this.flight.indexOf(flight)
-        if (i >= 0) this.flight.splice(i, 1)
+        this.flight = undefined
         this.schedule()
       })
   }
