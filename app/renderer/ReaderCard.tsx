@@ -1506,8 +1506,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   useEffect(() => {
     const handle: ReaderHandle = {
       ready: () => surface.current || readyError.current ? Promise.resolve() : new Promise<void>(done => readyWaiters.current.push(done)),
-      open: openNamed, openChild: openFolderChild, openDerived, navigateLocal: openLocal, pick, reload, back, close: () => close(), reopen: reopenClosed, clearClosed,
-      openIndexed: entry => openFolderChild(entry.ref.root, entry.ref.node, entry),
+      open: openNamed, openChild: openFolderChild, openDerived, navigateLocal: openLocal, pick, reload, close: () => close(), reopen: reopenClosed, clearClosed,
       cycle: step => { const state = workspace.getSnapshot(); const index = state.tabs.findIndex(tab => tab.id === state.selected); if (state.tabs.length) void selectTab(state.tabs[(index + step + state.tabs.length) % state.tabs.length].id) },
       find: findAction,
       goTo: openGoTo,
@@ -1520,7 +1519,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         const choices: LensName[] = c.opened.format === 'markdown' ? ['rendered', 'raw'] : c.opened.format === 'csv' ? ['grid', 'raw'] : c.opened.format === 'jsonl' ? ['rows', ...(c.structured && !c.structuredOff && !c.structured.tableOff ? ['table' as const] : []), 'raw'] : ['tree', 'raw']
         onLens(choices[(choices.indexOf(c.lens ?? 'raw') + 1) % choices.length])
       },
-      captureSession, restoreSession, selectTab,
+      captureSession, restoreSession,
       capture: async () => {
         const c = latest.current.card
         if (c.kind !== 'open' || navigating.current || !latest.current.limits) return null
@@ -1547,7 +1546,6 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         if (!permanent) { abort.current = new AbortController(); navigating.current = false; setNavigationBusy(false) }
         return bytes
       },
-      retirement: () => budget.current?.snapshot().total ?? 2 * retiredRendered.current,
       prepareRetirement: () => {
         const owner = budget.current
         const bytes = owner?.snapshot().total ?? 2 * retiredRendered.current

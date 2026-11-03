@@ -13,12 +13,10 @@ export interface ReaderHandle {
   ready(): Promise<void>
   open(path: string): void
   openChild(root: string, node: string): Promise<void>
-  openIndexed(entry: import('../shared/protocol').FolderEntry): Promise<void>
   openDerived(source: Opened, target: string, path: string): Promise<boolean>
   navigateLocal(source: Opened, target: string, path: string): Promise<boolean>
   pick(): Promise<void>
   reload(): Promise<void>
-  back(): Promise<void>
   close(): Promise<void>
   reopen(): Promise<void>
   clearClosed(): void
@@ -31,11 +29,9 @@ export interface ReaderHandle {
   handOff(kind: 'copy' | 'show' | 'open'): void
   captureSession(): Promise<SessionCard | null>
   restoreSession(card: SessionCard): Promise<void>
-  selectTab(id: string): Promise<void>
   capture(): Promise<SavedLocation | null>
   restore(entry: SavedLocation): Promise<boolean>
   detach(closing: boolean): Promise<number>
-  retirement(): number
   prepareRetirement(): { bytes: number; cancel(): void }
   resume(): Promise<void>
   activateSelected(): Promise<void>
