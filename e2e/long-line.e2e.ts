@@ -1,10 +1,9 @@
 // 1 GiB on one line (Z37): the first piece shows before the scan passes the line's end, and the rest of the line's
 // first MiB loads on demand as pieces of their own (brief §5.1, plan C3).
 import { expect } from '@playwright/test'
-import { execFileSync } from 'node:child_process'
 import { closeSync, openSync, readSync, rmSync, statSync } from 'node:fs'
-import { join, resolve } from 'node:path'
-import { FIXTURES, finish, launch, test, waitIndexed, waitOpen } from './app'
+import { join } from 'node:path'
+import { FIXTURES, finish, fixturesGen, launch, test, waitIndexed, waitOpen } from './app'
 import { FIRST_FRAME, MARKS, type Marks, outcome, scanGate, scanMarks, vetoControls } from './z37'
 
 const ONE_LINE = join(FIXTURES, '1gib-one-line.txt') // .txt: a .jsonl name would open in Rows, and this exercises Raw
@@ -73,11 +72,7 @@ test("1 GiB on one line: the first piece shows before the scan passes the line's
   test.setTimeout(10 * 60_000)
   // One JSON record of 1 GiB: a 54-byte head, the payload, then `"}` and a newline.
   const size = 1 << 30
-  execFileSync(
-    'cargo',
-    ['run', '--release', '-q', '-p', 'fixtures-gen', '--', 'jsonl-huge-first', '--out', ONE_LINE, '--first', String(size - 57), '--bytes', '0'],
-    { cwd: resolve(__dirname, '../core'), stdio: 'inherit' }
-  )
+  fixturesGen('jsonl-huge-first', '--out', ONE_LINE, '--first', String(size - 57), '--bytes', '0')
   expect(statSync(ONE_LINE).size).toBe(size)
   const l = await launch({ file: ONE_LINE })
   const { win } = l

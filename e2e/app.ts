@@ -4,7 +4,7 @@
 // that fails before calling it gets the same from the `test` exported here.
 import AxeBuilder from '@axe-core/playwright'
 import { type ElectronApplication, type Page, test as base, _electron as electron, expect } from '@playwright/test'
-import { spawnSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
@@ -237,6 +237,11 @@ export async function axe(win: Page): Promise<string[]> {
   // Legacy mode: the default run opens a second page for its final step, which Electron's context refuses (spike B).
   const { violations } = await new AxeBuilder({ page: win }).setLegacyMode().analyze()
   return violations.map((v) => `${v.impact} ${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(' | ')}`)
+}
+
+/** Runs the fixtures-gen binary (release build) from the core workspace. */
+export function fixturesGen(...args: string[]): void {
+  execFileSync('cargo', ['run', '--release', '-q', '-p', 'fixtures-gen', '--', ...args], { cwd: resolve(__dirname, '../core'), stdio: 'inherit' })
 }
 
 /** Runs netlog-assert.mjs on a log, as CI does. */
