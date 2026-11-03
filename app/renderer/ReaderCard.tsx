@@ -1363,88 +1363,32 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     </div>
   )
 
-  const body =
-    fontLayoutReady && card.kind === 'open' && limits && 'structured' in shown.body && structuredSource.current ? (
-      <LensHost core={core} onFind={setFindController} session={session} budget={budgetFor(card.opened)} retained={rendered} lens={lens}
-        jumpTo={jumpTo} place={place} hadFocus={hadFocus} restoreFocus={restoreFocus} atLine={card.atLine}
-        opened={card.opened} name={fileName(card.path)} lines={card.lines} indexed={card.indexed} limits={limits}
-        frozen={frozen !== undefined} mode={card.lens as StructuredMode} structured={structuredSource.current}
-        onRows={() => onLens('rows')}
-        onFrozen={why => setCard(c => c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c)}
-        notice={message => shared.notice(message)} onShowRaw={line => { jumpTo.current = line; onLens('raw') }}
-        onOpenLocal={(target, path, gesture) => routeLocal(card.opened, target, path, gesture)} onDisposed={disposedView} />
-    ) : fontLayoutReady && card.kind === 'open' && limits && 'raw' in shown.body ? (
-      <LensHost
-        core={core}
-        onFind={setFindController}
-        session={session}
-        budget={budgetFor(card.opened)}
-        retained={rendered}
-        lens={lens}
-        jumpTo={jumpTo}
-        place={place}
-        hadFocus={hadFocus}
-        restoreFocus={restoreFocus}
-        atLine={card.atLine}
-        opened={card.opened}
-        name={fileName(card.path)}
-        lines={card.lines}
-        indexed={card.indexed}
-        limits={limits}
-        frozen={frozen !== undefined}
-        mode="raw"
-        onFrozen={(why) => setCard((c) => (c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c))}
-        notice={message => shared.notice(message)}
-        onShowRaw={() => {}}
-        onOpenLocal={(target, path, gesture) => routeLocal(card.opened, target, path, gesture)}
-        onDisposed={disposedView}
-      />
-    ) : fontLayoutReady && card.kind === 'open' && limits && 'grid' in shown.body && card.csv ? (
-      <LensHost core={core} onFind={setFindController} session={session} budget={budgetFor(card.opened)} retained={rendered} lens={lens}
-        jumpTo={jumpTo} place={place} hadFocus={hadFocus} restoreFocus={restoreFocus} atLine={card.atLine}
-        opened={card.opened} name={fileName(card.path)} lines={card.lines} indexed={card.indexed} limits={limits}
-        frozen={frozen !== undefined} mode="grid" csv={card.csv} csvOptions={card.csvOptions ?? CSV_OPTIONS}
-        onCsvInfo={info => setCard(c => c.kind === 'open' && c.opened === card.opened && c.csv?.ref.revision === info.ref.revision ? { ...c, csv: info } : c)}
-        onFrozen={why => setCard(c => c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c)}
-        notice={message => shared.notice(message)}
-        onShowRaw={line => { jumpTo.current = line; onLens('raw') }}
-        onOpenLocal={(target, path, gesture) => routeLocal(card.opened, target, path, gesture)} onDisposed={disposedView} />
-    ) : fontLayoutReady && card.kind === 'open' && limits && 'rendered' in shown.body && card.build ? (
-      <LensHost
-        core={core}
-        onFind={setFindController}
-        session={session}
-        budget={budgetFor(card.opened)}
-        retained={rendered}
-        lens={lens}
-        jumpTo={jumpTo}
-        place={place}
-        hadFocus={hadFocus}
-        restoreFocus={restoreFocus}
-        atLine={card.atLine}
-        opened={card.opened}
-        name={fileName(card.path)}
-        lines={card.lines}
-        indexed={card.indexed}
-        limits={limits}
-        frozen={frozen !== undefined}
-        mode="rendered"
-        build={card.build}
+  // Raw never reads onShowRaw; Rendered replaces it below.
+  const host: Omit<LensHostProps, 'mode'> | null = fontLayoutReady && card.kind === 'open' && limits ? {
+    core, onFind: setFindController, session, budget: budgetFor(card.opened), retained: rendered, lens, jumpTo, place, hadFocus,
+    restoreFocus, atLine: card.atLine, opened: card.opened, name: fileName(card.path), lines: card.lines, indexed: card.indexed,
+    limits, frozen: frozen !== undefined, notice: message => shared.notice(message), onDisposed: disposedView,
+    onFrozen: why => setCard(c => c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c),
+    onShowRaw: line => { jumpTo.current = line; onLens('raw') },
+    onOpenLocal: (target, path, gesture) => routeLocal(card.opened, target, path, gesture)
+  } : null
+  const body = !host || card.kind !== 'open' ? message
+    : 'structured' in shown.body && structuredSource.current
+      ? <LensHost {...host} mode={card.lens as StructuredMode} structured={structuredSource.current} onRows={() => onLens('rows')} />
+    : 'raw' in shown.body ? <LensHost {...host} mode="raw" />
+    : 'grid' in shown.body && card.csv ? (
+      <LensHost {...host} mode="grid" csv={card.csv} csvOptions={card.csvOptions ?? CSV_OPTIONS}
+        onCsvInfo={info => setCard(c => c.kind === 'open' && c.opened === card.opened && c.csv?.ref.revision === info.ref.revision ? { ...c, csv: info } : c)} />
+    ) : 'rendered' in shown.body && card.build ? (
+      <LensHost {...host} mode="rendered" build={card.build}
         onExecutable={(href, path) => setSheet({ name: fileName(path), path, link: true,
           subject: { session: currentSession.current, doc: card.opened.doc, gen: card.opened.gen, href } })}
-        onFrozen={(why) => setCard((c) => (c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c))}
-        notice={message => shared.notice(message)}
         onShowRaw={(line) => {
           jumpTo.current = line
           picked.current = 'raw'
           setCard((c) => (c.kind === 'open' && c.opened === card.opened ? { ...c, lens: 'raw' } : c))
-        }}
-        onOpenLocal={(target, path, gesture) => routeLocal(card.opened, target, path, gesture)}
-        onDisposed={disposedView}
-      />
-    ) : (
-      message
-    )
+        }} />
+    ) : message
 
   async function captureSession(): Promise<SessionCard | null> {
     const before = workspace.getSnapshot()
