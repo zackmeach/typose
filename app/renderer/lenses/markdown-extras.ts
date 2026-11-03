@@ -17,8 +17,8 @@ const CALLOUTS: Record<string, string> = {
  * blocks (8 spans each) by 10–38 KiB a block after a forced GC. GC noise defeats a linear fit, so the pair covers the
  * worst dense run by a quarter (145.5 MiB at 2,000) and the one-line blocks with room to spare (44.7 KiB a block).
  */
-export const HIGHLIGHT_CHAR_BYTES = 320
-export const HIGHLIGHT_SPAN_BYTES = 3968
+const HIGHLIGHT_CHAR_BYTES = 320
+const HIGHLIGHT_SPAN_BYTES = 3968
 /** A worker job's transit (the source copy, the reply), returned when the job settles. Never kept. */
 const JOB_TRANSIT_BYTES = 1 << 20
 
@@ -112,7 +112,7 @@ function removeCalloutMarker(paragraph: HTMLElement, units: number): void {
  * Enhances only native-generated inert markers; raw HTML never supplies these own tags/attributes. `reserve` grows the
  * lens's extras share; a negative amount returns what a settled job no longer holds.
  */
-export function markdownExtras(root: HTMLElement, current: () => boolean, reserve: (bytes: number) => Promise<boolean> = async () => true): Promise<void> {
+export function markdownExtras(root: HTMLElement, current: () => boolean, reserve: (bytes: number) => Promise<boolean>): Promise<void> {
   for (const pre of root.querySelectorAll<HTMLElement>('pre[data-frontmatter="1"]')) frontmatter(pre)
   for (const quote of root.querySelectorAll<HTMLElement>('blockquote')) {
     const first = quote.querySelector('p')

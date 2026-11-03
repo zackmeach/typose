@@ -1,6 +1,6 @@
 import { type CSSProperties, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { Button, Dialog, Modal, ModalOverlay } from 'react-aria-components'
-import { MAX_DROP, type Command, type Hello, type Opened } from '../shared/protocol'
+import { MAX_DROP, type CapturedLocation, type Command, type Hello, type Opened } from '../shared/protocol'
 import { CoreCallError, type CoreClient } from './core'
 import { AppIcon, FileIcon } from './file-icon'
 import { fileName } from './card'
@@ -92,9 +92,9 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   const workspace = { getSnapshot: () => ({ ready: !!hello.current, tabs: allGroups.current.flatMap(group => group.workspace.getSnapshot().tabs) }) }
   const navigating = { get current() { return splitBusy.current || [...handles.current.values()].some(handle => handle.busy()) } }
   const [shared] = useState<ReaderWindow>(() => ({ core, hello, groups: allGroups, closed, folders, pendingFolders,
-    budget: workspaceBudget, peak: workspacePeak, queue: metadataQueue, pendingWorkspace, pendingNative,
+    budget: workspaceBudget, queue: metadataQueue, pendingWorkspace, pendingNative,
     pendingHistory: pendingHistory.current, recharged, paid: () => payment.current,
-    charge: async () => false, release: () => {}, notice: () => {}, opened: () => {}, addFolder: async () => {}, openLink: async () => false, report: () => {}, register: () => () => {} }))
+    charge: async () => false, release: () => {}, releaseLocation: () => {}, notice: () => {}, opened: () => {}, addFolder: async () => {}, openLink: async () => false, report: () => {}, register: () => () => {} }))
 
   function setPreview(next: LinkPreview | null): void {
     const previous = previewRef.current
@@ -257,6 +257,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   shared.charge = charge
   shared.settings = config.values
   shared.release = releaseEmptyWorkspace
+  shared.releaseLocation = releaseLocation
   shared.notice = setWorkspaceNotice
   shared.opened = () => { if (sidebarOverlay) setSidebarOpen(false) }
   shared.addFolder = path => pickFolder(undefined, path)
@@ -541,12 +542,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
         return opened
       }
       let destination = groupRef.current.find(group => group.id === sourceId) ?? groupRef.current[0]
-      if (gesture.mode === 'side') {
-        const index = groupRef.current.indexOf(destination)
-        const neighbor = groupRef.current[index + 1] ?? groupRef.current[index - 1]
-        if (neighbor) destination = neighbor
-        else { created = await newRight(destination.id); if (created) destination = created }
-      }
+      if (gesture.mode === 'side') [destination, created] = await sideCard(destination)
       const reader = await waitForReader(destination.id)
       if (reader.busy() || closingCards.current.has(destination.id)) return false
       const opened = await reader.openDerived(source, target, path)
@@ -587,7 +583,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
         const surface = handle.surface()
         if (surface && surface.session === hello.current?.session && !await core.call('releaseSurface', { surface, retiredBytes: retirement.bytes })) throw new Error('The preview could not be released')
       }
-      for (const tab of group.workspace.getSnapshot().tabs) for (const entry of tab.back ?? []) releaseLocation(entry)
+      for (const tab of group.workspace.getSnapshot().tabs) for (const entry of tab.back ?? []) releaseLocation(entry.location)
       pendingHistory.current.delete(group.id)
       setPreview(null)
       restorePreviewFocus(group)
@@ -611,12 +607,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     let b: ReturnType<ReaderHandle['prepareRetirement']> | undefined
     let detached = false, moved = false
     try {
-      if (side) {
-        const index = groupRef.current.indexOf(destination)
-        const neighbor = groupRef.current[index + 1] ?? groupRef.current[index - 1]
-        if (neighbor) destination = neighbor
-        else { created = await newRight(destination.id); if (created) destination = created }
-      }
+      if (side) [destination, created] = await sideCard(destination)
       if (closingCards.current.has(destination.id)) throw new Error('The destination card is busy')
       closingCards.current.add(destination.id)
       target = await waitForReader(destination.id)
@@ -691,8 +682,8 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       if (handle) waiter.start(handle)
     })
   }
-  function releaseLocation(entry: ClosedLocation['entry']): void {
-    if (entry.location.kind === 'derived' && entry.location.ticket.session === currentSession.current) void core.call('releaseSaved', { ticket: entry.location.ticket }).catch(() => {})
+  function releaseLocation(location: CapturedLocation): void {
+    if (location.kind === 'derived' && location.ticket.session === currentSession.current) void core.call('releaseSaved', { ticket: location.ticket }).catch(() => {})
   }
   async function newRight(sourceId: string): Promise<ReaderGroup | null> {
     if (!row.current || (groupRef.current.length + 1) * 320 + groupRef.current.length * 16 > row.current.clientWidth) {
@@ -709,6 +700,13 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     next.splice(next.findIndex(item => item.id === sourceId) + 1, 0, group)
     updateGroups(next)
     return group
+  }
+  /** The card right of `from`, else left of it, else a new card split right (and `created`); `from` when there's no room. */
+  async function sideCard(from: ReaderGroup): Promise<[card: ReaderGroup, created: ReaderGroup | null]> {
+    const index = groupRef.current.indexOf(from)
+    const neighbor = groupRef.current[index + 1] ?? groupRef.current[index - 1]
+    const created = neighbor ? null : await newRight(from.id)
+    return [neighbor ?? created ?? from, created]
   }
   async function splitRight(): Promise<void> {
     const sourceId = focusedRef.current, source = handles.current.get(sourceId)
@@ -729,7 +727,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     } catch (error) {
       setWorkspaceNotice('Cannot split · ' + String(error))
       if (created) await closeCard(created.id)
-    } finally { if (entry) releaseLocation(entry); pendingSplit.current = 0; splitBusy.current = false }
+    } finally { if (entry) releaseLocation(entry.location); pendingSplit.current = 0; splitBusy.current = false }
   }
   async function closeCard(id: string): Promise<void> {
     const source = groupRef.current.find(group => group.id === id), handle = handles.current.get(id)
@@ -852,10 +850,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     if (previewRef.current) { setWorkspaceNotice('Close the preview before changing the workspace'); return }
     const sourceId = focusedRef.current
     let destination = groupRef.current.find(group => group.id === sourceId)!
-    if (side) {
-      const at = groupRef.current.indexOf(destination)
-      destination = groupRef.current[at + 1] ?? groupRef.current[at - 1] ?? await newRight(sourceId) ?? destination
-    }
+    if (side) [destination] = await sideCard(destination)
     try {
       const target = await waitForReader(destination.id)
       settingsTab(destination.id, 'file'); focusCard(destination.id)
@@ -865,6 +860,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   }
   function run(command: Command): void {
     if (!commandEnabled(command)) return
+    const reader = previewRef.current ? handles.current.get(previewRef.current.id) : focusedReader()
     if (command === 'palette' || command === 'open') { showOverlay(command === 'open' ? 'open' : 'palette'); return }
     if (command === 'settings' || command === 'shortcuts') {
       if (previewRef.current) { setWorkspaceNotice('Close the preview before opening Settings'); return }
@@ -874,34 +870,30 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     if (command.startsWith('zoom-')) { window.typose.zoom(command === 'zoom-reset' ? 'reset' : command === 'zoom-in' ? 'in' : 'out'); return }
     if (command === 'full-screen') { void window.typose.fullScreen(); return }
     if (command === 'wrap-lines') { settings.change('wrap_lines', !settings.getSnapshot().values.wrap_lines); return }
-    if (command === 'switch-lens') { (previewRef.current ? handles.current.get(previewRef.current.id) : focusedReader())?.switchLens(); return }
+    if (command === 'switch-lens') { reader?.switchLens(); return }
     if (command === 'close-tab' && settingsTabsRef.current[focusedRef.current]?.active && !previewRef.current) { settingsTab(focusedRef.current, 'close'); return }
     if (command === 'go-to' || command === 'copy' || command === 'print') {
-      const reader = previewRef.current ? handles.current.get(previewRef.current.id) : focusedReader()
       if (command === 'go-to') reader?.goTo()
       else if (command === 'copy') void reader?.copy()
       else reader?.print()
       return
     }
     if (command === 'copy-path' || command === 'show-in-folder' || command === 'open-default') {
-      const reader = previewRef.current ? handles.current.get(previewRef.current.id) : focusedReader()
       reader?.handOff(command === 'copy-path' ? 'copy' : command === 'show-in-folder' ? 'show' : 'open')
       return
     }
     if (command === 'find' || command === 'find-next' || command === 'find-previous') {
-      const reader = previewRef.current ? handles.current.get(previewRef.current.id) : focusedReader()
       reader?.find(command === 'find' ? 'open' : command === 'find-next' ? 'next' : 'previous')
       return
     }
     if (previewRef.current) {
       if (command === 'close-tab' || command === 'close-card') void closePreview()
       else if (command === 'split-right' || command === 'move-tab-right') void promotePreview(true)
-      else if (command === 'reload') void handles.current.get(previewRef.current.id)?.reload()
+      else if (command === 'reload') void reader?.reload()
       else if (command === 'exit') window.close()
       else setWorkspaceNotice('Close the preview before changing the workspace')
       return
     }
-    const reader = focusedReader()
     if (command === 'browse') { settingsTab(focusedRef.current, 'file'); void reader?.pick() }
     else if (command === 'open-folder') void pickFolder()
     else if (command === 'toggle-sidebar') setSidebarOpen(open => !open)

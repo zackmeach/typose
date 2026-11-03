@@ -3,11 +3,11 @@ import { utf8ByteLength } from './grid-interactions'
 
 export const SOURCE_COPY_CHUNK = 64 << 10
 
-export interface SourceCopyPort {
+interface SourceCopyPort {
   valid(): boolean
   reserve(bytes: number, signal: AbortSignal): Promise<boolean>
   read(start: number, count: number, signal: AbortSignal): Promise<Uint8Array>
-  verify?(signal: AbortSignal): Promise<boolean>
+  verify(signal: AbortSignal): Promise<boolean>
   confirm(bytes: number, signal: AbortSignal): Promise<boolean>
   write(text: string): Promise<boolean>
   cancelWrite(): void
@@ -57,7 +57,7 @@ export async function copySourceSpan(port: SourceCopyPort, start: number, end: n
     if (!await reserve((512 << 10) + inputBytes * 2 + outputBytes * 4)) return current() ? refuse('Copy unavailable · the memory budget is full') : refuse('Copy cancelled')
     const text = parts.join('')
     if (utf8ByteLength(text) !== outputBytes || !current()) return refuse('Copy cancelled')
-    if (port.verify && !await port.verify(signal)) return refuse('Copy refused · the source changed before the clipboard write')
+    if (!await port.verify(signal)) return refuse('Copy refused · the source changed before the clipboard write')
     if (!current()) return refuse('Copy cancelled')
     if (!await port.write(text)) return refuse('Copy failed · the clipboard write was rejected')
     return current()

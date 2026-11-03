@@ -6,6 +6,7 @@ import { type Key, type Mounted, PageCache, ROW_HEIGHT, WRAP, capFor, rowsFor, r
 import type { LensBudget } from './lens-budget'
 import { SourceFind } from './source-find'
 import { copySourceSpan } from './source-copy'
+import { SourceCopyQueue } from './source-copy-queue'
 import { sourceByteAt } from './source-map'
 import { PRINT_LINES_PER_PAGE, type PrintPayload, type PrintPlan } from '../print'
 import { utf8ByteLength } from './grid-interactions'
@@ -109,10 +110,8 @@ export class RawLens {
   /** No page is fetched until the cache's first reservation has settled: its growth is charged first. */
   private reservedOnce = false
   private copyAll = false
-  private copyJob: AbortController | null = null
-  private copyToken: string | null = null
+  private readonly copies = new SourceCopyQueue(token => window.typose.cancelClipboardWrite(token))
   private indexed: boolean
-  private copySerial = 0
 
   constructor(
     private readonly host: HTMLElement,
@@ -159,10 +158,10 @@ export class RawLens {
       if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'a' && !(event.target instanceof HTMLInputElement)) {
         event.preventDefault()
         this.copyAll = true
-        this.cancelCopy()
+        this.copies.cancel()
       } else if (!['Control', 'Meta', 'Shift', 'Alt'].includes(event.key) && !((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c')) this.copyAll = false
     }, { capture: true })
-    for (const type of ['pointerdown', 'wheel'] as const) this.list.element.addEventListener(type, () => { this.copyAll = false; this.cancelCopy() }, { passive: true })
+    for (const type of ['pointerdown', 'wheel'] as const) this.list.element.addEventListener(type, () => { this.copyAll = false; this.copies.cancel() }, { passive: true })
     document.addEventListener('selectionchange', this.selectionChanged)
     this.list.element.addEventListener('scroll', () => this.rememberLine(), { passive: true })
     this.setLineCount(opened.lines)
@@ -242,7 +241,7 @@ export class RawLens {
 
   /** Copies selected decoded Raw text as the original source bytes, or the whole file after Ctrl+A. */
   async copy(): Promise<boolean> {
-    this.cancelCopy()
+    this.copies.cancel()
     const token = window.typose.beginClipboardWrite()
     if (!token) { this.options.notice?.('Copy unavailable · use Copy from the reader command menu'); return false }
     const view = this.opened.view
@@ -256,10 +255,6 @@ export class RawLens {
       this.options.notice?.('Copy refused · selection exceeds the 16 MiB limit')
       return false
     }
-    const controller = new AbortController()
-    this.copyJob = controller
-    this.copyToken = token
-    const serial = ++this.copySerial
     const generation = this.opened.gen
     const selectionStamp = selection ? this.selectionStamp(selection) : ''
     const sameSelection = () => {
@@ -268,43 +263,33 @@ export class RawLens {
       return !!current && current.startContainer === selection?.startContainer && current.startOffset === selection?.startOffset &&
         current.endContainer === selection?.endContainer && current.endOffset === selection?.endOffset && this.selectionStamp(current) === selectionStamp
     }
-    const valid = () => serial === this.copySerial && this.copyJob === controller && !this.stopped && !this.yielded && this.options.budget?.current(generation) !== false && sameSelection()
-    this.options.notice?.('Preparing copy…')
-    try {
-      const copied = await copySourceSpan({
-        valid,
-        reserve: async bytes => this.options.budget ? this.options.budget.reserveCopy(generation, bytes) : bytes <= this.opened.reserved,
-        read: (start, count, signal) => this.core.call('sourceBytes', { view, start, count }, signal),
-        verify: signal => this.core.call('sourceVerify', { view, start: span!.start, end: span!.end }, signal),
-        confirm: async bytes => window.confirm(`Copy ${new Intl.NumberFormat('en').format(bytes)} bytes to the clipboard?`),
-        write: text => window.typose.writeClipboardText(text, token),
-        cancelWrite: () => window.typose.cancelClipboardWrite(token),
-        status: message => this.options.notice?.(message)
-      }, span.start, span.end, this.opened.encoding, controller.signal)
-      if (copied) this.options.notice?.('Copied source text')
-      else if (controller.signal.aborted) this.options.notice?.('Copy cancelled')
-      return copied
-    } catch (error) {
-      this.options.notice?.(error instanceof Error ? `Copy failed · ${error.message}` : 'Copy failed')
-      return false
-    } finally {
-      if (this.options.budget) await this.options.budget.reserveCopy(generation, 0)
-      if (this.copyJob === controller) this.copyJob = null
-      if (this.copyToken === token) this.copyToken = null
-      window.typose.cancelClipboardWrite(token)
-    }
+    // The queue starts this copy only once the one it cancelled has released its share, and only then says so: one
+    // cancelled while it waits leaves the last copy's notice standing.
+    return this.copies.run(token, async (current, signal) => {
+      this.options.notice?.('Preparing copy…')
+      try {
+        const copied = await copySourceSpan({
+          valid: () => current() && !this.stopped && !this.yielded && this.options.budget?.current(generation) !== false && sameSelection(),
+          reserve: async bytes => this.options.budget ? this.options.budget.reserveCopy(generation, bytes) : bytes <= this.opened.reserved,
+          read: (start, count, signal) => this.core.call('sourceBytes', { view, start, count }, signal),
+          verify: signal => this.core.call('sourceVerify', { view, start: span!.start, end: span!.end }, signal),
+          confirm: async bytes => window.confirm(`Copy ${new Intl.NumberFormat('en').format(bytes)} bytes to the clipboard?`),
+          write: text => window.typose.writeClipboardText(text, token),
+          cancelWrite: () => window.typose.cancelClipboardWrite(token),
+          status: message => this.options.notice?.(message)
+        }, span.start, span.end, this.opened.encoding, signal)
+        if (copied) this.options.notice?.('Copied source text')
+        else if (signal.aborted) this.options.notice?.('Copy cancelled')
+        return copied
+      } catch (error) {
+        this.options.notice?.(error instanceof Error ? `Copy failed · ${error.message}` : 'Copy failed')
+        return false
+      }
+    }, async () => { if (this.options.budget) await this.options.budget.reserveCopy(generation, 0) })
   }
 
   private readonly selectionChanged = (): void => {
-    if (this.copyJob && !this.copyAll) this.cancelCopy()
-  }
-
-  private cancelCopy(): void {
-    this.copySerial++
-    this.copyJob?.abort()
-    this.copyJob = null
-    if (this.copyToken) window.typose.cancelClipboardWrite(this.copyToken)
-    this.copyToken = null
+    if (!this.copyAll) this.copies.cancel()
   }
 
   private rawSelection(): Range | null {
@@ -361,52 +346,8 @@ export class RawLens {
       allFits: this.indexed && pages <= MAX_PRINT_PAGES && this.opened.size <= MAX_PRINT_BYTES }
   }
 
-  async printRange(start: number, end: number, signal: AbortSignal): Promise<PrintPayload> {
-    const generation = this.opened.gen, view = this.opened.view, owner = this.options.budget
-    const current = () => !signal.aborted && !this.stopped && !this.yielded && this.indexed && !!view && owner?.current(generation) !== false
-    if (!view || !owner || !current() || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start || end > this.lineCount)
-      throw new Error('The Raw print range is no longer available')
-    if (!await owner.reserveCopy(generation, 512 << 10)) throw new Error('Print is unavailable · the memory budget is full')
-    let retained = true
-    try {
-      const span = await this.core.call('sourceLineRange', { view, startLine: start, count: end - start }, signal)
-      const decoder = new TextDecoder(this.opened.encoding, { ignoreBOM: true })
-      const parts: string[] = []
-      let offset = span.start, inputBytes = 0, outputBytes = 0, charged = 512 << 10
-      while (offset < span.end) {
-        if (!current()) throw new Error('The Raw print job was cancelled or the source changed')
-        const count = Math.min(64 << 10, span.end - offset)
-        const nextCharge = (512 << 10) + (inputBytes + count) * 2 + outputBytes * 4
-        if (nextCharge > charged && !await owner.reserveCopy(generation, nextCharge)) throw new Error('Print is unavailable · the memory budget is full')
-        charged = Math.max(charged, nextCharge)
-        const bytes = await this.core.call('sourceBytes', { view, start: offset, count }, signal)
-        if (!current() || bytes.length !== count) throw new Error('The Raw print source changed while reading')
-        const chunk = decoder.decode(bytes, { stream: true })
-        inputBytes += bytes.length
-        outputBytes += utf8ByteLength(chunk)
-        if (outputBytes > MAX_PRINT_BYTES) throw new Error('The selected print range exceeds the 8 MiB document limit')
-        parts.push(chunk)
-        offset += count
-      }
-      const tail = decoder.decode()
-      outputBytes += utf8ByteLength(tail)
-      if (outputBytes > MAX_PRINT_BYTES || !current()) throw new Error('The selected print range exceeds the bounded print limit')
-      parts.push(tail)
-      const text = parts.join('')
-      const jsonBytes = utf8ByteLength(JSON.stringify(text))
-      if (jsonBytes > MAX_PRINT_BYTES || !await owner.reserveCopy(generation, (512 << 10) + inputBytes * 2 + outputBytes * 4 + jsonBytes * 2))
-        throw new Error('Print is unavailable · the memory budget is full')
-      retained = false
-      let released = false
-      return {
-        blocks: [{ tag: 'pre', children: [{ text }] }],
-        pages: Math.ceil((end - start) / PRINT_LINES_PER_PAGE),
-        verify: async checkSignal => !checkSignal.aborted && current() && await this.core.call('sourceVerify', { view, start: span.start, end: span.end }, checkSignal),
-        release: async () => { if (released) return; released = true; await owner.reserveCopy(generation, 0) }
-      }
-    } finally {
-      if (retained) await owner.reserveCopy(generation, 0)
-    }
+  printRange(start: number, end: number, signal: AbortSignal): Promise<PrintPayload> {
+    return printLines(this.core, this.opened, this.options.budget, start, end, this.lineCount, () => !this.stopped && !this.yielded && this.indexed, signal)
   }
 
   /**
@@ -452,7 +393,7 @@ export class RawLens {
     this.wrapSetting.disconnect()
     this.wrapWidth.disconnect()
     clearTimeout(this.wrapTimer)
-    this.cancelCopy()
+    this.copies.cancel()
     document.removeEventListener('selectionchange', this.selectionChanged)
     this.find.destroy()
     this.stopped = true
@@ -859,5 +800,55 @@ export class RawLens {
     }
     const text = next ? '↪' : item.rest === undefined ? 'More on this line' : `+${size(item.rest)} more on this line`
     return Object.assign(document.createElement('span'), { className: 'more', textContent: text })
+  }
+}
+
+/** Raw's and Structured's print: source lines `start` to `end` as one decoded text block, charged stepwise to the copy share. */
+export async function printLines(core: CoreClient, opened: Opened, owner: LensBudget | null | undefined, start: number, end: number, lines: number,
+  live: () => boolean, signal: AbortSignal): Promise<PrintPayload> {
+  const generation = opened.gen, view = opened.view
+  const current = () => !signal.aborted && live() && !!view && owner?.current(generation) !== false
+  if (!view || !owner || !current() || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start || end > lines)
+    throw new Error('The print range is no longer available')
+  if (!await owner.reserveCopy(generation, 512 << 10)) throw new Error('Print is unavailable · the memory budget is full')
+  let retained = true
+  try {
+    const span = await core.call('sourceLineRange', { view, startLine: start, count: end - start }, signal)
+    const decoder = new TextDecoder(opened.encoding, { ignoreBOM: true })
+    const parts: string[] = []
+    let offset = span.start, inputBytes = 0, outputBytes = 0, charged = 512 << 10
+    while (offset < span.end) {
+      if (!current()) throw new Error('The print job was cancelled or the source changed')
+      const count = Math.min(64 << 10, span.end - offset)
+      const nextCharge = (512 << 10) + (inputBytes + count) * 2 + outputBytes * 4
+      if (nextCharge > charged && !await owner.reserveCopy(generation, nextCharge)) throw new Error('Print is unavailable · the memory budget is full')
+      charged = Math.max(charged, nextCharge)
+      const bytes = await core.call('sourceBytes', { view, start: offset, count }, signal)
+      if (!current() || bytes.length !== count) throw new Error('The print source changed while reading')
+      const chunk = decoder.decode(bytes, { stream: true })
+      inputBytes += bytes.length
+      outputBytes += utf8ByteLength(chunk)
+      if (outputBytes > MAX_PRINT_BYTES) throw new Error('The selected print range exceeds the 8 MiB document limit')
+      parts.push(chunk)
+      offset += count
+    }
+    const tail = decoder.decode()
+    outputBytes += utf8ByteLength(tail)
+    if (outputBytes > MAX_PRINT_BYTES || !current()) throw new Error('The selected print range exceeds the bounded print limit')
+    parts.push(tail)
+    const text = parts.join('')
+    const jsonBytes = utf8ByteLength(JSON.stringify(text))
+    if (jsonBytes > MAX_PRINT_BYTES || !await owner.reserveCopy(generation, (512 << 10) + inputBytes * 2 + outputBytes * 4 + jsonBytes * 2))
+      throw new Error('Print is unavailable · the memory budget is full')
+    retained = false
+    let released = false
+    return {
+      blocks: [{ tag: 'pre', children: [{ text }] }],
+      pages: Math.ceil((end - start) / PRINT_LINES_PER_PAGE),
+      verify: async checkSignal => !checkSignal.aborted && current() && await core.call('sourceVerify', { view, start: span.start, end: span.end }, checkSignal),
+      release: async () => { if (released) return; released = true; await owner.reserveCopy(generation, 0) }
+    }
+  } finally {
+    if (retained) await owner.reserveCopy(generation, 0)
   }
 }

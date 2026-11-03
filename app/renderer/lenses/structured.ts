@@ -5,6 +5,7 @@ import type { LensBudget } from './lens-budget'
 import type { StructuredSource } from './structured-source'
 import { copySourceSpan } from './source-copy'
 import { SourceCopyQueue } from './source-copy-queue'
+import { printLines } from './raw'
 import { PRINT_LINES_PER_PAGE, type PrintPayload, type PrintPlan } from '../print'
 import { spacerHeight, toLogical, toNative } from '../virtual/scrollmath'
 
@@ -556,17 +557,7 @@ export class StructuredLens {
   resumeReservation(): void {}
   dispose(): void { this.stopped = true; cancelAnimationFrame(this.frame); this.resize?.disconnect(); this.unsubscribe?.(); this.abort.abort(); this.copies.cancel(); this.find.destroy(); this.context?.remove(); this.element.remove() }
   printPlan(): PrintPlan { const pages = Math.ceil(this.lines / PRINT_LINES_PER_PAGE); return { unit: 'line', total: this.lines, current: this.line, indexed: this.indexed, totalPages: pages, allFits: pages <= MAX_PRINT_PAGES && this.opened.size <= MAX_PRINT_BYTES } }
-  async printRange(start: number, end: number, signal: AbortSignal): Promise<PrintPayload> {
-    const view = this.opened.view, owner = this.options.budget
-    if (!view || !owner || this.stopped || !this.indexed) throw new Error('Print unavailable')
-    const span = await this.core.call('sourceLineRange', { view, startLine: start, count: end - start }, signal)
-    if (span.end - span.start > MAX_PRINT_BYTES || !await owner.reserveCopy(this.opened.gen, (1 << 20) + (span.end - span.start) * 12)) throw new Error('Print range exceeds memory or size limit')
-    try {
-      const decoder = new TextDecoder(this.opened.encoding), parts: string[] = []
-      for (let offset = span.start; offset < span.end; offset += 65536) { if (this.stopped || signal.aborted) throw new Error('Print cancelled'); parts.push(decoder.decode(await this.core.call('sourceBytes', { view, start: offset, count: Math.min(65536, span.end - offset) }, signal), { stream: true })) }
-      parts.push(decoder.decode()); const text = parts.join('')
-      if (new TextEncoder().encode(JSON.stringify(text)).length > MAX_PRINT_BYTES) throw new Error('Print output exceeds size limit')
-      return { blocks: [{ tag: 'pre', children: [{ text }] }], pages: Math.ceil((end - start) / PRINT_LINES_PER_PAGE), verify: check => !this.stopped && !check.aborted ? this.core.call('sourceVerify', { view, ...span }, check) : Promise.resolve(false), release: async () => { await owner.reserveCopy(this.opened.gen, 0) } }
-    } catch (error) { await owner.reserveCopy(this.opened.gen, 0); throw error }
+  printRange(start: number, end: number, signal: AbortSignal): Promise<PrintPayload> {
+    return printLines(this.core, this.opened, this.options.budget, start, end, this.lines, () => !this.stopped && this.indexed, signal)
   }
 }

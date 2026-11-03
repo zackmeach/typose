@@ -1,10 +1,10 @@
 export type GridSort = 'none' | 'asc' | 'desc'
-export interface GridPosition { row: number; column: number }
+interface GridPosition { row: number; column: number }
 export type GridSelection =
   | { kind: 'cell' | 'range'; anchor: GridPosition; focus: GridPosition }
   | { kind: 'row'; anchor: GridPosition; focus: GridPosition }
   | { kind: 'column'; anchor: GridPosition; focus: GridPosition }
-export interface GridBounds { firstRow: number; lastRow: number; firstColumn: number; lastColumn: number }
+interface GridBounds { firstRow: number; lastRow: number; firstColumn: number; lastColumn: number }
 
 export const nextGridSort = (current: GridSort): GridSort => current === 'none' ? 'asc' : current === 'asc' ? 'desc' : 'none'
 
@@ -67,18 +67,9 @@ export function tsvByteLength(rows: readonly (readonly string[])[]): number {
     for (let column = 0; column < values.length; column++) {
       if (column) bytes++ // TAB
       const value = values[column]
-      let fieldBytes = 0, quotes = 0, quoted = false
-      for (let i = 0; i < value.length; i++) {
-        const unit = value.charCodeAt(i)
-        if (unit <= 0x7f) fieldBytes++
-        else if (unit <= 0x7ff) fieldBytes += 2
-        else if (unit >= 0xd800 && unit <= 0xdbff && i + 1 < value.length && value.charCodeAt(i + 1) >= 0xdc00 && value.charCodeAt(i + 1) <= 0xdfff) {
-          fieldBytes += 4; i++
-        } else fieldBytes += 3
-        if (unit === 0x09 || unit === 0x0a || unit === 0x0d) quoted = true
-        if (unit === 0x22) { quoted = true; quotes++ }
-      }
-      bytes += fieldBytes + (quoted ? 2 + quotes : 0)
+      let quotes = 0
+      for (let at = value.indexOf('"'); at >= 0; at = value.indexOf('"', at + 1)) quotes++
+      bytes += utf8ByteLength(value) + (quotes || /[\t\r\n]/.test(value) ? 2 + quotes : 0) // quoteTsv's quoting
     }
   }
   return bytes

@@ -120,7 +120,6 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   const [goToValue, setGoToValue] = useState('')
   const goToInput = useRef<HTMLInputElement>(null)
   const [printPlan, setPrintPlan] = useState<PrintPlan | null>(null)
-  const [printOpen, setPrintOpen] = useState(false)
   const [printMode, setPrintMode] = useState<'all' | 'around' | 'custom'>('around')
   const [printStart, setPrintStart] = useState('1')
   const [printEnd, setPrintEnd] = useState('1')
@@ -186,13 +185,12 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     setPrintStart(String(Math.max(1, plan.current + 1)))
     setPrintEnd(String(Math.min(plan.total, plan.current + PRINT_LINES_PER_PAGE)))
     setPrintConfirmed(false)
-    setPrintOpen(true)
   }
   function closePrint(): void {
     printAbort.current?.abort()
     printAbort.current = null
     setPrintBusy(false)
-    setPrintOpen(false)
+    setPrintPlan(null)
     requestAnimationFrame(() => lens.current?.focus())
   }
   function selectedPrintRange(plan: PrintPlan): { start: number; end: number; pages: number } | null {
@@ -769,9 +767,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     let plan: ReloadReservation | undefined
     let owner: LensBudget | null = null
     let captured: CapturedLocation | undefined
-    navigating.current = true
-    setNavigationBusy(true)
-    pendingHistoryBytes.current = historyDraftBytes(l)
+    navigate(l)
     try {
       // Count the pending path in every concurrent precharge, before any native holder changes.
       const paid = await metadata(async (current) => workspace.selected(selection) && latest.current.card.kind === 'open' &&
@@ -829,13 +825,10 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       if (e instanceof CoreCallError && e.code === 'NotFound') throw e
       return false
     } finally {
-      if (captured) releaseLocation(captured)
+      if (captured) shared.releaseLocation(captured)
       if (pendingWorkspace.current.get(id) === pending) pendingWorkspace.current.delete(id)
       if (plan) owner?.cancelTransition(plan)
-      pendingHistoryBytes.current = 0
-      navigating.current = false
-      setNavigationBusy(false)
-      releaseEmptyWorkspace()
+      navigated()
     }
   }
 
@@ -857,9 +850,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   async function openDerived(source: Opened, target: string, resolvedPath: string): Promise<boolean> {
     const l = latest.current.limits, ownerSession = currentSession.current
     if (!l || !surface.current || !recharged.current || closing.current || navigating.current || source.view?.session !== ownerSession) return false
-    navigating.current = true
-    setNavigationBusy(true)
-    pendingHistoryBytes.current = historyDraftBytes(l)
+    navigate(l)
     let candidate: Opened | undefined
     const owner = budget.current
     let plan: ReloadReservation | undefined
@@ -892,10 +883,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       if (candidate && ownerSession === currentSession.current) void core.call('close', { surface: surface.current!, doc: candidate.doc }).catch(() => {})
       if (plan) owner?.cancelTransition(plan)
       lens.current?.resumeReservation()
-      pendingHistoryBytes.current = 0
-      navigating.current = false
-      setNavigationBusy(false)
-      releaseEmptyWorkspace()
+      navigated()
     }
   }
 
@@ -903,14 +891,13 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   const historyDraftBytes = (l: Limits, page = true) => 16_384 + 128 * 32_767 + (page ?
     256 * 16_384 + 2 * l.pageWireMax + 1024 * l.maxItems + (64 << 10) : 0)
 
-  function releaseLocation(location: CapturedLocation): void {
-    if (location.kind === 'derived' && location.ticket.session === currentSession.current)
-      void core.call('releaseSaved', { ticket: location.ticket }).catch(() => {})
-  }
+  /** Link, folder and history opens hold the card busy and pay a draft history entry until they end. */
+  function navigate(l: Limits): void { navigating.current = true; setNavigationBusy(true); pendingHistoryBytes.current = historyDraftBytes(l) }
+  function navigated(): void { pendingHistoryBytes.current = 0; navigating.current = false; setNavigationBusy(false); releaseEmptyWorkspace() }
 
   function clearClosed(): void {
     if (navigating.current) return
-    for (const item of closed.current) releaseLocation(item.entry.location)
+    for (const item of closed.current) shared.releaseLocation(item.entry.location)
     closed.current = []
     setWorkspaceNotice('Recently closed tabs cleared')
     if (!recharged.current && workspace.getSnapshot().ready)
@@ -926,9 +913,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       setWorkspaceNotice('Cannot reopen this local file after the core restarted · select the file again using Open file…')
       return false
     }
-    navigating.current = true
-    setNavigationBusy(true)
-    pendingHistoryBytes.current = historyDraftBytes(l)
+    navigate(l)
     const ownerSession = currentSession.current
     const source = replace ? workspace.tab(replace) : undefined
     let candidate: Opened | undefined
@@ -982,10 +967,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     } finally {
       if (candidate && ownerSession === currentSession.current) void core.call('close', { surface: surface.current!, doc: candidate.doc }).catch(() => {})
       if (plan) owner?.cancelTransition(plan)
-      pendingHistoryBytes.current = 0
-      navigating.current = false
-      setNavigationBusy(false)
-      releaseEmptyWorkspace()
+      navigated()
     }
   }
 
@@ -995,7 +977,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     if (!id || !entry) return
     if (await restoreLocation(entry, id)) {
       workspace.consumeBack(id, entry) // duplicate manual targets focus their existing tab instead of replacing this one
-      releaseLocation(entry.location)
+      shared.releaseLocation(entry.location)
     }
   }
 
@@ -1004,7 +986,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     if (!item) { setWorkspaceNotice('No recently closed tabs'); return }
     if (await restoreLocation(item.entry, undefined, item.index)) {
       if (closed.current.at(-1) === item) closed.current.pop()
-      releaseLocation(item.entry.location)
+      shared.releaseLocation(item.entry.location)
     }
   }
 
@@ -1099,9 +1081,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     const existing = workspace.getSnapshot().tabs.find(tab => tab.session === currentSession.current && tab.card.kind === 'open' &&
       tab.card.opened.folder?.root === rootId && tab.card.opened.folder.node === nodeId)
     if (existing) { await selectTab(existing.id); return }
-    navigating.current = true
-    setNavigationBusy(true)
-    pendingHistoryBytes.current = historyDraftBytes(l)
+    navigate(l)
     const ownerSession = currentSession.current
     let candidate: Opened | undefined
     let owner: LensBudget | null = null
@@ -1133,10 +1113,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     } finally {
       if (candidate && ownerSession === currentSession.current) void core.call('close', { surface: surface.current!, doc: candidate.doc }).catch(() => {})
       if (plan) owner?.cancelTransition(plan)
-      pendingHistoryBytes.current = 0
-      navigating.current = false
-      setNavigationBusy(false)
-      releaseEmptyWorkspace()
+      navigated()
     }
   }
 
@@ -1190,7 +1167,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     } catch (e) {
       setWorkspaceNotice('Tab closed · cannot retain Reopen history: ' + (e instanceof Error ? e.message : String(e)))
     } finally {
-      if (captured) releaseLocation(captured)
+      if (captured) shared.releaseLocation(captured)
       pendingHistoryBytes.current = 0
       navigating.current = false
       setNavigationBusy(false)
@@ -1202,7 +1179,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     // Other cards and recently closed locations still own the shared window reservation/metadata queue.
     activationFailed.current.delete(id)
     closeNative(removed)
-    for (const entry of removed.back ?? []) releaseLocation(entry.location)
+    for (const entry of removed.back ?? []) shared.releaseLocation(entry.location)
     if (selected) {
       const next = workspace.getSnapshot().selected
       display(null, { kind: 'empty' })
@@ -1363,88 +1340,41 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     </div>
   )
 
-  const body =
-    fontLayoutReady && card.kind === 'open' && limits && 'structured' in shown.body && structuredSource.current ? (
-      <LensHost core={core} onFind={setFindController} session={session} budget={budgetFor(card.opened)} retained={rendered} lens={lens}
-        jumpTo={jumpTo} place={place} hadFocus={hadFocus} restoreFocus={restoreFocus} atLine={card.atLine}
-        opened={card.opened} name={fileName(card.path)} lines={card.lines} indexed={card.indexed} limits={limits}
-        frozen={frozen !== undefined} mode={card.lens as StructuredMode} structured={structuredSource.current}
-        onRows={() => onLens('rows')}
-        onFrozen={why => setCard(c => c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c)}
-        notice={message => shared.notice(message)} onShowRaw={line => { jumpTo.current = line; onLens('raw') }}
-        onOpenLocal={(target, path, gesture) => routeLocal(card.opened, target, path, gesture)} onDisposed={disposedView} />
-    ) : fontLayoutReady && card.kind === 'open' && limits && 'raw' in shown.body ? (
-      <LensHost
-        core={core}
-        onFind={setFindController}
-        session={session}
-        budget={budgetFor(card.opened)}
-        retained={rendered}
-        lens={lens}
-        jumpTo={jumpTo}
-        place={place}
-        hadFocus={hadFocus}
-        restoreFocus={restoreFocus}
-        atLine={card.atLine}
-        opened={card.opened}
-        name={fileName(card.path)}
-        lines={card.lines}
-        indexed={card.indexed}
-        limits={limits}
-        frozen={frozen !== undefined}
-        mode="raw"
-        onFrozen={(why) => setCard((c) => (c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c))}
-        notice={message => shared.notice(message)}
-        onShowRaw={() => {}}
-        onOpenLocal={(target, path, gesture) => routeLocal(card.opened, target, path, gesture)}
-        onDisposed={disposedView}
-      />
-    ) : fontLayoutReady && card.kind === 'open' && limits && 'grid' in shown.body && card.csv ? (
-      <LensHost core={core} onFind={setFindController} session={session} budget={budgetFor(card.opened)} retained={rendered} lens={lens}
-        jumpTo={jumpTo} place={place} hadFocus={hadFocus} restoreFocus={restoreFocus} atLine={card.atLine}
-        opened={card.opened} name={fileName(card.path)} lines={card.lines} indexed={card.indexed} limits={limits}
-        frozen={frozen !== undefined} mode="grid" csv={card.csv} csvOptions={card.csvOptions ?? CSV_OPTIONS}
-        onCsvInfo={info => setCard(c => c.kind === 'open' && c.opened === card.opened && c.csv?.ref.revision === info.ref.revision ? { ...c, csv: info } : c)}
-        onFrozen={why => setCard(c => c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c)}
-        notice={message => shared.notice(message)}
-        onShowRaw={line => { jumpTo.current = line; onLens('raw') }}
-        onOpenLocal={(target, path, gesture) => routeLocal(card.opened, target, path, gesture)} onDisposed={disposedView} />
-    ) : fontLayoutReady && card.kind === 'open' && limits && 'rendered' in shown.body && card.build ? (
-      <LensHost
-        core={core}
-        onFind={setFindController}
-        session={session}
-        budget={budgetFor(card.opened)}
-        retained={rendered}
-        lens={lens}
-        jumpTo={jumpTo}
-        place={place}
-        hadFocus={hadFocus}
-        restoreFocus={restoreFocus}
-        atLine={card.atLine}
-        opened={card.opened}
-        name={fileName(card.path)}
-        lines={card.lines}
-        indexed={card.indexed}
-        limits={limits}
-        frozen={frozen !== undefined}
-        mode="rendered"
-        build={card.build}
+  // Raw never reads onShowRaw; Rendered replaces it below.
+  const host: Omit<LensHostProps, 'mode'> | null = fontLayoutReady && card.kind === 'open' && limits ? {
+    core, onFind: setFindController, session, budget: budgetFor(card.opened), retained: rendered, lens, jumpTo, place, hadFocus,
+    restoreFocus, atLine: card.atLine, opened: card.opened, name: fileName(card.path), lines: card.lines, indexed: card.indexed,
+    limits, frozen: frozen !== undefined, notice: message => shared.notice(message), onDisposed: disposedView,
+    onFrozen: why => setCard(c => c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c),
+    onShowRaw: line => { jumpTo.current = line; onLens('raw') },
+    onOpenLocal: (target, path, gesture) => routeLocal(card.opened, target, path, gesture)
+  } : null
+  const body = !host || card.kind !== 'open' ? message
+    : 'structured' in shown.body && structuredSource.current
+      ? <LensHost {...host} mode={card.lens as StructuredMode} structured={structuredSource.current} onRows={() => onLens('rows')} />
+    : 'raw' in shown.body ? <LensHost {...host} mode="raw" />
+    : 'grid' in shown.body && card.csv ? (
+      <LensHost {...host} mode="grid" csv={card.csv} csvOptions={card.csvOptions ?? CSV_OPTIONS}
+        onCsvInfo={info => setCard(c => c.kind === 'open' && c.opened === card.opened && c.csv?.ref.revision === info.ref.revision ? { ...c, csv: info } : c)} />
+    ) : 'rendered' in shown.body && card.build ? (
+      <LensHost {...host} mode="rendered" build={card.build}
         onExecutable={(href, path) => setSheet({ name: fileName(path), path, link: true,
           subject: { session: currentSession.current, doc: card.opened.doc, gen: card.opened.gen, href } })}
-        onFrozen={(why) => setCard((c) => (c.kind === 'open' && c.opened === card.opened ? { ...c, frozen: c.frozen ?? why } : c))}
-        notice={message => shared.notice(message)}
         onShowRaw={(line) => {
           jumpTo.current = line
           picked.current = 'raw'
           setCard((c) => (c.kind === 'open' && c.opened === card.opened ? { ...c, lens: 'raw' } : c))
-        }}
-        onOpenLocal={(target, path, gesture) => routeLocal(card.opened, target, path, gesture)}
-        onDisposed={disposedView}
-      />
-    ) : (
-      message
-    )
+        }} />
+    ) : message
+  // Lens Tabs wrap this only when the card has lenses.
+  const chrome = <>
+    {header}
+    {progress}
+    {banner}
+    <div className="card-body">
+      {shown.lenses ? lensOptions.map(option => <TabPanel key={option.id} id={option.id} className="lens-panel">{shown.lenses?.showing === option.id ? body : null}</TabPanel>) : body}
+    </div>
+  </>
 
   async function captureSession(): Promise<SessionCard | null> {
     const before = workspace.getSnapshot()
@@ -1569,8 +1499,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   useEffect(() => {
     const handle: ReaderHandle = {
       ready: () => surface.current || readyError.current ? Promise.resolve() : new Promise<void>(done => readyWaiters.current.push(done)),
-      open: openNamed, openChild: openFolderChild, openDerived, navigateLocal: openLocal, pick, reload, back, close: () => close(), reopen: reopenClosed, clearClosed,
-      openIndexed: entry => openFolderChild(entry.ref.root, entry.ref.node, entry),
+      open: openNamed, openChild: openFolderChild, openDerived, navigateLocal: openLocal, pick, reload, close: () => close(), reopen: reopenClosed, clearClosed,
       cycle: step => { const state = workspace.getSnapshot(); const index = state.tabs.findIndex(tab => tab.id === state.selected); if (state.tabs.length) void selectTab(state.tabs[(index + step + state.tabs.length) % state.tabs.length].id) },
       find: findAction,
       goTo: openGoTo,
@@ -1583,7 +1512,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         const choices: LensName[] = c.opened.format === 'markdown' ? ['rendered', 'raw'] : c.opened.format === 'csv' ? ['grid', 'raw'] : c.opened.format === 'jsonl' ? ['rows', ...(c.structured && !c.structuredOff && !c.structured.tableOff ? ['table' as const] : []), 'raw'] : ['tree', 'raw']
         onLens(choices[(choices.indexOf(c.lens ?? 'raw') + 1) % choices.length])
       },
-      captureSession, restoreSession, selectTab,
+      captureSession, restoreSession,
       capture: async () => {
         const c = latest.current.card
         if (c.kind !== 'open' || navigating.current || !latest.current.limits) return null
@@ -1610,7 +1539,6 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         if (!permanent) { abort.current = new AbortController(); navigating.current = false; setNavigationBusy(false) }
         return bytes
       },
-      retirement: () => budget.current?.snapshot().total ?? 2 * retiredRendered.current,
       prepareRetirement: () => {
         const owner = budget.current
         const bytes = owner?.snapshot().total ?? 2 * retiredRendered.current
@@ -1644,7 +1572,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   return <section className={preview ? 'reader-card preview-reader' : 'reader-card'} role="region" aria-label={preview ? 'Preview reader' : 'Reader card ' + label} data-card={id} data-focused={focused || undefined} onPointerDownCapture={onFocus} onFocusCapture={onFocus}
     onKeyDown={event => {
       if (event.defaultPrevented || event.key !== 'Escape' || event.nativeEvent.isComposing) return
-      if (printOpen) { closePrint(); event.preventDefault(); event.stopPropagation(); return }
+      if (printPlan) { closePrint(); event.preventDefault(); event.stopPropagation(); return }
       if (goToOpen) { setGoToOpen(false); lens.current?.focus(); event.preventDefault(); event.stopPropagation(); return }
       if (findAction('close')) { event.preventDefault(); event.stopPropagation() }
     }}>
@@ -1662,7 +1590,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
             <button type="button" aria-label="Close go to" onClick={() => { setGoToOpen(false); lens.current?.focus() }}>×</button>
           </form>
         ) : null}
-        {printOpen && printPlan ? (() => {
+        {printPlan ? (() => {
           const range = selectedPrintRange(printPlan)
           const pages = range?.pages ?? 0
           return <form className="print-sheet" role="dialog" aria-modal="true" aria-labelledby={`print-title-${id}`} onSubmit={event => { void submitPrint(event) }}>
@@ -1706,34 +1634,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
             </Dialog>
           </Modal>
         </ModalOverlay> : null}
-        {card.kind === 'open' ? (
-          <>
-            {shown.lenses ? (
-              <Tabs key={secondaryLens} className="card-tabs" selectedKey={shown.lenses.showing} onSelectionChange={onLens}>
-                {header}
-                {progress}
-                {banner}
-                <div className="card-body">
-                  {lensOptions.map(option => <TabPanel key={option.id} id={option.id} className="lens-panel">{shown.lenses?.showing === option.id ? body : null}</TabPanel>)}
-                </div>
-              </Tabs>
-            ) : (
-              <>
-                {header}
-                {progress}
-                {banner}
-                <div className="card-body">{body}</div>
-              </>
-            )}
-          </>
-        ) : (
-          <>
-            {header}
-            {progress}
-            {banner}
-            <div className="card-body">{message}</div>
-          </>
-        )}
+        {shown.lenses ? <Tabs key={secondaryLens} className="card-tabs" selectedKey={shown.lenses.showing} onSelectionChange={onLens}>{chrome}</Tabs> : chrome}
         </div>
       </div>
   </section>
@@ -1799,18 +1700,8 @@ interface LensHostProps {
 /** Mounts Raw or Rendered into the card body. A switch or Reload of this document keeps the previous lens's top line. */
 function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place, hadFocus, restoreFocus, atLine, opened, name, lines, indexed, limits, frozen, mode, build, csv, csvOptions, onCsvInfo, structured, onRows, onFrozen, notice, onShowRaw, onOpenLocal, onExecutable, onDisposed }: LensHostProps) {
   const host = useRef<HTMLDivElement>(null)
-  const onFrozenNow = useRef(onFrozen)
-  onFrozenNow.current = onFrozen
-  const onShowRawNow = useRef(onShowRaw)
-  onShowRawNow.current = onShowRaw
-  const onOpenLocalNow = useRef(onOpenLocal)
-  onOpenLocalNow.current = onOpenLocal
-  const onExecutableNow = useRef(onExecutable)
-  onExecutableNow.current = onExecutable
-  const onDisposedNow = useRef(onDisposed)
-  onDisposedNow.current = onDisposed
-  const onCsvInfoNow = useRef(onCsvInfo)
-  onCsvInfoNow.current = onCsvInfo
+  const handlers = useRef({ onFrozen, onShowRaw, onOpenLocal, onExecutable, onDisposed, onCsvInfo })
+  handlers.current = { onFrozen, onShowRaw, onOpenLocal, onExecutable, onDisposed, onCsvInfo }
   useEffect(() => {
     // `place` outlives the document. Use it only for the document that saved it, so a second file opens at `atLine`
     // (or the top). Clear it only after that check: Reload is the same document, and its line has to survive.
@@ -1818,14 +1709,14 @@ function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place
     const at = saved ?? jumpTo.current ?? atLine
     if (saved !== undefined) place.current = undefined
     jumpTo.current = undefined
-    const onFrozenHere = (why: string) => onFrozenNow.current(why)
+    const onFrozenHere = (why: string) => handlers.current.onFrozen(why)
     let view: ShownLens
     if (structured && (mode === 'tree' || mode === 'rows' || mode === 'table' || mode === 'transcript')) {
-      view = new StructuredLens(host.current!, core, opened, structured, mode, { budget, atLine: at, notice, onFrozen: onFrozenHere, onShowRaw: line => onShowRawNow.current(line), onRows: () => onRows?.() })
+      view = new StructuredLens(host.current!, core, opened, structured, mode, { budget, atLine: at, notice, onFrozen: onFrozenHere, onShowRaw: line => handlers.current.onShowRaw(line), onRows: () => onRows?.() })
     } else if (mode === 'grid' && csv) {
       view = new GridLens(host.current!, core, opened, csv, limits, { atLine: at, options: csvOptions ?? CSV_OPTIONS,
-        onFrozen: onFrozenHere, budget, onInfo: info => onCsvInfoNow.current?.(info),
-        onShowRaw: line => onShowRawNow.current(line) })
+        onFrozen: onFrozenHere, budget, onInfo: info => handlers.current.onCsvInfo?.(info),
+        onShowRaw: line => handlers.current.onShowRaw(line) })
     } else if (mode === 'rendered' && build) {
       const kept = retained.current
       if (kept?.session === session && kept.doc === opened.doc && kept.gen === opened.gen) {
@@ -1834,9 +1725,9 @@ function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place
       } else {
         kept?.view.dispose()
         const made = new RenderedLens(host.current!, core, opened, build, limits, {
-          onFrozen: onFrozenHere, atLine: at, onShowRaw: (line) => onShowRawNow.current(line),
-          onOpenLocal: (target, path, gesture) => onOpenLocalNow.current(target, path, gesture), budget: budget ?? undefined,
-          onExecutable: (href, path) => onExecutableNow.current?.(href, path)
+          onFrozen: onFrozenHere, atLine: at, onShowRaw: (line) => handlers.current.onShowRaw(line),
+          onOpenLocal: (target, path, gesture) => handlers.current.onOpenLocal(target, path, gesture), budget: budget ?? undefined,
+          onExecutable: (href, path) => handlers.current.onExecutable?.(href, path)
         })
         retained.current = { session, doc: opened.doc, gen: opened.gen, view: made }
         view = made
@@ -1858,7 +1749,7 @@ function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place
       if (lens.current === view) lens.current = null
       if (view instanceof RenderedLens && budget?.current(opened.gen) && retained.current?.view === view) view.pause()
       else view.dispose(false)
-      onDisposedNow.current(opened)
+      handlers.current.onDisposed(opened)
     }
   }, [core, session, budget, retained, opened, name, limits, lens, atLine, mode, build, csv?.ref.revision, csvOptions, structured, jumpTo, place, hadFocus, restoreFocus])
   useEffect(() => lens.current?.setLineCount(lines), [lines])

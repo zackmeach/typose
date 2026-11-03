@@ -46,13 +46,11 @@ export class SettingsController {
     element.style.setProperty('--font-ui', stack(settings.ui_font, 'Inter', '--font-ui-base'))
     element.style.setProperty('--font-mono', stack(settings.mono_font, 'JetBrains Mono', '--font-mono-base'))
     element.style.setProperty('--ui-size', settings.ui_size + 'px'); element.style.setProperty('--mono-size', settings.mono_size + 'px')
-    element.style.setProperty('--size-mono', settings.mono_size + 'px')
     element.style.setProperty('--text-secondary', 'var(--text2)'); element.style.setProperty('--hairline', 'var(--border)'); element.style.setProperty('--guide', 'var(--border)')
     element.style.setProperty('--data-string', theme.scheme === 'dark' ? '#80bc92' : '#24653f')
     element.style.setProperty('--data-number', theme.scheme === 'dark' ? '#d9bc75' : '#775c11')
     element.style.setProperty('--data-boolean', theme.scheme === 'dark' ? '#bc9ade' : '#75409e')
     element.style.setProperty('--warning', theme.scheme === 'dark' ? '#d8ad60' : '#805c00')
-    window.dispatchEvent(new CustomEvent('typose-settings', { detail: settings }))
     void window.typose.setChromeTheme(theme.scheme === 'dark', String(theme.tokens.canvas), String(theme.tokens.text))
   }
 }

@@ -40,25 +40,10 @@ export const HOSTILE_HTML: string[] = [
     '<form action="https://example.invalid/f"><button formaction="https://example.invalid/g">b</button><input type="image" src="https://example.invalid/i.png"></form>'
 ]
 
-/** YAML for the zero-effects run: an alias bomb, URL-shaped tags and %TAG handles, a recursive alias. */
-export const HOSTILE_YAML: string[] = [
-  ['a: &a [x, x, x, x, x, x, x, x, x]', ...Array.from({ length: 9 }, (_, i) => `${'bcdefghij'[i]}: &${'bcdefghij'[i]} [${Array(9).fill('*' + 'abcdefghi'[i]).join(', ')}]`)].join('\n'),
-  '%TAG !e! tag:example.invalid,2000:\n--- !e!doc\na: !<https://example.invalid/t> 1\nb: !!binary aGVsbG8=\nc: !!js/function "function () { fetch(\'https://example.invalid/\') }"\n',
-  'r: &r [*r]\n<<: *r\n'
-]
-
 /** A label payload: an image, a script, a javascript: link, an @import and a frame. */
 const H =
   "<img src=https://example.invalid/i.png><script>alert(1)</script><a href='javascript:alert(1)'>a</a>" +
   "<style>@import url(https://example.invalid/s.css)</style><iframe src=https://example.invalid/f></iframe>"
-
-/** A flowchart with `edges` edges, padded with a comment to `chars` characters (Mermaid's limits: 50,000 and 500). */
-export function hugeFlowchart(edges: number, chars: number): string {
-  const lines = ['flowchart LR']
-  for (let i = 0; i < edges; i++) lines.push(`  n${i}["${i}"] --> n${i + 1}`)
-  const body = lines.join('\n') + '\n'
-  return body + '%%' + 'x'.repeat(Math.max(0, chars - body.length - 2))
-}
 
 /**
  * Mermaid: every diagram type mermaid 12.2.0 registers, with hostile text wherever the type's grammar accepts text,

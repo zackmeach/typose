@@ -7,12 +7,9 @@ const CELL_REFERENCE_BYTES = 48
 const OUTPUT_COPIES = 4
 const CHARGE_GRANULARITY = 256 << 10
 
-export interface GridCopyReader {
+export interface GridCopyPort {
   sourceRecord(displayRow: number, signal: AbortSignal): Promise<number>
   cellChunks(sourceRecord: number, column: number, signal: AbortSignal): AsyncIterable<string>
-}
-
-export interface GridCopyPort extends GridCopyReader {
   reserve(bytes: number, signal: AbortSignal): Promise<boolean>
   confirm(bytes: number, signal: AbortSignal): Promise<boolean>
   write(text: string): Promise<boolean>
@@ -20,7 +17,7 @@ export interface GridCopyPort extends GridCopyReader {
   valid(): boolean
 }
 
-export type GridCopyResult =
+type GridCopyResult =
   | { kind: 'copied'; bytes: number }
   | { kind: 'cancelled' }
   | { kind: 'refused'; reason: string }
@@ -38,6 +35,7 @@ export class GridCopyJob {
   async run(selection: GridSelection): Promise<GridCopyResult> {
     const signal = this.controller.signal
     const current = () => !signal.aborted && this.port.valid()
+    const full = (): GridCopyResult => current() ? { kind: 'refused', reason: 'Copy is unavailable · the memory budget is full' } : { kind: 'cancelled' }
     const selected = selectionBounds(selection, this.rows, this.columns)
     const rowCount = Math.max(0, selected.lastRow - selected.firstRow)
     const columnCount = Math.max(0, selected.lastColumn - selected.firstColumn)
@@ -63,8 +61,7 @@ export class GridCopyJob {
     let batchLines: string[] = []
     let rowOrdinal = 0
     try {
-      if (!await reserve(COPY_PAGE_RESERVE + columnCount * CELL_REFERENCE_BYTES + rowCount * 8))
-        return current() ? { kind: 'refused', reason: 'Copy is unavailable · the memory budget is full' } : { kind: 'cancelled' }
+      if (!await reserve(COPY_PAGE_RESERVE + columnCount * CELL_REFERENCE_BYTES + rowCount * 8)) return full()
 
       const appendRow = async (sourceRecord: number, firstColumn: number, lastColumn: number): Promise<GridCopyResult | null> => {
         const values: string[] = []
@@ -77,12 +74,10 @@ export class GridCopyJob {
             if (!current()) return { kind: 'cancelled' }
             fieldBytes += utf8ByteLength(chunk)
             sourceBytes += utf8ByteLength(chunk)
-            if (!Number.isSafeInteger(fieldBytes) || outputBytes + sourceBytes + (values.length ? values.length : 0) > MAX_CLIPBOARD_BYTES + 2)
+            if (!Number.isSafeInteger(fieldBytes) || outputBytes + sourceBytes + values.length > MAX_CLIPBOARD_BYTES + 2)
               return { kind: 'refused', reason: 'Selection exceeds the clipboard size limit' }
             const charge = COPY_PAGE_RESERVE + columnCount * CELL_REFERENCE_BYTES + outputBytes * OUTPUT_COPIES + sourceBytes * 3 + parts.length * 24
-            if (!await reserve(charge)) return current()
-              ? { kind: 'refused', reason: 'Copy is unavailable · the memory budget is full' }
-              : { kind: 'cancelled' }
+            if (!await reserve(charge)) return full()
             parts.push(chunk)
           }
           const value = parts.join('')
@@ -93,9 +88,7 @@ export class GridCopyJob {
         if (!Number.isSafeInteger(nextBytes) || nextBytes > MAX_CLIPBOARD_BYTES)
           return { kind: 'refused', reason: 'Selection exceeds the clipboard size limit' }
         const charge = COPY_PAGE_RESERVE + columnCount * CELL_REFERENCE_BYTES + nextBytes * OUTPUT_COPIES + sourceBytes * 2
-        if (!await reserve(charge)) return current()
-          ? { kind: 'refused', reason: 'Copy is unavailable · the memory budget is full' }
-          : { kind: 'cancelled' }
+        if (!await reserve(charge)) return full()
         batchLines.push(serializeTsv([values]))
         outputBytes = nextBytes
         rowOrdinal++
@@ -119,13 +112,11 @@ export class GridCopyJob {
       }
       if (batchLines.length) output.push(batchLines.join('\r\n'))
       if (outputBytes > LARGE_COPY_CONFIRM_BYTES && !await this.port.confirm(outputBytes, signal))
-        return current() ? { kind: 'cancelled' } : { kind: 'cancelled' }
+        return { kind: 'cancelled' }
       if (!current()) return { kind: 'cancelled' }
       const total = outputBytes
       const finalCharge = COPY_PAGE_RESERVE + total * OUTPUT_COPIES + output.length * 24
-      if (!await reserve(finalCharge)) return current()
-        ? { kind: 'refused', reason: 'Copy is unavailable · the memory budget is full' }
-        : { kind: 'cancelled' }
+      if (!await reserve(finalCharge)) return full()
       const text = output.join('\r\n')
       if (utf8ByteLength(text) !== total || !current()) return { kind: 'cancelled' }
       if (!await this.port.write(text) || !current()) return { kind: 'failed', reason: 'The clipboard write failed' }

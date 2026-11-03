@@ -10,11 +10,12 @@ import { markdownRichPrintNodes } from './markdown-rich-print'
 import { PRINT_LINES_PER_PAGE, type PrintPayload, type PrintPlan } from '../print'
 import { utf8ByteLength } from './grid-interactions'
 import { copySourceSpan } from './source-copy'
+import { SourceCopyQueue } from './source-copy-queue'
 import { renderedSelection } from './rendered-selection'
 import { markdownExtras } from './markdown-extras'
 import '../markdown-extras.css'
 
-export { RENDERED_PER_UNIT, renderedCharge } from './rendered-charge'
+export { renderedCharge } from './rendered-charge'
 
 /** A link with nothing to open: a dashed grey underline (markdown-extras.css), and the target in its tooltip. */
 function unresolved(a: HTMLElement, target: string): void {
@@ -36,10 +37,6 @@ export interface RenderedOptions {
   budget?: LensBudget
 }
 
-interface Flight {
-  abort: AbortController
-}
-
 /**
  * Rendered (brief §5.2) for one Markdown build. Every block is mounted; Chromium skips offscreen work
  * (`content-visibility`), and the blocks stay in the accessibility tree (plan §2.2, Z72). The core already sanitized
@@ -51,7 +48,7 @@ export class RenderedLens {
   private readonly scroller: HTMLElement
   private readonly column: HTMLElement
   private readonly images: RenderedImages
-  private readonly flight: Flight[] = []
+  private flight: AbortController | undefined
   /** The next block to ask for. A page ends where the 256 KiB cap stops it, so that start isn't known ahead of the answer. */
   private cursor = 0
   private readonly blocks: number
@@ -72,8 +69,7 @@ export class RenderedLens {
   private indexed: boolean
   private totalLines: number
   private copyAll = false
-  private copyAbort: AbortController | undefined
-  private copyToken: string | null = null
+  private readonly copies = new SourceCopyQueue(token => window.typose.cancelClipboardWrite(token))
   private copyStatus: HTMLDivElement
   private readonly outline: HTMLElement
   private readonly outlineNav: HTMLElement
@@ -137,14 +133,14 @@ export class RenderedLens {
       if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'a' && !(event.target instanceof HTMLInputElement)) {
         event.preventDefault()
         this.copyAll = true
-        this.cancelCopy()
+        this.copies.cancel()
         this.copyStatus.textContent = 'All source text selected · press Ctrl+C to copy'
       } else if (!['Control', 'Meta', 'Shift', 'Alt'].includes(event.key) && !((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c')) {
         this.copyAll = false
-        this.cancelCopy()
+        this.copies.cancel()
       }
     }, { capture: true })
-    for (const type of ['pointerdown', 'wheel'] as const) this.scroller.addEventListener(type, () => { this.copyAll = false; this.cancelCopy() }, { passive: true })
+    for (const type of ['pointerdown', 'wheel'] as const) this.scroller.addEventListener(type, () => { this.copyAll = false; this.copies.cancel() }, { passive: true })
     // Remember the top line while the view is on screen. Unmount hides the panel first, and every block's box is then
     // empty, so reading geometry in dispose would report the last block.
     this.scroller.addEventListener('scroll', () => this.remember(), { passive: true })
@@ -216,7 +212,7 @@ export class RenderedLens {
 
   /** Ctrl+A then Copy returns the original source; a partial visual selection needs per-run native maps. */
   async copy(): Promise<boolean> {
-    this.cancelCopy()
+    this.copies.cancel()
     const token = window.typose.beginClipboardWrite()
     if (!token) { this.copyStatus.textContent = 'Copy unavailable · use the reader Copy command'; return false }
     const all = this.copyAll
@@ -229,46 +225,35 @@ export class RenderedLens {
       this.copyStatus.textContent = 'Copy refused · source is unavailable or exceeds the 16 MiB limit'
       return false
     }
-    const controller = new AbortController()
-    this.copyAbort = controller
-    this.copyToken = token
-    const current = () => {
-      if (this.copyAbort !== controller || controller.signal.aborted || this.stopped || this.paused || this.copyAll !== all || !owner.current(generation)) return false
+    const valid = () => {
+      if (this.stopped || this.paused || this.copyAll !== all || !owner.current(generation)) return false
       if (all) return true
       const selected = renderedSelection(this.column, window.getSelection())
       return selected?.start === start && selected?.end === end
     }
-    this.copyStatus.textContent = 'Preparing source copy…'
-    try {
-      const copied = await copySourceSpan({
-        valid: current,
-        reserve: bytes => owner.reserveCopy(generation, bytes),
-        read: (start, count, signal) => this.core.call('sourceBytes', { view, start, count }, signal),
-        verify: signal => this.core.call('sourceVerify', { view, start, end }, signal),
-        confirm: async bytes => window.confirm(`Copy ${new Intl.NumberFormat('en').format(bytes)} bytes to the clipboard?`),
-        write: text => window.typose.writeClipboardText(text, token),
-        cancelWrite: () => window.typose.cancelClipboardWrite(token),
-        status: message => { this.copyStatus.textContent = message }
-      }, start, end, this.opened.encoding, controller.signal)
-      if (copied) this.copyStatus.textContent = 'Copied source text'
-      else if (controller.signal.aborted) this.copyStatus.textContent = 'Copy cancelled'
-      return copied
-    } catch (error) {
-      if (!controller.signal.aborted) this.copyStatus.textContent = error instanceof Error ? `Copy failed · ${error.message}` : 'Copy failed'
-      return false
-    } finally {
-      await owner.reserveCopy(generation, 0)
-      if (this.copyAbort === controller) this.copyAbort = undefined
-      if (this.copyToken === token) this.copyToken = null
-      window.typose.cancelClipboardWrite(token)
-    }
-  }
-
-  private cancelCopy(): void {
-    this.copyAbort?.abort()
-    this.copyAbort = undefined
-    if (this.copyToken) window.typose.cancelClipboardWrite(this.copyToken)
-    this.copyToken = null
+    // The queue starts this copy only once the one it cancelled has released its share, and only then says so: one
+    // cancelled while it waits leaves the last copy's status standing.
+    return this.copies.run(token, async (current, signal) => {
+      this.copyStatus.textContent = 'Preparing source copy…'
+      try {
+        const copied = await copySourceSpan({
+          valid: () => current() && valid(),
+          reserve: bytes => owner.reserveCopy(generation, bytes),
+          read: (start, count, signal) => this.core.call('sourceBytes', { view, start, count }, signal),
+          verify: signal => this.core.call('sourceVerify', { view, start, end }, signal),
+          confirm: async bytes => window.confirm(`Copy ${new Intl.NumberFormat('en').format(bytes)} bytes to the clipboard?`),
+          write: text => window.typose.writeClipboardText(text, token),
+          cancelWrite: () => window.typose.cancelClipboardWrite(token),
+          status: message => { this.copyStatus.textContent = message }
+        }, start, end, this.opened.encoding, signal)
+        if (copied) this.copyStatus.textContent = 'Copied source text'
+        else if (signal.aborted) this.copyStatus.textContent = 'Copy cancelled'
+        return copied
+      } catch (error) {
+        if (!signal.aborted) this.copyStatus.textContent = error instanceof Error ? `Copy failed · ${error.message}` : 'Copy failed'
+        return false
+      }
+    }, async () => { await owner.reserveCopy(generation, 0) })
   }
 
   printPlan(): PrintPlan {
@@ -365,7 +350,7 @@ export class RenderedLens {
     this.linkGeneration++
     this.focusJump = false
     this.placeGen++
-    for (const f of this.flight) f.abort.abort()
+    this.flight?.abort()
     this.scroller.remove()
   }
 
@@ -383,13 +368,13 @@ export class RenderedLens {
 
   /** `release` is Raw's. Closing the document releases the reservation; a lens switch must not zero it first. */
   dispose(_release = true): void {
-    this.cancelCopy()
+    this.copies.cancel()
     this.find.destroy()
     this.stopped = true
     this.images.dispose()
     this.outlineResize.disconnect()
     this.placeGen++
-    for (const f of this.flight) f.abort.abort()
+    this.flight?.abort()
     this.scroller.removeEventListener('click', this.onLink, true)
     this.scroller.removeEventListener('auxclick', this.onLink, true)
     this.scroller.removeEventListener('dragstart', this.onLink, true)
@@ -442,7 +427,7 @@ export class RenderedLens {
     }
   }
 
-  /** One page per frame, and at most 2 in flight (plan §2.2, C5). */
+  /** One page per frame, and one in flight (plan §2.2, C5). */
   private schedule(): void {
     if (this.scheduled) return
     this.scheduled = true
@@ -453,18 +438,16 @@ export class RenderedLens {
   }
 
   private pump(): void {
-    if (this.stopped || this.paused || this.flight.length >= 2) return
     // The next page begins where this one stops, and the 256 KiB cap chooses that, so a second request would guess it.
-    if (this.flight.length >= 1) return
+    if (this.stopped || this.paused || this.flight) return
     if (this.cursor >= this.blocks) return this.settle()
     const start = this.cursor
-    const flight: Flight = { abort: new AbortController() }
-    this.flight.push(flight)
+    const flight = this.flight = new AbortController()
     const { doc, gen } = this.opened
     void this.core
-      .call('page', { doc, lens: 'rendered', gen, start, count: this.limits.maxItems }, flight.abort.signal)
+      .call('page', { doc, lens: 'rendered', gen, start, count: this.limits.maxItems }, flight.signal)
       .then((page) => {
-        if (this.stopped || flight.abort.signal.aborted) return
+        if (this.stopped || flight.signal.aborted) return
         if (page.items.length === 0) {
           this.stopped = true // nothing more there; asking again would spin
           return
@@ -477,21 +460,16 @@ export class RenderedLens {
       })
       .catch((err: unknown) => this.failed(err))
       .finally(() => {
-        const i = this.flight.indexOf(flight)
-        if (i >= 0) this.flight.splice(i, 1)
+        this.flight = undefined
         this.schedule()
       })
-  }
-
-  private markReady(): void {
-    this.scroller.dataset.ready = '1'
   }
 
   /** Scroll to the block that contains `atLine` once it, or the nearest block above it, is mounted. */
   private settle(): void {
     const line = this.atLine
     if (line === undefined) {
-      if (this.cursor >= this.blocks) this.markReady()
+      if (this.cursor >= this.blocks) this.scroller.dataset.ready = '1'
       return
     }
     const blocks = this.column.children
@@ -545,7 +523,7 @@ export class RenderedLens {
   }
 
   private finishPlace(): void {
-    if (this.cursor >= this.blocks) this.markReady()
+    if (this.cursor >= this.blocks) this.scroller.dataset.ready = '1'
   }
 
   private block(item: MdItem): HTMLElement {

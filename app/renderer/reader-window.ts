@@ -1,5 +1,5 @@
 import type { RefObject } from 'react'
-import type { Hello, Opened, SurfaceRef } from '../shared/protocol'
+import type { CapturedLocation, Hello, Opened, SurfaceRef } from '../shared/protocol'
 import type { CoreClient } from './core'
 import type { RootView } from './folders'
 import type { SavedLocation, TabId, WorkspaceMetadataQueue, WorkspaceStore, WorkspaceTab } from './workspace'
@@ -13,12 +13,10 @@ export interface ReaderHandle {
   ready(): Promise<void>
   open(path: string): void
   openChild(root: string, node: string): Promise<void>
-  openIndexed(entry: import('../shared/protocol').FolderEntry): Promise<void>
   openDerived(source: Opened, target: string, path: string): Promise<boolean>
   navigateLocal(source: Opened, target: string, path: string): Promise<boolean>
   pick(): Promise<void>
   reload(): Promise<void>
-  back(): Promise<void>
   close(): Promise<void>
   reopen(): Promise<void>
   clearClosed(): void
@@ -31,11 +29,9 @@ export interface ReaderHandle {
   handOff(kind: 'copy' | 'show' | 'open'): void
   captureSession(): Promise<SessionCard | null>
   restoreSession(card: SessionCard): Promise<void>
-  selectTab(id: string): Promise<void>
   capture(): Promise<SavedLocation | null>
   restore(entry: SavedLocation): Promise<boolean>
   detach(closing: boolean): Promise<number>
-  retirement(): number
   prepareRetirement(): { bytes: number; cancel(): void }
   resume(): Promise<void>
   activateSelected(): Promise<void>
@@ -53,7 +49,6 @@ export interface ReaderWindow {
   folders: RefObject<readonly RootView[]>
   pendingFolders: RefObject<Map<symbol, number>>
   budget: RefObject<WorkspaceBudget | null>
-  peak: RefObject<number>
   queue: WorkspaceMetadataQueue
   pendingWorkspace: RefObject<Map<TabId, { units: number }>>
   pendingNative: RefObject<Set<symbol>>
@@ -62,6 +57,7 @@ export interface ReaderWindow {
   paid(): Promise<boolean>
   charge(owner: WorkspaceStore | null, tabs: readonly Pick<WorkspaceTab, 'key' | 'path'>[] | null, current: () => boolean): Promise<boolean>
   release(): void
+  releaseLocation(location: CapturedLocation): void
   notice(message: string): void
   opened(): void
   /** A folder a launch or drop named: added as Open folder… adds a root. */

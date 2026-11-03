@@ -5,10 +5,9 @@ import { ScrollState, isLogical, spacerHeight, visibleRows, wheelPixels } from '
 import type { LensBudget } from './lens-budget'
 import { viewportCap } from './page-cache'
 import { GRID_TEXT_UNITS as TEXT_UNITS, MAX_GRID_CELLS as MAX_CELLS, gridCellPreview, gridTextPreview as preview, nextGridCell, type GridCellPreview, type GridRange } from './grid-cache'
-import { extendSelection, nextGridSort, selectCell, type GridSelection, type GridSort, selectionBounds } from './grid-interactions'
-import { GridCopyJob, type GridCopyJob as GridCopyJobType } from './grid-copy'
+import { extendSelection, nextGridSort, selectCell, selectColumn, selectRow, type GridSelection, type GridSort, selectionBounds, utf8ByteLength } from './grid-interactions'
+import { GridCopyJob } from './grid-copy'
 import { PRINT_LINES_PER_PAGE, type PrintPayload, type PrintPlan } from '../print'
-import { utf8ByteLength } from './grid-interactions'
 import { GridColumns } from './grid-columns'
 
 const ROW = 28
@@ -70,14 +69,12 @@ export class GridLens {
   private findAbort: AbortController | undefined
   private pendingFind = false
   private findNavigation: Promise<void> = Promise.resolve()
-  private readonly findHits = new Map<number, CsvFindHit>()
-  private copyJob: GridCopyJobType | undefined
+  private copyJob: GridCopyJob | undefined
   private copyPending = false
   private copyDialog: HTMLDivElement | undefined
   private contextMenu: HTMLDivElement | undefined
   private contextTrigger: HTMLElement | undefined
   private lastGridFocus: HTMLElement | undefined
-  private copySourceRange: { first: number; last: number; order: CsvOrderRef; records: Map<number, number> } | undefined
   private range: GridRange = { firstRow: 0, lastRow: 0, firstColumn: 0, lastColumn: 0 }
   private active = { row: 0, column: 0 }
   private selection: GridSelection = selectCell(this.active, 1, 1)
@@ -91,7 +88,7 @@ export class GridLens {
   private wake = false
   private paid = false
   private sizing = Promise.resolve()
-  private reserved: number
+  private reserved = 0
   private timer: ReturnType<typeof setTimeout> | undefined
   private atLine: number | undefined
   private atRow: number | undefined
@@ -119,7 +116,6 @@ export class GridLens {
       next: direction => { void this.nextFind(direction) },
       close: () => this.closeFind()
     }
-    this.reserved = 0
     this.atLine = options.atLine
     this.shownLine = options.atLine ?? 0
     this.element.setAttribute('role', 'grid')
@@ -287,7 +283,6 @@ export class GridLens {
       }
     } finally { if (retained) await owner.reserveCopy(generation, 0) }
   }
-  copy(): Promise<boolean> { return this.copySelection() }
   setLineCount(_lines: number): void { this.request() }
   indexDone(): void { this.request() }
   freeze(): void { this.stopped = true; clearTimeout(this.timer); this.abort.abort(); this.sortAbort?.abort(); this.cancelCopy(); this.cancelInspector(); this.closeContextMenu(false); this.closeFind() }
@@ -300,18 +295,12 @@ export class GridLens {
     if (this.opened.view) {
       void this.core.call('csvOrderClose', { view: this.opened.view, order: this.order ?? { csv: this.info.ref, id: 0 }, interactionId: this.interactionId }).catch(() => {})
     }
-    this.cancelCopy()
-    this.cancelInspector()
-    this.closeContextMenu(false)
-    this.closeFind()
     this.freeze()
     this.observer.disconnect()
-    this.inspector?.remove()
     this.element.remove()
     this.status.remove()
     this.findExcerpt.remove()
     this.actionsButton.remove()
-    this.closeContextMenu(false)
     this.cells.clear(); this.rows.clear(); this.columns.clear(); this.mounted.clear(); this.rowElements.clear(); this.headerElements.clear()
     if (release) {
       if (this.options.budget) void this.options.budget.reserveGrid(this.opened.gen, 0)
@@ -656,7 +645,7 @@ export class GridLens {
     })
   }
 
-  private async copySelection(): Promise<boolean> {
+  async copy(): Promise<boolean> {
     if (this.copyPending) { this.cancelCopy(); this.message('Cancelling the previous copy…'); return false }
     const token = window.typose.beginClipboardWrite()
     if (!token) { this.message('Copy unavailable · use a trusted Copy action in the Grid'); return false }
@@ -669,7 +658,7 @@ export class GridLens {
     const current = () => this.valid(ref) && this.order?.id === order.id && this.sameSelection(this.selection, selection)
     this.copyPending = true
     this.message('Preparing copy…', true)
-    this.copySourceRange = { first: 0, last: 0, order, records: new Map() }
+    let known = { first: 0, last: 0, records: new Map<number, number>() }
     const job = new GridCopyJob({
       valid: current,
       reserve: async (bytes, signal) => {
@@ -683,9 +672,9 @@ export class GridLens {
       cancelWrite: () => window.typose.cancelClipboardWrite(token),
       sourceRecord: async (displayRow, signal) => {
         if (!current() || signal.aborted) throw new Error('Copy cancelled')
-        if (this.copySourceRange && displayRow >= this.copySourceRange.first && displayRow < this.copySourceRange.last) {
-          const known = this.copySourceRange.records.get(displayRow)
-          if (known !== undefined) return known
+        if (displayRow >= known.first && displayRow < known.last) {
+          const record = known.records.get(displayRow)
+          if (record !== undefined) return record
         }
         const first = displayRow, last = Math.min(rows, first + 128)
         const page = await this.page(ref, first, last - first, 0, 1, signal, order)
@@ -699,11 +688,11 @@ export class GridLens {
           if (!current() || signal.aborted || !sameRef(exact.ref, ref) || this.order?.id !== order.id) throw new Error('Copy cancelled')
           records = new Map(exact.rows.map(row => [row.dataRow, row.sourceRecord]))
           sourceRecord = records.get(displayRow)
-          this.copySourceRange = { first: displayRow, last: displayRow + 1, order, records }
+          known = { first: displayRow, last: displayRow + 1, records }
         } else if (page.rows.length) {
           const firstReturned = Math.min(...records.keys())
           const lastReturned = Math.max(...records.keys()) + 1
-          this.copySourceRange = { first: firstReturned, last: lastReturned, order, records }
+          known = { first: firstReturned, last: lastReturned, records }
         }
         if (sourceRecord === undefined) throw new Error('CSV row is unavailable for copy')
         return sourceRecord
@@ -716,7 +705,6 @@ export class GridLens {
     finally {
       await this.options.budget.reserveCopy(generation, 0)
       this.copyPending = false
-      this.copySourceRange = undefined
     }
     if (this.copyJob !== job) return false
     this.copyJob = undefined
@@ -786,9 +774,6 @@ export class GridLens {
       while (current() && !info.complete) {
         const page = await this.core.call('csvFindScan', { ref }, controller.signal)
         if (!current() || page.ref.id !== ref.id || page.ref.order.id !== ref.order.id) return
-        const first = Math.max(1, page.count - page.hits.length + 1)
-        page.hits.forEach((hit, index) => this.findHits.set(first + index, hit))
-        while (this.findHits.size > 128) this.findHits.delete(this.findHits.keys().next().value!)
         info = { count: page.count, complete: page.complete, current: this.findSignal.snapshot().current, busy: !page.complete }
         this.findSignal.publish(info)
         if (!this.findHit && page.hits.length) await this.queueFindSeek(1, epoch, ref, controller)
@@ -852,7 +837,6 @@ export class GridLens {
     this.findHit = undefined
     this.findCell = undefined
     this.paintFindExcerpt(undefined)
-    this.findHits.clear()
     controller?.abort()
     if (ref) void this.core.call('csvFindClose', { ref }).catch(() => {})
     this.findSignal.publish(EMPTY_FIND)
@@ -894,9 +878,9 @@ export class GridLens {
       item.addEventListener('click', () => { this.closeContextMenu(true); action() })
       menu.append(item)
     }
-    add('Select row', () => this.setSelection({ kind: 'row', anchor: { row, column: 0 }, focus: { row, column: this.columnCount - 1 } }, { row, column: 0 }))
-    add('Select column', () => this.setSelection({ kind: 'column', anchor: { row: 0, column }, focus: { row: this.rowCount - 1, column } }, { row, column }))
-    add('Copy selection', () => { void this.copySelection() }, true)
+    add('Select row', () => this.setSelection(selectRow(row, this.columnCount), { row, column: 0 }))
+    add('Select column', () => this.setSelection(selectColumn(column, this.rowCount), { row, column }))
+    add('Copy selection', () => { void this.copy() }, true)
     add(`Sort ${header ? 'this column' : 'column'} ascending`, () => { void this.requestSort(column, 'asc') })
     add(`Sort ${header ? 'this column' : 'column'} descending`, () => { void this.requestSort(column, 'desc') })
     add('Clear sort', () => { void this.requestSort(column, 'none') })
@@ -954,7 +938,7 @@ export class GridLens {
     const rowElement = rowHeader?.closest<HTMLElement>('.csv-row')
     if (rowElement) {
       const row = Number(rowElement.dataset.row)
-      this.setSelection({ kind: 'row', anchor: { row, column: 0 }, focus: { row, column: this.columnCount - 1 } }, { row, column: 0 })
+      this.setSelection(selectRow(row, this.columnCount), { row, column: 0 })
       this.element.focus({ preventScroll: true })
     }
   }
@@ -1064,18 +1048,16 @@ export class GridLens {
     }
     const command = event.ctrlKey || event.metaKey
     if (command && event.key.toLowerCase() === 'c') {
-      event.preventDefault(); void this.copySelection(); return
+      event.preventDefault(); void this.copy(); return
     }
     if (event.shiftKey && event.code === 'Space') {
       event.preventDefault()
-      const selection = { kind: 'row' as const, anchor: { row: this.active.row, column: 0 }, focus: { row: this.active.row, column: this.columnCount - 1 } }
-      this.setSelection(selection, { row: this.active.row, column: 0 })
+      this.setSelection(selectRow(this.active.row, this.columnCount), { row: this.active.row, column: 0 })
       return
     }
     if (event.ctrlKey && event.code === 'Space') {
       event.preventDefault()
-      const selection = { kind: 'column' as const, anchor: { row: 0, column: this.active.column }, focus: { row: this.rowCount - 1, column: this.active.column } }
-      this.setSelection(selection, { row: this.active.row, column: this.active.column })
+      this.setSelection(selectColumn(this.active.column, this.rowCount), { row: this.active.row, column: this.active.column })
       return
     }
     if (event.key === 'Enter') {

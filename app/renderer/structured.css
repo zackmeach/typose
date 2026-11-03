@@ -1,5 +1,5 @@
 .structured-host { height:100%; min-height:0; overflow:hidden; }
-.structured-view { height:100%; overflow:auto; position:relative; font-family:var(--font-mono,monospace); font-size:var(--size-mono,13px); line-height:1.55; }
+.structured-view { height:100%; overflow:auto; position:relative; font-family:var(--font-mono,monospace); font-size:var(--mono-size,13px); line-height:1.55; }
 .structured-content { min-width:max-content; padding:8px 12px; }
 .tree-row { display:flex; align-items:baseline; min-height:26px; white-space:pre; cursor:default; }
 /* A key or value with bidi controls (U+202E…) can reorder only its own text, never its neighbours. */

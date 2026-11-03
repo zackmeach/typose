@@ -21,7 +21,7 @@ const CONFIG = {
   ALLOW_DATA_ATTR: false
 }
 
-export function sanitizeMath(html: string): string {
+function sanitizeMath(html: string): string {
   return purify.sanitize(html, CONFIG)
 }
 if (__TEST_HOOKS__) Object.assign(window, { typoseSanitizeMath: sanitizeMath })
@@ -32,8 +32,8 @@ if (__TEST_HOOKS__) Object.assign(window, { typoseSanitizeMath: sanitizeMath })
  * each) by 292 MiB: 5,473,567 B and 153,092 B an item, which fit 2,301 B an element plus 88,657 B a formula. Each
  * ×1.25, rounded up to 64 B.
  */
-export const MATH_ELEMENT_BYTES = 2880
-export const MATH_FORMULA_BYTES = 110_848
+const MATH_ELEMENT_BYTES = 2880
+const MATH_FORMULA_BYTES = 110_848
 /** A formula still in the worker after this is a runaway: the worker is terminated and respawned for the next. */
 const MATH_TIMEOUT_MS = 1500
 
@@ -53,7 +53,7 @@ function showProblem(el: HTMLElement, tex: string, message: string): void {
  * the caps, the watchdog, the budget) keeps the source with the reason in its tooltip; a TeX error also shows a problem
  * marker (brief §4.6).
  */
-export async function renderMath(el: HTMLElement, tex: string, displayMode = false, admit: (bytes: number) => Promise<boolean> = async () => true): Promise<void> {
+export async function renderMath(el: HTMLElement, tex: string, displayMode: boolean, admit: (bytes: number) => Promise<boolean>): Promise<void> {
   const kept = (why: string) => { el.title = `Math source kept · ${why}` }
   let result: { html: string } | { error: string }
   try { result = await katexJob({ tex, displayMode, maxElements: MATH_MAX_ELEMENTS }) } catch (error) { return kept(error instanceof Error ? error.message : String(error)) }

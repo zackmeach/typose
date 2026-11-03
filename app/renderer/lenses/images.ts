@@ -20,7 +20,7 @@ interface ImageSlot {
 }
 
 /** Encoded host backing, wire, received chunks, Blob storage and decoder input; two bitmap/cache copies. */
-export const imageCharge = (image: Pick<PreparedImage, 'encodedBytes' | 'pixelBytes'>): number =>
+const imageCharge = (image: Pick<PreparedImage, 'encodedBytes' | 'pixelBytes'>): number =>
   5 * image.encodedBytes + 2 * image.pixelBytes
 
 /** A generation's images. Loaded blobs and their allowance stay with its retained Rendered tree. */

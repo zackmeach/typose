@@ -1,7 +1,7 @@
 // Native scrolling below the cap, logical above it (spec §5.3).
 export const SPACER_CAP = 16_000_000
 
-export interface ScrollGeometry {
+interface ScrollGeometry {
   total: number
   viewport: number
 }
@@ -32,7 +32,7 @@ export function wheelPixels(deltaY: number, deltaMode: number, rowHeight: number
   return deltaY
 }
 
-export const clampTop = (top: number, g: ScrollGeometry): number =>
+const clampTop = (top: number, g: ScrollGeometry): number =>
   Math.min(Math.max(0, top), Math.max(0, g.total - g.viewport))
 
 export function visibleRows(top: number, viewport: number, rowHeight: number, rowCount: number, overscan: number) {
