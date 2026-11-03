@@ -98,6 +98,8 @@ class Refusal extends Error {
 /** The addon's own codes (`typose-node`'s `Code`), passed through; anything else thrown is `Internal`. */
 const ADDON_CODES = new Set<string>(['InvalidParams', 'NotFound', 'NotDirectory', 'PermissionDenied', 'Refused', 'Binary', 'Frozen', 'Stale', 'Io', 'Cancelled', 'NoDocument', 'Memory'])
 
+/** A canonical UUID v4, as `randomUUID` makes them. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 type Params = Record<string, unknown>
 const codeOf = (e: unknown): unknown => (e as { code?: unknown } | null)?.code
 
@@ -333,7 +335,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     if (!isRecord(p.ticket)) throw new Refusal('InvalidParams', 'ticket must be a saved-location ticket', 'ticket')
     const ticketSession = int(p.ticket, 'session', 'ticket.session')
     const id = p.ticket.id
-    if (typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id))
+    if (typeof id !== 'string' || !UUID.test(id))
       throw new Refusal('InvalidParams', 'ticket.id must be an opaque UUID', 'ticket.id')
     return { session: ticketSession, id }
   }
@@ -365,8 +367,9 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     for (const pending of pendingViews.values()) bytes += pending.bytes
     return bytes
   }
-  const account = (bytes = viewBytes(), hostBytes = surfaceHostBytes): boolean => {
-    const total = bytes + workspaceBytes + savedHostBytes + rootHostBytes + hostBytes
+  /** Plan C1: reserves the core host's whole share of the ledger. A caller passes the terms it's about to change. */
+  const account = ({ views = viewBytes(), workspace = workspaceBytes, savedHost = savedHostBytes, rootHost = rootHostBytes, surfaceHost = surfaceHostBytes } = {}): boolean => {
+    const total = views + workspace + savedHost + rootHost + surfaceHost
     return Number.isSafeInteger(total) && addon.reserveCache(total)
   }
   const surfaceRef = (value: unknown): SurfaceState => {
@@ -393,7 +396,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   const reserveTable = (surfaceCount: number, views: number, pending: number, bytes = viewBytes()): boolean => {
     const nextSurfaces = Math.max(surfacePeak, surfaceCount), nextViews = Math.max(viewPeak, views), nextPending = Math.max(pendingPeak, pending)
     const hostBytes = 3 * ((64 << 10) + 4096 * nextSurfaces + 1024 * (nextViews + nextPending))
-    if ((hostBytes !== surfaceHostBytes || bytes !== viewBytes()) && !account(bytes, hostBytes)) return false
+    if ((hostBytes !== surfaceHostBytes || bytes !== viewBytes()) && !account({ views: bytes, surfaceHost: hostBytes })) return false
     surfacePeak = nextSurfaces; viewPeak = nextViews; pendingPeak = nextPending; surfaceHostBytes = hostBytes
     return true
   }
@@ -538,7 +541,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     return findLease(lease.ref)
   }
   const csvInteractionId = (value: unknown): string => {
-    if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value))
+    if (typeof value !== 'string' || !UUID.test(value))
       throw new Refusal('InvalidParams', 'interactionId must be a Grid UUID', 'interactionId')
     return value
   }
@@ -1207,7 +1210,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     },
     activate: async (p, req): Promise<Opened> => {
       const [id, gen, count, bytes] = [int(p, 'doc'), int(p, 'gen'), int(p, 'count'), int(p, 'bytes')]
-      if (p.activationId !== undefined && (typeof p.activationId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(p.activationId)))
+      if (p.activationId !== undefined && (typeof p.activationId !== 'string' || !UUID.test(p.activationId)))
         throw new Refusal('InvalidParams', 'activationId must be a canonical UUID v4', 'activationId')
       const surface = requestSurface(p)
       const doc = ownedDoc(surface, id)
@@ -1240,7 +1243,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       return true
     },
     deactivateActivation: (p): boolean => {
-      if (typeof p.activationId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(p.activationId))
+      if (typeof p.activationId !== 'string' || !UUID.test(p.activationId))
         throw new Refusal('InvalidParams', 'activationId must be a canonical UUID v4', 'activationId')
       const surface = surfaceRef(p.surface)
       const lease = currentLease(surface)
@@ -1284,8 +1287,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       if (!doc.localOnly) return { kind: 'manual', path: doc.path }
       const peak = Math.max(savedPeak, saved.size + 1)
       const bytes = 3 * ((64 << 10) + (16 << 10) * peak)
-      const total = viewBytes() + workspaceBytes + bytes + rootHostBytes + surfaceHostBytes
-      if (!Number.isSafeInteger(total) || !addon.reserveCache(total)) throw new Refusal('Memory', 'the saved-location table cannot grow')
+      if (!account({ savedHost: bytes })) throw new Refusal('Memory', 'the saved-location table cannot grow')
       const previous = savedHostBytes
       savedHostBytes = bytes
       let route: SavedRoute | undefined
@@ -1293,7 +1295,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       try {
         route = doc.saveRoute(gen)
         const id = ticketId()
-        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id) || saved.has(id))
+        if (!UUID.test(id) || saved.has(id))
           throw new Refusal('Refused', 'a unique saved-location identity could not be allocated')
         attempted = true
         savedPeak = peak
@@ -1497,14 +1499,13 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     reserve: (p) => {
       const bytes = int(p, 'bytes')
       const owned = requestedLease(p)
-      if (!owned || !account(viewBytes() - owned.lease.bytes + bytes)) return false
+      if (!owned || !account({ views: viewBytes() - owned.lease.bytes + bytes })) return false
       owned.lease.bytes = bytes
       return true
     },
     reserveWorkspace: (p) => {
       const bytes = int(p, 'bytes')
-      const total = viewBytes() + bytes + savedHostBytes + rootHostBytes + surfaceHostBytes
-      if (!Number.isSafeInteger(total) || !addon.reserveCache(total)) return false
+      if (!account({ workspace: bytes })) return false
       workspaceBytes = bytes
       return true
     },
