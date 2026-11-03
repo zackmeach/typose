@@ -143,7 +143,6 @@ export interface CsvPage { ref: CsvRef; rows: CsvRow[]; completeRect: boolean; n
 export interface CsvColumn { column: number; name: string; nameMore: boolean; type: 'text' | 'number' | 'date' | 'boolean' | 'url'; widthUnits: number; pills?: string[] }
 export interface CsvColumnPage { ref: CsvRef; columns: CsvColumn[]; nextColumn?: number; metadataDone: boolean }
 export type CsvLocated = { kind: 'pending' } | { kind: 'located'; dataRow: number; sourceRecord: number; sourceLine: number; span: CsvSpan; column?: number }
-export type CsvSource = { kind: 'pending' } | { kind: 'located'; span: CsvSpan; rawLine: number }
 
 export interface FolderRef { session: number; root: string; node: string }
 export interface FolderRoot { ref: FolderRef; label: string; path: string; identity?: string }
@@ -183,7 +182,6 @@ export interface Methods {
   csvCell: { params: { ref: CsvRef; sourceRecord: number; column: number }; result: CsvCell }
   csvColumns: { params: { ref: CsvRef; start: number; count: number }; result: CsvColumnPage }
   csvLocate: { params: { ref: CsvRef; rawLine: number } | { ref: CsvRef; sourceOffset: number }; result: CsvLocated }
-  csvSource: { params: { ref: CsvRef; sourceRecord: number; column?: number }; result: CsvSource }
   createSurface: { params: Record<string, never>; result: SurfaceRef }
   /** Close native owners after detached-tree retirement has been paid by the window workspace share. */
   releaseSurface: { params: { surface: SurfaceRef; retiredBytes: number }; result: boolean }

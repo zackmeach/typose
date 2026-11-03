@@ -39,8 +39,7 @@ function setup(path = 'tasks.csv') {
     csvPage: vi.fn(async (): Promise<TestPage> => ({ rows: [], completeRect: true, indexing: false })),
     csvPiece: vi.fn(async () => ({ sourceRecord: 1, column: 0, span: { start: 8, end: 14 }, pieceSpan: { start: 8, end: 14 }, text: '001', map: {}, replacements: 0 })),
     csvColumns: vi.fn(async () => ({ columns: [], metadataDone: false })),
-    csvLocate: vi.fn(async () => ({ kind: 'pending' as const })),
-    csvSource: vi.fn(async () => ({ kind: 'pending' as const }))
+    csvLocate: vi.fn(async () => ({ kind: 'pending' as const }))
   }
   const openDoc = vi.fn(() => doc as unknown as Doc)
   const dispatcher = makeDispatcher({ coreVersion: () => 'test', limits, openDoc, cancelFlag: flag, reserveCache: () => true }, 9, () => {})

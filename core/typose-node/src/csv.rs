@@ -148,12 +148,6 @@ pub struct CsvLocated {
     pub span: Option<CsvSpan>,
     pub column: Option<f64>,
 }
-#[napi(object)]
-pub struct CsvSource {
-    pub kind: String,
-    pub span: Option<CsvSpan>,
-    pub raw_line: Option<f64>,
-}
 
 fn span(s: core_csv::Span) -> CsvSpan {
     CsvSpan { start: s.start as f64, end: s.end as f64 }
@@ -522,28 +516,6 @@ impl Query for ColumnsQuery {
         p
     }
 }
-pub struct SourceQuery {
-    record: u64,
-    column: Option<u64>,
-}
-impl Query for SourceQuery {
-    type Output = CsvSource;
-    type JsValue = CsvSource;
-    fn run(&self, c: &Context) -> std::result::Result<Self::Output, DocError> {
-        let source = if let Some(column) = self.column {
-            c.state.csv.field(c.raw.document(), self.record, column)?
-        } else {
-            c.state.csv.row(c.raw.document(), self.record)?.map(|r| (r.span, r.line))
-        };
-        Ok(match source {
-            Some((s, line)) => CsvSource { kind: "located".into(), span: Some(span(s)), raw_line: Some(line as f64) },
-            None => CsvSource { kind: "pending".into(), span: None, raw_line: None },
-        })
-    }
-    fn convert(&self, p: Self::Output) -> CsvSource {
-        p
-    }
-}
 pub struct LocateQuery {
     line: Option<u64>,
     offset: Option<u64>,
@@ -781,18 +753,6 @@ impl Doc {
             line: line.map(|n| int("line", n)).transpose()?,
             offset: offset.map(|n| int("offset", n)).transpose()?,
         };
-        self.csv_context(generation, revision, cancel, query)
-    }
-    #[napi(ts_return_type = "Promise<CsvSource>")]
-    pub fn csv_source(
-        &self,
-        generation: f64,
-        revision: f64,
-        record: f64,
-        column: Option<f64>,
-        cancel: &Cancel,
-    ) -> std::result::Result<AsyncTask<ReadCsv<SourceQuery>>, Error<Code>> {
-        let query = SourceQuery { record: int("start", record)?, column: column.map(|n| int("start", n)).transpose()? };
         self.csv_context(generation, revision, cancel, query)
     }
 }

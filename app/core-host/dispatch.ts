@@ -19,7 +19,6 @@ import {
   type CsvLocated,
   type CsvPage,
   type CsvRef,
-  type CsvSource,
   type CsvOrderRef,
   type CsvOrderInfo,
   type CsvFindRef,
@@ -1198,18 +1197,6 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         return { kind: 'located', dataRow: csvResultNumber(result.dataRow, 'data row'),
           sourceRecord: csvResultNumber(result.sourceRecord, 'source record'), sourceLine: csvResultNumber(result.sourceLine, 'source line'),
           span: nativeCsvSpan(result.span), ...(result.column == null ? {} : { column: csvResultNumber(result.column, 'column') }) }
-      })
-    },
-    csvSource: (p, req): Promise<CsvSource> => {
-      const ref = csvRef(p.ref)
-      const sourceRecord = csvRequestNumber(p.sourceRecord, 'sourceRecord')
-      const column = p.column === undefined ? undefined : csvRequestNumber(p.column, 'column')
-      const doc = csvForRef(ref)
-      return csvRead(req, ref.doc, ref.gen, ref.revision, async (cancel) => {
-        const result = await doc.csvSource(ref.gen, ref.revision, sourceRecord, column, cancel)
-        if (result.kind === 'pending') return { kind: 'pending' }
-        if (result.kind !== 'located') throw new Refusal('Internal', 'the core returned an invalid CSV source location')
-        return { kind: 'located', span: nativeCsvSpan(result.span), rawLine: csvResultNumber(result.rawLine, 'raw line') }
       })
     },
     networkPath: (p): boolean => {
