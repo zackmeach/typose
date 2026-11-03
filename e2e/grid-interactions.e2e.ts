@@ -1,5 +1,5 @@
 import { expect } from '@playwright/test'
-import { finish, fixture, launch, test } from './app'
+import { finish, fixture, launch, recordClipboard, test } from './app'
 import { closePackaged, launchPackaged, unrequested } from './packaged'
 import { query, ready } from './find-ui'
 
@@ -8,10 +8,8 @@ test('Grid sorts stably, finds in display order and copies full values for range
   const file = fixture('grid-interactions.csv', 'rank,task,notes\r\n10,North,' + long + '\r\n2,South,first creek\r\n2,West,second\r\n')
   const live = await launch({ file })
   // Record the text at the OS boundary in this test process. The user's clipboard is private.
-  await live.app.evaluate(({ clipboard }) => {
-    clipboard.writeText = async value => { (globalThis as { copiedGridText?: string }).copiedGridText = value }
-  })
-  const copied = () => live.app.evaluate(() => (globalThis as { copiedGridText?: string }).copiedGridText?.replace(/\r\n/g, '\n'))
+  const clipboard = await recordClipboard(live.app)
+  const copied = async () => (await clipboard()).at(-1)?.replace(/\r\n/g, '\n')
   const page = live.win
   const card = page.getByRole('region', { name: 'Reader card 1' })
   const grid = card.getByRole('grid', { name: 'CSV grid' })

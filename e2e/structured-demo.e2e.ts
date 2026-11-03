@@ -1,5 +1,5 @@
 import { expect } from '@playwright/test'
-import { fixture, launch, finish, test } from './app'
+import { fixture, launch, finish, recordClipboard, test } from './app'
 import { mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 
@@ -305,21 +305,13 @@ test('CSV sampled metadata adds types, fitted widths and stable pills without re
   } finally { await finish(live) }
 })
 
-/** Main's clipboard writes, recorded instead of reaching the system clipboard. */
-async function recordClipboard(live: Awaited<ReturnType<typeof launch>>): Promise<() => Promise<string[]>> {
-  await live.app.evaluate(({ clipboard }) => {
-    clipboard.writeText = async (value: string) => { const g = globalThis as { copied?: string[] }; g.copied = [...g.copied ?? [], value] }
-  })
-  return () => live.app.evaluate(() => (globalThis as { copied?: string[] }).copied ?? [])
-}
-
 for (const [name, source, value, key] of [
   ['structured-copy.json', '{"name":"café","n":3.10}\n', '"café"', '"name"'],
   ['structured-copy.yaml', 'name: café\nn: 3.10\n', 'café', 'name']
 ] as const) test(`${name.endsWith('.json') ? 'JSON' : 'YAML'} Tree Ctrl+C, Copy value, Copy key and Copy path write source text`, async () => {
   const live = await launch({ hooks: true, file: fixture(name, source) })
   try {
-    const copied = await recordClipboard(live)
+    const copied = await recordClipboard(live.app)
     const card = live.win.getByRole('region', { name: 'Reader card 1' })
     await expect(card.locator('[data-lens="tree"]')).toBeVisible({ timeout: 30_000 })
     const row = card.locator('.tree-row').filter({ hasText: 'name:' })
@@ -339,7 +331,7 @@ test('JSONL Rows Copy record writes the long record’s source text', async () =
   const long = JSON.stringify({ message: 'north pier '.repeat(500) })
   const live = await launch({ hooks: true, file: fixture('structured-copy-record.jsonl', long + '\n{"message":"short"}\n') })
   try {
-    const copied = await recordClipboard(live)
+    const copied = await recordClipboard(live.app)
     const card = live.win.getByRole('region', { name: 'Reader card 1' })
     await expect(card.locator('[data-lens="rows"]')).toBeVisible({ timeout: 30_000 })
     // Rows keeps Copy record in the row's detail.

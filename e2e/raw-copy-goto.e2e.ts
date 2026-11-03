@@ -1,15 +1,13 @@
 import { expect } from '@playwright/test'
-import { finish, fixture, launch, test, waitIndexed, waitOpen } from './app'
+import { finish, fixture, launch, recordClipboard, test, waitIndexed, waitOpen } from './app'
 
 test('Raw Ctrl+A/Ctrl+C copies exact source bytes and Ctrl+G goes to a distant line', async () => {
   const source = Array.from({ length: 240 }, (_, index) => `line ${index + 1} · café`).join('\r\n') + '\r\n'
   const file = fixture('raw-copy-goto.txt', source)
   const live = await launch({ file, hooks: true })
   try {
-    await live.app.evaluate(({ clipboard }) => {
-      clipboard.writeText = async value => { (globalThis as { copiedRawSource?: string }).copiedRawSource = value }
-    })
-    const copied = () => live.app.evaluate(() => (globalThis as { copiedRawSource?: string }).copiedRawSource)
+    const clipboard = await recordClipboard(live.app)
+    const copied = async () => (await clipboard()).at(-1)
     await waitOpen(live.win)
     await waitIndexed(live.win)
     const scroller = live.win.locator('.vl-scroller')

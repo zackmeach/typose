@@ -1,5 +1,5 @@
 import { expect } from '@playwright/test'
-import { type TestHooks, finish, fixture, launch, test } from './app'
+import { type TestHooks, finish, fixture, launch, recordClipboard, test } from './app'
 import { ready } from './find-ui'
 import { writeFileSync } from 'node:fs'
 
@@ -8,10 +8,8 @@ test('Rendered Ctrl+A and partial selections copy source markup, entities and cu
   const file = fixture('rendered-copy.md', source)
   const live = await launch({ file, hooks: true })
   try {
-    await live.app.evaluate(({ clipboard }) => {
-      clipboard.writeText = async value => { (globalThis as { copiedSource?: string }).copiedSource = value }
-    })
-    const copied = () => live.app.evaluate(() => (globalThis as { copiedSource?: string }).copiedSource)
+    const clipboard = await recordClipboard(live.app)
+    const copied = async () => (await clipboard()).at(-1)
     const card = live.win.getByRole('region', { name: 'Reader card 1' })
     const scroller = card.locator('.md-scroller')
     await expect(scroller).toBeVisible(ready)

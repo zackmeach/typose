@@ -250,6 +250,14 @@ export function fixturesGen(...args: string[]): void {
   execFileSync('cargo', ['run', '--release', '-q', '-p', 'fixtures-gen', '--', ...args], { cwd: resolve(__dirname, '../core'), stdio: 'inherit' })
 }
 
+/** Main's clipboard writes, recorded instead of reaching the system clipboard (the user's is private). */
+export async function recordClipboard(app: ElectronApplication): Promise<() => Promise<string[]>> {
+  await app.evaluate(({ clipboard }) => {
+    clipboard.writeText = async (value: string) => { const g = globalThis as { copied?: string[] }; g.copied = [...g.copied ?? [], value] }
+  })
+  return () => app.evaluate(() => (globalThis as { copied?: string[] }).copied ?? [])
+}
+
 /** Runs netlog-assert.mjs on a log, as CI does. */
 export function assertNetLog(log: string): string {
   expect(statSync(log).size).toBeGreaterThan(0) // a NetLog always holds metadata; emptiness isn't the test
