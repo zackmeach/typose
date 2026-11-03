@@ -37,9 +37,8 @@ fn main() -> std::io::Result<()> {
             eprintln!("{out}: {n} sections");
         }
         Some("json") => {
-            let shape = flag("--shape").unwrap_or_else(|| "records".into());
-            let n = fixtures_gen::json_doc(&mut w, &shape, num("--bytes", 1 << 30))?;
-            eprintln!("{out}: {n} elements ({shape})");
+            let n = fixtures_gen::json_doc(&mut w, num("--bytes", 1 << 30))?;
+            eprintln!("{out}: {n} elements");
         }
         other => panic!("unknown fixture kind {other:?}"),
     }

@@ -210,7 +210,7 @@ const NAMED: [format: string, args: string[]][] = [
   ['md', ['md']],
   ['csv', ['csv']],
   ['tsv', ['tsv']],
-  ['json', ['json', '--shape', 'records']],
+  ['json', ['json']],
   ['jsonl', ['jsonl', '--line', String(LINE)]],
   ['yaml', ['yaml']]
 ]
