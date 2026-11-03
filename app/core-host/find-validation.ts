@@ -1,17 +1,17 @@
 import type { SourceHit, CsvFindHit } from '../shared/protocol'
+import { isRecord, isValid } from './numbers'
 
 const invalid = (): never => { throw Object.assign(new Error('the core returned invalid Find data'), { code: 'Internal' }) }
-const record = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 export function findNumber(v: unknown, max = Number.MAX_SAFE_INTEGER): number {
-  if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0 || v > max) invalid()
+  if (!isValid(v, 0, max)) invalid()
   return v as number
 }
 export function findProgress(v: unknown): { count: number; complete: boolean } {
-  if (!record(v) || typeof v.complete !== 'boolean') return invalid()
+  if (!isRecord(v) || typeof v.complete !== 'boolean') return invalid()
   return { count: findNumber(v.count), complete: v.complete }
 }
 export function sourceHit(v: unknown, size: number): SourceHit {
-  if (!record(v) || typeof v.text !== 'string' || v.text.length > 32 << 10 || !record(v.map)) return invalid()
+  if (!isRecord(v) || typeof v.text !== 'string' || v.text.length > 32 << 10 || !isRecord(v.map)) return invalid()
   const start = findNumber(v.start, size), end = findNumber(v.end, size)
   const line = findNumber(v.line), lineStart = findNumber(v.lineStart, start)
   const matchStart = findNumber(v.matchStart, v.text.length), matchEnd = findNumber(v.matchEnd, v.text.length)
@@ -50,7 +50,7 @@ export function sourceHits(v: unknown, size: number): SourceHit[] {
   })
 }
 export function csvFindHit(v: unknown, size: number): CsvFindHit {
-  if (!record(v)) return invalid()
+  if (!isRecord(v)) return invalid()
   const start = findNumber(v.start, size), end = findNumber(v.end, size)
   if (end <= start) return invalid()
   let excerpt: Pick<CsvFindHit, 'text' | 'matchStart' | 'matchEnd'> = {}

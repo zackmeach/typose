@@ -50,7 +50,7 @@ import {
   type ViewRef,
   type StructuredRef
 } from '../shared/protocol'
-import { isValid } from './numbers'
+import { isRecord, isValid } from './numbers'
 import { boundedLink, decodedLocalTarget, localTarget } from './local-target'
 import { isExecutable } from '../shared/handoff'
 import { structuredChildren, structuredColumns, structuredInfo, structuredRows } from './structured-validation'
@@ -99,7 +99,6 @@ class Refusal extends Error {
 const ADDON_CODES = new Set<string>(['InvalidParams', 'NotFound', 'NotDirectory', 'PermissionDenied', 'Refused', 'Binary', 'Frozen', 'Stale', 'Io', 'Cancelled', 'NoDocument', 'Memory'])
 
 type Params = Record<string, unknown>
-const isRecord = (v: unknown): v is Params => typeof v === 'object' && v !== null && !Array.isArray(v)
 const codeOf = (e: unknown): unknown => (e as { code?: unknown } | null)?.code
 
 export function makeDispatcher(addon: Addon, session: number, emit: (event: ProgressEvent) => void, ticketId: () => string = randomUUID): ((data: unknown) => Promise<Response>) & { handoffPath(subject: unknown): string } {

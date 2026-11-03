@@ -4,3 +4,6 @@ export const HOSTILE: readonly unknown[] = [NaN, Infinity, -Infinity, -1, 0.5, 2
 /** C4's rule: a JS number that is a safe integer within `[min, max]`. Checked before any conversion; never clamped. */
 export const isValid = (v: unknown, min: number, max: number): v is number =>
   typeof v === 'number' && Number.isSafeInteger(v) && v >= min && v <= max
+
+/** A plain object: neither null nor an array. */
+export const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
