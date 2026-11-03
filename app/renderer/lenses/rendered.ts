@@ -231,9 +231,10 @@ export class RenderedLens {
       const selected = renderedSelection(this.column, window.getSelection())
       return selected?.start === start && selected?.end === end
     }
-    this.copyStatus.textContent = 'Preparing source copy…'
-    // The queue starts this copy only once the one it cancelled has released its share.
+    // The queue starts this copy only once the one it cancelled has released its share, and only then says so: one
+    // cancelled while it waits leaves the last copy's status standing.
     return this.copies.run(token, async (current, signal) => {
+      this.copyStatus.textContent = 'Preparing source copy…'
       try {
         const copied = await copySourceSpan({
           valid: () => current() && valid(),

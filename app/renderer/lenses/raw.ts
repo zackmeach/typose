@@ -263,9 +263,10 @@ export class RawLens {
       return !!current && current.startContainer === selection?.startContainer && current.startOffset === selection?.startOffset &&
         current.endContainer === selection?.endContainer && current.endOffset === selection?.endOffset && this.selectionStamp(current) === selectionStamp
     }
-    this.options.notice?.('Preparing copy…')
-    // The queue starts this copy only once the one it cancelled has released its share.
+    // The queue starts this copy only once the one it cancelled has released its share, and only then says so: one
+    // cancelled while it waits leaves the last copy's notice standing.
     return this.copies.run(token, async (current, signal) => {
+      this.options.notice?.('Preparing copy…')
       try {
         const copied = await copySourceSpan({
           valid: () => current() && !this.stopped && !this.yielded && this.options.budget?.current(generation) !== false && sameSelection(),
