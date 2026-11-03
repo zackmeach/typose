@@ -769,9 +769,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     let plan: ReloadReservation | undefined
     let owner: LensBudget | null = null
     let captured: CapturedLocation | undefined
-    navigating.current = true
-    setNavigationBusy(true)
-    pendingHistoryBytes.current = historyDraftBytes(l)
+    navigate(l)
     try {
       // Count the pending path in every concurrent precharge, before any native holder changes.
       const paid = await metadata(async (current) => workspace.selected(selection) && latest.current.card.kind === 'open' &&
@@ -832,10 +830,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       if (captured) releaseLocation(captured)
       if (pendingWorkspace.current.get(id) === pending) pendingWorkspace.current.delete(id)
       if (plan) owner?.cancelTransition(plan)
-      pendingHistoryBytes.current = 0
-      navigating.current = false
-      setNavigationBusy(false)
-      releaseEmptyWorkspace()
+      navigated()
     }
   }
 
@@ -857,9 +852,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   async function openDerived(source: Opened, target: string, resolvedPath: string): Promise<boolean> {
     const l = latest.current.limits, ownerSession = currentSession.current
     if (!l || !surface.current || !recharged.current || closing.current || navigating.current || source.view?.session !== ownerSession) return false
-    navigating.current = true
-    setNavigationBusy(true)
-    pendingHistoryBytes.current = historyDraftBytes(l)
+    navigate(l)
     let candidate: Opened | undefined
     const owner = budget.current
     let plan: ReloadReservation | undefined
@@ -892,16 +885,17 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       if (candidate && ownerSession === currentSession.current) void core.call('close', { surface: surface.current!, doc: candidate.doc }).catch(() => {})
       if (plan) owner?.cancelTransition(plan)
       lens.current?.resumeReservation()
-      pendingHistoryBytes.current = 0
-      navigating.current = false
-      setNavigationBusy(false)
-      releaseEmptyWorkspace()
+      navigated()
     }
   }
 
   // The workspace's live + two retired graph allowance also pays the draft firstPage while source DOM stays mounted.
   const historyDraftBytes = (l: Limits, page = true) => 16_384 + 128 * 32_767 + (page ?
     256 * 16_384 + 2 * l.pageWireMax + 1024 * l.maxItems + (64 << 10) : 0)
+
+  /** Link, folder and history opens hold the card busy and pay a draft history entry until they end. */
+  function navigate(l: Limits): void { navigating.current = true; setNavigationBusy(true); pendingHistoryBytes.current = historyDraftBytes(l) }
+  function navigated(): void { pendingHistoryBytes.current = 0; navigating.current = false; setNavigationBusy(false); releaseEmptyWorkspace() }
 
   function releaseLocation(location: CapturedLocation): void {
     if (location.kind === 'derived' && location.ticket.session === currentSession.current)
@@ -926,9 +920,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       setWorkspaceNotice('Cannot reopen this local file after the core restarted · select the file again using Open file…')
       return false
     }
-    navigating.current = true
-    setNavigationBusy(true)
-    pendingHistoryBytes.current = historyDraftBytes(l)
+    navigate(l)
     const ownerSession = currentSession.current
     const source = replace ? workspace.tab(replace) : undefined
     let candidate: Opened | undefined
@@ -982,10 +974,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     } finally {
       if (candidate && ownerSession === currentSession.current) void core.call('close', { surface: surface.current!, doc: candidate.doc }).catch(() => {})
       if (plan) owner?.cancelTransition(plan)
-      pendingHistoryBytes.current = 0
-      navigating.current = false
-      setNavigationBusy(false)
-      releaseEmptyWorkspace()
+      navigated()
     }
   }
 
@@ -1099,9 +1088,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     const existing = workspace.getSnapshot().tabs.find(tab => tab.session === currentSession.current && tab.card.kind === 'open' &&
       tab.card.opened.folder?.root === rootId && tab.card.opened.folder.node === nodeId)
     if (existing) { await selectTab(existing.id); return }
-    navigating.current = true
-    setNavigationBusy(true)
-    pendingHistoryBytes.current = historyDraftBytes(l)
+    navigate(l)
     const ownerSession = currentSession.current
     let candidate: Opened | undefined
     let owner: LensBudget | null = null
@@ -1133,10 +1120,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     } finally {
       if (candidate && ownerSession === currentSession.current) void core.call('close', { surface: surface.current!, doc: candidate.doc }).catch(() => {})
       if (plan) owner?.cancelTransition(plan)
-      pendingHistoryBytes.current = 0
-      navigating.current = false
-      setNavigationBusy(false)
-      releaseEmptyWorkspace()
+      navigated()
     }
   }
 
