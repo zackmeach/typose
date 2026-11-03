@@ -478,16 +478,13 @@ void app.whenReady().then(() => {
       return await new Promise<PrintDocumentResult>(resolve => {
         try {
           target.webContents.print({ silent: false, printBackground: true, pageSize: 'Letter', margins: { marginType: 'none' } }, success => {
-            if (!target.isDestroyed()) target.close()
             resolve(success ? { kind: 'printed', pages: physicalPages } : { kind: 'cancelled' })
           })
         } catch {
-          if (!target.isDestroyed()) target.close()
           resolve({ kind: 'refused', reason: 'The OS print dialog could not be opened' })
         }
       })
     } catch {
-      if (!target.isDestroyed()) target.close()
       return { kind: 'refused', reason: 'The print document could not be prepared' } satisfies PrintDocumentResult
     } finally {
       if (!target.isDestroyed()) target.close()
