@@ -1152,6 +1152,7 @@ name = "typose-core"
 version = "0.0.0"
 dependencies = [
  "ammonia",
+ "crc32fast",
  "csv-core",
  "encoding_rs",
  "fdeflate",

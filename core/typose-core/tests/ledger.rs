@@ -589,14 +589,8 @@ fn corrupt_png_adler(source: &[u8]) -> Vec<u8> {
     }
     let (at, len) = idat.unwrap();
     source[at + 8 + len - 1] ^= 1;
-    let mut crc = u32::MAX;
-    for byte in &source[at + 4..at + 8 + len] {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (0xedb8_8320 & (0_u32.wrapping_sub(crc & 1)));
-        }
-    }
-    source[at + 8 + len..at + 12 + len].copy_from_slice(&(!crc).to_be_bytes());
+    let crc = crc32fast::hash(&source[at + 4..at + 8 + len]);
+    source[at + 8 + len..at + 12 + len].copy_from_slice(&crc.to_be_bytes());
     source
 }
 
