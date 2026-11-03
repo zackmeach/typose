@@ -1,8 +1,7 @@
-import AxeBuilder from '@axe-core/playwright'
 import { type Page, expect } from '@playwright/test'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { FIXTURES, type TestHooks, debugStats, expectReleasedDocuments, finish, fixture, killCore, launch, osFocus, pressAsOS, stubOpenDialog, test, visibleRows, waitIndexed, waitOpen } from './app'
+import { FIXTURES, type TestHooks, axe, debugStats, expectReleasedDocuments, finish, fixture, killCore, launch, osFocus, pressAsOS, stubOpenDialog, test, visibleRows, waitIndexed, waitOpen } from './app'
 import { processMemory } from './memory'
 import { workspaceCharge } from '../app/renderer/workspace-budget'
 
@@ -134,7 +133,7 @@ test('file pills disambiguate names, support keyboard selection and have no axe 
   const fileTabs = list!.childIds!.map((id) => nodes.get(id)!)
   expect(fileTabs.map((node) => node.name?.value)).toEqual(['README.md · tabs-one', 'README.md · tabs-two'])
   expect(fileTabs.flatMap((node) => node.childIds ?? []).some((id) => nodes.get(id)?.role?.value === 'button')).toBe(false)
-  expect((await new AxeBuilder({ page: win }).setLegacyMode().analyze()).violations).toEqual([])
+  expect(await axe(win)).toEqual([])
   await tab(win, 'README.md · tabs-one').focus()
   await win.keyboard.press('Tab')
   await expect(win.locator('.file-pill[data-selected] .file-tab-close')).toBeFocused()

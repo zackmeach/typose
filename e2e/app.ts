@@ -2,6 +2,7 @@
 // a private --user-data-dir, so runs never share the app profile, and records the main process's externally
 // observed exit status. `finish` keeps each run's lifecycle log, exit status and any new dumps (plan C9); a test
 // that fails before calling it gets the same from the `test` exported here.
+import AxeBuilder from '@axe-core/playwright'
 import { type ElectronApplication, type Page, test as base, _electron as electron, expect } from '@playwright/test'
 import { spawnSync } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs'
@@ -229,6 +230,13 @@ export function killCore(l: Launched): { session: number; at: number } {
   const at = Date.now()
   process.kill(spawned.utilityPid as number)
   return { session: spawned.session as number, at }
+}
+
+/** axe-core on the page: every violation, of any impact, as `impact id: targets`. */
+export async function axe(win: Page): Promise<string[]> {
+  // Legacy mode: the default run opens a second page for its final step, which Electron's context refuses (spike B).
+  const { violations } = await new AxeBuilder({ page: win }).setLegacyMode().analyze()
+  return violations.map((v) => `${v.impact} ${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(' | ')}`)
 }
 
 /** Runs netlog-assert.mjs on a log, as CI does. */

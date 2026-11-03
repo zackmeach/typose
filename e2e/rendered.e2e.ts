@@ -1,6 +1,5 @@
 // Plan (Rendered Markdown slice) PR 2: the Rendered lens, the switch, file states, accessibility and the
 // sanitizer's DOM. Links stay inert. Speculative DNS is off; the control withholds that and shows the NetLog catch it.
-import AxeBuilder from '@axe-core/playwright'
 import { type Page, expect } from '@playwright/test'
 import { spawnSync } from 'node:child_process'
 import { readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -8,7 +7,7 @@ import { join } from 'node:path'
 import { RENDERED_OFF } from '../app/renderer/card'
 import { viewportCap } from '../app/renderer/lenses/page-cache'
 import type { Limits } from '../app/shared/protocol'
-import { type TestHooks, assertNetLog, debugStats, expectReleasedDocuments, finish, fixture, killCore, launch, stubExternal, test, visibleRows, waitIndexed, waitOpen, workspaceHeld } from './app'
+import { type TestHooks, assertNetLog, axe, debugStats, expectReleasedDocuments, finish, fixture, killCore, launch, stubExternal, test, visibleRows, waitIndexed, waitOpen, workspaceHeld } from './app'
 
 type ReserveProbe = { held: boolean; bRendered: boolean; release?: () => void }
 type ShrinkProbe = { held: boolean; bytes?: number; release?: () => void }
@@ -114,11 +113,6 @@ async function topBlock(win: Page): Promise<{ line: number; end: number }> {
     const line = Number(block.dataset.line) + 1
     return { line, end: line + Number(block.dataset.lines) - 1 }
   })
-}
-
-async function axe(win: Page): Promise<string[]> {
-  const { violations } = await new AxeBuilder({ page: win }).setLegacyMode().analyze()
-  return violations.map((v) => `${v.impact} ${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(' | ')}`)
 }
 
 test('a Markdown file opens in Rendered, and Raw keeps the top line within one block', async () => {
