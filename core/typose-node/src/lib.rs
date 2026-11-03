@@ -87,7 +87,7 @@ fn int(field: &str, x: f64) -> std::result::Result<u64, Error<Code>> {
 
 #[napi]
 pub fn core_version() -> String {
-    typose_core::version().to_string()
+    env!("CARGO_PKG_VERSION").to_string() // the workspace version, typose-core's too
 }
 
 /// Whether `path` reaches a network share, judged without opening anything (`store::network`).
