@@ -1,7 +1,7 @@
 //! Verified structured lenses over the span-only JSON scanner.
 use crate::budget::Reservation;
 use crate::doc::{DocError, Document};
-use crate::json::{self, JsonIndex, ScanOptions};
+use crate::json::{self, JsonIndex};
 use crate::store::StoreError;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -63,8 +63,7 @@ impl JsonTree {
         cancel: &AtomicBool,
     ) -> Result<Self, DocError> {
         let _temp = Reservation::new(TEMP_BYTES).map_err(DocError::Memory)?;
-        let options = ScanOptions { jsonc, ..ScanOptions::default() };
-        let index = doc.verified(generation, |store| json::scan(store, range, &options, cancel))?;
+        let index = doc.verified(generation, |store| json::scan(store, range, jsonc, cancel))?;
         if let Some(error) = index.error {
             match error.kind {
                 json::ErrorKind::Memory(e) => return Err(DocError::Memory(e)),

@@ -5,7 +5,7 @@ use std::sync::{Mutex, RwLock};
 
 use crate::budget::Reservation;
 use crate::doc::{DocError, Document};
-use crate::json::{self, Child, JsonIndex, Kind, ScanOptions, Span};
+use crate::json::{self, Child, JsonIndex, Kind, Span};
 use crate::store::{ByteStore, StoreError, cancelled};
 
 const TEMP_BYTES: u64 = 16 << 20;
@@ -100,7 +100,6 @@ impl Index {
         flag: &AtomicBool,
         _temp: Reservation,
     ) -> Result<(), DocError> {
-        let options = ScanOptions { jsonc: false, ..ScanOptions::default() };
         let complete = doc.verified(generation, |store| {
             let (mut at, mut from, mut line) = (0, 0, 0);
             while at < store.len() {
@@ -109,7 +108,7 @@ impl Index {
                 }
                 let bytes = store.read(at, (at + 65_536).min(store.len()))?;
                 for end in memchr::memchr_iter(b'\n', &bytes).map(|i| at + i as u64 + 1) {
-                    if !self.record(store, Span { start: from, end }, line, &options, flag)? {
+                    if !self.record(store, Span { start: from, end }, line, flag)? {
                         return Ok(false);
                     }
                     from = end;
@@ -118,9 +117,7 @@ impl Index {
                 at += bytes.len() as u64;
                 self.progress.write().unwrap().bytes = at;
             }
-            if from < store.len()
-                && !self.record(store, Span { start: from, end: store.len() }, line, &options, flag)?
-            {
+            if from < store.len() && !self.record(store, Span { start: from, end: store.len() }, line, flag)? {
                 return Ok(false);
             }
             Ok(true)
@@ -128,16 +125,9 @@ impl Index {
         self.progress.write().unwrap().done = complete;
         Ok(())
     }
-    fn record(
-        &self,
-        store: &ByteStore,
-        span: Span,
-        line: u64,
-        options: &ScanOptions,
-        flag: &AtomicBool,
-    ) -> Result<bool, StoreError> {
+    fn record(&self, store: &ByteStore, span: Span, line: u64, flag: &AtomicBool) -> Result<bool, StoreError> {
         let body = content(store, span)?;
-        let index = json::scan(store, body.start..body.end, options, flag)?;
+        let index = json::scan(store, body.start..body.end, false, flag)?;
         if let Some(error) = index.error {
             match error.kind {
                 json::ErrorKind::Cancelled => return Err(StoreError::Cancelled),
@@ -319,7 +309,7 @@ mod tests {
             .verified(1, |store| {
                 let body = content(store, first)?;
                 assert_eq!(body.end, first.end - 2);
-                json::scan(store, body.start..body.end, &ScanOptions::default(), &AtomicBool::new(false))
+                json::scan(store, body.start..body.end, true, &AtomicBool::new(false))
             })
             .unwrap()
             .error
