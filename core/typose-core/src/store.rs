@@ -105,8 +105,9 @@ pub fn cancelled() -> bool {
 }
 
 /// Spec §3.3 🔒: device and special files are refused before anything opens them. Opening a named pipe, or on
-/// Windows even stat-ing one, connects to its server, and opening a FIFO blocks. `Ok(Some(why))` is a refusal;
-/// `Err` is the path's own error (missing, permission denied).
+/// Windows even stat-ing one, connects to its server, and opening a FIFO blocks. `Ok(Some(why))` is a refusal, which
+/// names a folder as one (a launch that names one makes it a root); `Err` is the path's own error (missing, permission
+/// denied).
 pub fn refusal(path: &Path) -> io::Result<Option<&'static str>> {
     if let Some(why) = route_refusal(path)? {
         return Ok(Some(why));
@@ -117,7 +118,7 @@ pub fn refusal(path: &Path) -> io::Result<Option<&'static str>> {
     let meta = query_open(path, 0)?.metadata()?;
     #[cfg(unix)]
     let meta = std::fs::metadata(path)?;
-    Ok((!meta.is_file()).then_some("not a regular file"))
+    Ok((!meta.is_file()).then_some(if meta.is_dir() { "a folder" } else { "not a regular file" }))
 }
 
 /// Opens `path` for queries only, as `std::fs::metadata` does (access 0, so nothing is locked or read; backup

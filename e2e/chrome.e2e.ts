@@ -1,4 +1,4 @@
-import { menuLabels } from './menu-fixture'
+import { SHOW, menuLabels } from './menu-fixture'
 // Plan PR 7's title bars and menus (brief §3.1, §3.2; spec §9): WCO on Windows, the traffic lights on macOS, ☰, and
 // Electron's default menu gone.
 import { expect } from '@playwright/test'
@@ -131,7 +131,8 @@ test('macOS: the shared command table drives the native menu, and Cmd+R reloads 
   // dead-key test below is Windows' and Linux's.)
   const menu = await appMenu(l)
   expect(menu?.map((m) => m.role ?? m.label)).toEqual(['appmenu', 'File', 'editmenu', 'windowmenu'])
-  expect(menu?.[1].items).toEqual([...menuLabels('Exit').slice(0, -1), 'close'])
+  // #43: a native menu click carries no web gesture for a hand-off's token, so the two hand-offs are not in it.
+  expect(menu?.[1].items).toEqual([...menuLabels('Exit').slice(0, -1).filter((label) => label !== SHOW && label !== 'Open with default app'), 'close'])
   await win.evaluate(() => Object.assign(window, { pageLifetime: 'the first page' }))
   await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '1')
   await pressAsOS(l, 'R', ['meta'])

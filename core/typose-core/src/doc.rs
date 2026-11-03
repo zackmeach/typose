@@ -722,6 +722,7 @@ mod tests {
             })
             .collect();
         assert!(opened.is_empty(), "not refused: {opened:#?}");
+        assert!(matches!(Document::open(&std::env::temp_dir()), Err(DocError::Refused(why)) if why == "a folder"));
     }
 
     /// A named-pipe server that can tell whether a client ever connected: in `PIPE_NOWAIT` mode
@@ -894,6 +895,7 @@ mod tests {
         let doc = Document::open(&scratch.0.join("j").join("f.txt")).unwrap();
         assert_eq!(doc.read(1, 0, 14).unwrap(), b"through a link");
         drop(doc);
+        assert!(matches!(Document::open(&scratch.0.join("j")), Err(DocError::Refused(why)) if why == "a folder"));
         let link = scratch.0.join("s.txt");
         match std::os::windows::fs::symlink_file(real.join("f.txt"), &link) {
             Ok(()) => assert_eq!(Document::open(&link).unwrap().read(1, 0, 7).unwrap(), b"through"),
@@ -1083,7 +1085,9 @@ mod tests {
         assert!(std::process::Command::new("mkfifo").arg(&path).status().unwrap().success());
         let (tx, rx) = std::sync::mpsc::channel();
         let fifo = path.clone();
-        std::thread::spawn(move || tx.send(matches!(Document::open(&fifo), Err(DocError::Refused(_)))));
+        std::thread::spawn(move || {
+            tx.send(matches!(Document::open(&fifo), Err(DocError::Refused(why)) if why == "not a regular file"))
+        });
         let refused = rx.recv_timeout(std::time::Duration::from_secs(5));
         fs::remove_file(&path).unwrap();
         assert_eq!(refused, Ok(true), "a FIFO must be refused, not opened (an open blocks)");
