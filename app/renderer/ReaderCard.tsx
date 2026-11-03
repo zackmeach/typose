@@ -1389,6 +1389,15 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
           setCard((c) => (c.kind === 'open' && c.opened === card.opened ? { ...c, lens: 'raw' } : c))
         }} />
     ) : message
+  // Lens Tabs wrap this only when the card has lenses.
+  const chrome = <>
+    {header}
+    {progress}
+    {banner}
+    <div className="card-body">
+      {shown.lenses ? lensOptions.map(option => <TabPanel key={option.id} id={option.id} className="lens-panel">{shown.lenses?.showing === option.id ? body : null}</TabPanel>) : body}
+    </div>
+  </>
 
   async function captureSession(): Promise<SessionCard | null> {
     const before = workspace.getSnapshot()
@@ -1650,34 +1659,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
             </Dialog>
           </Modal>
         </ModalOverlay> : null}
-        {card.kind === 'open' ? (
-          <>
-            {shown.lenses ? (
-              <Tabs key={secondaryLens} className="card-tabs" selectedKey={shown.lenses.showing} onSelectionChange={onLens}>
-                {header}
-                {progress}
-                {banner}
-                <div className="card-body">
-                  {lensOptions.map(option => <TabPanel key={option.id} id={option.id} className="lens-panel">{shown.lenses?.showing === option.id ? body : null}</TabPanel>)}
-                </div>
-              </Tabs>
-            ) : (
-              <>
-                {header}
-                {progress}
-                {banner}
-                <div className="card-body">{body}</div>
-              </>
-            )}
-          </>
-        ) : (
-          <>
-            {header}
-            {progress}
-            {banner}
-            <div className="card-body">{message}</div>
-          </>
-        )}
+        {shown.lenses ? <Tabs key={secondaryLens} className="card-tabs" selectedKey={shown.lenses.showing} onSelectionChange={onLens}>{chrome}</Tabs> : chrome}
         </div>
       </div>
   </section>
