@@ -69,6 +69,7 @@ async function closeHooks(live: Awaited<ReturnType<typeof launch>>): Promise<voi
 }
 
 test('local-link preview closes with button, Escape, or Ctrl+W and transfers its native document when promoted', async () => {
+  test.skip(process.platform !== 'win32', 'local capability backend is currently Windows-only')
   const { source: sourcePath } = makeLinkFixtures('peek-source-hooks.md', 'peek-destination-hooks.md')
   let live: Awaited<ReturnType<typeof launch>> | undefined
   try {
@@ -169,6 +170,7 @@ test('local-link preview closes with button, Escape, or Ctrl+W and transfers its
 })
 
 test('production package opens a relative tasks.csv as a Grid peek and to the side', async () => {
+  test.skip(process.platform !== 'win32', 'local capability backend is currently Windows-only')
   const directory = mkdtempSync(join(FIXTURES, 'csv-link-peek-'))
   const source = join(directory, 'source.md')
   writeFileSync(source, `# Peek source\n\nSource place remains visible\n\n[Preview destination](tasks.csv)\n`)

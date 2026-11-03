@@ -202,8 +202,9 @@ test('a file or folder that failed to open is not recorded as a recent', async (
   await expect(live.win.getByRole('tab', { name: 'no-such-file.md', exact: true })).toBeVisible()
   const folderDialog = (path: string) => live.app.evaluate(({ ipcMain }, path) => { ipcMain.removeHandler('folder-dialog'); ipcMain.handle('folder-dialog', () => path) }, path)
   await folderDialog(missingFolder)
-  await live.win.getByRole('button', { name: 'Menu', exact: true }).click()
-  await live.win.getByRole('menuitem', { name: 'Open folder…', exact: true }).click()
+  await live.win.keyboard.press(modifier + '+K') // the palette: macOS has the native menu, not the ☰
+  await live.win.getByRole('combobox', { name: 'Search commands' }).fill('Open folder')
+  await live.win.keyboard.press('Enter')
   await expect(live.win.getByText(/Cannot add folder/)).toBeVisible()
   if (FOLDERS) {
     await folderDialog(good)
@@ -322,7 +323,7 @@ test('Settings has a level-one heading and the size fields can be typed into', a
   await expect(live.win.getByRole('heading', { level: 1, name: /Settings/ })).toBeVisible()
   const size = live.win.getByLabel('Interface size', { exact: true })
   await size.click()
-  await live.win.keyboard.press('Control+A')
+  await live.win.keyboard.press(modifier + '+A')
   await live.win.keyboard.type('16')
   await expect(size).toHaveValue('16')
   await expect(live.win.getByRole('alert')).toHaveCount(0)

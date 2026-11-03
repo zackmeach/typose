@@ -895,6 +895,7 @@ mod tests {
         let doc = Document::open(&scratch.0.join("j").join("f.txt")).unwrap();
         assert_eq!(doc.read(1, 0, 14).unwrap(), b"through a link");
         drop(doc);
+        assert!(matches!(Document::open(&scratch.0.join("j")), Err(DocError::Refused(why)) if why == "a folder"));
         let link = scratch.0.join("s.txt");
         match std::os::windows::fs::symlink_file(real.join("f.txt"), &link) {
             Ok(()) => assert_eq!(Document::open(&link).unwrap().read(1, 0, 7).unwrap(), b"through"),

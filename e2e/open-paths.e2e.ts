@@ -148,14 +148,19 @@ test('a folder named on the command line becomes a sidebar root, and a file besi
 
 test('a FIFO named on the command line stays a refused tab, never a root', async () => {
   test.skip(process.platform === 'win32', 'Windows has no FIFOs')
-  const fifo = join(mkdtempSync(join(tmpdir(), 'typose-fifo-')), 'named.fifo')
-  expect(spawnSync('mkfifo', [fifo]).status).toBe(0)
-  const l = await launch({ file: [fifo] })
-  const { win } = l
-  await expect(win.locator('.card-message p')).toHaveText(`Can't open ${fifo} · refused: not a regular file`, { timeout: 30_000 })
-  await expect(win.getByRole('treeitem')).toHaveCount(0)
-  expect(l.pageErrors).toEqual([])
-  await finish(l)
+  const directory = mkdtempSync(join(tmpdir(), 'typose-fifo-'))
+  const fifo = join(directory, 'named.fifo')
+  try {
+    expect(spawnSync('mkfifo', [fifo]).status).toBe(0)
+    const l = await launch({ file: [fifo] })
+    const { win } = l
+    await expect(win.locator('.card-message p')).toHaveText(`Can't open ${fifo} · refused: not a regular file`, { timeout: 30_000 })
+    await expect(win.getByRole('treeitem')).toHaveCount(0)
+    expect(l.pageErrors).toEqual([])
+    await finish(l)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
 })
 
 test('a second-instance open while Settings shows switches the card back to the opened file, and Wrap lines is a palette command', async () => {
