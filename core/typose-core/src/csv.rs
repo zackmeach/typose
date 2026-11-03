@@ -289,7 +289,7 @@ impl Csv {
                 done: locked,
                 expected_columns: 0,
                 max_columns: 0,
-                metadata: metadata::Metadata::new(),
+                metadata: metadata::Metadata::default(),
                 _charge: charge,
             }),
         })

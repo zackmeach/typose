@@ -93,6 +93,7 @@ pub struct Problem {
     pub line: u64,
     pub record: Option<u64>,
 }
+#[derive(Default)]
 pub struct Metadata {
     pub columns: Vec<ColumnMetadata>,
     pub done: bool,
@@ -101,22 +102,7 @@ pub struct Metadata {
     pending_utf8: Vec<u8>,
     pending_at: u64,
 }
-impl Default for Metadata {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 impl Metadata {
-    pub fn new() -> Self {
-        Self {
-            columns: Vec::new(),
-            done: false,
-            problems: Vec::new(),
-            charge: Reservation::none(),
-            pending_utf8: Vec::with_capacity(4),
-            pending_at: 0,
-        }
-    }
     pub fn charged(&self) -> u64 {
         self.charge.bytes()
     }
@@ -215,7 +201,7 @@ mod tests {
     use super::*;
     #[test]
     fn sample_decisions_freeze_and_keep_first_appearance_order() {
-        let mut metadata = Metadata::new();
+        let mut metadata = Metadata::default();
         for record in 0..1000 {
             metadata.sample(record, 0, false, if record % 2 == 0 { "blue" } else { "red" }, true).unwrap();
             metadata.sample(record, 1, false, "001.20", true).unwrap();
@@ -228,7 +214,7 @@ mod tests {
     }
     #[test]
     fn only_the_first_512_columns_are_sampled_and_charged() {
-        let mut metadata = Metadata::new();
+        let mut metadata = Metadata::default();
         metadata.sample(0, 100_000, false, "far", true).unwrap();
         metadata.sample(0, 3, false, "near", true).unwrap();
         assert_eq!(metadata.columns.len(), 4);
@@ -238,7 +224,7 @@ mod tests {
     }
     #[test]
     fn small_or_high_cardinality_columns_do_not_get_pills() {
-        let mut metadata = Metadata::new();
+        let mut metadata = Metadata::default();
         for record in 0..20 {
             metadata.sample(record, 0, false, &format!("value {record}"), true).unwrap();
         }
@@ -250,7 +236,7 @@ mod tests {
     }
     #[test]
     fn decoding_counts_invalid_sequences_across_boundaries_without_counting_real_replacement_text() {
-        let mut metadata = Metadata::new();
+        let mut metadata = Metadata::default();
         metadata.utf8(b"ok\xef\xbf\xbd\xf0\x9f", 0, false);
         metadata.utf8(b"\x98\x80\xffbad\xe2", 8, false);
         metadata.utf8(b"", 15, true);
