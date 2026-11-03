@@ -27,7 +27,7 @@ export class VirtualList {
     private readonly rowHeight: number,
     private readonly paint: (i: number, el: HTMLDivElement) => void,
     private readonly onRange: (r: { first: number; last: number }) => void,
-    private maxRows = Infinity
+    private maxRows: number
   ) {
     this.element = Object.assign(document.createElement('div'), { className: 'vl-scroller', tabIndex: 0 })
     this.layer = Object.assign(document.createElement('div'), { className: 'vl-layer' })

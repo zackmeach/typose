@@ -112,7 +112,7 @@ function removeCalloutMarker(paragraph: HTMLElement, units: number): void {
  * Enhances only native-generated inert markers; raw HTML never supplies these own tags/attributes. `reserve` grows the
  * lens's extras share; a negative amount returns what a settled job no longer holds.
  */
-export function markdownExtras(root: HTMLElement, current: () => boolean, reserve: (bytes: number) => Promise<boolean> = async () => true): Promise<void> {
+export function markdownExtras(root: HTMLElement, current: () => boolean, reserve: (bytes: number) => Promise<boolean>): Promise<void> {
   for (const pre of root.querySelectorAll<HTMLElement>('pre[data-frontmatter="1"]')) frontmatter(pre)
   for (const quote of root.querySelectorAll<HTMLElement>('blockquote')) {
     const first = quote.querySelector('p')

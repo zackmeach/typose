@@ -53,7 +53,7 @@ function showProblem(el: HTMLElement, tex: string, message: string): void {
  * the caps, the watchdog, the budget) keeps the source with the reason in its tooltip; a TeX error also shows a problem
  * marker (brief §4.6).
  */
-export async function renderMath(el: HTMLElement, tex: string, displayMode = false, admit: (bytes: number) => Promise<boolean> = async () => true): Promise<void> {
+export async function renderMath(el: HTMLElement, tex: string, displayMode: boolean, admit: (bytes: number) => Promise<boolean>): Promise<void> {
   const kept = (why: string) => { el.title = `Math source kept · ${why}` }
   let result: { html: string } | { error: string }
   try { result = await katexJob({ tex, displayMode, maxElements: MATH_MAX_ELEMENTS }) } catch (error) { return kept(error instanceof Error ? error.message : String(error)) }
