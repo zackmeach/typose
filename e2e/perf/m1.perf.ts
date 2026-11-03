@@ -109,7 +109,7 @@ async function launchMissing(file: string, args: string[] = []): Promise<Package
   await l.page!.waitForTimeout(500) // let startup work settle, as Spike A's openIn did (spike-a.e2e.ts:49)
   return l
 }
-const openInApp = (page: Page) => page.keyboard.press((MAC ? 'Meta' : 'Control') + '+R')
+const openInApp = (page: Page) => page.keyboard.press('ControlOrMeta+R')
 
 /** The held-open control: the page's next `open` request reaches the core `hold` ms late (over CDP; no hook). */
 const holdOpen = (page: Page, hold: number) =>
@@ -210,7 +210,7 @@ const NAMED: [format: string, args: string[]][] = [
   ['md', ['md']],
   ['csv', ['csv']],
   ['tsv', ['tsv']],
-  ['json', ['json', '--shape', 'records']],
+  ['json', ['json']],
   ['jsonl', ['jsonl', '--line', String(LINE)]],
   ['yaml', ['yaml']]
 ]

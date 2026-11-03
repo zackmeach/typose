@@ -1,14 +1,5 @@
 // Minimal static fixtures matching the native adapters' supported profiles. No image tool or browser encoder.
-import { deflateSync } from 'node:zlib'
-
-function crc32(bytes: Buffer): number {
-  let crc = 0xffffffff
-  for (const byte of bytes) {
-    crc ^= byte
-    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1))
-  }
-  return (crc ^ 0xffffffff) >>> 0
-}
+import { crc32, deflateSync } from 'node:zlib'
 
 function chunk(kind: string, data: Buffer): Buffer {
   const size = Buffer.alloc(4)

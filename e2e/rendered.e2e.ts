@@ -1,6 +1,5 @@
 // Plan (Rendered Markdown slice) PR 2: the Rendered lens, the switch, file states, accessibility and the
 // sanitizer's DOM. Links stay inert. Speculative DNS is off; the control withholds that and shows the NetLog catch it.
-import AxeBuilder from '@axe-core/playwright'
 import { type Page, expect } from '@playwright/test'
 import { spawnSync } from 'node:child_process'
 import { readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -8,8 +7,7 @@ import { join } from 'node:path'
 import { RENDERED_OFF } from '../app/renderer/card'
 import { viewportCap } from '../app/renderer/lenses/page-cache'
 import type { Limits } from '../app/shared/protocol'
-import { type TestHooks, assertNetLog, debugStats, expectReleasedDocuments, finish, fixture, launch, lifecycle, stubExternal, test, visibleRows, waitIndexed, waitOpen, workspaceHeld } from './app'
-import { command } from './find-ui'
+import { type TestHooks, assertNetLog, axe, debugStats, expectReleasedDocuments, finish, fixture, killCore, launch, stubExternal, test, visibleRows, waitIndexed, waitOpen, waitRendered, workspaceHeld } from './app'
 
 type ReserveProbe = { held: boolean; bRendered: boolean; release?: () => void }
 type ShrinkProbe = { held: boolean; bytes?: number; release?: () => void }
@@ -100,11 +98,6 @@ function corpusFile(): string {
   return fixture('corpus.md', ['# Corpus', '', ...payloads.flatMap(contexts)].join('\n'))
 }
 
-async function waitRendered(win: Page): Promise<void> {
-  await expect(win.locator('.md-scroller')).toBeAttached({ timeout: 30_000 })
-  await expect(win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 60_000 })
-}
-
 /** The block at the top of the Rendered view, and the source lines it covers (1-based, like Raw's gutter). */
 async function topBlock(win: Page): Promise<{ line: number; end: number }> {
   return win.evaluate(() => {
@@ -115,11 +108,6 @@ async function topBlock(win: Page): Promise<{ line: number; end: number }> {
     const line = Number(block.dataset.line) + 1
     return { line, end: line + Number(block.dataset.lines) - 1 }
   })
-}
-
-async function axe(win: Page): Promise<string[]> {
-  const { violations } = await new AxeBuilder({ page: win }).setLegacyMode().analyze()
-  return violations.map((v) => `${v.impact} ${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(' | ')}`)
 }
 
 test('a Markdown file opens in Rendered, and Raw keeps the top line within one block', async () => {
@@ -201,7 +189,7 @@ test('Ctrl+R keeps the reader on the same block', async () => {
   })
   const before = await topBlock(win)
   await win.locator('.md-scroller').focus()
-  await win.keyboard.press(command + '+r')
+  await win.keyboard.press('ControlOrMeta+r')
   await expect(win.locator('[data-lens="rendered"]')).toHaveAttribute('data-gen', '2')
   await waitRendered(win)
   const after = await topBlock(win)
@@ -248,8 +236,7 @@ test('a different file after a core restart starts at its first line despite reu
   await waitIndexed(win)
   await win.locator('.vl-scroller').evaluate((el) => { el.scrollTop = 200 * 20 })
   await expect.poll(async () => (await visibleRows(win))[0]).toEqual({ line: 201, text: 'A line 201' })
-  const spawned = lifecycle(l.userData).filter((r) => r.event === 'utility-spawn').at(-1)!
-  process.kill(spawned.utilityPid as number)
+  killCore(l)
   await expect(win.locator('.card-message p')).toHaveText("Typose's core stopped")
   await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), fixture('session-place-b.txt', body('B')))
   await expect(win.locator('.card-name')).toHaveText('session-place-b.txt')
@@ -517,8 +504,7 @@ test('retired Rendered allowance survives Close, refused open and core restart w
   const reopened = await win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.client.rendered!())
   expect(reopened.retiredReserved).toBe(2 * original.reserved)
   expect(reopened.totalReserved).toBe(reopened.rawReserved + reopened.reserved + 2 * original.reserved)
-  const spawned = lifecycle(l.userData).filter((r) => r.event === 'utility-spawn').at(-1)!
-  process.kill(spawned.utilityPid as number)
+  killCore(l)
   await expect(win.locator('.card-message p')).toHaveText("Typose's core stopped")
   await l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), text)
   await expect(win.locator('.card-name')).toHaveText('retired-restart.txt')
@@ -539,7 +525,7 @@ test('terminal Reload failure disposes the retained Rendered tree and releases t
   await waitRendered(win)
   rmSync(file)
   await win.locator('.md-scroller').focus()
-  await win.keyboard.press(command + '+R')
+  await win.keyboard.press('ControlOrMeta+R')
   await expect(win.locator('.card-message p')).toContainText('File not found')
   expect(await win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.client.rendered)).toBeNull()
   await expect.poll(async () => (await debugStats(win)).docs).toBe(0)
@@ -665,7 +651,7 @@ test('Ctrl+R keeps keyboard focus on the Rendered scroller', async () => {
   const scroller = win.locator('.md-scroller')
   await scroller.focus()
   await expect(scroller).toBeFocused()
-  await win.keyboard.press(command + '+r')
+  await win.keyboard.press('ControlOrMeta+r')
   await expect(win.locator('[data-lens="rendered"]')).toHaveAttribute('data-gen', '2')
   await waitRendered(win)
   const focused = await win.evaluate(() => document.activeElement?.className ?? '')

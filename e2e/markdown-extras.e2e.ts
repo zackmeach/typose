@@ -55,99 +55,98 @@ test('offline Markdown extras render securely and offscreen math/diagrams reach 
   const file = fixture('markdown-extras.md', source)
   const netlog = join(FIXTURES, 'markdown-extras.netlog.json')
   const live = await launch({ file, netlog, hooks: true, env: { TYPOSE_TEST_PRINT: '1' } })
-  try {
-    await expect(live.win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 60_000 })
-    await waitIndexed(live.win)
-    await expect(live.win.locator('.md-properties')).toContainText('Markdown candidate')
-    await expect(live.win.locator('.md-properties dd').filter({ hasText: 'alpha' })).toHaveText('[alpha, beta]')
-    await expect(live.win.locator('.md-callout[data-tint="blue"]')).toContainText('A native callout.')
-    await expect(live.win.locator('code[data-highlighted="1"]')).toContainText('const answer = 42', { timeout: 30_000 })
-    // Every colored token stays readable on the code block in both themes, and a theme switch repaints without a re-tokenize.
-    const tokens = () => live.win.evaluate(() => {
-      const luminance = (color: string) => {
-        const [r, g, b] = color.match(/[\d.]+/g)!.slice(0, 3).map(v => Number(v) / 255).map(v => v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)
-        return r * 0.2126 + g * 0.7152 + b * 0.0722
-      }
-      const code = document.querySelector('code[data-highlighted="1"]')!
-      const background = luminance(getComputedStyle(code.closest('pre')!).backgroundColor)
-      const colors = [...code.querySelectorAll('.tp-token')].filter(token => token.textContent!.trim()).map(token => getComputedStyle(token).color)
-      const ratios = colors.map(color => { const l = luminance(color); return (Math.max(l, background) + 0.05) / (Math.min(l, background) + 0.05) })
-      return { colors, min: Math.min(...ratios) }
-    })
-    const light = (on: boolean) => live.win.evaluate(on => {
-      // What the settings controller applies for Typose Light.
-      const root = document.documentElement, tokens = { canvas: '#f7f7f7', surface: '#ffffff', 'surface-raised': '#f0f0f2', border: '#dcdce0', text: '#202024', text2: '#64646d', accent: '#285ac9' }
-      if (on) root.dataset.theme = 'light'; else delete root.dataset.theme
-      for (const [key, value] of Object.entries(tokens)) {
-        if (on) root.style.setProperty('--' + key, value)
-        else root.style.removeProperty('--' + key)
-      }
-    }, on)
-    await live.win.emulateMedia({ colorScheme: 'dark' }) // the System theme follows the OS; this baseline is the dark one
-    await expect(live.win.locator('html')).toHaveAttribute('data-theme', 'dark')
-    const dark = await tokens()
-    expect(dark.colors.length).toBeGreaterThan(8)
-    expect(dark.min).toBeGreaterThanOrEqual(3)
-    await light(true)
-    const lit = await tokens()
-    expect(lit.min).toBeGreaterThanOrEqual(3)
-    expect(lit.colors).not.toEqual(dark.colors)
-    await light(false)
-    expect((await tokens()).colors).toEqual(dark.colors)
-    await expect(live.win.locator('.tp-math .katex')).toHaveCount(2 + PRINT_FALLBACK_TEX.length, { timeout: 30_000 })
-    const frame = live.win.locator('.md-diagram iframe')
-    await expect(frame).toHaveAttribute('sandbox', '', { timeout: 30_000 })
-    await expect(frame).toHaveAttribute('title', 'Mermaid diagram')
-    expect(await live.win.locator('iframe').count()).toBe(1)
-    expect(live.win.url()).toContain('typose://')
-    await live.win.locator('.md-outline summary').click()
-    await expect(live.win.getByRole('navigation', { name: 'Document outline' }).getByRole('button', { name: 'Offscreen math' })).toBeVisible()
-    await live.win.locator('.md-outline summary').click()
-    await live.app.evaluate(({ BrowserWindow }) => {
-      const state = globalThis as unknown as { richPrint?: { math: number; namespace: string | null; images: number; external: number; text: string } }
-      const proto = Object.getPrototypeOf(BrowserWindow.getAllWindows()[0].webContents)
-      const original = proto.printToPDF
-      proto.printToPDF = async function (options: unknown) {
-        state.richPrint = await this.executeJavaScript(`({math:document.querySelectorAll('math').length,namespace:document.querySelector('math')?.namespaceURI,images:document.images.length,external:document.querySelectorAll('[href],[src^="http"],iframe,script').length,text:document.body.textContent})`)
-        return original.call(this, options)
-      }
-    })
-    await live.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('command', 'print'))
-    const sheet = live.win.getByRole('dialog', { name: 'Print markdown-extras.md' })
-    await sheet.getByRole('radio', { name: 'All' }).check()
-    await sheet.getByRole('button', { name: 'Continue to print…' }).click()
-    await expect(live.win.getByRole('status').filter({ hasText: 'Print job sent' })).toBeVisible({ timeout: 60_000 })
-    const { text, ...printed } = await live.app.evaluate(() => (globalThis as unknown as { richPrint: { text: string } }).richPrint)
-    expect(printed).toEqual({ math: 2, namespace: 'http://www.w3.org/1998/Math/MathML', images: 1, external: 0 })
-    // MathML the strict print tree refuses prints as that formula's TeX; the rest of the document still prints.
-    for (const tex of PRINT_FALLBACK_TEX) expect(text).toContain(tex)
-    const windows = await live.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)
-    const refused = await live.win.evaluate(async () => {
-      const api = (window as unknown as { typose: { printDocument(title: string, blocks: unknown[], pages: number, confirmed: boolean): Promise<{ kind: string }> } }).typose
-      return Promise.all([
-        { tag: 'annotation-xml', children: [{ tag: 'script', children: [{ text: 'alert(1)' }] }] },
-        { tag: 'mi', attrs: { href: 'https://example.invalid/' }, children: [{ text: 'x' }] },
-        { tag: 'mstyle', attrs: { style: 'background:url(https://example.invalid/)' } }
-      ].map(math => api.printDocument('hostile MathML', [{ tag: 'math', math }], 1, false)))
-    })
-    expect(refused.map(result => result.kind)).toEqual(['refused', 'refused', 'refused'])
-    expect(await live.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)).toBe(windows)
-    // A wiki link has nothing to resolve it; a missing heading or local file is known once following it fails.
-    const link = (name: string) => live.win.getByRole('link', { name, exact: true })
-    await expect(link('Team roster')).toHaveClass(/md-unresolved/)
-    await expect(link('Team roster')).toHaveAttribute('title', 'Not found: Team roster')
-    expect(await link('Team roster').evaluate(a => getComputedStyle(a).textDecorationStyle)).toBe('dashed')
-    await link('Gone').click()
-    await expect(link('Gone')).toHaveAttribute('title', 'Not found: #no-such-heading')
-    await expect(link('Gone')).toHaveClass(/md-unresolved/)
-    if (process.platform === 'win32') {
-      await link('Risks').click()
-      await expect(link('Risks')).toHaveAttribute('title', 'Not found: markdown-extras-risks.md', { timeout: 30_000 })
-      await expect(link('Risks')).toHaveClass(/md-unresolved/)
+  await expect(live.win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 60_000 })
+  await waitIndexed(live.win)
+  await expect(live.win.locator('.md-properties')).toContainText('Markdown candidate')
+  await expect(live.win.locator('.md-properties dd').filter({ hasText: 'alpha' })).toHaveText('[alpha, beta]')
+  await expect(live.win.locator('.md-callout[data-tint="blue"]')).toContainText('A native callout.')
+  await expect(live.win.locator('code[data-highlighted="1"]')).toContainText('const answer = 42', { timeout: 30_000 })
+  // Every colored token stays readable on the code block in both themes, and a theme switch repaints without a re-tokenize.
+  const tokens = () => live.win.evaluate(() => {
+    const luminance = (color: string) => {
+      const [r, g, b] = color.match(/[\d.]+/g)!.slice(0, 3).map(v => Number(v) / 255).map(v => v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)
+      return r * 0.2126 + g * 0.7152 + b * 0.0722
     }
-    await expect(link('Top')).not.toHaveClass(/md-unresolved/)
-    expect(live.pageErrors).toEqual([])
-  } finally { await finish(live) }
+    const code = document.querySelector('code[data-highlighted="1"]')!
+    const background = luminance(getComputedStyle(code.closest('pre')!).backgroundColor)
+    const colors = [...code.querySelectorAll('.tp-token')].filter(token => token.textContent!.trim()).map(token => getComputedStyle(token).color)
+    const ratios = colors.map(color => { const l = luminance(color); return (Math.max(l, background) + 0.05) / (Math.min(l, background) + 0.05) })
+    return { colors, min: Math.min(...ratios) }
+  })
+  const light = (on: boolean) => live.win.evaluate(on => {
+    // What the settings controller applies for Typose Light.
+    const root = document.documentElement, tokens = { canvas: '#f7f7f7', surface: '#ffffff', 'surface-raised': '#f0f0f2', border: '#dcdce0', text: '#202024', text2: '#64646d', accent: '#285ac9' }
+    if (on) root.dataset.theme = 'light'; else delete root.dataset.theme
+    for (const [key, value] of Object.entries(tokens)) {
+      if (on) root.style.setProperty('--' + key, value)
+      else root.style.removeProperty('--' + key)
+    }
+  }, on)
+  await live.win.emulateMedia({ colorScheme: 'dark' }) // the System theme follows the OS; this baseline is the dark one
+  await expect(live.win.locator('html')).toHaveAttribute('data-theme', 'dark')
+  const dark = await tokens()
+  expect(dark.colors.length).toBeGreaterThan(8)
+  expect(dark.min).toBeGreaterThanOrEqual(3)
+  await light(true)
+  const lit = await tokens()
+  expect(lit.min).toBeGreaterThanOrEqual(3)
+  expect(lit.colors).not.toEqual(dark.colors)
+  await light(false)
+  expect((await tokens()).colors).toEqual(dark.colors)
+  await expect(live.win.locator('.tp-math .katex')).toHaveCount(2 + PRINT_FALLBACK_TEX.length, { timeout: 30_000 })
+  const frame = live.win.locator('.md-diagram iframe')
+  await expect(frame).toHaveAttribute('sandbox', '', { timeout: 30_000 })
+  await expect(frame).toHaveAttribute('title', 'Mermaid diagram')
+  expect(await live.win.locator('iframe').count()).toBe(1)
+  expect(live.win.url()).toContain('typose://')
+  await live.win.locator('.md-outline summary').click()
+  await expect(live.win.getByRole('navigation', { name: 'Document outline' }).getByRole('button', { name: 'Offscreen math' })).toBeVisible()
+  await live.win.locator('.md-outline summary').click()
+  await live.app.evaluate(({ BrowserWindow }) => {
+    const state = globalThis as unknown as { richPrint?: { math: number; namespace: string | null; images: number; external: number; text: string } }
+    const proto = Object.getPrototypeOf(BrowserWindow.getAllWindows()[0].webContents)
+    const original = proto.printToPDF
+    proto.printToPDF = async function (options: unknown) {
+      state.richPrint = await this.executeJavaScript(`({math:document.querySelectorAll('math').length,namespace:document.querySelector('math')?.namespaceURI,images:document.images.length,external:document.querySelectorAll('[href],[src^="http"],iframe,script').length,text:document.body.textContent})`)
+      return original.call(this, options)
+    }
+  })
+  await live.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('command', 'print'))
+  const sheet = live.win.getByRole('dialog', { name: 'Print markdown-extras.md' })
+  await sheet.getByRole('radio', { name: 'All' }).check()
+  await sheet.getByRole('button', { name: 'Continue to print…' }).click()
+  await expect(live.win.getByRole('status').filter({ hasText: 'Print job sent' })).toBeVisible({ timeout: 60_000 })
+  const { text, ...printed } = await live.app.evaluate(() => (globalThis as unknown as { richPrint: { text: string } }).richPrint)
+  expect(printed).toEqual({ math: 2, namespace: 'http://www.w3.org/1998/Math/MathML', images: 1, external: 0 })
+  // MathML the strict print tree refuses prints as that formula's TeX; the rest of the document still prints.
+  for (const tex of PRINT_FALLBACK_TEX) expect(text).toContain(tex)
+  const windows = await live.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)
+  const refused = await live.win.evaluate(async () => {
+    const api = (window as unknown as { typose: { printDocument(title: string, blocks: unknown[], pages: number, confirmed: boolean): Promise<{ kind: string }> } }).typose
+    return Promise.all([
+      { tag: 'annotation-xml', children: [{ tag: 'script', children: [{ text: 'alert(1)' }] }] },
+      { tag: 'mi', attrs: { href: 'https://example.invalid/' }, children: [{ text: 'x' }] },
+      { tag: 'mstyle', attrs: { style: 'background:url(https://example.invalid/)' } }
+    ].map(math => api.printDocument('hostile MathML', [{ tag: 'math', math }], 1, false)))
+  })
+  expect(refused.map(result => result.kind)).toEqual(['refused', 'refused', 'refused'])
+  expect(await live.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)).toBe(windows)
+  // A wiki link has nothing to resolve it; a missing heading or local file is known once following it fails.
+  const link = (name: string) => live.win.getByRole('link', { name, exact: true })
+  await expect(link('Team roster')).toHaveClass(/md-unresolved/)
+  await expect(link('Team roster')).toHaveAttribute('title', 'Not found: Team roster')
+  expect(await link('Team roster').evaluate(a => getComputedStyle(a).textDecorationStyle)).toBe('dashed')
+  await link('Gone').click()
+  await expect(link('Gone')).toHaveAttribute('title', 'Not found: #no-such-heading')
+  await expect(link('Gone')).toHaveClass(/md-unresolved/)
+  if (process.platform === 'win32') {
+    await link('Risks').click()
+    await expect(link('Risks')).toHaveAttribute('title', 'Not found: markdown-extras-risks.md', { timeout: 30_000 })
+    await expect(link('Risks')).toHaveClass(/md-unresolved/)
+  }
+  await expect(link('Top')).not.toHaveClass(/md-unresolved/)
+  expect(live.pageErrors).toEqual([])
+  await finish(live)
   expect(assertNetLog(netlog)).toContain('PASS: no Chromium network-stack activity')
 })
 
@@ -157,19 +156,18 @@ test('every hostile Mermaid diagram type and hostile TeX settle in script-less f
   const file = fixture('markdown-extras-hostile.md', source)
   const netlog = join(FIXTURES, 'markdown-extras-hostile.netlog.json')
   const live = await launch({ file, netlog, hooks: true })
-  try {
-    await expect(live.win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 60_000 })
-    // A diagram ends as a frame, its source with a problem marker, or its source with the budget note.
-    const settled = () => live.win.evaluate(() => [...document.querySelectorAll('.md-diagram')]
-      .filter(d => d.querySelector('iframe, .problem') || d.getAttribute('title')).length)
-    await expect.poll(settled, { timeout: 180_000 }).toBe(HOSTILE_MERMAID.length)
-    const frames = await live.win.evaluate(() => [...document.querySelectorAll('iframe')]
-      .map(f => f.getAttribute('sandbox') === '' && !!f.closest('.md-diagram') && !!f.getAttribute('src')?.startsWith('data:text/html;')))
-    expect(frames.length).toBeGreaterThan(0)
-    expect(frames.every(Boolean)).toBe(true)
-    expect(live.win.url()).toContain('typose://')
-    expect(live.pageErrors).toEqual([])
-  } finally { await finish(live) }
+  await expect(live.win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 60_000 })
+  // A diagram ends as a frame, its source with a problem marker, or its source with the budget note.
+  const settled = () => live.win.evaluate(() => [...document.querySelectorAll('.md-diagram')]
+    .filter(d => d.querySelector('iframe, .problem') || d.getAttribute('title')).length)
+  await expect.poll(settled, { timeout: 180_000 }).toBe(HOSTILE_MERMAID.length)
+  const frames = await live.win.evaluate(() => [...document.querySelectorAll('iframe')]
+    .map(f => f.getAttribute('sandbox') === '' && !!f.closest('.md-diagram') && !!f.getAttribute('src')?.startsWith('data:text/html;')))
+  expect(frames.length).toBeGreaterThan(0)
+  expect(frames.every(Boolean)).toBe(true)
+  expect(live.win.url()).toContain('typose://')
+  expect(live.pageErrors).toEqual([])
+  await finish(live)
   expect(assertNetLog(netlog)).toContain('PASS: no Chromium network-stack activity')
 })
 
@@ -181,40 +179,39 @@ test('math bombs, oversized formulas and hostile sanitizer input stay bounded an
   const file = fixture('markdown-extras-bounded-math.md', source)
   const netlog = join(FIXTURES, 'markdown-extras-bounded-math.netlog.json')
   const live = await launch({ file, netlog, hooks: true })
-  try {
-    const stop = await responsiveness(live.win)
-    await expect(live.win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 60_000 })
-    // Every formula ends rendered, or as its source with the reason in its tooltip. (The 100,001-character nesting
-    // fixture is over the 64 KiB block bound, so the core makes it a note, not a formula.)
-    await expect.poll(() => live.win.evaluate(() => [...document.querySelectorAll('.tp-math')]
-      .filter(m => !m.querySelector('.katex, .problem') && !m.getAttribute('title')).length), { timeout: 60_000 }).toBe(0)
-    const { worstRoundTrip, longestTask, timerLate } = await stop()
-    const titles = await live.win.evaluate(() => [...document.querySelectorAll('.tp-math')].map(m => m.getAttribute('title')))
-    expect(titles.slice(0, 4)).toEqual(['Math source kept · Macro definitions are not rendered', 'Math source kept · Macro definitions are not rendered', null, 'Math source kept · Math output exceeds 8192 elements'])
-    await expect(live.win.locator('.tp-math').nth(2).locator('.katex')).toHaveCount(1)
-    expect(await live.win.evaluate(() => document.querySelectorAll('*').length)).toBeLessThan(40_000)
-    console.log(`bounded math: worst eval round-trip ${worstRoundTrip} ms, longest renderer task ${Math.round(longestTask)} ms, page timer late ${timerLate} ms`)
-    expect(worstRoundTrip).toBeLessThan(1000)
-    expect(longestTask).toBeLessThan(250)
-    expect(timerLate).toBeLessThan(250)
-    // An Object.prototype key is not a callout kind.
-    expect(await live.win.locator('.md-callout').count()).toBe(0)
-    // The math sanitizer, alone, on HTML a KaTeX bug could emit: nothing that loads, links, runs or styles survives.
-    const leaks = await live.win.evaluate(corpus => {
-      const sanitize = (window as unknown as { typoseSanitizeMath: (html: string) => string }).typoseSanitizeMath
-      return corpus.flatMap(html => {
-        const t = document.createElement('template')
-        t.innerHTML = sanitize(html)
-        return [...t.content.querySelectorAll('*')].flatMap(el => [
-          ...(['script', 'iframe', 'object', 'embed', 'style', 'foreignobject', 'image', 'use', 'form'].includes(el.localName) ? [`<${el.localName}>`] : []),
-          ...[...el.attributes].filter(a => a.name.startsWith('on') || /example\.invalid|javascript:/i.test(a.value) || (a.name === 'style' && /url\(|@import/i.test(a.value)))
-            .map(a => `${el.localName}[${a.name}]`)
-        ])
-      })
-    }, HOSTILE_HTML)
-    expect(leaks).toEqual([])
-    expect(live.pageErrors).toEqual([])
-  } finally { await finish(live) }
+  const stop = await responsiveness(live.win)
+  await expect(live.win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 60_000 })
+  // Every formula ends rendered, or as its source with the reason in its tooltip. (The 100,001-character nesting
+  // fixture is over the 64 KiB block bound, so the core makes it a note, not a formula.)
+  await expect.poll(() => live.win.evaluate(() => [...document.querySelectorAll('.tp-math')]
+    .filter(m => !m.querySelector('.katex, .problem') && !m.getAttribute('title')).length), { timeout: 60_000 }).toBe(0)
+  const { worstRoundTrip, longestTask, timerLate } = await stop()
+  const titles = await live.win.evaluate(() => [...document.querySelectorAll('.tp-math')].map(m => m.getAttribute('title')))
+  expect(titles.slice(0, 4)).toEqual(['Math source kept · Macro definitions are not rendered', 'Math source kept · Macro definitions are not rendered', null, 'Math source kept · Math output exceeds 8192 elements'])
+  await expect(live.win.locator('.tp-math').nth(2).locator('.katex')).toHaveCount(1)
+  expect(await live.win.evaluate(() => document.querySelectorAll('*').length)).toBeLessThan(40_000)
+  console.log(`bounded math: worst eval round-trip ${worstRoundTrip} ms, longest renderer task ${Math.round(longestTask)} ms, page timer late ${timerLate} ms`)
+  expect(worstRoundTrip).toBeLessThan(1000)
+  expect(longestTask).toBeLessThan(250)
+  expect(timerLate).toBeLessThan(250)
+  // An Object.prototype key is not a callout kind.
+  expect(await live.win.locator('.md-callout').count()).toBe(0)
+  // The math sanitizer, alone, on HTML a KaTeX bug could emit: nothing that loads, links, runs or styles survives.
+  const leaks = await live.win.evaluate(corpus => {
+    const sanitize = (window as unknown as { typoseSanitizeMath: (html: string) => string }).typoseSanitizeMath
+    return corpus.flatMap(html => {
+      const t = document.createElement('template')
+      t.innerHTML = sanitize(html)
+      return [...t.content.querySelectorAll('*')].flatMap(el => [
+        ...(['script', 'iframe', 'object', 'embed', 'style', 'foreignobject', 'image', 'use', 'form'].includes(el.localName) ? [`<${el.localName}>`] : []),
+        ...[...el.attributes].filter(a => a.name.startsWith('on') || /example\.invalid|javascript:/i.test(a.value) || (a.name === 'style' && /url\(|@import/i.test(a.value)))
+          .map(a => `${el.localName}[${a.name}]`)
+      ])
+    })
+  }, HOSTILE_HTML)
+  expect(leaks).toEqual([])
+  expect(live.pageErrors).toEqual([])
+  await finish(live)
   expect(assertNetLog(netlog)).toContain('PASS: no Chromium network-stack activity')
 })
 
@@ -233,17 +230,17 @@ test('dense highlighting pays for its spans before inserting them, and never sta
     '```' + ts, Array(3).fill('a'.repeat(9990)).join('\n'), '```', ''].join('\n')
   const measure = async (name: string, source: string, highlighted: number) => {
     const live = await launch({ file: fixture(name, source), hooks: true, controlledAccessibility: process.env.A11Y_OFF === '1' })
-    try {
-      const stop = await responsiveness(live.win)
-      await expect(live.win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 60_000 })
-      await expect(live.win.locator('code[data-highlighted="1"]')).toHaveCount(highlighted, { timeout: 60_000 })
-      await live.win.waitForTimeout(2000) // the TS block's watchdog, or its plain result
-      const timing = await stop()
-      const spans = await live.win.locator('.tp-token').count()
-      const memory = (await processMemory(live.app)).find(p => p.type === 'Tab')!.private ?? 0
-      expect(live.pageErrors).toEqual([])
-      return { ...timing, spans, memory, extras: await extrasReserved(live.win) }
-    } finally { await finish(live) }
+    const stop = await responsiveness(live.win)
+    await expect(live.win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 60_000 })
+    await expect(live.win.locator('code[data-highlighted="1"]')).toHaveCount(highlighted, { timeout: 60_000 })
+    await live.win.waitForTimeout(2000) // the TS block's watchdog, or its plain result
+    const timing = await stop()
+    const spans = await live.win.locator('.tp-token').count()
+    const memory = (await processMemory(live.app)).find(p => p.type === 'Tab')!.private ?? 0
+    expect(live.pageErrors).toEqual([])
+    const result = { ...timing, spans, memory, extras: await extrasReserved(live.win) }
+    await finish(live)
+    return result
   }
   const plain = await measure('markdown-extras-dense-plain.md', markdown('text', 'text'), 0)
   expect(plain.extras).toBe(0) // unlabeled blocks pay nothing
@@ -261,12 +258,10 @@ test('dense highlighting pays for its spans before inserting them, and never sta
 test('blocks that cannot highlight pay nothing, so a formula after a thousand of them still renders', async () => {
   const source = ['# Shell', '', ...Array.from({ length: 1000 }, (_, i) => ['```sh', `echo ${i}`, '```', '']).flat(), '$$x^2$$', ''].join('\n')
   const live = await launch({ file: fixture('markdown-extras-sh.md', source), hooks: true, env: { TYPOSE_TEST_BUDGET: String(1 << 30) } })
-  try {
-    await expect(live.win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 60_000 })
-    await expect(live.win.locator('.tp-math .katex')).toHaveCount(1, { timeout: 60_000 })
-    expect(await extrasReserved(live.win)).toBeLessThan(4 << 20)
-    expect(live.pageErrors).toEqual([])
-  } finally { await finish(live) }
+  await expect(live.win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 60_000 })
+  await expect(live.win.locator('.tp-math .katex')).toHaveCount(1, { timeout: 60_000 })
+  expect(await extrasReserved(live.win)).toBeLessThan(4 << 20)
+  expect(live.pageErrors).toEqual([])
 })
 
 /** The renderer's private bytes after a forced GC, so garbage from settled jobs doesn't count as kept. */
@@ -289,13 +284,13 @@ test('two thousand small formulas, or two thousand one-line code blocks, all ren
     const measure = async (variant: string, source: string, count: number) => {
       const file = fixture(`markdown-extras-2000-${name.replace(' ', '-')}-${variant}.md`, '# Many\n\n' + source + '\n')
       const live = await launch({ file, hooks: true, env: { TYPOSE_TEST_BUDGET: String(2 ** 31) } })
-      try {
-        await expect(live.win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 60_000 })
-        await expect(live.win.locator(done)).toHaveCount(count, { timeout: 120_000 })
-        expect(await live.win.locator('.tp-math[title], code[title]').count()).toBe(0) // nothing refused or stopped
-        expect(live.pageErrors).toEqual([])
-        return { kept: await keptPrivate(live), extras: await extrasReserved(live.win) }
-      } finally { await finish(live) }
+      await expect(live.win.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 60_000 })
+      await expect(live.win.locator(done)).toHaveCount(count, { timeout: 120_000 })
+      expect(await live.win.locator('.tp-math[title], code[title]').count()).toBe(0) // nothing refused or stopped
+      expect(live.pageErrors).toEqual([])
+      const result = { kept: await keptPrivate(live), extras: await extrasReserved(live.win) }
+      await finish(live)
+      return result
     }
     const before = await measure('plain', plain, 0)
     const after = await measure('lit', lit, 2000)

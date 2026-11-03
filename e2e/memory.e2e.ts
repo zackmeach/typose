@@ -2,12 +2,11 @@
 // holds only the viewport too, the deterministic multi-document exhaustion test, the memory metrics, and the refusal on
 // open. Memory is read per process (`memory.ts`), every metric on its own.
 import { type Page, expect } from '@playwright/test'
-import { execFileSync } from 'node:child_process'
 import { rmSync, statSync, truncateSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import { GARBAGE_PER_UNIT, WRAP, capFor, rowCost, rowsFor } from '../app/renderer/lenses/page-cache'
 import type { Limits, Opened, Page as CorePage } from '../app/shared/protocol'
-import { FIXTURES, type Launched, type TestHooks, debugStats, expectReleasedDocuments, finish, fixture, launch, sparseFixture, test, visibleRows, waitIndexed, waitOpen, workspaceHeld } from './app'
+import { FIXTURES, type Launched, type TestHooks, debugStats, expectReleasedDocuments, finish, fixture, fixturesGen, launch, sparseFixture, test, visibleRows, waitIndexed, waitOpen, workspaceHeld } from './app'
 import { mib, processMemory, summed } from './memory'
 
 type CacheStats = { charged: number; cap: number; reserved: number }
@@ -479,11 +478,7 @@ for (const size of ['1 GiB', '10 GiB'] as const) {
         ? join(FIXTURES, 'memory-1gib.txt') // .txt: a .jsonl name would open in Rows, and this reads Raw
         : sparseFixture('memory-10gib.txt', 10 * GIB, HEAD) // sparse: what's indexed is real, the disk holds little
     try {
-      if (size === '1 GiB')
-        execFileSync('cargo', ['run', '--release', '-q', '-p', 'fixtures-gen', '--', 'jsonl', '--out', path, '--bytes', String(GIB), '--line', '200'], {
-          cwd: resolve(__dirname, '../core'),
-          stdio: 'inherit'
-        })
+      if (size === '1 GiB') fixturesGen('jsonl', '--out', path, '--bytes', String(GIB), '--line', '200')
       const l = await launch({ hooks: true, file: path })
       const { win } = l
       await waitOpen(win)

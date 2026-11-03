@@ -1,24 +1,8 @@
-import { expect, type Locator, type Page } from '@playwright/test'
+import { expect } from '@playwright/test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
-import { FIXTURES, finish, launch, test } from './app'
+import { FIXTURES, finish, launch, stubOpenDialog, test, waitRendered } from './app'
 import { armPlaceProbe, readPlaceProbe } from './place-probe'
-
-/** Replace only the native folder picker in this dev-process test; filesystem listing stays real. */
-async function stubFolderDialog(app: Awaited<ReturnType<typeof launch>>['app'], selected: string): Promise<void> {
-  await app.evaluate(({ dialog, ipcMain }, path) => {
-    dialog.showOpenDialog = () => Promise.reject(new Error('the real folder dialog was reached'))
-    ipcMain.removeHandler('folder-dialog')
-    ipcMain.handle('folder-dialog', () => {
-      ;(globalThis as { folderDialogCalls?: number }).folderDialogCalls = ((globalThis as { folderDialogCalls?: number }).folderDialogCalls ?? 0) + 1
-      return path
-    })
-  }, selected)
-  await expect(app.evaluate(({ dialog }) => dialog.showOpenDialog({}))).rejects.toThrow('the real folder dialog was reached')
-}
-
-const markdownReady = (scope: Page | Locator) =>
-  expect(scope.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 30_000 })
 
 function makeFolderFixture(): string {
   mkdirSync(FIXTURES, { recursive: true })
@@ -73,12 +57,12 @@ test('folder tree opens CSV from Markdown after a link preview was promoted and 
     l = await launch({ hooks: true })
     const { win } = l
     await showSidebar(win)
-    await stubFolderDialog(l.app, root)
+    await stubOpenDialog(l.app, root, 'folder-dialog')
     await win.getByRole('button', { name: /Add folder/ }).click()
     await expect(win.getByRole('treeitem', { name: basename(root), exact: true })).toBeVisible()
     await expandTreeItem(win, basename(root))
     await activateTreeItem(win, 'launch-plan.md')
-    await markdownReady(win)
+    await waitRendered(win)
 
     const source = win.locator('.reader-card').first()
     const link = source.getByRole('link', { name: 'tasks.csv', exact: true })
@@ -115,16 +99,16 @@ test('folder tree opens a nested Markdown link and Back restores the source plac
     l = live
     const { win } = live
     await showSidebar(win)
-    await stubFolderDialog(live.app, root)
+    await stubOpenDialog(live.app, root, 'folder-dialog')
     await win.getByRole('button', { name: /Add folder/ }).click()
     await expect(win.getByRole('treeitem', { name: basename(root), exact: true })).toBeVisible()
-    await expect.poll(() => live.app.evaluate(() => (globalThis as { folderDialogCalls?: number }).folderDialogCalls)).toBe(1)
+    await expect.poll(() => live.app.evaluate(() => (globalThis as { dialogCalls?: number }).dialogCalls)).toBe(1)
 
     await expandTreeItem(win, basename(root))
     await expandTreeItem(win, 'docs')
     await expect(win.getByRole('treeitem', { name: '.hidden.md', exact: true })).toHaveCount(0)
     await activateTreeItem(win, 'A.md')
-    await markdownReady(win)
+    await waitRendered(win)
     await expect(win.getByRole('heading', { name: 'Source A', exact: true })).toBeVisible()
     await expect(win.locator('.card-parent')).toContainText(`${basename(root)} / docs`)
 
@@ -135,7 +119,7 @@ test('folder tree opens a nested Markdown link and Back restores the source plac
     await guide.click()
     const preview = win.getByRole('dialog', { name: 'Link preview', exact: true })
     await expect(preview).toBeVisible()
-    await markdownReady(preview)
+    await waitRendered(preview)
     await expect(preview.getByRole('heading', { name: 'Destination B', exact: true })).toBeVisible()
     await expect(preview.locator('.card-parent')).toContainText(`${basename(root)} / guide`)
     const sourceDuringPreview = await readPlaceProbe(guide)
@@ -145,7 +129,7 @@ test('folder tree opens a nested Markdown link and Back restores the source plac
     await preview.getByRole('button', { name: 'Close preview', exact: true }).click()
     await expect(preview).toHaveCount(0)
     await expect(sourceCard.locator('.card-name')).toHaveText('A.md')
-    await markdownReady(sourceCard)
+    await waitRendered(sourceCard)
     await expect(win.getByRole('heading', { name: 'Source A', exact: true })).toBeVisible()
     await expect(guide).toBeInViewport()
     await expect(guide).toBeFocused()
@@ -183,14 +167,14 @@ test('folder refresh discovers new files, resize stays bounded, and removal reta
       return !!after && Math.abs(after.x - cardBeforeOverlay!.x) < 2 && Math.abs(after.y - cardBeforeOverlay!.y) < 2 &&
         Math.abs(after.width - cardBeforeOverlay!.width) < 2 && Math.abs(after.height - cardBeforeOverlay!.height) < 2
     }).toBe(true)
-    await stubFolderDialog(live.app, root)
+    await stubOpenDialog(live.app, root, 'folder-dialog')
     await win.getByRole('button', { name: /Add folder/ }).click()
     const rootItem = win.getByRole('treeitem', { name: basename(root), exact: true })
     await expect(rootItem).toBeVisible()
     await expandTreeItem(win, basename(root))
     await expandTreeItem(win, 'docs')
     await activateTreeItem(win, 'A.md')
-    await markdownReady(win)
+    await waitRendered(win)
 
     await showSidebar(win)
     await expect(win.locator('.folder-sidebar[data-overlay]')).toBeVisible()

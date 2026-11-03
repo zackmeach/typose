@@ -2,7 +2,7 @@
 import { expect } from '@playwright/test'
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { dumps, finish, fixture, launch, lifecycle, test, waitOpen } from './app'
+import { dumps, finish, fixture, killCore, launch, lifecycle, test, waitOpen } from './app'
 
 const events = (userData: string) => lifecycle(userData).map((r) => r.event)
 const file = () => fixture('lifecycle.txt', Array.from({ length: 2000 }, (_, i) => `line ${i}`).join('\n'))
@@ -53,8 +53,7 @@ test('forcefullyCrashRenderer() logs render-process-gone with crashed (killed on
 test('a core kill (C7): main logs the exit and lives on, and the card shows the core stopped', async () => {
   const l = await launch({ file: file() })
   await waitOpen(l.win)
-  const spawned = lifecycle(l.userData).find((r) => r.event === 'utility-spawn')!
-  process.kill(spawned.utilityPid as number)
+  killCore(l)
   await expect(l.win.locator('.card-message p')).toHaveText("Typose's core stopped") // then Reopen (core-death.e2e.ts)
   const log = lifecycle(l.userData)
   expect(log.find((r) => r.event === 'utility-exit')).toMatchObject({ session: 1 })

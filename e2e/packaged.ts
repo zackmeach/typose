@@ -2,7 +2,7 @@
 // inspector, which the fuse turns off. So the executable is spawned directly, with a private --user-data-dir, and
 // with `cdp` it gets --remote-debugging-port=0 and is attached with connectOverCDP. Startup marks come from the
 // read-only TYPOSE_MARKS hook, so a launch without `cdp` passes no debugging switch at all (a cold launch).
-import { type Browser, type Page, chromium } from '@playwright/test'
+import { type Browser, type Page, chromium, expect } from '@playwright/test'
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -125,9 +125,9 @@ export async function waitMarks(l: PackagedLaunch, names: string[], timeout = 30
 
 /**
  * Closes the app the way a user does, without CDP: on Windows, taskkill without /F posts WM_CLOSE to its window;
- * elsewhere, SIGTERM. Then keeps the run's evidence (plan C9) and deletes the profile unless `keep`.
+ * elsewhere, SIGTERM. Then keeps the run's evidence (plan C9) and deletes the profile.
  */
-export async function closePackaged(l: PackagedLaunch, keep = false): Promise<Exit> {
+export async function closePackaged(l: PackagedLaunch): Promise<Exit> {
   cleanups.delete(l.cleanup)
   await l.browser?.close().catch(() => {}) // disconnects; the app stays up
   if (l.proc.exitCode === null && l.proc.signalCode === null) {
@@ -136,7 +136,7 @@ export async function closePackaged(l: PackagedLaunch, keep = false): Promise<Ex
   }
   const closed = await Promise.race([l.exited, new Promise<null>((ok) => setTimeout(() => ok(null), 15_000))])
   const exit = closed ?? (l.proc.kill('SIGKILL'), await l.exited)
-  keepEvidence(l.userData, l.pid, exit, keep)
+  keepEvidence(l.userData, l.pid, exit, false)
   if (!closed) throw new Error(`pid ${l.pid} didn't exit within 15 s of its close, and was killed`)
   return exit
 }
@@ -167,4 +167,11 @@ export function unrequested(l: PackagedLaunch, exit: Exit): string[] {
     else if (r.event === 'utility-exit' && !quitting) problems.push(`pid ${l.pid}: the core host exited before the quit: ${line}`)
   }
   return problems
+}
+
+/** Closes the launch and expects a clean quit: exit 0 and nothing unrequested. */
+export async function closeCleanly(l: PackagedLaunch): Promise<void> {
+  const exit = await closePackaged(l)
+  expect(exit).toEqual({ code: 0, signal: null })
+  expect(unrequested(l, exit)).toEqual([])
 }

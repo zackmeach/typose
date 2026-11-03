@@ -3,7 +3,6 @@
 import { expect } from '@playwright/test'
 import { rmSync } from 'node:fs'
 import { type TestHooks, debugStats, expectReleasedDocuments, finish, fixture, launch, test, waitOpen, waitIndexed } from './app'
-import { command } from './find-ui'
 import { mib, processMemory } from './memory'
 
 const CEILING = 8 << 20
@@ -169,7 +168,7 @@ for (const sampleCase of CASES)
       for (let gen = 2; gen <= 6; gen++) {
         const requested = Date.now()
         await win.locator('.md-scroller').focus()
-        await win.keyboard.press(command + '+R')
+        await win.keyboard.press('ControlOrMeta+R')
         if (sampleCase.name === 'dense topology' && gen === 3) {
           const budgetRefusal = win.locator('.banner').filter({ hasText: "Can't reload: Typose's memory budget is full" })
           const active = win.locator('[data-lens="rendered"]')
@@ -187,7 +186,7 @@ for (const sampleCase of CASES)
             expect((await debugStats(win, { limit: allowance })).ledger.limit).toBe(allowance)
             console.log(`Dense handoff refused at ${QUALIFICATION_BUDGET} bytes; retained view ${extra}; positive retry limit ${allowance}`)
             await win.locator('.md-scroller').focus()
-            await win.keyboard.press(command + '+R')
+            await win.keyboard.press('ControlOrMeta+R')
           }
         }
         await expect(win.locator('[data-lens="rendered"]')).toHaveAttribute('data-gen', String(gen), { timeout: 120_000 })

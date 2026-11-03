@@ -1,12 +1,10 @@
 import { type Page, expect } from '@playwright/test'
 import { writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
-import { type TestHooks, assertNetLog, debugStats, expectReleasedDocuments, finish, fixture, launch, test } from './app'
-import { command } from './find-ui'
+import { type TestHooks, assertNetLog, debugStats, expectReleasedDocuments, finish, fixture, holdReply, launch, test, waitRendered } from './app'
 import { imageGif, imageJpeg, imagePng, imageWebp } from './image-fixtures'
 import { processMemory } from './memory'
 
-const ready = (win: Page) => expect(win.locator('.md-scroller')).toHaveAttribute('data-ready', '1')
 const open = (l: Awaited<ReturnType<typeof launch>>, path: string) => l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), path)
 const stats = (win: Page) => win.evaluate(() => (window as unknown as { typoseTest: TestHooks }).typoseTest.client.rendered?.())
 
@@ -25,7 +23,7 @@ test('three supported local formats render from canonical blobs; WebP, remote, u
   const log = test.info().outputPath('images-netlog.json')
   const l = await launch({ file: source, netlog: log })
   const { win } = l
-  await ready(win)
+  await waitRendered(win)
   for (const name of ['PNG', 'GIF', 'JPEG']) {
     const img = win.getByRole('img', { name, exact: true })
     await expect(img).toBeVisible()
@@ -68,7 +66,7 @@ test('two image loads at most; hidden and resumed trees retain their blobs and c
     }
   })
   await open(l, file)
-  await ready(win)
+  await waitRendered(win)
   await expect.poll(() => win.evaluate(() => (window as unknown as { imageQueue: { release: unknown[] } }).imageQueue.release.length)).toBe(2)
   expect(await win.evaluate(() => (window as unknown as { imageQueue: { starts: number } }).imageQueue.starts)).toBe(2)
   await win.getByRole('tab', { name: 'Raw', exact: true }).click()
@@ -84,7 +82,7 @@ test('two image loads at most; hidden and resumed trees retain their blobs and c
   for (let i = 0; i < 3; i++) {
     await win.getByRole('tab', { name: 'Raw', exact: true }).click()
     await win.getByRole('tab', { name: 'Rendered', exact: true }).click()
-    await ready(win)
+    await waitRendered(win)
     expect((await stats(win))!.reserved).toBe(held)
     expect(await win.locator('img').evaluateAll((images) => images.map((img) => img.getAttribute('src')))).toEqual(urls)
   }
@@ -103,17 +101,9 @@ test('a tight image budget keeps alt text and the reader; a delayed resource can
   const l = await launch({ hooks: true })
   const { win } = l
   await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
-  await win.evaluate(() => {
-    const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core
-    const call = core.call.bind(core)
-    core.call = async (method, params) => {
-      const reply = await call(method, params)
-      if (method === 'prepareImage') await new Promise<void>((done) => { (window as unknown as { releaseImageTest: () => void }).releaseImageTest = done })
-      return reply
-    }
-  })
+  await holdReply(win, 'prepareImage', 'releaseImageTest')
   await open(l, file)
-  await ready(win)
+  await waitRendered(win)
   const held = () => expect.poll(() => win.evaluate(() => typeof (window as unknown as { releaseImageTest?: () => void }).releaseImageTest)).toBe('function')
   const release = () => win.evaluate(() => { const state = window as unknown as { releaseImageTest?: () => void }; state.releaseImageTest?.(); delete state.releaseImageTest })
   await held()
@@ -123,10 +113,10 @@ test('a tight image budget keeps alt text and the reader; a delayed resource can
   await expect(win.getByRole('heading', { name: 'Delayed', exact: true })).toBeVisible()
   // Restore a normal test limit; Reload has a new resource generation.
   await debugStats(win, { limit: 2 ** 30 })
-  await win.keyboard.press(command + '+r')
+  await win.keyboard.press('ControlOrMeta+r')
   await held()
   await open(l, fixture('image-replacement.md', '# Replacement\n'))
-  await ready(win)
+  await waitRendered(win)
   await release()
   await expect.poll(async () => (await debugStats(win)).jobs).toBe(0)
   await expect(win.getByRole('heading', { name: 'Replacement', exact: true })).toBeVisible()
@@ -160,7 +150,7 @@ test('close cancels active and queued image reads within the measured chunk dela
     }
   })
   await open(l, file)
-  await ready(win)
+  await waitRendered(win)
   const active = await win.evaluate(async () => {
     const state = window as unknown as { typoseTest: TestHooks; pendingImagePrepares: number }
     const deadline = performance.now() + 10_000
@@ -203,7 +193,7 @@ test('an image request rechecks its Markdown source and raises the source-change
     }
   })
   await open(l, file)
-  await ready(win)
+  await waitRendered(win)
   await expect.poll(() => win.evaluate(() => typeof (window as unknown as { sourceImageHeld?: () => void }).sourceImageHeld)).toBe('function')
   writeFileSync(file, '# Changed source\n')
   await win.evaluate(() => (window as unknown as { sourceImageHeld: () => void }).sourceImageHeld())
@@ -239,16 +229,16 @@ for (const method of ['reload', 'openLocal'] as const) test(`${method} freezes l
     }
   }, method)
   await open(l, source)
-  await ready(win)
+  await waitRendered(win)
   await expect.poll(() => win.evaluate(() => typeof (window as unknown as { imageHandoff: { image?: () => void } }).imageHandoff.image)).toBe('function')
-  if (method === 'reload') await win.keyboard.press(command + '+r')
+  if (method === 'reload') await win.keyboard.press('ControlOrMeta+r')
   else await win.getByRole('link', { name: 'Next', exact: true }).click({ modifiers: ['Control'] })
   await expect.poll(() => win.evaluate(() => typeof (window as unknown as { imageHandoff: { handoff?: () => void } }).imageHandoff.handoff)).toBe('function')
   await win.evaluate(() => (window as unknown as { imageHandoff: { image: () => void } }).imageHandoff.image())
   await expect(win.locator('.tp-img')).toContainText('Memory budget is full')
   expect(await win.evaluate(() => (window as unknown as { imageHandoff: { chunks: number } }).imageHandoff.chunks)).toBe(0)
   await win.evaluate(() => (window as unknown as { imageHandoff: { handoff: () => void } }).imageHandoff.handoff())
-  await ready(win)
+  await waitRendered(win)
   if (method === 'reload') await expect(win.getByRole('img', { name: 'Late image', exact: true })).toBeVisible()
   else await expect(win.getByRole('heading', { name: 'Navigation target', exact: true })).toBeVisible()
   expect(l.pageErrors).toEqual([])
@@ -266,21 +256,9 @@ for (const side of [1024, 2048]) test(`local image ${side}px allocation, switche
   await cdp.send('HeapProfiler.collectGarbage')
   const renderer = async () => (await processMemory(l.app)).find((p) => p.type === 'Tab')!
   const baseline = (await renderer()).private!
-  await win.evaluate(() => {
-    const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core
-    const call = core.call.bind(core)
-    let first = true
-    core.call = async (method, params) => {
-      const reply = await call(method, params)
-      if (method === 'prepareImage' && first) {
-        first = false
-        await new Promise<void>((done) => { (window as unknown as { memoryImageHeld: () => void }).memoryImageHeld = done })
-      }
-      return reply
-    }
-  })
+  await holdReply(win, 'prepareImage', 'memoryImageHeld', true)
   await open(l, file)
-  await ready(win)
+  await waitRendered(win)
   await expect.poll(() => win.evaluate(() => typeof (window as unknown as { memoryImageHeld?: () => void }).memoryImageHeld)).toBe('function')
   const imageBaseline = (await renderer()).private!
   const baseRendered = (await stats(win))!.reserved
@@ -308,7 +286,7 @@ for (const side of [1024, 2048]) test(`local image ${side}px allocation, switche
   }
   for (let i = 0; i < 2; i++) {
     const previous = await win.getByRole('img', { name: 'Memory image' }).getAttribute('src')
-    await win.keyboard.press(command + '+r')
+    await win.keyboard.press('ControlOrMeta+r')
     await expect(win.getByRole('img', { name: 'Memory image' })).toBeVisible()
     await expect(win.getByRole('img', { name: 'Memory image' })).not.toHaveAttribute('src', previous!)
     await expect.poll(async () => (await stats(win))!.retiredReserved).toBeGreaterThan(0)

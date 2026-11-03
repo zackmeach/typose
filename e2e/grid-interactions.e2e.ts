@@ -1,17 +1,15 @@
 import { expect } from '@playwright/test'
-import { finish, fixture, launch, test } from './app'
+import { finish, fixture, launch, recordClipboard, test } from './app'
 import { closePackaged, launchPackaged, unrequested } from './packaged'
-import { command, query, ready } from './find-ui'
+import { query, ready } from './find-ui'
 
 test('Grid sorts stably, finds in display order and copies full values for ranges, rows and columns', async () => {
   const long = 'a'.repeat(5000) + ' creek'
   const file = fixture('grid-interactions.csv', 'rank,task,notes\r\n10,North,' + long + '\r\n2,South,first creek\r\n2,West,second\r\n')
   const live = await launch({ file })
   // Record the text at the OS boundary in this test process. The user's clipboard is private.
-  await live.app.evaluate(({ clipboard }) => {
-    clipboard.writeText = async value => { (globalThis as { copiedGridText?: string }).copiedGridText = value }
-  })
-  const copied = () => live.app.evaluate(() => (globalThis as { copiedGridText?: string }).copiedGridText?.replace(/\r\n/g, '\n'))
+  const clipboard = await recordClipboard(live.app)
+  const copied = async () => (await clipboard()).at(-1)?.replace(/\r\n/g, '\n')
   const page = live.win
   const card = page.getByRole('region', { name: 'Reader card 1' })
   const grid = card.getByRole('grid', { name: 'CSV grid' })
@@ -31,7 +29,7 @@ test('Grid sorts stably, finds in display order and copies full values for range
   await inspector.getByRole('button', { name: 'Close value' }).click()
   await rows.nth(0).getByRole('gridcell', { name: 'South', exact: true }).click()
   await page.keyboard.press('Shift+ArrowDown')
-  await page.keyboard.press(command + '+c')
+  await page.keyboard.press('ControlOrMeta+c')
   await expect.poll(copied).toBe('South\nWest')
   const bar = await query(page, card, 'creek')
   await expect(bar.getByRole('status')).toHaveText('1 of 2', ready)
@@ -51,28 +49,28 @@ test('Grid sorts stably, finds in display order and copies full values for range
   await expect(rows.nth(0).getByRole('rowheader')).toHaveText('1')
   await rows.nth(0).getByRole('gridcell', { name: 'North', exact: true }).click()
   await page.keyboard.press('Shift+ArrowRight')
-  await page.keyboard.press(command + '+c')
+  await page.keyboard.press('ControlOrMeta+c')
   await expect.poll(copied).toBe('North\t' + long)
   await rows.nth(1).getByRole('gridcell', { name: 'South', exact: true }).click()
   await page.keyboard.press('Shift+Space')
-  await page.keyboard.press(command + '+c')
+  await page.keyboard.press('ControlOrMeta+c')
   await expect.poll(copied).toBe('2\tSouth\tfirst creek')
   await rows.nth(2).getByRole('gridcell', { name: 'West', exact: true }).click()
   await page.keyboard.press('Control+Space')
-  await page.keyboard.press(command + '+c')
+  await page.keyboard.press('ControlOrMeta+c')
   await expect.poll(copied).toBe('task\nNorth\nSouth\nWest')
 
   await grid.getByRole('columnheader', { name: 'rank', exact: true }).click({ button: 'right' })
   const menu = card.getByRole('menu', { name: 'Grid actions' })
   await menu.getByRole('menuitem', { name: 'Select column', exact: true }).click()
   await expect(menu).toHaveCount(0)
-  await page.keyboard.press(command + '+c')
+  await page.keyboard.press('ControlOrMeta+c')
   await expect.poll(copied).toBe('rank\n10\n2\n2')
   await rows.nth(2).getByRole('gridcell', { name: 'West', exact: true }).click()
   await page.keyboard.press('Shift+F10')
   await expect(menu.getByRole('menuitem', { name: 'Select row' })).toBeFocused()
   await page.keyboard.press('Enter')
-  await page.keyboard.press(command + '+c')
+  await page.keyboard.press('ControlOrMeta+c')
   await expect.poll(copied).toBe('2\tWest\tsecond')
 
   const start = await rows.nth(1).getByRole('gridcell', { name: 'South', exact: true }).boundingBox()

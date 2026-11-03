@@ -2,11 +2,9 @@ import { menuLabels } from './menu-fixture'
 // Plan PR 7's accessibility gates (Z39, spec §6.3): the accessibility mode main forwards (§6.2), Raw and the chrome
 // in the accessibility trees (CDP, and UIA on Windows), focus, the keyboard, axe, and 200% zoom. No screen-reader
 // claim: real-reader testing stays parked.
-import AxeBuilder from '@axe-core/playwright'
 import { type Page, expect } from '@playwright/test'
 import { closeSync, openSync, writeSync } from 'node:fs'
-import { type Launched, finish, fixture, launch, test, visibleRows, waitIndexed, waitOpen } from './app'
-import { command } from './find-ui'
+import { type Launched, axe, finish, fixture, launch, test, visibleRows, waitIndexed, waitOpen } from './app'
 import { HT, hitTest, uiaNodes, uiaTree } from './win32'
 
 const MAC = process.platform === 'darwin'
@@ -157,7 +155,7 @@ test('focus stays in Raw across scrolling, far jumps and page replacement', asyn
   await expect.poll(async () => (await visibleRows(win))[0]).toEqual({ line: 1, text: LINES[0] })
   await inRaw('after Ctrl+Home')
   // Reload replaces every page with the next generation's (a new lens).
-  await win.keyboard.press(command + '+R')
+  await win.keyboard.press('ControlOrMeta+R')
   await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '2')
   await expect.poll(async () => (await visibleRows(win))[0]).toEqual({ line: 1, text: LINES[0] })
   await inRaw('after Reload')
@@ -263,13 +261,6 @@ async function keyboardMenu(win: Page): Promise<void> {
   await expect(win.getByRole('menu')).toHaveCount(0)
   await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '2')
   await expect(win.locator('.menu-button')).toBeFocused()
-}
-
-/** axe-core on the page: every violation, of any impact, as `impact id: targets`. */
-async function axe(win: Page): Promise<string[]> {
-  // Legacy mode: the default run opens a second page for its final step, which Electron's context refuses (spike B).
-  const { violations } = await new AxeBuilder({ page: win }).setLegacyMode().analyze()
-  return violations.map((v) => `${v.impact} ${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(' | ')}`)
 }
 
 test('axe finds no violations on the chrome: empty, with Raw, with ☰ open, and at 200% zoom', async () => {

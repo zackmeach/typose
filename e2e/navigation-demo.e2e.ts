@@ -1,24 +1,15 @@
 // Checkpoint A's visible local-navigation demo on the production package. This is a short workflow smoke, not the
 // authority, lifecycle, or memory qualification suite.
-import { expect, type Locator, type Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { FIXTURES, test, visibleRows, waitIndexed, waitOpen } from './app'
-import { closePackaged, launchPackaged, unrequested } from './packaged'
+import { FIXTURES, test, visibleRows, waitIndexed, waitOpen, waitRendered } from './app'
+import { closeCleanly, closePackaged, launchPackaged } from './packaged'
 import { armPlaceProbe, readPlaceProbe } from './place-probe'
-
-const ready = (scope: Page | Locator) =>
-  expect(scope.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout: 30_000 })
 
 function demoDirectory(prefix: string): string {
   mkdirSync(FIXTURES, { recursive: true })
   return mkdtempSync(join(FIXTURES, `${prefix}-`))
-}
-
-async function closeCleanly(l: Awaited<ReturnType<typeof launchPackaged>>): Promise<void> {
-  const exit = await closePackaged(l)
-  expect(exit).toEqual({ code: 0, signal: null })
-  expect(unrequested(l, exit)).toEqual([])
 }
 
 async function openMenuItem(win: Page, name: string): Promise<void> {
@@ -41,7 +32,7 @@ test('packaged local-link peek: B opens C, Back restores B, and closing returns 
   try {
     l = await launchPackaged({ cdp: true, file: a })
     const win = l.page!
-    await ready(win)
+    await waitRendered(win)
     const sourceCard = win.locator('.reader-card').first()
     const aLink = sourceCard.getByRole('link', { name: 'Continue to B', exact: true })
     await aLink.scrollIntoViewIfNeeded()
@@ -50,7 +41,7 @@ test('packaged local-link peek: B opens C, Back restores B, and closing returns 
     const dialog = win.getByRole('dialog', { name: 'Link preview', exact: true })
     await expect(dialog).toBeVisible()
     await expect(dialog.getByRole('heading', { name: 'B', exact: true })).toBeVisible()
-    await ready(dialog)
+    await waitRendered(dialog)
     const sourceDuringPreview = await readPlaceProbe(aLink)
     expect(sourceDuringPreview.sameNodes).toBe(true)
     expect(sourceDuringPreview.scrollTop).toBe(sourceDuringPreview.originScrollTop)
@@ -61,13 +52,13 @@ test('packaged local-link peek: B opens C, Back restores B, and closing returns 
     await expect(dialog.getByText('C line 1', { exact: true })).toBeVisible()
     await dialog.getByRole('button', { name: 'Back', exact: true }).click()
     await expect(dialog.getByRole('heading', { name: 'B', exact: true })).toBeVisible()
-    await ready(dialog)
+    await waitRendered(dialog)
     await expect(dialog.getByRole('link', { name: 'Continue to C', exact: true })).toBeInViewport()
     await win.screenshot({ path: test.info().outputPath('back-restored.png') })
     await dialog.getByRole('button', { name: 'Close preview', exact: true }).click()
     await expect(dialog).toHaveCount(0)
     await expect(sourceCard.locator('.card-name')).toHaveText('A.md')
-    await ready(sourceCard)
+    await waitRendered(sourceCard)
     await expect(aLink).toBeInViewport()
     await expect(aLink).toBeFocused()
     const sourceAfterClose = await readPlaceProbe(aLink)
@@ -102,7 +93,7 @@ test('packaged Ctrl+Shift+T reopens a closed scrolled text file at the same line
 
     await win.getByRole('button', { name: 'Close scroll-place.txt', exact: true }).click()
     await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
-    await win.keyboard.press(process.platform === 'darwin' ? 'Meta+Shift+T' : 'Control+Shift+T')
+    await win.keyboard.press('ControlOrMeta+Shift+T')
     await expect(win.locator('.card-name')).toHaveText('scroll-place.txt')
     await waitOpen(win)
     await waitIndexed(win)

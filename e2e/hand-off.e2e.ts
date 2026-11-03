@@ -1,11 +1,10 @@
 // Z79's hand-offs: Copy path, Show in Explorer and Open with default app, from the card, the sidebar and the sheets.
 // The test-hooks build records main's shell calls under TYPOSE_TEST_SHELL=record; the real shell is also replaced by
 // one that throws, so no test here can open Explorer or an app.
-import AxeBuilder from '@axe-core/playwright'
 import { type ElectronApplication, type Page, expect } from '@playwright/test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
-import { FIXTURES, finish, fixture, launch, test, waitOpen } from './app'
+import { FIXTURES, axe, finish, fixture, launch, stubOpenDialog, test, waitOpen } from './app'
 
 const SHOW = process.platform === 'darwin' ? 'Show in Finder' : process.platform === 'linux' ? 'Show in folder' : 'Show in Explorer'
 const RECORD = { TYPOSE_TEST_SHELL: 'record' }
@@ -28,11 +27,6 @@ async function copies(win: Page): Promise<() => Promise<string[]>> {
     navigator.clipboard.writeText = async (text: string) => { state.copied.push(text) }
   })
   return () => win.evaluate(() => (window as unknown as { copied: string[] }).copied)
-}
-
-async function axe(win: Page): Promise<string[]> {
-  const { violations } = await new AxeBuilder({ page: win }).setLegacyMode().analyze()
-  return violations.map((v) => `${v.impact} ${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(' | ')}`)
 }
 
 /**
@@ -64,11 +58,7 @@ async function fileAction(win: Page, name: string): Promise<void> {
 
 /** The real folder picker never opens: main's handler answers `selected`. */
 async function addFolder(app: ElectronApplication, win: Page, selected: string): Promise<void> {
-  await app.evaluate(({ dialog, ipcMain }, path) => {
-    dialog.showOpenDialog = () => Promise.reject(new Error('the real folder dialog was reached'))
-    ipcMain.removeHandler('folder-dialog')
-    ipcMain.handle('folder-dialog', () => path)
-  }, selected)
+  await stubOpenDialog(app, selected, 'folder-dialog')
   await win.getByRole('button', { name: 'Show sidebar', exact: true }).click()
   await win.getByRole('button', { name: /Add folder/ }).click()
   await expect(win.getByRole('treeitem', { name: basename(selected), exact: true })).toBeVisible()

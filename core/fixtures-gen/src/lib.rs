@@ -33,55 +33,27 @@ pub fn huge_record<W: Write>(w: &mut W, payload_bytes: u64) -> io::Result<()> {
     w.write_all(b"\"}\n")
 }
 
-const NUMBERS: [&str; 10] = [
-    "12345678901234567890",
-    "3.10",
-    "-0",
-    "1e400",
-    "0.000123",
-    "-42",
-    "6.02214076e23",
-    "0",
-    "-1.5E-7",
-    "9007199254740993",
-];
-
-/// A JSON document of at least `target_bytes` for the Spike C scanner benchmark; returns its element count.
-/// Shapes: `records` (an array of ~190-byte objects, like `jsonl` lines joined), `wide` (one object, every
-/// 100,000th key repeating key 0), `deep` (an array of records nested 1,000 levels) and `numbers`.
-pub fn json_doc<W: Write>(w: &mut W, shape: &str, target_bytes: u64) -> io::Result<u64> {
-    if !["records", "wide", "deep", "numbers"].contains(&shape) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("unknown shape {shape}")));
-    }
-    let deep = format!("{}1{}", "{\"a\":[".repeat(500), "]}".repeat(500));
+/// A JSON array of ~190-byte record objects (like `jsonl` lines joined) of at least `target_bytes`, for the Spike C
+/// scanner benchmark; returns its element count.
+pub fn json_doc<W: Write>(w: &mut W, target_bytes: u64) -> io::Result<u64> {
     let pad = "x".repeat(100);
-    let (open, close): (&[u8], &[u8]) = if shape == "wide" { (b"{\n", b"\n}\n") } else { (b"[\n", b"\n]\n") };
-    w.write_all(open)?;
-    let (mut written, mut n) = (open.len() as u64, 0u64);
+    w.write_all(b"[\n")?;
+    let (mut written, mut n) = (2u64, 0u64);
     while written < target_bytes {
-        let item = match shape {
-            "records" => format!(
-                "{{\"id\":{n},\"ts\":\"2026-10-20T12:{:02}:{:02}.{:03}Z\",\"type\":\"{}\",\"msg\":\"line {n:010} {pad}\"}}",
-                (n / 60_000) % 60,
-                (n / 1000) % 60,
-                n % 1000,
-                TYPES[(n % 4) as usize]
-            ),
-            "wide" => format!(
-                "\"key_{:09}\":{}",
-                if n % 100_000 == 99_999 { 0 } else { n },
-                ["1", "\"v\"", "true", "null"][(n % 4) as usize]
-            ),
-            "deep" => deep.clone(),
-            _ => NUMBERS[(n % 10) as usize].to_string(),
-        };
+        let item = format!(
+            "{{\"id\":{n},\"ts\":\"2026-10-20T12:{:02}:{:02}.{:03}Z\",\"type\":\"{}\",\"msg\":\"line {n:010} {pad}\"}}",
+            (n / 60_000) % 60,
+            (n / 1000) % 60,
+            n % 1000,
+            TYPES[(n % 4) as usize]
+        );
         let sep: &[u8] = if n == 0 { b"" } else { b",\n" };
         w.write_all(sep)?;
         w.write_all(item.as_bytes())?;
         written += (sep.len() + item.len()) as u64;
         n += 1;
     }
-    w.write_all(close)?;
+    w.write_all(b"\n]\n")?;
     Ok(n)
 }
 
@@ -235,16 +207,12 @@ mod tests {
     }
 
     #[test]
-    fn json_docs_reach_the_target_and_count_their_elements() {
-        for shape in ["records", "wide", "deep", "numbers"] {
-            let mut out = Vec::new();
-            let n = json_doc(&mut out, shape, 100_000).unwrap();
-            assert!(out.len() >= 100_000, "{shape}");
-            assert_eq!(out.windows(2).filter(|w| w == b",\n").count() as u64 + 1, n, "{shape}");
-            let (open, close): (&[u8], &[u8]) = if shape == "wide" { (b"{\n", b"\n}\n") } else { (b"[\n", b"\n]\n") };
-            assert!(out.starts_with(open) && out.ends_with(close), "{shape}");
-        }
-        assert!(json_doc(&mut Vec::new(), "nope", 1).is_err());
+    fn json_doc_reaches_the_target_and_counts_its_elements() {
+        let mut out = Vec::new();
+        let n = json_doc(&mut out, 100_000).unwrap();
+        assert!(out.len() >= 100_000);
+        assert_eq!(out.windows(2).filter(|w| w == b",\n").count() as u64 + 1, n);
+        assert!(out.starts_with(b"[\n") && out.ends_with(b"\n]\n"));
     }
 
     #[test]

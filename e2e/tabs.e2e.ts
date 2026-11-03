@@ -1,14 +1,11 @@
-import AxeBuilder from '@axe-core/playwright'
 import { type Page, expect } from '@playwright/test'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { FIXTURES, type TestHooks, debugStats, expectReleasedDocuments, finish, fixture, launch, lifecycle, osFocus, pressAsOS, stubOpenDialog, test, visibleRows, waitIndexed, waitOpen } from './app'
-import { command } from './find-ui'
+import { FIXTURES, type TestHooks, axe, debugStats, expectReleasedDocuments, finish, fixture, holdReply, killCore, launch, osFocus, pressAsOS, runCommand, stubOpenDialog, test, visibleRows, waitIndexed, waitOpen, waitRendered } from './app'
 import { processMemory } from './memory'
 import { workspaceCharge } from '../app/renderer/workspace-budget'
 
 const open = (l: Awaited<ReturnType<typeof launch>>, path: string) => l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), path)
-const rendered = (win: Page) => expect(win.locator('.md-scroller')).toHaveAttribute('data-ready', '1')
 const tab = (win: Page, name: string) => win.getByRole('tab', { name, exact: true })
 
 async function documentAndWorkspaceCache(win: Page): Promise<number> {
@@ -80,7 +77,7 @@ test('permanent tabs retain document identity, Raw choice and source position; d
   const b = fixture('tabs-b.txt', 'Document B.\n')
   const l = await launch({ hooks: true, file: a })
   const { win } = l
-  await rendered(win)
+  await waitRendered(win)
   await win.getByRole('tab', { name: 'Raw', exact: true }).click()
   await waitOpen(win)
   await waitIndexed(win)
@@ -104,7 +101,7 @@ test('permanent tabs retain document identity, Raw choice and source position; d
   await expect(win.locator('.card-name')).toHaveText('tabs-b.txt')
   await expect(win.locator('.file-tab')).toHaveCount(2)
   expect(Object.keys((await debugStats(win)).charges).sort()).toEqual(identities)
-  await win.keyboard.press(command + '+w')
+  await win.keyboard.press('ControlOrMeta+w')
   await expect(win.locator('.card-name')).toHaveText('tabs-a.md')
   await expect.poll(async () => (await debugStats(win)).docs).toBe(1)
   await closeTabs(win)
@@ -118,9 +115,9 @@ test('file pills disambiguate names, support keyboard selection and have no axe 
   const two = fixture('tabs-two/README.md', '# Second readme\n')
   const l = await launch({ hooks: true, file: one })
   const { win } = l
-  await rendered(win)
+  await waitRendered(win)
   await open(l, two)
-  await rendered(win)
+  await waitRendered(win)
   await expect(win.locator('.file-tab-parent')).toHaveText([' · tabs-one', ' · tabs-two'])
   await tab(win, 'README.md · tabs-two').focus()
   await win.keyboard.press('ArrowLeft')
@@ -135,7 +132,7 @@ test('file pills disambiguate names, support keyboard selection and have no axe 
   const fileTabs = list!.childIds!.map((id) => nodes.get(id)!)
   expect(fileTabs.map((node) => node.name?.value)).toEqual(['README.md · tabs-one', 'README.md · tabs-two'])
   expect(fileTabs.flatMap((node) => node.childIds ?? []).some((id) => nodes.get(id)?.role?.value === 'button')).toBe(false)
-  expect((await new AxeBuilder({ page: win }).setLegacyMode().analyze()).violations).toEqual([])
+  expect(await axe(win)).toEqual([])
   await tab(win, 'README.md · tabs-one').focus()
   await win.keyboard.press('Tab')
   await expect(win.locator('.file-pill[data-selected] .file-tab-close')).toBeFocused()
@@ -156,19 +153,7 @@ test('an activation overtaken by A-B-A cannot steal the view or close an owned d
   await open(l, b)
   await expect(win.locator('.card-name')).toHaveText('tabs-race-b.txt')
   await waitOpen(win)
-  await win.evaluate(() => {
-    const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core
-    const call = core.call.bind(core)
-    let first = true
-    core.call = async (method, params) => {
-      const reply = await call(method, params)
-      if (method === 'activate' && first) {
-        first = false
-        await new Promise<void>((done) => { (window as unknown as { tabsRelease: () => void }).tabsRelease = done })
-      }
-      return reply
-    }
-  })
+  await holdReply(win, 'activate', 'tabsRelease', true)
   await tab(win, 'tabs-race-a.txt').click()
   await expect.poll(() => win.evaluate(() => typeof (window as unknown as { tabsRelease?: () => void }).tabsRelease)).toBe('function')
   await tab(win, 'tabs-race-b.txt').click()
@@ -235,10 +220,10 @@ test('a delayed replacement after A-B-A displays the new owned document identity
   const c = fixture('tabs-replace-c.txt', 'C replacement\n')
   const l = await launch({ hooks: true, file: source })
   const { win } = l
-  await rendered(win)
+  await waitRendered(win)
   await win.getByRole('link', { name: 'Next', exact: true }).click({ modifiers: ['Control'] })
   await expect(win.locator('.card-name')).toHaveText('tabs-replace-a.md')
-  await rendered(win)
+  await waitRendered(win)
   await open(l, b)
   await waitOpen(win)
   await win.evaluate(() => {
@@ -260,17 +245,13 @@ test('a delayed replacement after A-B-A displays the new owned document identity
   await tab(win, 'tabs-replace-a.md').click()
   await expect(win.locator('.card-message p')).toContainText('memory budget')
   await stubOpenDialog(l.app, c)
-  if (process.platform === 'darwin') await l.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('command', 'browse'))
-  else {
-    await win.getByRole('button', { name: 'Menu', exact: true }).click()
-    await win.getByRole('menuitem', { name: 'Open file…' }).click()
-    await win.getByRole('button', { name: 'Browse…', exact: true }).click()
-  }
+  await runCommand(win, 'Open file…')
+  await win.getByRole('button', { name: 'Browse…', exact: true }).click()
   await expect.poll(() => win.evaluate(() => typeof (window as unknown as { replacementRelease?: () => void }).replacementRelease)).toBe('function')
   await tab(win, 'tabs-replace-b.txt').click()
   await waitOpen(win)
   await tab(win, 'tabs-replace-a.md').click()
-  await rendered(win)
+  await waitRendered(win)
   await expect(win.getByRole('heading', { name: 'Original A' })).toBeVisible()
   await win.evaluate(() => (window as unknown as { replacementRelease: () => void }).replacementRelease())
   await expect(win.locator('.card-name')).toHaveText('tabs-replace-c.txt', { timeout: 10_000 })
@@ -313,17 +294,7 @@ test('leaving a pending activation for a failed tab does not leave a hidden acti
   await open(l, missing)
   await expect(win.locator('.card-message p')).toContainText('File not found')
   const workspace = await documentAndWorkspaceCache(win)
-  await win.evaluate(() => {
-    const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core
-    const call = core.call.bind(core)
-    core.call = async (method, params) => {
-      const reply = await call(method, params)
-      if (method === 'activate' && !(window as unknown as { pendingTabRelease?: () => void }).pendingTabRelease) await new Promise<void>((done) => {
-        (window as unknown as { pendingTabRelease: () => void }).pendingTabRelease = done
-      })
-      return reply
-    }
-  })
+  await holdReply(win, 'activate', 'pendingTabRelease', true)
   await tab(win, 'tabs-pending-a.txt').click()
   await expect.poll(() => win.evaluate(() => typeof (window as unknown as { pendingTabRelease?: () => void }).pendingTabRelease)).toBe('function')
   await win.getByRole('tab', { name: /tabs-pending-missing-/ }).click()
@@ -347,17 +318,7 @@ test('a fresh open completed behind a failed tab retains its document without a 
   await waitOpen(win)
   await open(l, missing)
   await expect(win.locator('.card-message p')).toContainText('File not found')
-  await win.evaluate(() => {
-    const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core
-    const call = core.call.bind(core)
-    core.call = async (method, params) => {
-      const reply = await call(method, params)
-      if (method === 'open') await new Promise<void>((done) => {
-        (window as unknown as { backgroundRelease: () => void }).backgroundRelease = done
-      })
-      return reply
-    }
-  })
+  await holdReply(win, 'open', 'backgroundRelease')
   await open(l, b)
   await expect.poll(() => win.evaluate(() => typeof (window as unknown as { backgroundRelease?: () => void }).backgroundRelease)).toBe('function')
   await win.getByRole('tab', { name: /tabs-background-missing-/ }).click()
@@ -397,7 +358,7 @@ for (const stage of ['native read', 'reply'] as const) test('leaving during Relo
       return reply
     }
   }, stage)
-  await win.keyboard.press(command + '+r')
+  await win.keyboard.press('ControlOrMeta+r')
   await expect.poll(() => win.evaluate(() => !!(window as unknown as { reloadStarted: boolean }).reloadStarted)).toBe(true)
   if (stage === 'reply') await expect.poll(() => win.evaluate(() => typeof (window as unknown as { reloadRelease?: () => void }).reloadRelease)).toBe('function')
   else await debugStats(win) // ordered after Reload entered the host; its new-generation read is still delayed
@@ -421,19 +382,18 @@ test('derived local tabs retain their capability across selection and cannot reg
   const other = fixture('tabs-derived-other.txt', 'Manual other\n')
   const l = await launch({ hooks: true, file: source })
   const { win } = l
-  await rendered(win)
+  await waitRendered(win)
   await win.getByRole('link', { name: 'Next', exact: true }).click({ modifiers: ['Control'] })
   await expect(win.locator('.card-name')).toHaveText('tabs-derived-target.md')
-  await rendered(win)
+  await waitRendered(win)
   await open(l, other)
   await waitOpen(win)
   await tab(win, 'tabs-derived-target.md').click()
-  await rendered(win)
+  await waitRendered(win)
   await expect(win.getByRole('heading', { name: 'Derived target' })).toBeVisible()
   await tab(win, 'tabs-derived-other.txt').click()
   await waitOpen(win)
-  const spawned = lifecycle(l.userData).filter((r) => r.event === 'utility-spawn').at(-1)!
-  process.kill(spawned.utilityPid as number)
+  killCore(l)
   await expect(win.locator('.card-message p')).toContainText("Typose's core stopped")
   await expect(win.getByRole('button', { name: 'Reopen', exact: true })).toBeEnabled()
   await tab(win, 'tabs-derived-target.md').click()
@@ -457,7 +417,7 @@ test('an unexpected local result path is abandoned and the still-owned source ca
   fixture('tabs-mismatch-target.md', '# Target\n')
   const l = await launch({ hooks: true, file: fixture('tabs-mismatch-source.md', '# Original source\n\n[Next](tabs-mismatch-target.md)\n') })
   const { win } = l
-  await rendered(win)
+  await waitRendered(win)
   await win.evaluate(() => {
     const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core
     const call = core.call.bind(core)

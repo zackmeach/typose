@@ -2,8 +2,9 @@
 // a private --user-data-dir, so runs never share the app profile, and records the main process's externally
 // observed exit status. `finish` keeps each run's lifecycle log, exit status and any new dumps (plan C9); a test
 // that fails before calling it gets the same from the `test` exported here.
-import { type ElectronApplication, type Page, test as base, _electron as electron, expect } from '@playwright/test'
-import { spawnSync } from 'node:child_process'
+import AxeBuilder from '@axe-core/playwright'
+import { type ElectronApplication, type Locator, type Page, test as base, _electron as electron, expect } from '@playwright/test'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, truncateSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
@@ -56,7 +57,8 @@ export const test = base.extend<{ finishLaunches: void }>({
         for (const l of running) {
           const at = n++
           await l.win.screenshot({ path: testInfo.outputPath(`failure-${at}.png`), timeout: 5000 }).catch(() => {})
-          const page = await l.win.evaluate(() => ({ inner: [innerWidth, innerHeight], screen: [screen.width, screen.height], ratio: devicePixelRatio, focus: document.hasFocus() })).catch((e: unknown) => String(e))
+          const probe = l.win.evaluate(() => ({ inner: [innerWidth, innerHeight], screen: [screen.width, screen.height], ratio: devicePixelRatio, focus: document.hasFocus() }))
+          const page = await Promise.race([probe, new Promise<string>((ok) => setTimeout(() => ok('timed out after 5 s'), 5000))]).catch((e: unknown) => String(e))
           const main = await l.app.evaluate(({ BrowserWindow, screen }) => {
             const w = BrowserWindow.getAllWindows()[0]
             return { bounds: w?.getBounds(), content: w?.getContentBounds(), focused: w?.isFocused(), workArea: screen.getPrimaryDisplay().workArea, scale: screen.getPrimaryDisplay().scaleFactor }
@@ -64,11 +66,10 @@ export const test = base.extend<{ finishLaunches: void }>({
           writeFileSync(testInfo.outputPath(`failure-${at}.json`), JSON.stringify({ page, main }, null, 2))
         }
       }
-      try {
-        for (const l of running) await finish(l)
-      } finally {
-        for (const cleanup of cleanups) await cleanup().catch(() => {}) // each removes itself, which a Set allows mid-loop
-      }
+      const errors: unknown[] = []
+      for (const l of running) await finish(l).catch((e: unknown) => errors.push(e)) // one launch's failure doesn't strand the rest
+      for (const cleanup of cleanups) await cleanup().catch(() => {}) // each removes itself, which a Set allows mid-loop
+      if (errors.length) throw errors[0]
     },
     { auto: true }
   ]
@@ -185,28 +186,34 @@ export const pressAsOS = (l: Launched, keyCode: string, modifiers: ('control' | 
   )
 
 /**
- * Open file… without the OS dialog, which must never open on the desktop the tests run on: main's handler is replaced
- * by one that answers `path` and counts its calls (`globalThis.dialogCalls`), and the dialog itself rejects.
+ * Open file… (or, with `channel` 'folder-dialog', Open folder…) without the OS dialog, which must never open on the
+ * desktop the tests run on: main's handler is replaced by one that answers `path` and counts its calls
+ * (`globalThis.dialogCalls`), and the dialog itself rejects.
  */
-export async function stubOpenDialog(app: ElectronApplication, path: string): Promise<void> {
-  await app.evaluate(({ dialog, ipcMain }, path) => {
+export async function stubOpenDialog(app: ElectronApplication, path: string, channel = 'open-dialog'): Promise<void> {
+  await app.evaluate(({ dialog, ipcMain }, { path, channel }) => {
     dialog.showOpenDialog = () => Promise.reject(new Error('the real dialog was reached'))
-    ipcMain.removeHandler('open-dialog')
-    ipcMain.handle('open-dialog', () => {
+    ipcMain.removeHandler(channel)
+    ipcMain.handle(channel, () => {
       ;(globalThis as { dialogCalls?: number }).dialogCalls = ((globalThis as { dialogCalls?: number }).dialogCalls ?? 0) + 1
       return path
     })
-  }, path)
+  }, { path, channel })
   await expect(app.evaluate(({ dialog }) => dialog.showOpenDialog({}))).rejects.toThrow('the real dialog was reached')
 }
 
-/** The card is showing a file's lines once its first row has text. */
-export async function waitOpen(win: Page): Promise<void> {
+/** The card (or page) is showing a file's lines once its first row has text. */
+export async function waitOpen(win: Page | Locator): Promise<void> {
   await expect(win.locator('.vl-row .text').first()).toBeAttached({ timeout: 30_000 })
 }
 
+/** The Markdown view in `scope` (a page or a card) has rendered: its scroller reports ready. */
+export async function waitRendered(scope: Page | Locator, timeout = 60_000): Promise<void> {
+  await expect(scope.locator('.md-scroller')).toHaveAttribute('data-ready', '1', { timeout })
+}
+
 /** Waits until the index reports done (the status shows the line count and encoding), and returns the count. */
-export async function waitIndexed(win: Page, timeout = 120_000): Promise<number> {
+export async function waitIndexed(win: Page | Locator, timeout = 120_000): Promise<number> {
   const status = win.locator('.card-status')
   await expect(status).toHaveText(/^[\d,]+ lines? · /, { timeout })
   return Number((await status.textContent())!.split(' ')[0].replaceAll(',', ''))
@@ -221,6 +228,61 @@ export function lifecycle(userData: string): LifecycleRecord[] {
     .trim()
     .split('\n')
     .map((l) => JSON.parse(l) as LifecycleRecord)
+}
+
+/** Kills the newest session's core host by its pid; returns the session and when (wall clock). */
+export function killCore(l: Launched): { session: number; at: number } {
+  const spawned = lifecycle(l.userData).filter((r) => r.event === 'utility-spawn').at(-1)!
+  const at = Date.now()
+  process.kill(spawned.utilityPid as number)
+  return { session: spawned.session as number, at }
+}
+
+/** axe-core on the page: every violation, of any impact, as `impact id: targets`. */
+export async function axe(win: Page): Promise<string[]> {
+  // Legacy mode: the default run opens a second page for its final step, which Electron's context refuses (spike B).
+  const { violations } = await new AxeBuilder({ page: win }).setLegacyMode().analyze()
+  return violations.map((v) => `${v.impact} ${v.id}: ${v.nodes.map((n) => n.target.join(' ')).join(' | ')}`)
+}
+
+/** Runs the fixtures-gen binary (release build) from the core workspace. */
+export function fixturesGen(...args: string[]): void {
+  execFileSync('cargo', ['run', '--release', '-q', '-p', 'fixtures-gen', '--', ...args], { cwd: resolve(__dirname, '../core'), stdio: 'inherit' })
+}
+
+/** Runs a command by its label through the palette, which every OS has (macOS has no ☰). */
+export async function runCommand(win: Page, label: string): Promise<void> {
+  await win.keyboard.press('ControlOrMeta+K')
+  await win.getByRole('combobox', { name: 'Search commands' }).fill(label)
+  await win.keyboard.press('Enter')
+}
+
+/**
+ * Holds the page core client's reply to `method` (every call, or only the first when `once`) until the test calls
+ * `window[name]()`; the test waits for it with `typeof window[name] === 'function'`. Test-hooks build only.
+ */
+export async function holdReply(win: Page, method: string, name: string, once = false): Promise<void> {
+  await win.evaluate(({ method, name, once }) => {
+    const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core
+    const call = core.call.bind(core)
+    let first = true
+    core.call = async (m, params) => {
+      const reply = await call(m, params)
+      if (m === method && (first || !once)) {
+        first = false
+        await new Promise<void>((done) => { (window as unknown as Record<string, () => void>)[name] = done })
+      }
+      return reply
+    }
+  }, { method, name, once })
+}
+
+/** Main's clipboard writes, recorded instead of reaching the system clipboard (the user's is private). */
+export async function recordClipboard(app: ElectronApplication): Promise<() => Promise<string[]>> {
+  await app.evaluate(({ clipboard }) => {
+    clipboard.writeText = async (value: string) => { const g = globalThis as { copied?: string[] }; g.copied = [...g.copied ?? [], value] }
+  })
+  return () => app.evaluate(() => (globalThis as { copied?: string[] }).copied ?? [])
 }
 
 /** Runs netlog-assert.mjs on a log, as CI does. */

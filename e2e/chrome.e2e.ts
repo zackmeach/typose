@@ -2,7 +2,7 @@ import { SHOW, menuLabels } from './menu-fixture'
 // Plan PR 7's title bars and menus (brief §3.1, §3.2; spec §9): WCO on Windows, the traffic lights on macOS, ☰, and
 // Electron's default menu gone.
 import { expect } from '@playwright/test'
-import { type Launched, finish, fixture, launch, lifecycle, osFocus, pressAsOS, stubOpenDialog, test, waitOpen } from './app'
+import { type Launched, finish, fixture, launch, lifecycle, osFocus, pressAsOS, recordClipboard, stubOpenDialog, test, waitOpen } from './app'
 import { HT, doubleClickMessage, hitTest, reaches, realMouse } from './win32'
 
 const MAC = process.platform === 'darwin'
@@ -176,12 +176,10 @@ test('Electron’s default menu is gone: Force Reload and its other accelerators
     })
   ).toEqual({ devTools: false, zoom: 1, fullScreen: false })
   // Select All and Copy use the document source, including text outside the mounted viewport.
-  await app.evaluate(({ clipboard }) => {
-    clipboard.writeText = async value => { (globalThis as { acceleratorCopy?: string }).acceleratorCopy = value }
-  })
+  const copied = await recordClipboard(app)
   await pressAsOS(l, 'A', ['control'])
   await pressAsOS(l, 'C', ['control'])
-  await expect.poll(() => app.evaluate(() => (globalThis as { acceleratorCopy?: string }).acceleratorCopy)).toBe(lines.join('\n'))
+  await expect.poll(async () => (await copied()).at(-1)).toBe(lines.join('\n'))
   // Ctrl+R is the page's own Reload (PR 4): the document's next generation, in the same page.
   await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '1')
   await pressAsOS(l, 'R', ['control'])

@@ -84,7 +84,7 @@ test('a double Reload mid-index on 10 GiB keeps one index job, and close then le
       return second
     }
   })
-  await l.win.keyboard.press(process.platform === 'darwin' ? 'Meta+r' : 'Control+r')
+  await l.win.keyboard.press('ControlOrMeta+r')
   await l.win.waitForFunction(() => 'doubleReload' in window)
   const replies = await l.win.evaluate(() => (window as unknown as { doubleReload: Promise<unknown[]> }).doubleReload)
   // The first ends Stale, or Frozen when generation 3 supersedes its first page's read; the second gives generation 3.

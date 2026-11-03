@@ -1,9 +1,8 @@
 // A generated 1 GiB JSONL file (200-byte lines): over 5M lines, so 107M px of rows and logical scrolling (§5.3).
 import { expect } from '@playwright/test'
-import { execFileSync } from 'node:child_process'
 import { closeSync, openSync, readSync, rmSync, statSync } from 'node:fs'
-import { join, resolve } from 'node:path'
-import { FIXTURES, finish, launch, test, visibleRows, waitIndexed, waitOpen } from './app'
+import { join } from 'node:path'
+import { FIXTURES, finish, fixturesGen, launch, test, visibleRows, waitIndexed, waitOpen } from './app'
 
 const GIB = join(FIXTURES, '1gib.txt') // .txt: a .jsonl name would open in Rows, and this exercises Raw
 const LINE = 200
@@ -21,10 +20,7 @@ function lastLine(): string {
 
 test('1 GiB: Ctrl+End reaches the last line, the wheel moves 1:1 in logical mode, and Shift+wheel scrolls sideways', async () => {
   test.setTimeout(10 * 60_000)
-  execFileSync('cargo', ['run', '--release', '-q', '-p', 'fixtures-gen', '--', 'jsonl', '--out', GIB, '--bytes', String(1 << 30), '--line', String(LINE)], {
-    cwd: resolve(__dirname, '../core'),
-    stdio: 'inherit'
-  })
+  fixturesGen('jsonl', '--out', GIB, '--bytes', String(1 << 30), '--line', String(LINE))
   const l = await launch({ file: GIB })
   const { win } = l
   await waitOpen(win)
