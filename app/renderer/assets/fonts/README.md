@@ -8,8 +8,9 @@ or conversion was performed, so glyph coverage is exactly the upstream file's co
 
 - Release: `rsms/inter` v4.1, commit `e3a3d4c` (GitHub release page identifies this commit).
 - Source: <https://github.com/rsms/inter/tree/v4.1/docs/font-files>
-- Files: `InterVariable.woff2` (roman variable weight 100–900) and
-  `InterVariable-Italic.woff2` (italic variable weight 100–900).
+- Files, upstream name → shipped name:
+  - `InterVariable.woff2` → `inter-variable.woff2` (roman variable weight 100–900)
+  - `InterVariable-Italic.woff2` → `inter-variable-italic.woff2` (italic variable weight 100–900)
 - License: SIL Open Font License 1.1, copied as `LICENSE-Inter-OFL.txt` from
   <https://github.com/rsms/inter/blob/v4.1/LICENSE.txt>.
 
@@ -17,8 +18,11 @@ or conversion was performed, so glyph coverage is exactly the upstream file's co
 
 - Release: `JetBrains/JetBrainsMono` v2.304, commit `cd5227b` (GitHub release page identifies this commit).
 - Source: <https://github.com/JetBrains/JetBrainsMono/tree/v2.304/fonts/webfonts>
-- Files: `JetBrainsMono-Regular.woff2` (400), `JetBrainsMono-Medium.woff2` (500),
-  `JetBrainsMono-SemiBold.woff2` (600), and `JetBrainsMono-Bold.woff2` (700).
+- Files, upstream name → shipped name:
+  - `JetBrainsMono-Regular.woff2` → `jetbrains-mono-regular.woff2` (400)
+  - `JetBrainsMono-Medium.woff2` → `jetbrains-mono-medium.woff2` (500)
+  - `JetBrainsMono-SemiBold.woff2` → `jetbrains-mono-semibold.woff2` (600)
+  - `JetBrainsMono-Bold.woff2` → `jetbrains-mono-bold.woff2` (700)
 - License: SIL Open Font License 1.1, copied as `LICENSE-JetBrains-Mono-OFL.txt` from
   <https://github.com/JetBrains/JetBrainsMono/blob/v2.304/OFL.txt>.
 

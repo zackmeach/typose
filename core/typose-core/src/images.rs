@@ -1530,9 +1530,8 @@ mod canonical_tests {
     }
 }
 
-// Append to images.rs for an explicitly invoked release qualification probe. This is a direct codec-stage
-// measurement: production adapters first prove each fixture is accepted, then cancellation starts after headers
-// and output allocation so preflight/strict-validator checks cannot conceal a synchronous decoder delay.
+// A plain unit test, run by every `cargo test`. It calls `decode` directly on a baseline JPEG one pixel wide and
+// 65,535 rows tall whose every block adds the largest DC difference, and requires a refusal rather than a panic.
 #[cfg(test)]
 mod dc_tests {
     use super::*;
