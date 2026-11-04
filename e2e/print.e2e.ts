@@ -73,6 +73,30 @@ test('Escape cancels the print sheet before any document is built', async () => 
   expect(l.pageErrors).toEqual([])
 })
 
+test('the print sheet keeps Tab inside it and gives focus back on Close', async () => {
+  const file = fixture('print-focus.txt', Array.from({ length: 120 }, (_, i) => `line ${i + 1}`).join('\n'))
+  const l = await launch({ file, hooks: true, env: { TYPOSE_TEST_PRINT: '1' } })
+  await waitOpen(l.win)
+  await waitIndexed(l.win)
+  const card = l.win.getByRole('region', { name: 'Reader card 1' })
+  const reader = card.locator('.vl-scroller')
+  await reader.focus()
+  await l.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('command', 'print'))
+  const sheet = card.getByRole('dialog', { name: 'Print print-focus.txt' })
+  await expect(sheet.getByRole('button', { name: 'Close' })).toBeFocused()
+  await sheet.getByRole('button', { name: 'Continue to print…' }).focus()
+  await l.win.keyboard.press('Tab') // from the last control
+  await expect(sheet.locator(':focus')).toHaveCount(1)
+  await sheet.getByRole('radio', { name: 'Pages around current view' }).focus()
+  await l.win.keyboard.press('Shift+Tab') // from the first
+  await expect(sheet.locator(':focus')).toHaveCount(1)
+  await sheet.getByRole('button', { name: 'Close' }).click()
+  await expect(sheet).toHaveCount(0)
+  await expect(reader).toBeFocused()
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
 test('print refuses a source that changes after its Markdown plan was built', async () => {
   const path = fixture('print-source-change.md', '# Stable source\n\nThe original content.\n')
   const l = await launch({ file: path, hooks: true, env: { TYPOSE_TEST_PRINT: '1' } })
