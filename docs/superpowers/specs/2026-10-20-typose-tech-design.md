@@ -248,7 +248,7 @@ SourceRef  { gen: u32, primary: SourceSpan, contributing: SourceSpan[] }
 ### 3.5 Indexes
 | Format | Index | Memory |
 |---|---|---|
-| Text, Raw (all formats) | Line checkpoints: one `u64` every 1,024 lines, built with `memchr` (+ `rayon` for >64MiB). The block is rescanned on demand. Each checkpoint also records the UTF-16 length and non-ASCII flag of its block. | ~16KiB per million lines |
+| Text, Raw (all formats) | Line checkpoints: one `u64` every 1,024 lines, built with `memchr`. The block is rescanned on demand. Each checkpoint also records the UTF-16 length and non-ASCII flag of its block. | ~16KiB per million lines |
 | JSONL | The line index, plus per-line parse status and blank or failed counts | as above + 1 bit per line |
 | CSV/TSV | **Record** checkpoints (records ≠ lines, because quoted fields contain newlines) from `csv-core` state, every 1,024 records. Quote state makes parallel indexing hard, so v1 indexes sequentially (Spike A measures this). | ~8KiB per million records |
 | JSON/JSONC | A **container index**: every object and array, with start/end offsets and child count, from one streaming structural scan. Children of an expanded container are enumerated lazily, with element checkpoints for huge arrays. | Proportional to containers, not values |

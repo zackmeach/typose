@@ -1,4 +1,5 @@
 import { type FormEvent, type ReactNode, type RefObject, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { FocusScope } from 'react-aria'
 import { Button, Dialog, DialogTrigger, Heading, Menu, MenuItem, MenuTrigger, Modal, ModalOverlay, Popover, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
 import { MAX_PRINT_PAGES, type CapturedLocation, type CsvInfo, type CsvOptions, type HandoffSubject, type Hello, type Limits, type MdBuild, type Methods, type Opened, type SurfaceRef, type ViewRef } from '../shared/protocol'
 import { canOpen, extension, isExecutable } from '../shared/handoff'
@@ -1593,7 +1594,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         {printPlan ? (() => {
           const range = selectedPrintRange(printPlan)
           const pages = range?.pages ?? 0
-          return <form className="print-sheet" role="dialog" aria-modal="true" aria-labelledby={`print-title-${id}`} onSubmit={event => { void submitPrint(event) }}>
+          return <FocusScope contain restoreFocus><form className="print-sheet" role="dialog" aria-modal="true" aria-labelledby={`print-title-${id}`} onSubmit={event => { void submitPrint(event) }}>
             <h2 id={`print-title-${id}`}>Print {path ? fileName(path) : 'document'}</h2>
             <p>{printPlan.total.toLocaleString()} {printPlan.unit}s · estimated {printPlan.totalPages.toLocaleString()} pages</p>
             <fieldset disabled={printBusy || !printPlan.indexed}>
@@ -1613,7 +1614,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
               <button type="button" autoFocus onClick={closePrint}>{printBusy ? 'Cancel' : 'Close'}</button>
               <button type="submit" disabled={printBusy || !printPlan.indexed || !range || pages > 50 && !printConfirmed}>Continue to print…</button>
             </div>
-          </form>
+          </form></FocusScope>
         })() : null}
         {sheet ? <ModalOverlay isOpen isDismissable className="handoff-overlay" onOpenChange={open => { if (!open) setSheet(null) }}>
           <Modal className="handoff-sheet">

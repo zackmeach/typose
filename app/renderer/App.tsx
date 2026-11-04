@@ -500,7 +500,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
 
 
   function focusReader(id: string): void {
-    requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-card="${CSS.escape(id)}"] .csv-grid, [data-card="${CSS.escape(id)}"] .md-scroller, [data-card="${CSS.escape(id)}"] .vl-scroller`)?.focus({ preventScroll: true }))
+    requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-card="${CSS.escape(id)}"] .csv-grid, [data-card="${CSS.escape(id)}"] .md-scroller, [data-card="${CSS.escape(id)}"] .vl-scroller, [data-card="${CSS.escape(id)}"] .structured-view`)?.focus({ preventScroll: true }))
   }
 
   function restorePreviewFocus(group: LinkPreview): void {

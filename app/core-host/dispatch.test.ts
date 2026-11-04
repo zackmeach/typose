@@ -1234,6 +1234,15 @@ describe("the renderer cache's reservation (plan C1)", () => {
     expect(reserved()).toEqual([Number.MAX_SAFE_INTEGER, paid(0)])
   })
 
+  it('refuses a folder root whose combined sum is unsafe, before the native reservation or capture', async () => {
+    const captureFolder = vi.fn()
+    const folders = makeDispatcher({ ...addon, captureFolder }, 7, () => {})
+    expect(await folders({ id: 1, method: 'reserveWorkspace', params: { bytes: Number.MAX_SAFE_INTEGER } })).toMatchObject({ result: true })
+    expect(await folders({ id: 2, method: 'addRoot', params: { path: 'C:\\docs' } })).toMatchObject({ error: { code: 'Memory' } })
+    expect(captureFolder).not.toHaveBeenCalled()
+    expect(reserved()).toEqual([Number.MAX_SAFE_INTEGER])
+  })
+
   it('keeps the latest workspace share when an activation gives back its previous view reservation', async () => {
     expect(await call('reserve', { doc: 1, gen: 1, bytes: 300 })).toMatchObject({ result: true })
     expect(await call('reserveWorkspace', { bytes: 100 })).toMatchObject({ result: true })

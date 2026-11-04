@@ -1017,7 +1017,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const peak = Math.max(rootPeak, roots.size + 1)
       // Path + label may be full UTF-16, alongside the Map entry and wrapper metadata/copies.
       const bytes = 3 * ((64 << 10) + (2 * 32_767 + 2 * 255 + (16 << 10)) * peak)
-      if (!addon.reserveCache(viewBytes() + workspaceBytes + savedHostBytes + bytes + surfaceHostBytes)) throw new Refusal('Memory', 'the folder table cannot grow')
+      if (!account({ rootHost: bytes })) throw new Refusal('Memory', 'the folder table cannot grow')
       const previous = rootHostBytes
       rootHostBytes = bytes
       let native: NativeFolderRoot | undefined
