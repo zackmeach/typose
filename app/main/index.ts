@@ -14,6 +14,7 @@ import { envWhole, isMark, marksHook } from './marks'
 import { SessionStore } from './session-store'
 import { ConfigStore, type TomlCodec } from './config-store'
 import { COMMANDS } from '../shared/commands'
+import { addonTarget } from '../shared/addon-target'
 import { MAX_PRINT_PDF_BYTES, physicalPageCount, validatePrintDocument } from './print-validation'
 
 const mainStart = Date.now() // plan C8's first startup mark: read now, written once the hook is set up below
@@ -271,8 +272,7 @@ void app.whenReady().then(() => {
   session.defaultSession.setSpellCheckerEnabled(false)
   serveApp()
   const win = createWindow()
-  const targets: Record<string, string> = { 'win32-x64': 'win32-x64-msvc', 'darwin-arm64': 'darwin-arm64', 'linux-x64': 'linux-x64-gnu' }
-  const codec = require(`typose-node/${__TEST_HOOKS__ ? 'hooks/' : ''}typose-node.${targets[`${process.platform}-${process.arch}`]}.node`) as TomlCodec
+  const codec = require(`typose-node/${__TEST_HOOKS__ ? 'hooks/' : ''}typose-node.${addonTarget(process.platform, process.arch)}.node`) as TomlCodec
   const configStore = new ConfigStore(app.getPath('userData'), codec)
   if (sessionStore.snapshot().window?.maximized) win.maximize()
   const rememberBounds = () => { if (!win.isDestroyed()) sessionStore.bounds({ ...win.getNormalBounds(), maximized: win.isMaximized() }) }

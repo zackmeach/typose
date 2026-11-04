@@ -2,6 +2,7 @@
 // MessagePort main hands it. Main's first message carries the port and this spawn's session id (plan C7).
 import { totalmem } from 'node:os'
 import type * as Core from 'typose-node'
+import { addonTarget } from '../shared/addon-target'
 import type { Charges, DebugStats } from '../shared/protocol'
 import { makeDispatcher } from './dispatch'
 
@@ -18,10 +19,7 @@ interface Hooks {
   savedRouteBytes(route: Core.SavedRoute): number
 }
 
-/** napi-rs's `--platform` name for each build target (spec §12.1). */
-const TARGETS: Record<string, string> = { 'win32-x64': 'win32-x64-msvc', 'darwin-arm64': 'darwin-arm64', 'linux-x64': 'linux-x64-gnu' }
-const target = TARGETS[`${process.platform}-${process.arch}`]
-if (!target) throw new Error(`no Typose core is built for ${process.platform}-${process.arch}`)
+const target = addonTarget(process.platform, process.arch)
 // The addon's own binary, by its known name, not through napi-rs's generated index.js: that loader would load whatever
 // NAPI_RS_NATIVE_LIBRARY_PATH names, or go looking for a WASI build (spec §7.1). It sits unpacked beside the asar,
 // outside its integrity check, and is no longer read. The test-hooks build loads the test-hooks addon, which the release
