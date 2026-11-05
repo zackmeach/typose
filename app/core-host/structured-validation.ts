@@ -58,9 +58,7 @@ export function structuredInfo(value: unknown, base: Omit<StructuredRef, 'revisi
   for (const key of ['rows', 'parsed', 'failed', 'blank', 'columns'] as const) if (value[key] != null) info[key] = number(value[key])
   if (value.tableOff != null) info.tableOff = text(value.tableOff, 2048)
   if (value.schema != null) info.schema = text(value.schema, 64)
-  // Checked, not yet passed on: until the Transcript lens lands (M5 PR 2), the renderer would show every detected
-  // session a disabled Transcript tab (card.ts).
-  if (value.transcript != null) transcriptInfo(value.transcript)
+  if (value.transcript != null) info.transcript = transcriptInfo(value.transcript)
   return info
 }
 

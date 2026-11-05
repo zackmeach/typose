@@ -209,7 +209,10 @@ test('a Claude-session-shaped JSONL reads in Rows, Table and Raw without stoppin
   ]
   const live = await launch({ hooks: true, file: fixture('structured-claude-shaped.jsonl', records.map(record => JSON.stringify(record)).join('\n') + '\n') })
   const card = live.win.getByRole('region', { name: 'Reader card 1' }), row = (line: number) => card.locator(`.jsonl-entry[data-line="${line}"]`)
-  await expect(card.locator('[data-lens="rows"]')).toBeVisible({ timeout: 30_000 })
+  // A detected session opens in Transcript (brief §5.4).
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  await card.getByRole('tab', { name: 'Rows', exact: true }).click()
+  await expect(card.locator('[data-lens="rows"]')).toBeVisible()
   await expect(row(0).locator('.text')).toHaveText('Read the launch plan and summarise it')
   await expect(row(1).locator('.text')).toHaveText(`Read launch-plan.md · ${Buffer.byteLength(JSON.stringify(records[1]))} B`)
   await expect(row(2).locator('.text')).toHaveText('# Launch plan Move the pier on Tuesday.')
@@ -227,6 +230,55 @@ test('a Claude-session-shaped JSONL reads in Rows, Table and Raw without stoppin
   await card.getByRole('tab', { name: 'Rows', exact: true }).click()
   await expect(row(4).locator('.text')).toHaveText('Launch plan review')
   await expect(live.win.getByText("Typose's core stopped")).toHaveCount(0)
+  expect(live.pageErrors).toEqual([])
+})
+
+test('Claude Transcript uses the full graph, nests tool results and preserves literal command tags', async () => {
+  const records = [
+    { type: 'user', uuid: 'u0', parentUuid: null, message: { role: 'user', content: [{ type: 'text', text: 'Please **inspect** <command-name>literal</command-name>.' }] } },
+    { type: 'system', uuid: 'event1', parentUuid: 'u0', detail: 'Session metadata fixture' },
+    { type: 'assistant', uuid: 'a1', parentUuid: 'event1', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tool1', name: 'read', input: { amount: 3.1, file: 'local.md' } }] } },
+    { type: 'user', uuid: 'u1', parentUuid: 'a1', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tool1', content: '**matched result**' }] } },
+    { type: 'assistant', uuid: 'old', parentUuid: 'u1', message: { role: 'assistant', content: 'Old branch fixture' } },
+    { type: 'assistant', uuid: 'new', parentUuid: 'u1', message: { role: 'assistant', content: 'Latest leaf fixture' } },
+    { type: 'assistant', uuid: 'side', parentUuid: 'a1', isSidechain: true, message: { role: 'assistant', content: 'Sidechain fixture' } },
+    { type: 'queue-operation', operation: 'fixture' }
+  ]
+  const source = records.map(record => JSON.stringify(record).replace('"amount":3.1', '"amount":3.10')).join('\n') + '\n{bad\n'
+  const live = await launch({ hooks: true, file: fixture('structured-claude.jsonl', source) })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  await expect(card.locator('.transcript-markdown strong').filter({ hasText: 'inspect' })).toBeVisible()
+  await expect(card.locator('.transcript-markdown').first()).toContainText('<command-name>literal</command-name>')
+  await expect(card.getByText('Latest leaf fixture', { exact: true })).toBeVisible()
+  await expect(card.getByText('Old branch fixture', { exact: true })).toHaveCount(0)
+  await card.getByText('1 messages on another branch', { exact: true }).click()
+  await expect(card.getByText('Old branch fixture', { exact: true })).toBeVisible()
+  await card.getByText('Sidechain · 1 messages', { exact: true }).click()
+  await expect(card.getByText('Sidechain fixture', { exact: true })).toBeVisible()
+  const tool = card.locator('.transcript-tool[data-tool-id="tool1"]')
+  await tool.locator('summary').click()
+  await expect(tool.locator('.tree-number')).toHaveText('3.10')
+  await expect(tool.locator('.transcript-tool-result strong').filter({ hasText: 'matched result' })).toBeVisible()
+  await expect(card.locator('.transcript-turn > h3').filter({ hasText: /^User$/ })).toHaveCount(1)
+  await expect(card.getByRole('button', { name: '1 lines couldn’t be parsed · View in Rows', exact: true })).toBeVisible()
+  await card.getByRole('checkbox', { name: 'Show 2 session events', exact: true }).check()
+  await expect(card.locator('.session-event')).toHaveCount(2)
+  expect(live.pageErrors).toEqual([])
+})
+
+test('OpenAI dataset Transcript keeps conversations separate and tool results under their matching calls', async () => {
+  const line = JSON.stringify({ messages: [{ role: 'system', content: 'System fixture' }, { role: 'user', content: 'Question fixture' }, { role: 'assistant', content: null, tool_calls: [{ id: 'reused', type: 'function', function: { name: 'lookup', arguments: '{"exact":3.10}' } }] }, { role: 'tool', tool_call_id: 'reused', content: 'Dataset result fixture' }], metadata: { fixture: true } })
+  const live = await launch({ hooks: true, file: fixture('structured-openai-dataset.jsonl', [line, line, line].join('\n') + '\n') })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  await expect(card.locator('.transcript-conversation')).toHaveCount(3)
+  await expect(card.getByText('System prompt', { exact: true })).toHaveCount(3)
+  await expect(card.getByText('Line metadata', { exact: true })).toHaveCount(3)
+  const tool = card.locator('.transcript-tool[data-tool-id="reused"]').first()
+  await tool.locator('summary').click()
+  await expect(tool.locator('.transcript-tool-result').getByText('Dataset result fixture', { exact: true })).toBeVisible()
+  await expect(card.locator('.transcript-turn > h3').filter({ hasText: /^Tool$/ })).toHaveCount(0)
   expect(live.pageErrors).toEqual([])
 })
 

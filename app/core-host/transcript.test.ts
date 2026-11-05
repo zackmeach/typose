@@ -65,7 +65,7 @@ async function client() {
   return { open, value, call }
 }
 
-/** The core's own description of `path`, which the core host checks but doesn't pass on yet (M5 PR 2). */
+/** The core's own description of `path`, read without the core host. */
 async function nativeTranscript(path: string) {
   const doc = Doc.open(path)
   try {
@@ -137,7 +137,7 @@ describe('Transcript through the core host', () => {
     const c = await client()
     const { info, path } = await c.open('session-7f3a.jsonl', SESSION)
     expect(info).toMatchObject({ done: true, schema: 'claude-code-v1' })
-    expect(info.transcript).toBeUndefined() // not shown before the lens (M5 PR 2)
+    expect(info.transcript).toEqual(await nativeTranscript(path))
     expect(await nativeTranscript(path)).toEqual({ adapter: 'claude-code-v1', mode: 'messages', confidence: 9 / 11, ready: true,
       messages: 9, events: 2, branches: 1, sidechains: 1, calls: 2, matchedResults: 2, unmatchedResults: 0 })
 
@@ -172,7 +172,7 @@ describe('Transcript through the core host', () => {
     const c = await client()
     const { info, path } = await c.open('finetune-support.jsonl', DATASET)
     expect(info).toMatchObject({ done: true, schema: 'openai-chat-v1' })
-    expect(info.transcript).toBeUndefined()
+    expect(info.transcript).toEqual(await nativeTranscript(path))
     expect(await nativeTranscript(path)).toEqual({ adapter: 'openai-chat-v1', mode: 'dataset', confidence: 1, ready: true,
       messages: 200, events: 0, branches: 0, sidechains: 0, calls: 40, matchedResults: 40, unmatchedResults: 0 })
 

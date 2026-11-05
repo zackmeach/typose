@@ -43,8 +43,20 @@
 .jsonl-table th,.jsonl-table td { text-align:left; border-bottom:1px solid var(--hairline,#29292d); padding:6px 12px; max-width:70ch; white-space:pre-wrap; overflow-wrap:anywhere; }
 .structured-pagination { display:flex; gap:16px; padding:14px 0; align-items:center; }
 .structured-context { position:fixed; z-index:50; display:flex; flex-direction:column; background:var(--surface,#202023); border:1px solid var(--border,#454549); padding:4px; }
-.transcript-turn,.transcript-conversation { max-width:70ch; min-width:35ch; margin:0 auto; padding:16px 0; border-bottom:1px solid var(--hairline,#29292d); }
+.transcript-turn,.transcript-conversation { max-width:70ch; min-width:0; margin:0 auto; padding:16px 0; border-bottom:1px solid var(--hairline,#29292d); }
 .transcript-turn h3 { font:inherit; font-weight:600; margin:0 0 8px; }
 .transcript-text { font:inherit; white-space:pre-wrap; overflow-wrap:anywhere; margin:0 0 10px; }
 .session-event { color:var(--text-secondary,#aaa); }
 .structured-problem-list { max-height:320px; overflow:auto; }
+/* Transcript (brief §5.4): Rendered's 70ch reading column, its turns' Markdown in the reading font. */
+.structured-view[data-mode=transcript] .structured-content { min-width:0; }
+.transcript-pane { width:min(100%, 70ch); margin:0 auto; }
+.transcript-controls { display:flex; flex-direction:column; gap:8px; padding:8px 0; color:var(--text2); }
+.transcript-markdown { font:16px/1.6 var(--font-ui); overflow-wrap:anywhere; }
+.transcript-markdown pre { white-space:pre-wrap; background:var(--surface-raised); padding:12px; border-radius:8px; }
+.transcript-markdown code { font-family:var(--font-mono); font-size:.9em; }
+.transcript-markdown a { color:var(--accent); text-decoration:underline; cursor:pointer; }
+.transcript-tool { margin:8px 0; padding:4px 0; }
+.transcript-tool-result { margin:8px 0 8px 16px; border-left:1px solid var(--guide,#434348); padding-left:12px; }
+.transcript-image { max-width:100%; max-height:320px; object-fit:contain; display:block; }
+.transcript-image-placeholder { color:var(--text2); }
