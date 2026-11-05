@@ -238,8 +238,11 @@ impl Graph {
         self.entries.push(entry);
         Ok(())
     }
+    /// Called for every record past the first 200 of a file with no schema: only the first turns the graph off.
     pub fn reject_undetected(&mut self) {
-        self.disable("No supported transcript schema was detected in the first 200 parsed records");
+        if self.reason.is_none() {
+            self.disable("No supported transcript schema was detected in the first 200 parsed records");
+        }
     }
     /// Builds the displayed order once every record is observed: linear in the graph's records, turns and links, and
     /// cancellable, checking the read's flag (`store::cancellable`) every `CANCEL_EVERY` steps. A cancelled finish
