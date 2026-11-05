@@ -473,12 +473,23 @@ impl Graph {
         // to the session after. On this PC (M5 PR 1, 27 sessions over 10 MiB), the graph keeps 85 boundaries
         // (`drop_copies` drops 9 later copies), which cut 52,151 of 79,735 messages off the main chain. Only an earlier
         // record is a logical parent: 81 of the 85 name one, and 4, each its file's first, name a later one, which
-        // would close a cycle.
+        // would close a cycle. A boundary may also name a record absent from its file: on this PC (3,000 session
+        // files), 23 boundaries in 16 of 2,764 subagent files do, and cut those sessions into 39 segments. Such a
+        // boundary joins the latest message before it with its own `sidechain` flag: in all 23, the record just before
+        // it and the latest leaf of the segment before. With none, it stays a root, as 4 do in main sessions, each its
+        // file's first boundary with no message before it.
         let mut direct = Vec::with_capacity(n);
+        let mut latest = [None; 2]; // the latest message so far, by its `sidechain` flag
         for (index, entry) in self.entries.iter().enumerate() {
             steps.tick()?;
             let parent = entry.parent.as_deref().and_then(|id| ids.get(id).copied());
-            direct.push(parent.filter(|&at| !entry.logical || at < index));
+            direct.push(match parent {
+                None if entry.logical => latest[usize::from(entry.sidechain)],
+                parent => parent.filter(|&at| !entry.logical || at < index),
+            });
+            if message[index] {
+                latest[usize::from(entry.sidechain)] = Some(index);
+            }
         }
         drop(ids);
         // Session events may carry UUIDs and sit between two messages: a message's parent is the nearest message above.
@@ -1374,6 +1385,87 @@ mod tests {
         let graph = index.transcript.lock().unwrap();
         assert!(graph.ready, "{:?}", graph.reason);
         assert_eq!(order(&graph), [("event", "b"), ("turn", "u1"), ("turn", "a2"), ("turn", "u3")]);
+    }
+    /// A compacted subagent session: each boundary names a record that isn't in the file. Each joins the latest message
+    /// before it, and the segments read as one chain.
+    #[test]
+    fn boundaries_naming_absent_records_join_a_subagent_session_into_one_chain() {
+        let index = fixture(
+            "transcript-compaction-subagent",
+            &[
+                r#"{"type":"user","uuid":"s0","parentUuid":null,"isSidechain":true,"message":{"role":"user","content":"task"}}"#,
+                r#"{"type":"assistant","uuid":"s1","parentUuid":"s0","isSidechain":true,"message":{"role":"assistant","content":"one"}}"#,
+                r#"{"type":"system","subtype":"compact_boundary","uuid":"b1","parentUuid":null,"logicalParentUuid":"gone1","isSidechain":true}"#,
+                r#"{"type":"user","uuid":"s2","parentUuid":"b1","isSidechain":true,"message":{"role":"user","content":"summary"}}"#,
+                r#"{"type":"assistant","uuid":"s3","parentUuid":"s2","isSidechain":true,"message":{"role":"assistant","content":"two"}}"#,
+                r#"{"type":"system","subtype":"compact_boundary","uuid":"b2","parentUuid":null,"logicalParentUuid":"gone2","isSidechain":true}"#,
+                r#"{"type":"user","uuid":"s4","parentUuid":"b2","isSidechain":true,"message":{"role":"user","content":"summary"}}"#,
+                r#"{"type":"assistant","uuid":"s5","parentUuid":"s4","isSidechain":true,"message":{"role":"assistant","content":"three"}}"#,
+            ],
+        );
+        let graph = index.transcript.lock().unwrap();
+        assert!(graph.ready, "{:?}", graph.reason);
+        assert_eq!(graph.census.branches, 0);
+        assert_eq!(
+            order(&graph),
+            [
+                ("turn", "s0"),
+                ("turn", "s1"),
+                ("event", "b1"),
+                ("turn", "s2"),
+                ("turn", "s3"),
+                ("event", "b2"),
+                ("turn", "s4"),
+                ("turn", "s5")
+            ]
+        );
+    }
+    /// A boundary naming an absent record with no message before it stays a root; a later one joins the message before
+    /// it, not a later one, which would close a cycle.
+    #[test]
+    fn a_boundary_naming_an_absent_record_with_no_message_before_it_stays_a_root() {
+        let index = fixture(
+            "transcript-compaction-absent-first",
+            &[
+                r#"{"type":"system","subtype":"compact_boundary","uuid":"b0","parentUuid":null,"logicalParentUuid":"gone0"}"#,
+                r#"{"type":"user","uuid":"u1","parentUuid":"b0","message":{"role":"user","content":"summary"}}"#,
+                r#"{"type":"assistant","uuid":"a2","parentUuid":"u1","message":{"role":"assistant","content":"reply"}}"#,
+                r#"{"type":"system","subtype":"compact_boundary","uuid":"b3","parentUuid":null,"logicalParentUuid":"gone3"}"#,
+                r#"{"type":"user","uuid":"u4","parentUuid":"b3","message":{"role":"user","content":"summary"}}"#,
+                r#"{"type":"assistant","uuid":"a5","parentUuid":"u4","message":{"role":"assistant","content":"next"}}"#,
+            ],
+        );
+        let graph = index.transcript.lock().unwrap();
+        assert!(graph.ready, "{:?}", graph.reason);
+        assert_eq!(graph.census.branches, 0);
+        assert_eq!(
+            order(&graph),
+            [("event", "b0"), ("turn", "u1"), ("turn", "a2"), ("event", "b3"), ("turn", "u4"), ("turn", "a5")]
+        );
+    }
+    /// In a main session, a boundary naming an absent record joins the latest main-session message before it, not a
+    /// sidechain message written in between.
+    #[test]
+    fn a_main_session_boundary_naming_an_absent_record_skips_an_interleaved_sidechain() {
+        let index = fixture(
+            "transcript-compaction-absent-main",
+            &[
+                r#"{"type":"user","uuid":"u0","parentUuid":null,"message":{"role":"user","content":"start"}}"#,
+                r#"{"type":"assistant","uuid":"a1","parentUuid":"u0","message":{"role":"assistant","content":"reply"}}"#,
+                r#"{"type":"user","uuid":"s0","parentUuid":"a1","isSidechain":true,"message":{"role":"user","content":"task"}}"#,
+                r#"{"type":"assistant","uuid":"s1","parentUuid":"s0","isSidechain":true,"message":{"role":"assistant","content":"done"}}"#,
+                r#"{"type":"system","subtype":"compact_boundary","uuid":"b","parentUuid":null,"logicalParentUuid":"gone","isSidechain":false}"#,
+                r#"{"type":"user","uuid":"u2","parentUuid":"b","message":{"role":"user","content":"summary"}}"#,
+                r#"{"type":"assistant","uuid":"a3","parentUuid":"u2","message":{"role":"assistant","content":"next"}}"#,
+            ],
+        );
+        let graph = index.transcript.lock().unwrap();
+        assert!(graph.ready, "{:?}", graph.reason);
+        assert_eq!((graph.census.branches, graph.census.sidechains), (0, 1));
+        assert_eq!(
+            order(&graph),
+            [("turn", "u0"), ("turn", "a1"), ("sidechain", "s0"), ("event", "b"), ("turn", "u2"), ("turn", "a3")]
+        );
     }
     fn call(uuid: &str, parent: &str, id: &str, message: &str) -> String {
         format!(
