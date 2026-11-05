@@ -54,12 +54,12 @@ export class TranscriptView {
 
   /** Only the shown page and the one being built are reserved: reading to the end holds one page's charge, and the lens
    *  releases it when it unmounts. */
-  async show(start = this.start): Promise<void> {
+  async show(start = this.start, top = false): Promise<void> {
     const epoch = ++this.serial,
       pane: Pane = { bytes: 0 }
     this.building = pane
     try {
-      await this.build(start, epoch, pane)
+      await this.build(start, epoch, pane, top)
     } finally {
       // The page this one replaced is released, or this one, if a newer page replaced it first.
       if (this.building === pane) this.building = undefined
@@ -77,7 +77,8 @@ export class TranscriptView {
     pane.bytes -= bytes
     throw new Error('Transcript display exceeds the memory budget · use Rows or Raw')
   }
-  private async build(start: number, epoch: number, pane: Pane): Promise<void> {
+  /** `top`: a new page (Next, Previous) starts at its top, not where the last one was scrolled to. */
+  private async build(start: number, epoch: number, pane: Pane, top: boolean): Promise<void> {
     const page = await this.core.call(
       'structuredTranscript',
       { ref: this.source.info.ref, start, count: 20, events: this.showEvents },
@@ -118,7 +119,7 @@ export class TranscriptView {
     if (this.history.length) {
       const previous = make('button', 'Previous turns')
       previous.onclick = () => {
-        void this.show(this.history.pop()!).catch(this.options.frozen)
+        void this.show(this.history.pop()!, true).catch(this.options.frozen)
       }
       navigation.append(previous)
     }
@@ -126,7 +127,7 @@ export class TranscriptView {
       const next = make('button', 'Next turns')
       next.onclick = () => {
         this.history.push(start)
-        void this.show(page.next!).catch(this.options.frozen)
+        void this.show(page.next!, true).catch(this.options.frozen)
       }
       navigation.append(next)
     }
@@ -136,6 +137,7 @@ export class TranscriptView {
     body.append(navigation)
     if (!this.signal.aborted && epoch === this.serial) {
       this.host.replaceChildren(body)
+      if (top) this.host.parentElement!.scrollTop = 0
       this.shown = pane
     }
   }

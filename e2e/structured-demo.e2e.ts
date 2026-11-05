@@ -455,6 +455,25 @@ test('reading Rows by keyboard while the graph indexes keeps Rows when the Trans
   expect(live.pageErrors).toEqual([])
 })
 
+test('Transcript paging starts each page at its top', async () => {
+  const text = 'Bounded page fixture '.repeat(48)
+  const file = fixture('transcript-scroll.jsonl', claudeSession(Array.from({ length: 100 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: `Turn ${i} ${text}` }))))
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' }), view = card.locator('.structured-view')
+  await expect(card.getByText('1–20 of 100', { exact: true })).toBeVisible({ timeout: 30_000 })
+  const bottom = () => view.evaluate(element => { element.scrollTop = element.scrollHeight; return element.scrollTop })
+  expect(await bottom()).toBeGreaterThan(0)
+  await card.getByRole('button', { name: 'Next turns', exact: true }).click()
+  await expect(card.getByText('21–40 of 100', { exact: true })).toBeVisible()
+  await expect.poll(() => view.evaluate(element => element.scrollTop)).toBe(0)
+  await expect(card.getByText('Turn 20 ', { exact: false })).toBeInViewport()
+  expect(await bottom()).toBeGreaterThan(0)
+  await card.getByRole('button', { name: 'Previous turns', exact: true }).click()
+  await expect(card.getByText('1–20 of 100', { exact: true })).toBeVisible()
+  await expect.poll(() => view.evaluate(element => element.scrollTop)).toBe(0)
+  expect(live.pageErrors).toEqual([])
+})
+
 test('JSONL Table discovers a global key after line 1,000 and retains original source row navigation', async () => {
   const lines = Array.from({ length: 1001 }, (_, index) => `{"common":"row ${index + 1}"}`)
   lines.push('{"common":"last row","late":"revealed"}')
