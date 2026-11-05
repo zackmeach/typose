@@ -154,6 +154,7 @@ pub trait Query: Send + 'static {
 pub struct Read<Q: Query> {
     context: Context,
     query: Q,
+    slot: Option<Slot>,
 }
 impl<Q: Query> Task for Read<Q> {
     type Output = std::result::Result<Q::Output, DocError>;
@@ -161,6 +162,7 @@ impl<Q: Query> Task for Read<Q> {
     fn compute(&mut self) -> Result<Self::Output> {
         let flag = self.context.cancel.clone();
         Ok(cancellable(&flag, || {
+            self.slot = Some(slot(Work::Page, &store::cancelled)?);
             self.context.check()?;
             self.query.run(&self.context)
         }))
@@ -386,6 +388,7 @@ impl Doc {
         }
         Ok(AsyncTask::new(Read {
             context: self.transcript_context(generation, revision, cancel)?,
+            slot: None,
             query: Page {
                 start: int("start", start)? as usize,
                 count,
@@ -412,6 +415,7 @@ impl Doc {
         }
         Ok(AsyncTask::new(Read {
             context: self.transcript_context(generation, revision, cancel)?,
+            slot: None,
             query: Tools {
                 item: int("item", item)? as usize,
                 start: int("start", start)? as usize,
@@ -432,6 +436,7 @@ impl Doc {
     ) -> std::result::Result<AsyncTask<Read<Text>>, Error<Code>> {
         Ok(AsyncTask::new(Read {
             context: self.transcript_context(generation, revision, cancel)?,
+            slot: None,
             query: Text { start: int("start", start)?, end: int("end", end)?, block: int("block", block)? as usize },
         }))
     }
