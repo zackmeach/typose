@@ -24,9 +24,12 @@ pub const RANGES: [(&str, u64, u64); 11] = [
     ("totalmem", 1, MAX_SAFE),
 ];
 
-/// `x` as an integer, if it's a finite whole number within `field`'s range. The error names the field.
+/// `x` as an integer, if it's a finite whole number within `field`'s range. The error names the field. A field with no
+/// range is an error too, never a panic: a panic in a napi call kills the core host.
 pub fn int(field: &str, x: f64) -> Result<u64, String> {
-    let &(_, min, max) = RANGES.iter().find(|r| r.0 == field).unwrap_or_else(|| panic!("no range for {field}"));
+    let Some(&(_, min, max)) = RANGES.iter().find(|r| r.0 == field) else {
+        return Err(format!("{field} has no range"));
+    };
     // Both bounds are at most 2^53 − 1, so they're exact as f64 and the cast below is exact too.
     if x.is_finite() && x.fract() == 0.0 && x >= min as f64 && x <= max as f64 {
         Ok(x as u64)
@@ -70,5 +73,33 @@ mod tests {
         }
         assert_eq!(int("count", 1e12), Err("count must be an integer in [1, 1024], not 1000000000000".into()));
         assert!(int("start", 2f64.powi(53)).is_err()); // past MAX_SAFE: not exact in JavaScript
+    }
+
+    /// A name without a row is refused, not a panic: on the JS thread a panic kills the core host (M5 PR 1).
+    #[test]
+    fn a_field_without_a_range_is_an_error() {
+        assert_eq!(int("no-such-field", 1.0), Err("no-such-field has no range".into()));
+    }
+
+    /// Every `int("…")` in the addon names a row, so none is refused at run time for want of one.
+    #[test]
+    fn every_addon_call_site_names_a_range() {
+        let mut sites = 0;
+        for file in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../typose-node/src")).unwrap() {
+            let path = file.unwrap().path();
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            for (at, _) in source.match_indices("int(\"") {
+                if source[..at].ends_with(|c: char| c.is_alphanumeric() || c == '_') {
+                    continue; // print(", hint("
+                }
+                let name = source[at + 5..].split('"').next().unwrap();
+                assert!(RANGES.iter().any(|r| r.0 == name), "{}: int(\"{name}\") has no range", path.display());
+                sites += 1;
+            }
+        }
+        assert!(sites > 50, "only {sites} call sites found: the scan is broken");
     }
 }
