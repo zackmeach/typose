@@ -161,16 +161,30 @@ fn parsed(
         scope: Some(span(scope)),
     }
 }
+/// Whether the graph is an OpenAI transcript's, whose tool calls' `arguments` parse (brief §5.4).
+fn openai(graph: &model::Graph) -> bool {
+    graph.ready && graph.schema.is_some_and(|schema| schema.starts_with("openai-"))
+}
 /// A page of a parsed `arguments` value's children, bounded as `Children` bounds a page.
 pub(super) fn argument_children(
     raw: &Raw,
-    generation: u32,
+    entry: &Entry,
+    record: Option<u64>,
     scope: json::Span,
     container: u32,
     start: u64,
     count: usize,
 ) -> std::result::Result<StructuredChildren, DocError> {
-    let arguments = model::Arguments::read(raw.document(), generation, scope, raw.source_encoding())?
+    // Only what the Tools query parses: a string in an OpenAI transcript, inside the record the request names.
+    let openai = entry.jsonl.as_ref().is_some_and(|index| openai(&index.transcript.lock().unwrap()));
+    let range = match record {
+        Some(line) => super::record_range(raw, entry.generation, line)?,
+        None => None,
+    };
+    if !openai || !range.is_some_and(|range| range.start <= scope.start && scope.end <= range.end) {
+        return Err(DocError::Invalid("A scope must be a string in the named record of an OpenAI transcript".into()));
+    }
+    let arguments = model::Arguments::read(raw.document(), entry.generation, scope, raw.source_encoding())?
         .ok_or_else(|| DocError::Invalid("The scope is not a JSON string that holds JSON".into()))?;
     let mut nodes = Vec::new();
     let mut bytes = 1024;
@@ -336,7 +350,7 @@ impl Query for Tools {
             }
         } else {
             total = turn.calls.len();
-            let openai = graph.entries[item.entry].schema.starts_with("openai-");
+            let openai = openai(&graph) && graph.entries[item.entry].schema.starts_with("openai-");
             for (ordinal, call) in turn.calls.iter().enumerate().skip(self.start).take(self.count) {
                 let block = value(&c.raw, c.entry.generation, &call.block)?;
                 let input = match &call.input {

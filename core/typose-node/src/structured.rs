@@ -403,7 +403,8 @@ impl Task for Children {
                 if let Some(scope) = self.scope {
                     return transcript::argument_children(
                         &self.raw,
-                        self.entry.generation,
+                        &self.entry,
+                        self.record,
                         scope,
                         self.container,
                         self.start,
