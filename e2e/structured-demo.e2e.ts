@@ -488,6 +488,22 @@ test('Transcript paging ignores Next while a page builds, and each Previous goes
   expect(live.pageErrors).toEqual([])
 })
 
+test('a Markdown block the core makes a note (nested too deep) shows its text literally', async () => {
+  // 70 nested quotes pass md.rs's MAX_DEPTH: the block comes back as a note, with no HTML.
+  const deep = '>'.repeat(70) + ' deep content fixture'
+  const file = fixture('transcript-deep.jsonl', claudeSession([
+    { role: 'user', content: deep },
+    { role: 'assistant', content: 'Reply fixture' },
+    { role: 'user', content: 'Done fixture' }
+  ]))
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  await expect(card.getByText('Done fixture', { exact: true })).toBeVisible()
+  await expect(card.locator('pre.transcript-text')).toHaveText(deep)
+  expect(live.pageErrors).toEqual([])
+})
+
 test('JSONL Table discovers a global key after line 1,000 and retains original source row navigation', async () => {
   const lines = Array.from({ length: 1001 }, (_, index) => `{"common":"row ${index + 1}"}`)
   lines.push('{"common":"last row","late":"revealed"}')

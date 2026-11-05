@@ -503,6 +503,11 @@ export class TranscriptView {
         return
       }
       if (pane.signal.aborted) return
+      // A block the core turned into a note (nested too deep, too large) comes as empty HTML: as refused, so literal.
+      if (page.html.some((html) => !html)) {
+        await literal()
+        return
+      }
       await this.charge(pane, page.html.reduce((chars, html) => chars + html.length, 0) * CHAR_BYTES)
       for (const html of page.html) {
         const fragment = make('div', undefined, 'md-block')
