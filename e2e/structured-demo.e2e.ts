@@ -336,23 +336,34 @@ test('Transcript reserves the mounted page’s HTML, flat to the last page, and 
 })
 
 test('Transcript shows HTML-like tags in message text as literal text, never interpreted or stripped', async () => {
-  // Allowlisted raw HTML that Rendered would keep (and a stray end tag it would drop), in a user message.
-  const tags = 'Reply <b>bold?</b> <img src="local.png" alt="pic"> stray </i> <details><summary>open?</summary>hidden?</details>'
+  const texts = [
+    // Raw HTML that Rendered keeps (b, img) or drops (a stray end tag), beside Markdown that renders.
+    'Reply <b>bold?</b> <img src="local.png" alt="pic"> stray </i> and **this** stays Markdown',
+    // A CommonMark type-6 HTML block.
+    '<details>\n<summary>open?</summary>\nhidden?\n</details>',
+    // Round 1's bypasses of a renderer-side check: a lone surrogate before the tag, and a source map in the text.
+    '\ud800<b>surrogate</b> after a lone surrogate',
+    'See data-source-map="L:0:1:9999" then <b>mapped</b>',
+    'Code `<b>` stays code'
+  ]
   const file = fixture('transcript-tags.jsonl', claudeSession([
-    { role: 'user', content: tags },
-    { role: 'assistant', content: [{ type: 'text', text: 'Code `<b>` stays code, and **this** stays Markdown' }] },
-    { role: 'user', content: 'Done fixture' }
+    ...texts.map((text, i) => ({ role: i % 2 ? 'assistant' as const : 'user' as const, content: [{ type: 'text', text }] })),
+    { role: 'assistant', content: 'Done fixture' }
   ]))
   const live = await launch({ hooks: true, file })
   const card = live.win.getByRole('region', { name: 'Reader card 1' })
   await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
   await expect(card.getByText('Done fixture', { exact: true })).toBeVisible()
-  const user = card.locator('.transcript-turn').first()
-  await expect(user.locator('b, i, details:not(:has(> summary:text-is("Message metadata"))), .tp-img')).toHaveCount(0)
-  expect(await user.locator('pre.transcript-text').textContent()).toBe(tags)
-  // A tag inside code is the code's text: that message keeps its Markdown.
-  await expect(card.locator('.transcript-markdown code')).toHaveText('<b>')
-  await expect(card.locator('.transcript-markdown strong')).toHaveText('this')
+  const markdown = card.locator('.transcript-markdown')
+  await expect(markdown).toHaveCount(texts.length + 1)
+  await expect(card.locator('pre.transcript-text')).toHaveCount(0)
+  await expect(markdown.locator('b, i, details, summary, .tp-img')).toHaveCount(0)
+  await expect(markdown.nth(0)).toHaveText('Reply <b>bold?</b> <img src="local.png" alt="pic"> stray </i> and this stays Markdown')
+  await expect(markdown.nth(0).locator('strong')).toHaveText('this')
+  await expect(markdown.nth(1)).toHaveText('<details> <summary>open?</summary> hidden? </details>')
+  await expect(markdown.nth(2)).toContainText('<b>surrogate</b> after a lone surrogate')
+  await expect(markdown.nth(3)).toHaveText('See data-source-map="L:0:1:9999" then <b>mapped</b>')
+  await expect(markdown.nth(4).locator('code')).toHaveText('<b>')
   expect(live.pageErrors).toEqual([])
 })
 

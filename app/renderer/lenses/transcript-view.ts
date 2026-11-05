@@ -2,7 +2,6 @@ import type { Opened, SourceSpan, StructuredNode, TranscriptItem, TranscriptText
 import { CoreCallError, type CoreClient } from '../core'
 import type { LocalGesture } from '../reader-window'
 import type { StructuredSource } from './structured-source'
-import { mappedRange } from './rendered-selection'
 import { RENDERED_PER_UNIT } from './rendered-charge'
 
 const make = (tag: string, text?: string, className?: string): HTMLElement => {
@@ -18,30 +17,6 @@ const string = (node?: StructuredNode): string => {
   } catch {
     return node.text
   }
-}
-/** sanitize.rs's RAW_TAGS: the raw HTML tags the core keeps for Rendered. It escapes every other tag already. */
-const RAW_TAG = /<\/?(?:b|i|em|strong|code|kbd|sub|sup|br|hr|details|summary|a|img|table|thead|tbody|tr|th|td)[\t\n\f\r />]/i
-/**
- * Whether the core kept or stripped raw HTML in `text`'s Markdown, `html`. md.rs maps each Markdown text run, code
- * included, to its source bytes, and raw HTML never reaches one: an allowlisted tag outside every run is raw HTML.
- * Until `whole`, `html` is only the first pages, and the check stops at their last run.
- */
-const interpreted = (text: string, html: string[], whole: boolean): boolean => {
-  if (!text.includes('<')) return false
-  const bytes = new TextEncoder().encode(text),
-    runs = new Uint8Array(bytes.length)
-  let last = 0
-  for (const block of html)
-    for (const [, map] of block.matchAll(/data-source-map="([^"]*)"/g)) {
-      const range = mappedRange(map!)
-      if (range) {
-        runs.fill(1, range[0], range[1])
-        last = Math.max(last, range[1])
-      }
-    }
-  let gaps = ''
-  for (let i = 0; i < (whole ? bytes.length : last); i++) gaps += runs[i] ? '\0' : String.fromCharCode(bytes[i]!)
-  return RAW_TAG.test(gaps)
 }
 interface Options {
   tree(node: StructuredNode, record: number): Promise<HTMLElement>
@@ -475,11 +450,9 @@ export class TranscriptView {
     }
     const holder = make('div', undefined, 'transcript-markdown md-content')
     parent.append(holder)
-    const loaded: string[] = []
-    let text: string | undefined
     /** The text, literally and whole, in place of its Markdown. */
     const literal = async () => {
-      text ??= await this.whole(node)
+      const text = await this.whole(node)
       await this.charge(pane, text.length * RENDERED_PER_UNIT)
       holder.replaceWith(make('pre', text, 'transcript-text'))
     }
@@ -498,14 +471,6 @@ export class TranscriptView {
         return
       }
       if (this.signal.aborted) return
-      // Brief §5.4: HTML-like tags in message text are literal, never interpreted or stripped. The core renders the
-      // Markdown as Rendered does, keeping allowlisted raw HTML, so a text with any shows literally instead.
-      loaded.push(...page.html)
-      text ??= await this.whole(node)
-      if (interpreted(text, loaded, page.next === undefined)) {
-        await literal()
-        return
-      }
       await this.charge(pane, page.html.reduce((chars, html) => chars + html.length, 0) * CHAR_BYTES)
       for (const html of page.html) {
         const fragment = make('div', undefined, 'md-block')
