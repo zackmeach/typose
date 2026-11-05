@@ -257,6 +257,8 @@ test('Claude Transcript uses the full graph, nests tool results and preserves li
   await card.getByText('Sidechain · 1 messages', { exact: true }).click()
   await expect(card.getByText('Sidechain fixture', { exact: true })).toBeVisible()
   const tool = card.locator('.transcript-tool[data-tool-id="tool1"]')
+  // Brief §5.4's `name(args summary)`: the input's first fields, as written.
+  await expect(tool.locator('summary')).toHaveText('read(amount: 3.10, file: "local.md")')
   await tool.locator('summary').click()
   await expect(tool.locator('.tree-number')).toHaveText('3.10')
   await expect(tool.locator('.transcript-tool-result strong').filter({ hasText: 'matched result' })).toBeVisible()

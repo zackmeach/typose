@@ -251,7 +251,7 @@ export class TranscriptView {
     }
     const used = new Set<number>()
     await this.content(turn, item.content, item.record, pane, item, tools, used)
-    for (const tool of tools) if (!used.has(tool.ordinal)) turn.append(this.tool(item, tool, pane))
+    for (const tool of tools) if (!used.has(tool.ordinal)) turn.append(await this.tool(item, tool, pane))
     const metadata = document.createElement('details')
     metadata.append(make('summary', 'Message metadata'))
     this.lazyTree(metadata, item.root, item.record)
@@ -264,7 +264,7 @@ export class TranscriptView {
       { ref: this.source.info.ref, item: item.id, start, count: 32 },
       this.signal
     )
-    for (const tool of page.tools) parent.append(this.tool(item, tool, pane))
+    for (const tool of page.tools) parent.append(await this.tool(item, tool, pane))
     if (page.next !== undefined) {
       const more = make('button', 'Show more tool calls')
       more.onclick = () => {
@@ -274,12 +274,23 @@ export class TranscriptView {
       parent.append(more)
     }
   }
-  private tool(item: TranscriptItem, tool: TranscriptTool, pane: Pane): HTMLElement {
+  /** Brief §5.4's `name(args summary)`: a string input's text, or an object's first fields as `key: value`, in at most
+   *  80 characters, with ` …` when cut. */
+  private async arguments(input: StructuredNode | undefined, record: number): Promise<string> {
+    if (!input) return ''
+    const value = (field: StructuredNode) => (field.kind === 'object' ? '{…}' : field.kind === 'array' ? '[…]' : field.text)
+    const text = (
+      input.container === undefined
+        ? string(input)
+        : (await this.fields(input, record)).map((field) => `${field.key ?? field.ordinal}: ${value(field)}`).join(', ')
+    ).replace(/\s+/g, ' ')
+    return text.length > 80 || input.more ? text.slice(0, 80) + ' …' : text
+  }
+  private async tool(item: TranscriptItem, tool: TranscriptTool, pane: Pane): Promise<HTMLElement> {
     const disclosure = document.createElement('details')
     disclosure.className = 'transcript-tool'
     disclosure.dataset.toolId = tool.id
-    const preview = tool.input?.text ? string(tool.input).replace(/\s+/g, ' ').slice(0, 80) : ''
-    disclosure.append(make('summary', `${tool.name}(${preview}${tool.input?.more ? ' …' : ''})`))
+    disclosure.append(make('summary', `${tool.name}(${await this.arguments(tool.input, item.record)})`))
     let loaded = false
     const results = async (start: number) => {
       const page = await this.core.call(
@@ -365,7 +376,7 @@ export class TranscriptView {
         )
         if (call && item) {
           used.add(call.ordinal)
-          parent.append(this.tool(item, call, pane))
+          parent.append(await this.tool(item, call, pane))
           continue
         }
         if ((type === 'text' || type === 'input_text' || type === 'output_text') && text) {
