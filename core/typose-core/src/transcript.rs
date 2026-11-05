@@ -12,6 +12,7 @@ use crate::json::{self, Child, JsonIndex, Kind, Span};
 use crate::jsonl::{named_fields, read_string, visit_members};
 use crate::store::{ByteStore, StoreError, cancelled};
 use std::collections::{HashMap, HashSet};
+use xxhash_rust::xxh3::xxh3_64;
 
 /// The most records a graph holds.
 pub const MAX_ENTRIES: usize = 250_000;
@@ -77,8 +78,12 @@ pub struct Entry {
     pub turns: Vec<Turn>,
     pub timestamp: String,
     pub uuid: Option<String>,
+    /// `parentUuid`, or with none, `logicalParentUuid` (`logical`): a compaction boundary's.
     pub parent: Option<String>,
+    pub logical: bool,
     pub sidechain: bool,
+    /// A hash of `message.id`, which a Claude Code message's records share.
+    pub message: Option<u64>,
 }
 #[derive(Clone, Debug)]
 pub struct Item {
@@ -133,11 +138,19 @@ impl Graph {
     }
     fn disable(&mut self, reason: &str) {
         self.reason = Some(reason.into());
+        self.census = Census::default();
         // The memory, then what paid for it.
         self.entries = Vec::new();
         self.items = Vec::new();
         self.main = Vec::new();
         self.charge = Reservation::none();
+    }
+    /// The JSONL index stopped short of the file (its budget, an error, a cancel), so the graph never finishes: what
+    /// it holds goes now.
+    pub fn stop(&mut self) {
+        if self.reason.is_none() {
+            self.disable("Transcript graph stopped with the JSONL index; Rows remains available");
+        }
     }
     pub fn observe(&mut self, store: &ByteStore, index: &JsonIndex, line: u64, span: Span) -> Result<(), StoreError> {
         if self.reason.is_some() {
@@ -155,6 +168,7 @@ impl Graph {
                 "message",
                 "uuid",
                 "parentUuid",
+                "logicalParentUuid",
                 "isSidechain",
                 "timestamp",
                 "messages",
@@ -176,6 +190,14 @@ impl Graph {
         // The entry's turns, reserved as they're made, until the entry is charged to the graph. Declared first, so it's
         // released after them.
         let mut held = Reservation::none();
+        let (parent, logical) = match string("parentUuid")? {
+            Some(parent) => (Some(parent), false),
+            None => {
+                let logical = string("logicalParentUuid")?;
+                let is = logical.is_some();
+                (logical, is)
+            }
+        };
         let mut entry = Entry {
             line,
             span,
@@ -189,8 +211,10 @@ impl Graph {
             turns: Vec::new(),
             timestamp: string("timestamp")?.unwrap_or_default(),
             uuid: string("uuid")?,
-            parent: string("parentUuid")?,
+            parent,
+            logical,
             sidechain: fields.get("isSidechain").is_some_and(|node| node.kind == Kind::True),
+            message: None,
         };
         if entry.uuid.as_ref().is_some_and(|value| value.len() >= 4094)
             || entry.parent.as_ref().is_some_and(|value| value.len() >= 4094)
@@ -205,21 +229,31 @@ impl Graph {
                 fields.get("message").filter(|node| node.kind == Kind::Object).and_then(|node| node.container)
         {
             entry.schema = "claude-code-v1";
-            fits = add(&mut entry.turns, &mut held, turn(store, index, container, true)?);
+            let id = named_fields(store, index, container, &["id"])?;
+            entry.message = id
+                .get("id")
+                .filter(|node| node.kind == Kind::String)
+                .map(|node| read_string(store, node.value))
+                .transpose()?
+                .map(|id| xxh3_64(id.as_bytes()));
+            fits = turn(store, index, container, true, &mut held)?
+                .is_some_and(|turn| push(&mut entry.turns, &mut held, 0, turn));
         } else if let Some(container) =
             fields.get("messages").filter(|node| node.kind == Kind::Array).and_then(|node| node.container)
         {
             entry.schema = "openai-dataset-v1";
             visit_members(store, index, container, |message| {
                 if let Some(container) = message.container.filter(|_| message.kind == Kind::Object) {
-                    fits = add(&mut entry.turns, &mut held, turn(store, index, container, false)?);
+                    fits = turn(store, index, container, false, &mut held)?
+                        .is_some_and(|turn| push(&mut entry.turns, &mut held, 0, turn));
                 }
                 Ok(fits)
             })?;
         } else if string("role")?.is_some_and(|role| crate::jsonl::known_role(&role)) && fields.contains_key("content")
         {
             entry.schema = "openai-chat-v1";
-            fits = add(&mut entry.turns, &mut held, turn(store, index, 0, false)?);
+            fits =
+                turn(store, index, 0, false, &mut held)?.is_some_and(|turn| push(&mut entry.turns, &mut held, 0, turn));
         }
         if entry.turns.iter().any(|turn| turn.results.len() > MAX_RESULTS || turn.calls.len() > MAX_CALLS) {
             self.disable("A turn exceeds the bounded Transcript tool metadata limit; Rows preserves every block");
@@ -354,7 +388,9 @@ impl Graph {
     fn match_tools(&mut self, schema: &str, steps: &mut Steps) -> Result<(), Stop> {
         let turns = || self.entries.iter().flat_map(|entry| &entry.turns);
         let mut calls = HashMap::with_capacity(turns().map(|turn| turn.calls.len()).sum());
-        let mut results = Vec::with_capacity(turns().map(|turn| turn.results.len()).sum());
+        let mut links: Vec<(Place, Place)> = Vec::with_capacity(turns().map(|turn| turn.results.len()).sum());
+        // In file order, each result links to the latest call before it with its id: a legacy `function_call`'s id is
+        // its name, which later calls reuse, and a chat may reuse a `tool_call_id`.
         for (entry_index, entry) in self.entries.iter().enumerate() {
             steps.tick()?;
             if !same_schema(entry.schema, schema) {
@@ -364,6 +400,13 @@ impl Graph {
                 steps.tick()?;
                 self.census.messages += 1;
                 let prefix = if entry.schema == "openai-dataset-v1" { entry_index + 1 } else { 0 };
+                for (result_index, result) in turn.results.iter().enumerate() {
+                    steps.tick()?;
+                    match calls.get(&(prefix, result.id.as_str())) {
+                        Some(&call) => links.push((call, (entry_index, turn_index, result_index))),
+                        None => self.census.unmatched_results += 1,
+                    }
+                }
                 for (call_index, call) in turn.calls.iter().enumerate() {
                     steps.tick()?;
                     if !call.id.is_empty() {
@@ -371,18 +414,6 @@ impl Graph {
                     }
                     self.census.calls += 1;
                 }
-                for (result_index, result) in turn.results.iter().enumerate() {
-                    steps.tick()?;
-                    results.push((prefix, result.id.as_str(), (entry_index, turn_index, result_index)));
-                }
-            }
-        }
-        let mut links: Vec<(Place, Place)> = Vec::with_capacity(results.len());
-        for (prefix, id, result) in results {
-            steps.tick()?;
-            match calls.get(&(prefix, id)) {
-                Some(&call) => links.push((call, result)),
-                None => self.census.unmatched_results += 1,
             }
         }
         drop(calls);
@@ -436,10 +467,15 @@ impl Graph {
                 ids.insert(uuid.as_str(), index); // unique: `drop_copies` ran
             }
         }
+        // Compaction leaves a `compact_boundary` record with no parent; its logical parent joins the session before it to
+        // the session after. On this PC (M5 PR 1, 27 sessions over 10 MiB), 94 boundaries cut 52,151 of 79,735 messages
+        // off the main chain. Only an earlier record is a logical parent: 4 of the 94, each a session's first, name a
+        // later one, which would close a cycle.
         let mut direct = Vec::with_capacity(n);
-        for entry in &self.entries {
+        for (index, entry) in self.entries.iter().enumerate() {
             steps.tick()?;
-            direct.push(entry.parent.as_deref().and_then(|id| ids.get(id).copied()));
+            let parent = entry.parent.as_deref().and_then(|id| ids.get(id).copied());
+            direct.push(parent.filter(|&at| !entry.logical || at < index));
         }
         drop(ids);
         // Session events may carry UUIDs and sit between two messages: a message's parent is the nearest message above.
@@ -455,6 +491,8 @@ impl Graph {
         // with no main chain to attach to, its sidechain is the chain, ending at its latest leaf like any other.
         let sidechain_only = messages.iter().all(|&index| self.entries[index].sidechain);
         let side: Vec<bool> = self.entries.iter().map(|entry| entry.sidechain && !sidechain_only).collect();
+        memo.fill(Climb::Unknown);
+        self.parallel_calls(&messages, &side, &mut parents, &mut memo, &mut path, steps)?;
         let mut has_child = vec![false; n];
         for &index in &messages {
             if !side[index]
@@ -509,6 +547,10 @@ impl Graph {
                     children.extend(nested);
                 }
             }
+            // A group of tool results only, each shown under its call, shows nothing: it isn't one.
+            if children.is_empty() {
+                continue;
+            }
             let (kind, items) = if branch {
                 self.census.branches += 1;
                 ("branch", &mut branch_items)
@@ -543,6 +585,74 @@ impl Graph {
         // A branch forks from the chain, and a sidechain hangs from the chain or a branch's message, or from neither.
         debug_assert!(branch_items.is_empty() && side_items.is_empty(), "a group was left out of the main order");
         Ok(())
+    }
+    /// Parallel tool calls. Claude Code writes an assistant message's blocks as records of one `message.id`, each the
+    /// parent of the next, and each tool result as a child of the record holding its call: a message's calls fork
+    /// each of its records but the last, into the next one and that record's result. On this PC (M5 PR 1, 27 sessions
+    /// over 10 MiB), 2,742 of 2,779 forks have exactly that shape: an assistant parent with two children, a record of
+    /// its `message.id` first in the file, then a record of only results to the parent's calls. There the result hangs
+    /// from the message's last record instead, and the fork closes. Every other fork stays a branch.
+    fn parallel_calls(
+        &self,
+        messages: &[usize],
+        side: &[bool],
+        parents: &mut [Option<usize>],
+        memo: &mut [Climb],
+        path: &mut Vec<usize>,
+        steps: &mut Steps,
+    ) -> Result<(), Stop> {
+        let entries = &self.entries;
+        // Each message's first two children in the file and how many it has, up to 3; and its first child of its
+        // `message.id`, the message's next record.
+        let mut children = vec![(0u8, 0, 0); entries.len()];
+        let mut next = vec![None; entries.len()];
+        for &index in messages {
+            steps.tick()?;
+            let Some(parent) = parents[index].filter(|_| !side[index]) else {
+                continue;
+            };
+            let (count, first, second) = &mut children[parent];
+            match *count {
+                0 => *first = index,
+                1 => *second = index,
+                _ => {}
+            }
+            *count = (*count + 1).min(3);
+            if next[parent].is_none() && entries[index].message.is_some_and(|id| entries[parent].message == Some(id)) {
+                next[parent] = Some(index);
+            }
+        }
+        for &parent in messages {
+            steps.tick()?;
+            let (count, call, result) = children[parent];
+            if count == 2 && self.parallel_fork(parent, call, result, steps)? {
+                let (_, last) = climb(call, memo, path, |at| next[at], |_| false, steps)?.ok_or(Stop::Off(CYCLE))?;
+                parents[result] = Some(last);
+            }
+        }
+        Ok(())
+    }
+    /// Whether `parent`'s children `call` and `result`, in file order, are its message's next record and a record of
+    /// only results to its own calls.
+    fn parallel_fork(&self, parent: usize, call: usize, result: usize, steps: &mut Steps) -> Result<bool, Stop> {
+        let entries = &self.entries;
+        let assistant = |at: usize| entries[at].turns.first().filter(|turn| turn.role == "assistant");
+        let (Some(calls), Some(_)) = (assistant(parent), assistant(call)) else {
+            return Ok(false);
+        };
+        let Some(results) = entries[result].turns.first().filter(|turn| turn.only_results) else {
+            return Ok(false);
+        };
+        if entries[call].message.is_none_or(|id| entries[parent].message != Some(id)) {
+            return Ok(false);
+        }
+        // `match_tools` links each result once, so its results are all the parent's when as many link to its calls.
+        let mut answered = 0;
+        for link in calls.calls.iter().flat_map(|call| &call.results) {
+            steps.tick()?;
+            answered += usize::from(link.entry == result);
+        }
+        Ok(!results.results.is_empty() && answered == results.results.len())
     }
 }
 const CYCLE: &str = "Transcript parent graph contains a cycle; inspect in Rows";
@@ -628,12 +738,13 @@ fn heap(entry: &Entry) -> u64 {
         + entry.parent.as_ref().map_or(0, String::capacity);
     (strings + entry.turns.capacity() * size_of::<Turn>()) as u64 + entry.turns.iter().map(turn_heap).sum::<u64>()
 }
-/// Adds `turn` to `turns`, reserving its heap and its slot (`json::room`) in `held` first. False if the ledger refuses.
-fn add(turns: &mut Vec<Turn>, held: &mut Reservation, turn: Turn) -> bool {
-    if held.grow(turn_heap(&turn)).is_err() || json::room(turns, held).is_err() {
+/// Adds `value` to `values`, reserving its `strings`' bytes and its slot (`json::room`) in `held` first. False if the
+/// ledger refuses.
+fn push<T>(values: &mut Vec<T>, held: &mut Reservation, strings: usize, value: T) -> bool {
+    if held.grow(strings as u64).is_err() || json::room(values, held).is_err() {
         return false;
     }
-    turns.push(turn);
+    values.push(value);
     true
 }
 /// Shrinks `values`, whose capacity `charge` pays for, to its length, and releases the rest. The smaller block is
@@ -663,14 +774,14 @@ fn table<T>(n: usize) -> usize {
 fn finish_temp(records: usize, turns: usize, calls: usize, results: usize) -> u64 {
     type Group = (bool, usize, Option<usize>, usize);
     let copies = table::<&str>(records) + records;
-    let tools = table::<((usize, &str), Place)>(calls)
-        + results * (size_of::<(usize, &str, Place)>() + size_of::<(Place, Place)>());
-    // A record's four flags, three indexes (messages or events, the climb's path, the chain), two parents (direct and
-    // nearest message), two memos, and its group with the stable sort's scratch for it; then the uuid table, the two
-    // group tables and their lists.
+    let tools = table::<((usize, &str), Place)>(calls) + results * size_of::<(Place, Place)>();
+    // A record's four flags, three indexes (messages or events, the climb's path, the chain), three parents (direct,
+    // nearest message, and its message's next record), its first two children, two memos, and its group with the
+    // stable sort's scratch for it; then the uuid table, the two group tables and their lists.
     let claude = records
         * (4 + 3 * size_of::<usize>()
-            + 2 * size_of::<Option<usize>>()
+            + 3 * size_of::<Option<usize>>()
+            + size_of::<(u8, usize, usize)>()
             + 2 * size_of::<Climb>()
             + 2 * size_of::<Group>()
             + 4 * size_of::<usize>())
@@ -683,7 +794,16 @@ fn finish_temp(records: usize, turns: usize, calls: usize, results: usize) -> u6
 fn same_schema(entry: &str, schema: &str) -> bool {
     entry == schema || entry.starts_with("openai-") && schema.starts_with("openai-")
 }
-fn turn(store: &ByteStore, index: &JsonIndex, container: u32, claude: bool) -> Result<Turn, StoreError> {
+/// A message's turn. Each call and result is reserved in `held`, its slot and strings, before it's added (`push`):
+/// lossy decoding makes each invalid byte of an id or name three, so a turn's 1,024 calls can hold 25 MB of strings.
+/// `None` if the ledger refuses.
+fn turn(
+    store: &ByteStore,
+    index: &JsonIndex,
+    container: u32,
+    claude: bool,
+    held: &mut Reservation,
+) -> Result<Option<Turn>, StoreError> {
     let fields = named_fields(
         store,
         index,
@@ -694,8 +814,12 @@ fn turn(store: &ByteStore, index: &JsonIndex, container: u32, claude: bool) -> R
         fields.get(name).filter(|node| node.kind == Kind::String).map(|node| read_string(store, node.value)).transpose()
     };
     let role = string("role")?.unwrap_or_else(|| "unknown".into());
+    if held.grow(role.capacity() as u64).is_err() {
+        return Ok(None);
+    }
     let content = fields.get("content").map(|node| reference(index, node));
     let mut turn = Turn { role, content, container, calls: Vec::new(), results: Vec::new(), only_results: false };
+    let mut fits = true;
     if claude {
         if let Some(content) = &turn.content
             && let Some(array) = content.container.filter(|_| content.kind == Kind::Array)
@@ -714,23 +838,29 @@ fn turn(store: &ByteStore, index: &JsonIndex, container: u32, claude: bool) -> R
                             .transpose()
                     };
                     match string("type")?.as_deref() {
-                        Some("tool_use") => turn.calls.push(ToolCall {
-                            id: string("id")?.unwrap_or_default(),
-                            name: string("name")?.unwrap_or_else(|| "Tool".into()),
-                            block: reference(index, &block),
-                            input: fields.get("input").map(|node| reference(index, node)),
-                            results: Vec::new(),
-                        }),
-                        Some("tool_result") => turn.results.push(ToolResult {
-                            id: string("tool_use_id")?.unwrap_or_default(),
-                            block: reference(index, &block),
-                            content: fields.get("content").map(|node| reference(index, node)),
-                            linked: false,
-                        }),
+                        Some("tool_use") => {
+                            let call = ToolCall {
+                                id: string("id")?.unwrap_or_default(),
+                                name: string("name")?.unwrap_or_else(|| "Tool".into()),
+                                block: reference(index, &block),
+                                input: fields.get("input").map(|node| reference(index, node)),
+                                results: Vec::new(),
+                            };
+                            fits = push(&mut turn.calls, held, call.id.capacity() + call.name.capacity(), call);
+                        }
+                        Some("tool_result") => {
+                            let result = ToolResult {
+                                id: string("tool_use_id")?.unwrap_or_default(),
+                                block: reference(index, &block),
+                                content: fields.get("content").map(|node| reference(index, node)),
+                                linked: false,
+                            };
+                            fits = push(&mut turn.results, held, result.id.capacity(), result);
+                        }
                         _ => {}
                     }
                 }
-                Ok(turn.calls.len() <= MAX_CALLS && turn.results.len() <= MAX_RESULTS)
+                Ok(fits && turn.calls.len() <= MAX_CALLS && turn.results.len() <= MAX_RESULTS)
             })?;
             turn.only_results = blocks > 0 && blocks == turn.results.len();
         }
@@ -748,33 +878,30 @@ fn turn(store: &ByteStore, index: &JsonIndex, container: u32, claude: bool) -> R
                             .map(|node| read_string(store, node.value))
                             .transpose()?
                             .unwrap_or_else(|| "Tool".into());
-                        turn.calls.push(ToolCall {
+                        let tool = ToolCall {
                             id,
                             name,
                             block: reference(index, &call),
                             input: fields.get("arguments").map(|node| reference(index, node)),
                             results: Vec::new(),
-                        });
+                        };
+                        fits = push(&mut turn.calls, held, tool.id.capacity() + tool.name.capacity(), tool);
                     }
                 }
-                Ok(turn.calls.len() <= MAX_CALLS)
+                Ok(fits && turn.calls.len() <= MAX_CALLS)
             })?;
         }
-        if matches!(turn.role.as_str(), "tool" | "function") {
+        if fits && matches!(turn.role.as_str(), "tool" | "function") {
             let id = string("tool_call_id")?
-                .or_else(|| string("name").ok().flatten().map(|name| format!("function:{name}")))
+                .or_else(|| string("name").ok().flatten().map(|name| legacy_id(&name)))
                 .unwrap_or_default();
             if let Some(content) = &turn.content {
-                turn.results.push(ToolResult {
-                    id,
-                    block: content.clone(),
-                    content: Some(content.clone()),
-                    linked: false,
-                });
+                let result = ToolResult { id, block: content.clone(), content: Some(content.clone()), linked: false };
+                fits = push(&mut turn.results, held, result.id.capacity(), result);
                 turn.only_results = true;
             }
         }
-        if let Some(function) = fields.get("function_call").and_then(|node| node.container) {
+        if fits && let Some(function) = fields.get("function_call").and_then(|node| node.container) {
             let fields = named_fields(store, index, function, &["name", "arguments"])?;
             let name = fields
                 .get("name")
@@ -783,19 +910,31 @@ fn turn(store: &ByteStore, index: &JsonIndex, container: u32, claude: bool) -> R
                 .unwrap_or_else(|| "Tool".into());
             let block = fields.get("arguments").map(|node| reference(index, node));
             if let Some(block) = block {
-                turn.calls.push(ToolCall {
-                    id: format!("function:{name}"),
+                let call = ToolCall {
+                    id: legacy_id(&name),
                     name,
                     block: block.clone(),
                     input: Some(block),
                     results: Vec::new(),
-                });
+                };
+                fits = push(&mut turn.calls, held, call.id.capacity() + call.name.capacity(), call);
             }
         }
     }
-    turn.calls.shrink_to_fit();
-    turn.results.shrink_to_fit();
-    Ok(turn)
+    if !fits || fit(&mut turn.calls, held).is_err() || fit(&mut turn.results, held).is_err() {
+        return Ok(None);
+    }
+    Ok(Some(turn))
+}
+/// A legacy `function_call`'s id, which its result shares: `function:` and its function's name, cut to the core host's
+/// bound on a tool id, 4,096 UTF-16 units (structured-validation.ts).
+fn legacy_id(name: &str) -> String {
+    let mut units = "function:".len();
+    let name = name.chars().take_while(|c| {
+        units += c.len_utf16();
+        units <= 4096
+    });
+    "function:".chars().chain(name).collect()
 }
 
 #[cfg(test)]
@@ -1033,6 +1172,158 @@ mod tests {
         assert!(!graph.ready);
         assert_eq!(graph.reason.as_deref(), Some(super::CYCLE));
         assert_eq!(graph.charged(), 0);
+        assert_eq!(graph.census.messages, 0, "the census goes with the graph");
+    }
+    /// The main order: each item's kind and its record's uuid.
+    fn order(graph: &Graph) -> Vec<(&'static str, &str)> {
+        graph
+            .main
+            .iter()
+            .map(|&id| (graph.items[id].kind, graph.entries[graph.items[id].entry].uuid.as_deref().unwrap_or("")))
+            .collect()
+    }
+    /// Compaction: a `compact_boundary` record has no parent, but names the message the session went on from. The
+    /// session after it is the same chain, with the boundary an event in its place.
+    #[test]
+    fn a_compaction_boundary_joins_its_two_segments() {
+        let index = fixture(
+            "transcript-compaction",
+            &[
+                r#"{"type":"user","uuid":"u0","parentUuid":null,"message":{"role":"user","content":"start"}}"#,
+                r#"{"type":"assistant","uuid":"a1","parentUuid":"u0","message":{"role":"assistant","content":"reply"}}"#,
+                r#"{"type":"system","subtype":"compact_boundary","uuid":"b","parentUuid":null,"logicalParentUuid":"a1"}"#,
+                r#"{"type":"user","uuid":"u2","parentUuid":"b","message":{"role":"user","content":"summary"}}"#,
+                r#"{"type":"assistant","uuid":"a3","parentUuid":"u2","message":{"role":"assistant","content":"next"}}"#,
+            ],
+        );
+        let graph = index.transcript.lock().unwrap();
+        assert!(graph.ready, "{:?}", graph.reason);
+        assert_eq!(graph.census.branches, 0);
+        assert_eq!(order(&graph), [("turn", "u0"), ("turn", "a1"), ("event", "b"), ("turn", "u2"), ("turn", "a3")]);
+    }
+    /// A boundary whose logical parent is written after it would close a cycle (4 sessions on this PC): it stays a
+    /// root.
+    #[test]
+    fn a_boundary_naming_a_later_record_stays_a_root() {
+        let index = fixture(
+            "transcript-compaction-later",
+            &[
+                r#"{"type":"system","subtype":"compact_boundary","uuid":"b","parentUuid":null,"logicalParentUuid":"a2"}"#,
+                r#"{"type":"user","uuid":"u1","parentUuid":"b","message":{"role":"user","content":"summary"}}"#,
+                r#"{"type":"assistant","uuid":"a2","parentUuid":"u1","message":{"role":"assistant","content":"reply"}}"#,
+                r#"{"type":"user","uuid":"u3","parentUuid":"a2","message":{"role":"user","content":"next"}}"#,
+            ],
+        );
+        let graph = index.transcript.lock().unwrap();
+        assert!(graph.ready, "{:?}", graph.reason);
+        assert_eq!(order(&graph), [("event", "b"), ("turn", "u1"), ("turn", "a2"), ("turn", "u3")]);
+    }
+    fn call(uuid: &str, parent: &str, id: &str, message: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","uuid":"{uuid}","parentUuid":"{parent}","message":{{"id":"{message}","role":"assistant","content":[{{"type":"tool_use","id":"{id}","name":"read","input":{{}}}}]}}}}"#
+        )
+    }
+    fn result(uuid: &str, parent: &str, id: &str) -> String {
+        format!(
+            r#"{{"type":"user","uuid":"{uuid}","parentUuid":"{parent}","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"{id}","content":"r"}}]}}}}"#
+        )
+    }
+    const START: &str = r#"{"type":"user","uuid":"u0","parentUuid":null,"message":{"role":"user","content":"start"}}"#;
+    fn reply(parent: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","uuid":"n","parentUuid":"{parent}","message":{{"id":"N","role":"assistant","content":"done"}}}}"#
+        )
+    }
+    /// Parallel tool calls: Claude Code writes an assistant message's blocks as records of one `message.id`, each the
+    /// parent of the next, and each tool result as a child of its call's record. The forks that makes close: whichever
+    /// result the session goes on from, the main order is one chain, and each result nests under its call.
+    #[test]
+    fn parallel_tool_calls_are_one_chain() {
+        let two =
+            [call("p", "u0", "t1", "M"), call("a", "p", "t2", "M"), result("r1", "p", "t1"), result("r2", "a", "t2")];
+        let three = [
+            call("p", "u0", "t1", "M"),
+            call("a1", "p", "t2", "M"),
+            call("a2", "a1", "t3", "M"),
+            result("r1", "p", "t1"),
+            result("r2", "a1", "t2"),
+            result("r3", "a2", "t3"),
+        ];
+        for (name, records, from, shown) in [
+            ("transcript-two-calls-last", &two[..], "r2", &["u0", "p", "a", "n"][..]),
+            ("transcript-two-calls-first", &two[..], "r1", &["u0", "p", "a", "n"][..]),
+            ("transcript-three-calls-last", &three[..], "r3", &["u0", "p", "a1", "a2", "n"][..]),
+            ("transcript-three-calls-first", &three[..], "r1", &["u0", "p", "a1", "a2", "n"][..]),
+        ] {
+            let mut lines = vec![START.to_string()];
+            lines.extend(records.iter().cloned());
+            lines.push(reply(from));
+            let index = fixture(name, &lines.iter().map(String::as_str).collect::<Vec<_>>());
+            let graph = index.transcript.lock().unwrap();
+            assert!(graph.ready, "{name}: {:?}", graph.reason);
+            assert_eq!((graph.census.branches, graph.census.matched_results), (0, records.len() as u64 / 2), "{name}");
+            let turns: Vec<_> = shown.iter().map(|&uuid| ("turn", uuid)).collect();
+            assert_eq!(order(&graph), turns, "{name}");
+            for entry in graph.entries.iter().filter(|entry| entry.uuid.as_deref() != Some("n")) {
+                for call in entry.turns.iter().flat_map(|turn| &turn.calls) {
+                    assert_eq!(call.results.len(), 1, "{name}: {:?}", entry.uuid);
+                }
+            }
+        }
+    }
+    /// A fork of two messages stays a branch: the assistant child has another `message.id`.
+    #[test]
+    fn a_fork_of_two_messages_stays_a_branch() {
+        let lines = [
+            START.to_string(),
+            call("p", "u0", "t1", "M"),
+            call("a", "p", "t2", "OTHER"),
+            result("r2", "a", "t2"),
+            result("r1", "p", "t1"),
+            reply("r1"),
+        ];
+        let index = fixture("transcript-real-fork", &lines.iter().map(String::as_str).collect::<Vec<_>>());
+        let graph = index.transcript.lock().unwrap();
+        assert!(graph.ready, "{:?}", graph.reason);
+        assert_eq!(graph.census.branches, 1);
+        assert_eq!(order(&graph), [("turn", "u0"), ("turn", "p"), ("branch", "a"), ("turn", "n")]);
+    }
+    /// Each result links to the latest call before it with its id: a legacy `function_call`'s id is its name, which
+    /// later calls reuse, and a chat may reuse a `tool_call_id`. A result before any call with its id stays unmatched.
+    #[test]
+    fn results_link_to_the_latest_earlier_call() {
+        let legacy = [
+            r#"{"role":"user","content":"q"}"#,
+            r#"{"role":"assistant","content":null,"function_call":{"name":"lookup","arguments":"{\"n\":1}"}}"#,
+            r#"{"role":"function","name":"lookup","content":"r1"}"#,
+            r#"{"role":"assistant","content":null,"function_call":{"name":"lookup","arguments":"{\"n\":2}"}}"#,
+            r#"{"role":"function","name":"lookup","content":"r2"}"#,
+        ];
+        let reused = [
+            r#"{"role":"tool","tool_call_id":"call_1","content":"early"}"#,
+            r#"{"role":"user","content":"q"}"#,
+            r#"{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"{}"}}]}"#,
+            r#"{"role":"tool","tool_call_id":"call_1","content":"r1"}"#,
+            r#"{"role":"user","content":"q2"}"#,
+            r#"{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"{}"}}]}"#,
+            r#"{"role":"tool","tool_call_id":"call_1","content":"r2"}"#,
+        ];
+        for (name, lines, links, unmatched) in [
+            ("transcript-legacy-calls", &legacy[..], [(1, 2), (3, 4)], 0),
+            ("transcript-reused-ids", &reused[..], [(2, 3), (5, 6)], 1),
+        ] {
+            let index = fixture(name, lines);
+            let graph = index.transcript.lock().unwrap();
+            assert!(graph.ready, "{name}: {:?}", graph.reason);
+            assert_eq!((graph.census.matched_results, graph.census.unmatched_results), (2, unmatched), "{name}");
+            let entries = &graph.entries;
+            let found: Vec<_> = entries
+                .iter()
+                .flat_map(|entry| entry.turns.iter().flat_map(|turn| &turn.calls).map(move |call| (entry.line, call)))
+                .flat_map(|(line, call)| call.results.iter().map(move |link| (line, entries[link.entry].line)))
+                .collect();
+            assert_eq!(found, links, "{name}");
+        }
     }
     /// A cancelled `finish` stops at its next check, leaving the graph off and holding nothing.
     #[test]
@@ -1078,7 +1369,7 @@ mod tests {
                 size_of::<Item>(),
                 size_of::<Climb>(),
             ],
-            [40, 24, 152, 112, 120, 184, 64, 24]
+            [40, 24, 152, 112, 120, 200, 64, 24]
         );
         let line = r#"{"messages":[{"role":"system","content":"s"},{"role":"assistant","content":null,"tool_calls":[{"id":"t","function":{"name":"lookup","arguments":"{}"}},{"id":"u","function":{"name":"find","arguments":"{}"}}]},{"role":"tool","tool_call_id":"t","content":"one"},{"role":"tool","tool_call_id":"u","content":"two"}]}"#;
         for (name, lines) in [

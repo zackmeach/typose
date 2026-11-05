@@ -387,10 +387,40 @@ fn openai_dataset() -> String {
     vec![line; 1000].join("\n") + "\n"
 }
 
+/// 1,024 tool calls whose ids and names are 4,096 invalid bytes each, which lossy decoding makes 12 KiB strings;
+/// `head`, `middle` and `tail` frame them as Claude Code `tool_use` blocks or OpenAI `tool_calls` entries.
+fn lossy_calls(head: &[u8], middle: &[u8], tail: &[u8]) -> Vec<u8> {
+    let bad = [0xFF; 4096];
+    let call = [head, &bad, middle, &bad, tail].concat();
+    vec![call; 1024].join(&b","[..])
+}
+/// A Claude Code session with one turn of such calls: about 25 MB of call strings in one record.
+fn lossy_session() -> Vec<u8> {
+    let calls = lossy_calls(br#"{"type":"tool_use","id":""#, br#"","name":""#, br#"","input":{}}"#);
+    [
+        br#"{"type":"user","uuid":"u0","parentUuid":null,"message":{"role":"user","content":"start"}}"#.as_slice(),
+        b"\n",
+        br#"{"type":"assistant","uuid":"a1","parentUuid":"u0","message":{"role":"assistant","content":["#,
+        &calls,
+        b"]}}\n",
+        br#"{"type":"user","uuid":"u2","parentUuid":"a1","message":{"role":"user","content":"next"}}"#,
+        b"\n",
+    ]
+    .concat()
+}
+/// An OpenAI dataset of 3 rows, each one assistant turn of such calls.
+fn lossy_dataset() -> Vec<u8> {
+    let calls = lossy_calls(br#"{"id":""#, br#"","type":"function","function":{"name":""#, br#"","arguments":"{}"}}"#);
+    let row =
+        [br#"{"messages":[{"role":"assistant","content":null,"tool_calls":["#.as_slice(), &calls, b"]}]}\n"].concat();
+    row.repeat(3)
+}
+
 /// Indexes `path` as JSONL, with its transcript graph, checked throughout; holds it, then drops it and the document:
 /// the ledger is back to its baseline.
 fn transcript_shape(step: usize, name: &str, path: &Path) {
     let before = budget::totals();
+    let over = OVER.load(SeqCst);
     STEP.store(step, SeqCst);
     ARMED.store(true, SeqCst);
     let start = (LIVE.load(SeqCst), budget::in_use().0);
@@ -409,7 +439,8 @@ fn transcript_shape(step: usize, name: &str, path: &Path) {
     let leaked = LIVE.load(SeqCst) as i64 - BASELINE.load(SeqCst) as i64;
     println!(
         "{name:>24}: {entries} records, {items} items, {charged} charged for the graph; once built, {live} live and \
-         {reserved} reserved since it opened; live past baseline after: {leaked}"
+         {reserved} reserved since it opened; live past baseline after: {leaked}; {} allocations live > reserved",
+        OVER.load(SeqCst) - over
     );
     assert!(ready, "{name}: the transcript graph is off");
     assert!(live <= reserved, "{name}: {live} bytes live since it opened, {reserved} reserved");
@@ -839,9 +870,16 @@ fn main() {
         fs::write(path, bytes).unwrap();
     }
     let markdown: Vec<(&str, PathBuf)> = markdown.into_iter().map(|(name, path, _)| (name, path)).collect();
-    let transcripts = [("Claude Code session", at("claude.jsonl")), ("OpenAI dataset", at("dataset.jsonl"))];
+    let transcripts = [
+        ("Claude Code session", at("claude.jsonl")),
+        ("OpenAI dataset", at("dataset.jsonl")),
+        ("lossy tool calls", at("lossy.jsonl")),
+        ("lossy dataset calls", at("lossy-dataset.jsonl")),
+    ];
     fs::write(&transcripts[0].1, claude_session()).unwrap();
     fs::write(&transcripts[1].1, openai_dataset()).unwrap();
+    fs::write(&transcripts[2].1, lossy_session()).unwrap();
+    fs::write(&transcripts[3].1, lossy_dataset()).unwrap();
 
     budget::set_limit(8 << 30).unwrap();
     // A first build makes the statics a build uses once for the process (ammonia's builder, html5ever's atoms).
