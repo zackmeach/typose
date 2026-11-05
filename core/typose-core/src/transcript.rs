@@ -369,21 +369,21 @@ impl Graph {
             parents[message] = current;
         }
         let parent = |index: usize| parents[index];
+        // A subagent's own session is all sidechain (every agent-*.jsonl on this PC, 2,712 of 2,986 session files):
+        // with no main chain to attach to, its sidechain is the chain, ending at its latest leaf like any other.
+        let sidechain_only = messages.iter().all(|&index| self.entries[index].sidechain);
+        let side: Vec<bool> = self.entries.iter().map(|entry| entry.sidechain && !sidechain_only).collect();
         let mut has_child = HashSet::new();
         for &index in &messages {
-            if !self.entries[index].sidechain
+            if !side[index]
                 && let Some(parent) = parent(index)
             {
                 has_child.insert(parent);
             }
         }
-        let leaf = messages
-            .iter()
-            .rev()
-            .find(|&&index| !self.entries[index].sidechain && !has_child.contains(&index))
-            .copied();
+        let leaf = messages.iter().rev().find(|&&index| !side[index] && !has_child.contains(&index)).copied();
         let Some(mut current) = leaf else {
-            self.disable("Transcript has no non-sidechain leaf; inspect its graph in Rows");
+            self.disable("Transcript has no leaf message; inspect its graph in Rows");
             return;
         };
         let mut chain = Vec::new();
@@ -407,7 +407,7 @@ impl Graph {
             if chain_set.contains(&index) {
                 continue;
             }
-            let side = self.entries[index].sidechain;
+            let sidechain = side[index];
             let mut attach = parent(index);
             let mut root = index;
             let mut visited = HashSet::new();
@@ -416,8 +416,8 @@ impl Graph {
                     self.disable("Transcript parent graph contains a cycle; inspect in Rows");
                     return;
                 }
-                if side {
-                    if !self.entries[ancestor].sidechain {
+                if sidechain {
+                    if !side[ancestor] {
                         break;
                     }
                 } else if chain_set.contains(&ancestor) {
@@ -426,7 +426,7 @@ impl Graph {
                 root = ancestor;
                 attach = parent(ancestor);
             }
-            (if side { &mut sides } else { &mut branches }).entry((attach, root)).or_default().push(index);
+            (if sidechain { &mut sides } else { &mut branches }).entry((attach, root)).or_default().push(index);
         }
         let mut side_items: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
         let mut sides: Vec<_> = sides.into_iter().collect();
@@ -786,5 +786,32 @@ mod tests {
         let call = graph.entries.iter().find(|entry| entry.uuid.as_deref() == Some("a1")).unwrap();
         assert_eq!(call.line, 1);
         assert_eq!(graph.entries[call.turns[0].calls[0].results[0].entry].line, 2);
+    }
+    /// A subagent's session, all sidechain: its latest leaf's chain is the main one, with the branch it left at the
+    /// fork, not one collapsed sidechain group.
+    #[test]
+    fn a_sidechain_only_session_reads_as_its_own_chain() {
+        let index = fixture(
+            "transcript-subagent",
+            &[
+                r#"{"type":"user","uuid":"s0","parentUuid":null,"isSidechain":true,"message":{"role":"user","content":"task"}}"#,
+                r#"{"type":"assistant","uuid":"s1","parentUuid":"s0","isSidechain":true,"message":{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"grep","input":{}}]}}"#,
+                r#"{"type":"user","uuid":"s2","parentUuid":"s1","isSidechain":true,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"hit"}]}}"#,
+                r#"{"type":"assistant","uuid":"old","parentUuid":"s2","isSidechain":true,"message":{"role":"assistant","content":"retry"}}"#,
+                r#"{"type":"assistant","uuid":"s3","parentUuid":"s2","isSidechain":true,"message":{"role":"assistant","content":"done"}}"#,
+            ],
+        );
+        let graph = index.transcript.lock().unwrap();
+        assert!(graph.ready, "{:?}", graph.reason);
+        assert_eq!((graph.census.messages, graph.census.branches, graph.census.sidechains), (5, 1, 0));
+        let shown: Vec<_> = graph
+            .main
+            .iter()
+            .map(|&id| {
+                let item = &graph.items[id];
+                (item.kind, graph.entries[item.entry].uuid.as_deref().unwrap())
+            })
+            .collect();
+        assert_eq!(shown, vec![("turn", "s0"), ("turn", "s1"), ("branch", "old"), ("turn", "s3")]);
     }
 }
