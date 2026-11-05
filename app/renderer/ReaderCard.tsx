@@ -1281,6 +1281,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
           {card.structured?.parsedAs ? <p>Parsed as {card.structured.parsedAs === 'jsonc' ? 'JSONC' : 'JSON'}</p> : null}
           {card.opened.format === 'jsonl' ? <p>{card.structured?.parsed === undefined ? '…' : jsonlCounts(card.structured, card.lines)} · {card.structured?.transcript?.adapter ?? 'Generic JSONL'}</p> : null}
           {card.structuredOff ? <p>{card.structuredOff}</p> : null}
+          {card.transcriptOff ? <p>{card.transcriptOff}</p> : null}
           <div className="structured-problem-list">{card.structured?.problems.map((problem, index) => <details key={index}><summary>{problem.kind}: {problem.count.toLocaleString()}</summary><button type="button" onClick={() => { jumpTo.current = Math.max(0, (problem.line ?? 1) - 1); onLens('raw') }}>{problem.message} · {problem.line ? `line ${problem.line}` : `byte ${problem.first.start}`}</button></details>)}</div>
         </Dialog></Popover>
       </DialogTrigger> : null}

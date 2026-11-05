@@ -356,6 +356,24 @@ test('Transcript shows HTML-like tags in message text as literal text, never int
   expect(live.pageErrors).toEqual([])
 })
 
+test('a Transcript graph that is off says why, where a disabled structured lens does', async () => {
+  // A parent cycle (the core's own fixture) turns the graph off; Rows remains.
+  const file = fixture('transcript-cycle.jsonl', [
+    { type: 'user', uuid: 'a', parentUuid: 'b', message: { role: 'user', content: 'a' } },
+    { type: 'assistant', uuid: 'b', parentUuid: 'a', message: { role: 'assistant', content: 'b' } },
+    { type: 'user', uuid: 'z', parentUuid: null, message: { role: 'user', content: 'z' } }
+  ].map(record => JSON.stringify(record)).join('\n') + '\n')
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' }), reason = 'Transcript parent graph contains a cycle; inspect in Rows'
+  await expect(card.locator('[data-lens="rows"]')).toBeVisible({ timeout: 30_000 })
+  const transcript = card.getByRole('tab', { name: 'Transcript', exact: true })
+  await expect(transcript).toBeDisabled()
+  await expect(transcript.getByTitle(reason)).toBeVisible()
+  await card.getByRole('button', { name: 'File info', exact: true }).click()
+  await expect(live.win.getByRole('dialog', { name: 'File info' }).getByText(reason, { exact: true })).toBeVisible()
+  expect(live.pageErrors).toEqual([])
+})
+
 test('JSONL Table discovers a global key after line 1,000 and retains original source row navigation', async () => {
   const lines = Array.from({ length: 1001 }, (_, index) => `{"common":"row ${index + 1}"}`)
   lines.push('{"common":"last row","late":"revealed"}')
