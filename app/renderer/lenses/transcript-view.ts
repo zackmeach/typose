@@ -486,7 +486,7 @@ export class TranscriptView {
     await blocks(0)
   }
   /** Every image is a placeholder until the bounded `data:` path with its pixel caps (Z43) and the remote-image gate
-   *  (§4.6) land: a URL that isn't `data:` is remote, and anything else is embedded data. */
+   *  (§4.6) land: an http(s) URL is a remote image, and anything else isn't one to load. */
   private async image(parent: HTMLElement, fields: StructuredNode[], record: number): Promise<void> {
     const image = fields.find((field) => field.key === 'image_url' || field.key === 'source')
     let url = image?.kind === 'string' ? string(image) : ''
@@ -494,7 +494,7 @@ export class TranscriptView {
     parent.append(
       make(
         'p',
-        url && !/^data:/i.test(url)
+        /^https?:/i.test(url)
           ? 'Remote image · not loaded · inspect the source in Message metadata'
           : 'Image preview unavailable · inspect embedded data in Message metadata',
         'transcript-image-placeholder'

@@ -536,13 +536,15 @@ test('Transcript shows every image as a placeholder, embedded or remote, until t
     { role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: png } }] },
     { role: 'assistant', content: [{ type: 'image_url', image_url: { url: `data:image/png;base64,${png}` } }] },
     { role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.invalid/remote.png' } }] },
+    // A URL that isn't http(s) isn't a remote image.
+    { role: 'assistant', content: [{ type: 'image_url', image_url: { url: 'javascript:alert(1)' } }] },
     { role: 'assistant', content: 'Images fixture' }
   ]))
   const live = await launch({ hooks: true, file })
   const card = live.win.getByRole('region', { name: 'Reader card 1' })
   await expect(card.getByText('Images fixture', { exact: true })).toBeVisible({ timeout: 30_000 })
   const embedded = 'Image preview unavailable · inspect embedded data in Message metadata'
-  await expect(card.locator('.transcript-image-placeholder')).toHaveText([embedded, embedded, 'Remote image · not loaded · inspect the source in Message metadata'])
+  await expect(card.locator('.transcript-image-placeholder')).toHaveText([embedded, embedded, 'Remote image · not loaded · inspect the source in Message metadata', embedded])
   await expect(card.getByRole('img', { name: 'Embedded image' })).toHaveCount(0)
   expect(live.pageErrors).toEqual([])
 })
