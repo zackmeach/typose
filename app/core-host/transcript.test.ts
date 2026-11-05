@@ -218,4 +218,24 @@ describe('Transcript through the core host', () => {
     expect(await c.call('structuredTranscript', { ref: generic.info.ref, start: 0, count: 20 }))
       .toMatchObject({ error: { code: 'Refused', message: expect.stringContaining('No supported transcript schema') } })
   })
+
+  it('a record that is both an OpenAI message and a dataset line counts once, and the file opens', async () => {
+    const c = await client()
+    const line = JSON.stringify({ role: 'user', content: 'hi', messages: [{ role: 'user', content: 'q' }, { role: 'assistant', content: 'a' }] })
+    const { info, path } = await c.open('both.jsonl', `${line}\n`.repeat(5))
+    expect(info).toMatchObject({ done: true, schema: 'openai-chat-v1' })
+    expect(await nativeTranscript(path)).toMatchObject({ mode: 'dataset', confidence: 1, ready: true, messages: 10 })
+  })
+
+  it('a legacy function call named at the 4,096-byte bound: its id fits the Tools bound, and its result nests under it', async () => {
+    const c = await client()
+    const name = 'f'.repeat(4096)
+    const lines = [{ role: 'user', content: 'q' }, { role: 'assistant', content: null, function_call: { name, arguments: '{}' } }, { role: 'function', name, content: 'r' }]
+    const { info } = await c.open('legacy-name.jsonl', lines.map((line) => `${JSON.stringify(line)}\n`).join(''))
+    const call = (await page(c, info.ref)).items[1]!
+    const [tool] = (await c.value<TranscriptTools>('structuredTranscriptTools', { ref: info.ref, item: call.id, start: 0, count: 32 })).tools
+    expect(tool).toMatchObject({ name: expect.stringMatching(/^f{4000,4096}$/), results: 1 })
+    expect(tool!.id).toBe(`function:${tool!.name}`.slice(0, 4096))
+    expect(tool!.id).toHaveLength(4096)
+  })
 })

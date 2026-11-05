@@ -107,12 +107,14 @@ impl Index {
                 return Ok(false);
             }
             Ok(true)
-        })?;
-        if complete {
+        });
+        if let Ok(true) = complete {
             let schema = detected_schema(&self.progress.read().unwrap());
             self.transcript.lock().unwrap().finish(schema)?;
+        } else {
+            self.transcript.lock().unwrap().stop();
         }
-        self.progress.write().unwrap().done = complete;
+        self.progress.write().unwrap().done = complete?;
         Ok(())
     }
     fn record(&self, store: &ByteStore, span: Span, line: u64) -> Result<bool, StoreError> {
@@ -197,7 +199,8 @@ impl Index {
             let mut progress = self.progress.write().unwrap();
             progress.sample_parsed += 1;
             progress.claude += u64::from(claude);
-            progress.openai_messages += u64::from(openai_message);
+            // A dataset line with a role and content of its own is a dataset line, once.
+            progress.openai_messages += u64::from(openai_message && !dataset);
             progress.openai_dataset += u64::from(dataset);
         }
         let progress = self.progress.read().unwrap();

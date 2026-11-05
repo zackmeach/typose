@@ -263,8 +263,8 @@ it('M5 PR 1: a transcript graph stays charged until close, at its structs\' size
     expect(generic.transcript).toBeUndefined()
     const graph = structuredBytes(docs[0]!) - structuredBytes(docs[1]!)
     console.log(`a 40,000-record session's transcript graph: ${graph} bytes, ${(graph / 40_000).toFixed(0)} a record`)
-    // At least each record's 184-byte entry (pinned in transcript.rs), and far below the parked graph's guess of 8 KB.
-    expect(graph).toBeGreaterThan(40_000 * 184)
+    // At least each record's 200-byte entry (pinned in transcript.rs), and far below the parked graph's guess of 8 KB.
+    expect(graph).toBeGreaterThan(40_000 * 200)
     expect(graph).toBeLessThan(40_000 * 1024)
   } finally {
     for (const doc of docs) doc.close()
@@ -284,6 +284,36 @@ it('M5 PR 1: closing a session mid-index ends its graph and releases it', async 
   expect((await doc.structuredBuild(doc.generation, new core.Cancel())).done).toBe(false)
   doc.close()
   core.setReadDelay(0)
+  await expect.poll(() => alive()).toEqual({ jobs: 0, tasks: 0, handles: 0 })
+  expect(core.debugStats().ledger.used).toBe(base)
+})
+
+it('M5 PR 1: an index the budget stops releases its half-built graph, and Page says why', async () => {
+  const path = join(dir, 'transcript-stopped.jsonl')
+  // 40,000 messages the graph takes in, then a record of 3 million arrays the budget can't scan.
+  const message = (i: number) => JSON.stringify({ type: i % 2 ? 'assistant' : 'user', uuid: `u${i}`, parentUuid: i ? `u${i - 1}` : null, message: { role: i % 2 ? 'assistant' : 'user', content: 'x' } })
+  writeFileSync(path, Array.from({ length: 40_000 }, (_, i) => message(i) + '\n').join('') + `[${Array(3_000_000).fill('[]').join(',')}]\n`)
+  const { used: base } = core.debugStats().ledger
+  const doc = core.Doc.open(path)
+  try {
+    await indexed(doc)
+    const { used, limit } = core.debugStats().ledger
+    try {
+      core.setLimit(used + (52 << 20)) // the index's temporaries and the graph, not the scan
+      await doc.structuredBuild(doc.generation, new core.Cancel())
+      await expect.poll(() => core.debugStats().jobs, { timeout: 10_000 }).toBe(0) // the index thread stopped
+    } finally {
+      core.setLimit(limit)
+    }
+    const info = await doc.structuredBuild(doc.generation, new core.Cancel())
+    const reason = 'Transcript graph stopped with the JSONL index; Rows remains available'
+    console.log(`a stopped index: ${structuredBytes(doc)} bytes still charged to the structured index`)
+    expect(info).toMatchObject({ done: false, reason: 'The memory budget stopped JSONL indexing', transcript: { ready: false, reason, messages: 0 } })
+    expect(structuredBytes(doc)).toBeLessThan(1 << 20) // the JSONL index's own; the half-built graph held 17.6 MB
+    expect(await doc.structuredTranscript(doc.generation, info.revision, 0, 20, new core.Cancel()).catch((e: { code: string, message: string }) => [e.code, e.message])).toEqual(['Refused', `refused: ${reason}`])
+  } finally {
+    doc.close()
+  }
   await expect.poll(() => alive()).toEqual({ jobs: 0, tasks: 0, handles: 0 })
   expect(core.debugStats().ledger.used).toBe(base)
 })

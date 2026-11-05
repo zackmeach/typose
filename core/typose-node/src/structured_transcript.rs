@@ -23,7 +23,7 @@ pub(super) fn describe(index: &jsonl::Index) -> Option<TranscriptInfo> {
     let schema = jsonl::detected_schema(&progress)?;
     let matches =
         if schema == "claude-code-v1" { progress.claude } else { progress.openai_messages + progress.openai_dataset };
-    let confidence = matches as f64 / progress.sample_parsed.max(1) as f64;
+    let confidence = (matches as f64 / progress.sample_parsed.max(1) as f64).min(1.);
     drop(progress);
     let graph = index.transcript.lock().unwrap();
     Some(TranscriptInfo {
@@ -196,11 +196,10 @@ impl Query for Page {
         } else {
             &graph.main
         };
-        let visible: Vec<usize> =
-            list.iter().copied().filter(|&id| self.events || graph.items[id].kind != "event").collect();
+        let visible = || list.iter().copied().filter(|&id| self.events || graph.items[id].kind != "event");
         let mut items = Vec::new();
         let mut bytes = 1024;
-        for &id in visible.iter().skip(self.start).take(self.count) {
+        for id in visible().skip(self.start).take(self.count) {
             let item = &graph.items[id];
             let entry = &graph.entries[item.entry];
             let turn = item.turn.and_then(|index| entry.turns.get(index));
@@ -230,11 +229,11 @@ impl Query for Page {
                 }),
             });
         }
-        let next = self.start + items.len();
+        let (next, total) = (self.start + items.len(), visible().count());
         Ok(TranscriptPage {
             items,
-            total: visible.len() as f64,
-            next: (next < visible.len()).then_some(next as f64),
+            total: total as f64,
+            next: (next < total).then_some(next as f64),
             events: graph.census.events as f64,
         })
     }
