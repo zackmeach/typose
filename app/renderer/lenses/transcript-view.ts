@@ -315,7 +315,8 @@ export class TranscriptView {
    *  not the page's. */
   private async arguments(input: StructuredNode | undefined, record: number, pane: Pane): Promise<string> {
     if (!input || pane.signal.aborted) return ''
-    const value = (field: StructuredNode) => (field.kind === 'object' ? '{…}' : field.kind === 'array' ? '[…]' : field.text)
+    const value = (field: StructuredNode) =>
+      field.kind === 'object' ? '{…}' : field.kind === 'array' ? '[…]' : field.kind === 'string' ? `"${string(field)}"` : field.text
     const text = (
       input.container === undefined
         ? string(input)

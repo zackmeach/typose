@@ -237,7 +237,7 @@ test('Claude Transcript uses the full graph, nests tool results and preserves li
   const records = [
     { type: 'user', uuid: 'u0', parentUuid: null, message: { role: 'user', content: [{ type: 'text', text: 'Please **inspect** <command-name>literal</command-name>.' }] } },
     { type: 'system', uuid: 'event1', parentUuid: 'u0', detail: 'Session metadata fixture' },
-    { type: 'assistant', uuid: 'a1', parentUuid: 'event1', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tool1', name: 'read', input: { amount: 3.1, file: 'local.md' } }] } },
+    { type: 'assistant', uuid: 'a1', parentUuid: 'event1', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tool1', name: 'read', input: { amount: 3.1, file: 'local.md', path: 'C:\\Users\\me\\f1.md' } }] } },
     { type: 'user', uuid: 'u1', parentUuid: 'a1', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tool1', content: '**matched result**' }] } },
     { type: 'assistant', uuid: 'old', parentUuid: 'u1', message: { role: 'assistant', content: 'Old branch fixture' } },
     { type: 'assistant', uuid: 'new', parentUuid: 'u1', message: { role: 'assistant', content: 'Latest leaf fixture' } },
@@ -261,8 +261,8 @@ test('Claude Transcript uses the full graph, nests tool results and preserves li
     groups.map(group => { const style = getComputedStyle(group); return `${style.marginLeft} ${style.borderLeftWidth} ${style.paddingLeft}` }))
   expect(await guides(card)).toEqual(['16px 1px 12px', '16px 1px 12px'])
   const tool = card.locator('.transcript-tool[data-tool-id="tool1"]')
-  // Brief §5.4's `name(args summary)`: the input's first fields, as written.
-  await expect(tool.locator('summary')).toHaveText('read(amount: 3.10, file: "local.md")')
+  // Brief §5.4's `name(args summary)`: the input's first fields, a number as written and a string decoded.
+  await expect(tool.locator('summary')).toHaveText('read(amount: 3.10, file: "local.md", path: "C:\\Users\\me\\f1.md")')
   await tool.locator('summary').click()
   await expect(tool.locator('.tree-number')).toHaveText('3.10')
   await expect(tool.locator('.transcript-tool-result strong').filter({ hasText: 'matched result' })).toBeVisible()
