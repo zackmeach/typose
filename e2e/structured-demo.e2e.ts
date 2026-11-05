@@ -489,6 +489,24 @@ test('Transcript shows HTML-like tags in message text as literal text, never int
   expect(live.pageErrors).toEqual([])
 })
 
+test('Transcript shows every image as a placeholder, embedded or remote, until the bounded image path (Z43) lands', async () => {
+  // A 1×1 PNG, small enough for a node's 4 KiB preview: embedded as a block, and as a data URL.
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+  const file = fixture('transcript-images.jsonl', claudeSession([
+    { role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: png } }] },
+    { role: 'assistant', content: [{ type: 'image_url', image_url: { url: `data:image/png;base64,${png}` } }] },
+    { role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.invalid/remote.png' } }] },
+    { role: 'assistant', content: 'Images fixture' }
+  ]))
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.getByText('Images fixture', { exact: true })).toBeVisible({ timeout: 30_000 })
+  const embedded = 'Image preview unavailable · inspect embedded data in Message metadata'
+  await expect(card.locator('.transcript-image-placeholder')).toHaveText([embedded, embedded, 'Remote image · not loaded · inspect the source in Message metadata'])
+  await expect(card.getByRole('img', { name: 'Embedded image' })).toHaveCount(0)
+  expect(live.pageErrors).toEqual([])
+})
+
 test('a Transcript graph that is off says why, where a disabled structured lens does', async () => {
   // A parent cycle (the core's own fixture) turns the graph off; Rows remains.
   const file = fixture('transcript-cycle.jsonl', [

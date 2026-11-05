@@ -481,35 +481,21 @@ export class TranscriptView {
     }
     await blocks(0)
   }
+  /** Every image is a placeholder until the bounded `data:` path with its pixel caps (Z43) and the remote-image gate
+   *  (§4.6) land: a URL that isn't `data:` is remote, and anything else is embedded data. */
   private async image(parent: HTMLElement, fields: StructuredNode[], record: number): Promise<void> {
-    const image = fields.find(
-      (field) => field.key === 'image_url' || field.key === 'source' || field.key === 'image_url'
-    )
+    const image = fields.find((field) => field.key === 'image_url' || field.key === 'source')
     let url = image?.kind === 'string' ? string(image) : ''
-    if (image?.container !== undefined) {
-      const values = await this.fields(image, record),
-        data = values.find((value) => value.key === 'data'),
-        media = values.find((value) => value.key === 'media_type')
-      if (data && media && !data.more) url = `data:${string(media)};base64,${string(data)}`
-      else url = string(values.find((value) => value.key === 'url'))
-    }
-    if (/^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(url) && url.length <= 2 << 20) {
-      const thumbnail = document.createElement('img')
-      thumbnail.src = url
-      thumbnail.alt = 'Embedded image'
-      thumbnail.className = 'transcript-image'
-      thumbnail.loading = 'lazy'
-      parent.append(thumbnail)
-    } else
-      parent.append(
-        make(
-          'p',
-          url
-            ? 'Remote image · not loaded · inspect the source in Message metadata'
-            : 'Image preview unavailable · inspect embedded data in Message metadata',
-          'transcript-image-placeholder'
-        )
+    if (image?.container !== undefined) url = string((await this.fields(image, record)).find((value) => value.key === 'url'))
+    parent.append(
+      make(
+        'p',
+        url && !/^data:/i.test(url)
+          ? 'Remote image · not loaded · inspect the source in Message metadata'
+          : 'Image preview unavailable · inspect embedded data in Message metadata',
+        'transcript-image-placeholder'
       )
+    )
   }
   /** A string node's whole text: its preview when that's all of it, else its source (at most the text query's 64 KiB). */
   private async whole(node: StructuredNode, signal: AbortSignal): Promise<string> {
