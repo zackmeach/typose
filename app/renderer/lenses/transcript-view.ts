@@ -28,9 +28,12 @@ interface Options {
   openLocal?(target: string, path: string, gesture: LocalGesture): Promise<boolean>
   reserve(bytes: number): Promise<boolean>
 }
-/** One page's DOM, shown or being built: what its HTML and literal text are charged. */
+/** One page's DOM, shown or being built: what its HTML and literal text are charged, and the signal its queries take,
+ *  aborted once another page replaces it or supersedes its build. */
 interface Pane {
   bytes: number
+  abort: AbortController
+  signal: AbortSignal
 }
 /** The snapshot's allowance for one character of mounted HTML: its DOM nodes, its text and the HTML string. Literal
  *  text is one text node: Rendered's allowance for a unit of text (`RENDERED_PER_UNIT`). */
@@ -53,17 +56,28 @@ export class TranscriptView {
   ) {}
 
   /** Only the shown page and the one being built are reserved: reading to the end holds one page's charge, and the lens
-   *  releases it when it unmounts. */
-  async show(start = this.start, top = false): Promise<void> {
+   *  releases it when it unmounts. `commit` runs as the page is shown: Next and Previous move the history then. */
+  async show(start = this.start, commit?: () => void): Promise<void> {
     const epoch = ++this.serial,
-      pane: Pane = { bytes: 0 }
+      abort = new AbortController(),
+      pane: Pane = { bytes: 0, abort, signal: AbortSignal.any([this.signal, abort.signal]) }
+    // A build this one supersedes stops, its group, tool and text queries with it.
+    this.building?.abort.abort()
     this.building = pane
     try {
-      await this.build(start, epoch, pane, top)
+      await this.build(start, epoch, pane, commit)
+    } catch (error) {
+      if (!abort.signal.aborted) throw error
     } finally {
       // The page this one replaced is released, or this one, if a newer page replaced it first.
       if (this.building === pane) this.building = undefined
       if (!this.signal.aborted) void this.options.reserve(this.held())
+    }
+  }
+  /** A page's later load failed: it says so, unless the page was replaced or superseded, which aborted it. */
+  private lost(pane: Pane): (error: unknown) => void {
+    return (error) => {
+      if (!pane.signal.aborted) this.options.frozen(error)
     }
   }
   private held(): number {
@@ -77,14 +91,14 @@ export class TranscriptView {
     pane.bytes -= bytes
     throw new Error('Transcript display exceeds the memory budget · use Rows or Raw')
   }
-  /** `top`: a new page (Next, Previous) starts at its top, not where the last one was scrolled to. */
-  private async build(start: number, epoch: number, pane: Pane, top: boolean): Promise<void> {
+  /** A page `commit` moves to (Next, Previous) starts at its top, not where the last one was scrolled to. */
+  private async build(start: number, epoch: number, pane: Pane, commit?: () => void): Promise<void> {
     const page = await this.core.call(
       'structuredTranscript',
       { ref: this.source.info.ref, start, count: 20, events: this.showEvents },
-      this.signal
+      pane.signal
     )
-    if (this.signal.aborted || epoch !== this.serial) return
+    if (pane.signal.aborted || epoch !== this.serial) return
     this.start = start
     const body = make('div', undefined, 'transcript-pane'),
       controls = make('div', undefined, 'transcript-controls')
@@ -95,8 +109,7 @@ export class TranscriptView {
       check.checked = this.showEvents
       check.onchange = () => {
         this.showEvents = check.checked
-        this.history = []
-        void this.show(0).catch(this.options.frozen)
+        void this.show(0, () => (this.history = [])).catch(this.options.frozen)
       }
       label.append(check, document.createTextNode(` Show ${page.events.toLocaleString()} session events`))
       controls.append(label)
@@ -112,22 +125,25 @@ export class TranscriptView {
     }
     body.append(controls)
     for (const item of page.items) {
-      if (this.signal.aborted || epoch !== this.serial) return
+      if (pane.signal.aborted || epoch !== this.serial) return
       body.append(await this.item(item, pane))
     }
+    if (pane.signal.aborted || epoch !== this.serial) return
+    // The history moves as the page is shown, so its navigation is made after.
+    commit?.()
     const navigation = make('div', undefined, 'structured-pagination')
     if (this.history.length) {
       const previous = make('button', 'Previous turns')
+      // One page at a time: a click while a page builds is ignored.
       previous.onclick = () => {
-        void this.show(this.history.pop()!, true).catch(this.options.frozen)
+        if (!this.building) void this.show(this.history.at(-1)!, () => this.history.pop()).catch(this.options.frozen)
       }
       navigation.append(previous)
     }
     if (page.next !== undefined) {
       const next = make('button', 'Next turns')
       next.onclick = () => {
-        this.history.push(start)
-        void this.show(page.next!, true).catch(this.options.frozen)
+        if (!this.building) void this.show(page.next!, () => this.history.push(start)).catch(this.options.frozen)
       }
       navigation.append(next)
     }
@@ -135,18 +151,18 @@ export class TranscriptView {
       make('span', `${page.items.length ? start + 1 : 0}–${start + page.items.length} of ${page.total}`)
     )
     body.append(navigation)
-    if (!this.signal.aborted && epoch === this.serial) {
-      this.host.replaceChildren(body)
-      if (top) this.host.parentElement!.scrollTop = 0
-      this.shown = pane
-    }
+    // The page this one replaces stops what it still had loading.
+    this.shown?.abort.abort()
+    this.host.replaceChildren(body)
+    if (commit) this.host.parentElement!.scrollTop = 0
+    this.shown = pane
   }
   /** One item, or why it couldn't be shown: one item's failure never fails its page. */
   private async item(item: TranscriptItem, pane: Pane): Promise<HTMLElement> {
     try {
       return await this.render(item, pane)
     } catch (error) {
-      if (this.signal.aborted || (error instanceof CoreCallError && error.code === 'Frozen')) throw error
+      if (pane.signal.aborted || (error instanceof CoreCallError && error.code === 'Frozen')) throw error
       const problem = make(
         'button',
         `This item couldn’t be shown · ${error instanceof Error ? error.message : String(error)} · View in Rows`,
@@ -181,15 +197,15 @@ export class TranscriptView {
         const page = await this.core.call(
           'structuredTranscript',
           { ref: this.source.info.ref, start, count: 20, group: item.id, events: this.showEvents },
-          this.signal
+          pane.signal
         )
-        if (this.signal.aborted) return
+        if (pane.signal.aborted) return
         for (const child of page.items) children.append(await this.item(child, pane))
         if (page.next !== undefined) {
           const more = make('button', 'Show more messages')
           more.onclick = () => {
             more.remove()
-            void load(page.next!).catch(this.options.frozen)
+            void load(page.next!).catch(this.lost(pane))
           }
           children.append(more)
         }
@@ -197,7 +213,7 @@ export class TranscriptView {
       group.addEventListener('toggle', () => {
         if (group.open && !loaded) {
           loaded = true
-          void load(0).catch(this.options.frozen)
+          void load(0).catch(this.lost(pane))
         }
       })
       if (group.open) {
@@ -241,7 +257,7 @@ export class TranscriptView {
       const first = await this.core.call(
         'structuredTranscriptTools',
         { ref: this.source.info.ref, item: item.id, start: 0, count: 32 },
-        this.signal
+        pane.signal
       )
       tools = first.tools
       // Further tool pages are always reachable, rather than disappearing behind the preview bound.
@@ -249,7 +265,7 @@ export class TranscriptView {
         const more = make('button', 'Show more tool calls')
         more.onclick = () => {
           more.remove()
-          void this.moreTools(turn, item, first.next!, pane).catch(this.options.frozen)
+          void this.moreTools(turn, item, first.next!, pane).catch(this.lost(pane))
         }
         turn.append(more)
       }
@@ -267,14 +283,14 @@ export class TranscriptView {
     const page = await this.core.call(
       'structuredTranscriptTools',
       { ref: this.source.info.ref, item: item.id, start, count: 32 },
-      this.signal
+      pane.signal
     )
     for (const tool of page.tools) parent.append(await this.tool(item, tool, pane))
     if (page.next !== undefined) {
       const more = make('button', 'Show more tool calls')
       more.onclick = () => {
         more.remove()
-        void this.moreTools(parent, item, page.next!, pane).catch(this.options.frozen)
+        void this.moreTools(parent, item, page.next!, pane).catch(this.lost(pane))
       }
       parent.append(more)
     }
@@ -301,7 +317,7 @@ export class TranscriptView {
       const page = await this.core.call(
         'structuredTranscriptTools',
         { ref: this.source.info.ref, item: item.id, call: tool.ordinal, start, count: 32 },
-        this.signal
+        pane.signal
       )
       for (const result of page.results) {
         const block = make('div', undefined, 'transcript-tool-result')
@@ -313,7 +329,7 @@ export class TranscriptView {
         const more = make('button', 'Show more tool results')
         more.onclick = () => {
           more.remove()
-          void results(page.next!).catch(this.options.frozen)
+          void results(page.next!).catch(this.lost(pane))
         }
         disclosure.append(more)
       }
@@ -324,7 +340,7 @@ export class TranscriptView {
       void (async () => {
         if (tool.input) disclosure.append(await this.options.tree(tool.input, item.record))
         if (tool.results) await results(0)
-      })().catch(this.options.frozen)
+      })().catch(this.lost(pane))
     })
     return disclosure
   }
@@ -354,7 +370,7 @@ export class TranscriptView {
     tools: TranscriptTool[] = [],
     used = new Set<number>()
   ): Promise<void> {
-    if (!node || this.signal.aborted) return
+    if (!node || pane.signal.aborted) return
     if (node.kind === 'string') {
       await this.markdown(parent, node, record, pane)
       return
@@ -371,7 +387,7 @@ export class TranscriptView {
     const blocks = async (start: number) => {
       const page = await this.source.children(node.container!, start, record)
       for (const block of page.nodes) {
-        if (this.signal.aborted) return
+        if (pane.signal.aborted) return
         if (item?.linkedResults.some((span) => span.start === block.span.start && span.end === block.span.end)) continue
         const fields = await this.fields(block, record),
           type = string(fields.find((field) => field.key === 'type')),
@@ -406,7 +422,7 @@ export class TranscriptView {
         const more = make('button', 'Show more content blocks')
         more.onclick = () => {
           more.remove()
-          void blocks(page.next!).catch(this.options.frozen)
+          void blocks(page.next!).catch(this.lost(pane))
         }
         parent.append(more)
       }
@@ -444,13 +460,13 @@ export class TranscriptView {
       )
   }
   /** A string node's whole text: its preview when that's all of it, else its source (at most the text query's 64 KiB). */
-  private async whole(node: StructuredNode): Promise<string> {
+  private async whole(node: StructuredNode, signal: AbortSignal): Promise<string> {
     const view = this.opened.view
     if (!node.more || !view) return string(node)
     const bytes = await this.core.call(
       'sourceBytes',
       { view, start: node.span.start, count: node.span.end - node.span.start },
-      this.signal
+      signal
     )
     return string({ ...node, text: new TextDecoder(this.opened.encoding, { ignoreBOM: true }).decode(bytes) })
   }
@@ -468,7 +484,7 @@ export class TranscriptView {
     parent.append(holder)
     /** The text, literally and whole, in place of its Markdown. */
     const literal = async () => {
-      const text = await this.whole(node)
+      const text = await this.whole(node, pane.signal)
       await this.charge(pane, text.length * RENDERED_PER_UNIT)
       holder.replaceWith(make('pre', text, 'transcript-text'))
     }
@@ -478,7 +494,7 @@ export class TranscriptView {
         page = await this.core.call(
           'structuredTranscriptText',
           { ref: this.source.info.ref, start: node.span.start, end: node.span.end, block },
-          this.signal
+          pane.signal
         )
       } catch (error) {
         // A block whose HTML passes the core's display bound: the text shows literally, and whole, instead.
@@ -486,7 +502,7 @@ export class TranscriptView {
         await literal()
         return
       }
-      if (this.signal.aborted) return
+      if (pane.signal.aborted) return
       await this.charge(pane, page.html.reduce((chars, html) => chars + html.length, 0) * CHAR_BYTES)
       for (const html of page.html) {
         const fragment = make('div', undefined, 'md-block')
@@ -497,7 +513,7 @@ export class TranscriptView {
         const more = make('button', 'Show more text')
         more.onclick = () => {
           more.remove()
-          void load(page.next!).catch(this.options.frozen)
+          void load(page.next!).catch(this.lost(pane))
         }
         holder.append(more)
       }

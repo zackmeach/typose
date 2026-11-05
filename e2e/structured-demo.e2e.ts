@@ -474,6 +474,20 @@ test('Transcript paging starts each page at its top', async () => {
   expect(live.pageErrors).toEqual([])
 })
 
+test('Transcript paging ignores Next while a page builds, and each Previous goes back one page', async () => {
+  const file = fixture('transcript-paging.jsonl', claudeSession(Array.from({ length: 140 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: `Paging turn ${i}` }))))
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' }), previous = card.getByRole('button', { name: 'Previous turns', exact: true })
+  await expect(card.getByText('1–20 of 140', { exact: true })).toBeVisible({ timeout: 30_000 })
+  // Five clicks in one task: the first starts page 2, and the rest land while it builds.
+  await card.getByRole('button', { name: 'Next turns', exact: true }).evaluate(next => { for (let i = 0; i < 5; i++) (next as HTMLButtonElement).click() })
+  await expect(card.getByText('21–40 of 140', { exact: true })).toBeVisible()
+  await previous.click()
+  await expect(card.getByText('1–20 of 140', { exact: true })).toBeVisible()
+  await expect(previous).toHaveCount(0)
+  expect(live.pageErrors).toEqual([])
+})
+
 test('JSONL Table discovers a global key after line 1,000 and retains original source row navigation', async () => {
   const lines = Array.from({ length: 1001 }, (_, index) => `{"common":"row ${index + 1}"}`)
   lines.push('{"common":"last row","late":"revealed"}')
