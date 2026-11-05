@@ -512,7 +512,9 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         const current = latest.current.card
         const already = current.kind === 'open' && current.opened === opened && ['tree', 'rows', 'table', 'transcript'].includes(current.lens ?? '')
         const go = !off && picked.current !== 'raw' && (picked.current !== null || preferred !== 'raw') && (already || picked.current !== null || !lens.current?.readerMoved())
-        const chosen = ['tree', 'rows', 'table', 'transcript'].includes(picked.current ?? '') ? picked.current! : already && lens.current?.readerMoved() ? current.lens! : preferred
+        // A Transcript pick (a restored tab's, say) waits in Rows until its graph is ready, which may be never.
+        const pick = picked.current === 'transcript' && !info.transcript?.ready ? 'rows' : picked.current
+        const chosen = ['tree', 'rows', 'table', 'transcript'].includes(pick ?? '') ? pick! : already && lens.current?.readerMoved() ? current.lens! : preferred
         setCard(c => c.kind === 'open' && c.opened === opened ? { ...c, structured: info, structuredOff: off, transcriptOff: info.transcript && !info.transcript.ready ? info.transcript.reason ?? 'Transcript graph is indexing…' : undefined, lens: go ? chosen : 'raw' } : c)
       }
       update(); unsubscribe = source.subscribe?.(update)

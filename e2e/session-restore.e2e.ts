@@ -50,6 +50,25 @@ test('actual restart preserves cards, selected tabs, lenses and anchors, and kee
   expect(await finish(resumed)).toEqual({ code: 0, signal: null })
 })
 
+test('a tab saved in Transcript whose graph is off restores in Rows, with Transcript disabled', async () => {
+  // A parent cycle (the core's own fixture) turns the transcript graph off; Rows remains.
+  const file = fixture('session-transcript-cycle.jsonl', [
+    { type: 'user', uuid: 'a', parentUuid: 'b', message: { role: 'user', content: 'a' } },
+    { type: 'assistant', uuid: 'b', parentUuid: 'a', message: { role: 'assistant', content: 'b' } },
+    { type: 'user', uuid: 'z', parentUuid: null, message: { role: 'user', content: 'z' } }
+  ].map(record => JSON.stringify(record)).join('\n') + '\n')
+  const userData = mkdtempSync(join(tmpdir(), 'typose-session-transcript-'))
+  writeFileSync(join(userData, 'session.json'), JSON.stringify({ ...emptySession(),
+    cards: [{ tabs: [{ location: { kind: 'manual', path: file }, anchor: 0, lens: 'transcript' }], selected: 0, weight: 1 }] }))
+  const live = await launch({ hooks: true, userData })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.locator('[data-lens="rows"]')).toBeVisible({ timeout: 30_000 })
+  await expect(card.getByRole('tab', { name: 'Transcript', exact: true })).toBeDisabled()
+  await expect(card.locator('[data-lens="transcript"]')).toHaveCount(0)
+  await expect(card.locator('.structured-problem')).toHaveCount(0)
+  expect(live.pageErrors).toEqual([])
+})
+
 test('a network share in the saved session stays unopened until a click', async () => {
   test.skip(process.platform !== 'win32', 'UNC shares are Windows paths')
   const share = String.raw`\\example.invalid\typose-probe-no-such-share`
