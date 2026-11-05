@@ -369,11 +369,7 @@ fn claude_session() -> String {
     lines.push(r#"{"type":"bridge-session","sessionId":"s"}"#.into());
     lines.extend(lines[..500].to_vec());
     lines.push(message("user", "last", &parent, false, r#""last""#));
-    lines.join(
-        "
-",
-    ) + "
-"
+    lines.join("\n") + "\n"
 }
 
 /// An OpenAI fine-tuning dataset: conversations of a system prompt and 40 rounds of a tool call, its result and a
@@ -388,11 +384,7 @@ fn openai_dataset() -> String {
         r#"{{"messages":[{{"role":"system","content":"s"}},{}],"metadata":{{"split":"train"}}}}"#,
         (0..40).map(round).collect::<Vec<_>>().join(",")
     );
-    vec![line; 1000].join(
-        "
-",
-    ) + "
-"
+    vec![line; 1000].join("\n") + "\n"
 }
 
 /// Indexes `path` as JSONL, with its transcript graph, checked throughout; holds it, then drops it and the document:
