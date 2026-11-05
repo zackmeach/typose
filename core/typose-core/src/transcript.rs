@@ -206,25 +206,11 @@ impl Graph {
             entry.schema = "openai-chat-v1";
             entry.turns.push(turn(store, index, 0, false)?);
         }
-        let mut bytes = 2048
-            + (entry.timestamp.len()
-                + entry.uuid.as_ref().map_or(0, String::len)
-                + entry.parent.as_ref().map_or(0, String::len)) as u64
-                * 8;
-        for turn in &entry.turns {
-            if turn.results.len() > MAX_RESULTS || turn.calls.len() > MAX_CALLS {
-                self.disable("A turn exceeds the bounded Transcript tool metadata limit; Rows preserves every block");
-                return Ok(());
-            }
-            bytes += 2048 + turn.role.len() as u64 * 8;
-            for call in &turn.calls {
-                bytes += 2048 + (call.id.len() + call.name.len()) as u64 * 8;
-            }
-            for result in &turn.results {
-                bytes += 1024 + result.id.len() as u64 * 8;
-            }
+        if entry.turns.iter().any(|turn| turn.results.len() > MAX_RESULTS || turn.calls.len() > MAX_CALLS) {
+            self.disable("A turn exceeds the bounded Transcript tool metadata limit; Rows preserves every block");
+            return Ok(());
         }
-        if self.entries.len() >= MAX_ENTRIES || self.charge.grow(bytes).is_err() {
+        if self.entries.len() >= MAX_ENTRIES || self.charge.grow(estimate(&entry)).is_err() {
             self.disable("Transcript graph exceeds its memory or record limit; Rows remains available");
             return Ok(());
         }
@@ -243,6 +229,9 @@ impl Graph {
             return;
         };
         self.schema = Some(schema);
+        if schema == "claude-code-v1" {
+            self.drop_copies();
+        }
         // Each item is a turn or stands for a record (an event, a conversation, a group rooted at it).
         let turns: usize = self.entries.iter().map(|entry| entry.turns.len()).sum();
         if (self.entries.len() + turns) as u64 > MAX_ITEMS {
@@ -260,6 +249,25 @@ impl Graph {
             self.openai(schema);
         }
         self.ready = self.reason.is_none();
+    }
+    /// Claude Code writes some records twice. On this PC (M5 PR 1), 10 of 274 sessions hold 12,351 later copies of
+    /// earlier records, in runs that each follow a `bridge-session` or `pr-link` record; every later copy is timestamped
+    /// before a record already written. The copies differ in metadata only (`slug`, `promptId`, `toolUseResult`,
+    /// `version`, `message.usage`), never in role or content. Where their `parentUuid`s differ (279 copies), the later
+    /// one mostly points at the copy before it in its run. So the first copy is the record, in its place in time and in
+    /// the file; later copies leave the graph, with what they were charged.
+    fn drop_copies(&mut self) {
+        let mut seen = HashSet::with_capacity(self.entries.len());
+        let keep: Vec<bool> =
+            self.entries.iter().map(|entry| entry.uuid.as_deref().is_none_or(|uuid| seen.insert(uuid))).collect();
+        drop(seen);
+        let (mut at, mut freed) = (0, 0);
+        self.entries.retain(|entry| {
+            at += 1;
+            freed += if keep[at - 1] { 0 } else { estimate(entry) };
+            keep[at - 1]
+        });
+        self.charge.shrink(freed);
     }
     fn item(&mut self, kind: &'static str, entry: usize, turn: Option<usize>, children: Vec<usize>) -> usize {
         let id = self.items.len();
@@ -331,11 +339,8 @@ impl Graph {
         let mut messages = Vec::new();
         let mut events = Vec::new();
         for (index, entry) in self.entries.iter().enumerate() {
-            if let Some(uuid) = &entry.uuid
-                && ids.insert(uuid.clone(), index).is_some()
-            {
-                self.disable("Duplicate UUIDs make the transcript graph ambiguous; inspect in Rows");
-                return;
+            if let Some(uuid) = &entry.uuid {
+                ids.insert(uuid.clone(), index); // unique: `drop_copies` ran
             }
             if entry.schema == "claude-code-v1" {
                 messages.push(index);
@@ -482,6 +487,24 @@ impl Graph {
         self.main.extend(branch_items.into_values().flatten());
         self.main.extend(side_items.into_values().flatten());
     }
+}
+/// What an entry is charged.
+fn estimate(entry: &Entry) -> u64 {
+    let mut bytes = 2048
+        + (entry.timestamp.len()
+            + entry.uuid.as_ref().map_or(0, String::len)
+            + entry.parent.as_ref().map_or(0, String::len)) as u64
+            * 8;
+    for turn in &entry.turns {
+        bytes += 2048 + turn.role.len() as u64 * 8;
+        for call in &turn.calls {
+            bytes += 2048 + (call.id.len() + call.name.len()) as u64 * 8;
+        }
+        for result in &turn.results {
+            bytes += 1024 + result.id.len() as u64 * 8;
+        }
+    }
+    bytes
 }
 fn same_schema(entry: &str, schema: &str) -> bool {
     entry == schema || entry.starts_with("openai-") && schema.starts_with("openai-")
@@ -725,5 +748,43 @@ mod tests {
         assert!(graph.ready);
         assert_eq!(graph.census.branches, 2);
         assert_eq!(graph.main.iter().filter(|&&id| graph.items[id].kind == "branch").count(), 2);
+    }
+    /// A session that wrote records twice (`drop_copies`): the first copies keep their place, the rerun adds nothing,
+    /// and what follows it extends the one chain.
+    #[test]
+    fn a_record_written_twice_keeps_its_first_copy() {
+        let a1 = r#"{"type":"assistant","uuid":"a1","parentUuid":"u0","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"read","input":{}}]}}"#;
+        let a1_copy = a1.replace(r#""message""#, r#""slug":"rerun","message""#);
+        let index = fixture(
+            "transcript-copies",
+            &[
+                r#"{"type":"user","uuid":"u0","parentUuid":null,"message":{"role":"user","content":"start"}}"#,
+                a1,
+                r#"{"type":"user","uuid":"u1","parentUuid":"a1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"result"}]}}"#,
+                r#"{"type":"assistant","uuid":"a2","parentUuid":"u1","message":{"role":"assistant","content":"answer"}}"#,
+                r#"{"type":"bridge-session","sessionId":"s"}"#,
+                r#"{"type":"user","uuid":"u0","parentUuid":null,"message":{"role":"user","content":"start"}}"#,
+                &a1_copy,
+                r#"{"type":"user","uuid":"u1","parentUuid":"u0","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"result"}]}}"#,
+                r#"{"type":"user","uuid":"u2","parentUuid":"a2","message":{"role":"user","content":"next"}}"#,
+            ],
+        );
+        let graph = index.transcript.lock().unwrap();
+        assert!(graph.ready, "{:?}", graph.reason);
+        let c = &graph.census;
+        assert_eq!((c.messages, c.events, c.branches, c.calls, c.matched_results), (5, 1, 0, 1, 1));
+        let shown: Vec<_> = graph
+            .main
+            .iter()
+            .filter_map(|&id| {
+                let item = &graph.items[id];
+                let entry = &graph.entries[item.entry];
+                (item.kind == "turn").then(|| (entry.uuid.as_deref().unwrap(), entry.line))
+            })
+            .collect();
+        assert_eq!(shown, vec![("u0", 0), ("a1", 1), ("a2", 3), ("u2", 8)]);
+        let call = graph.entries.iter().find(|entry| entry.uuid.as_deref() == Some("a1")).unwrap();
+        assert_eq!(call.line, 1);
+        assert_eq!(graph.entries[call.turns[0].calls[0].results[0].entry].line, 2);
     }
 }
