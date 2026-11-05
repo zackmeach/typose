@@ -238,3 +238,52 @@ it('plan C5: a cancelled read stops within the chunk read under way, and reads n
   // 903-1086 ms, and in run 40072658390 this came 197 ms after the cancel (plan §7).
   expect(cut.afterCancel).toBeLessThan(cut.delayMs + 50)
 })
+
+// M5 PR 1: a Claude Code session of `pairs` questions, each answered with a tool call.
+const session = (pairs: number) => Array.from({ length: pairs }, (_, i) =>
+  JSON.stringify({ type: 'user', uuid: `u${i}`, parentUuid: i ? `a${i - 1}` : null, message: { role: 'user', content: `question ${i}` } }) + '\n' +
+  JSON.stringify({ type: 'assistant', uuid: `a${i}`, parentUuid: `u${i}`, message: { role: 'assistant', content: [{ type: 'tool_use', id: `t${i}`, name: 'read', input: { path: 'x' } }] } }) + '\n').join('')
+const structuredDone = async (doc: Core.Doc) => {
+  let info = await doc.structuredBuild(doc.generation, new core.Cancel())
+  while (!info.done) info = await doc.structuredBuild(doc.generation, new core.Cancel())
+  return info
+}
+/** A document's charges past Raw's own: its structured index's. */
+const structuredBytes = (doc: Core.Doc) => (({ total, hashes, checkpoints, cache, metadata }) => total - hashes - checkpoints - cache - metadata)(core.docCharges(doc))
+
+it('M5 PR 1: a transcript graph stays charged until close, at its structs\' size, and close releases it', async () => {
+  const path = join(dir, 'transcript.jsonl'), plain = join(dir, 'transcript-generic.jsonl')
+  writeFileSync(path, session(20_000))
+  writeFileSync(plain, session(20_000).replaceAll('"type":', '"kind":')) // the same records, with no schema to detect
+  const { used: base } = core.debugStats().ledger
+  const docs = [core.Doc.open(path), core.Doc.open(plain)]
+  try {
+    const [info, generic] = [await structuredDone(docs[0]!), await structuredDone(docs[1]!)]
+    expect(info.transcript).toMatchObject({ ready: true, messages: 40_000, calls: 20_000, matchedResults: 0 })
+    expect(generic.transcript).toBeUndefined()
+    const graph = structuredBytes(docs[0]!) - structuredBytes(docs[1]!)
+    console.log(`a 40,000-record session's transcript graph: ${graph} bytes, ${(graph / 40_000).toFixed(0)} a record`)
+    // At least each record's 184-byte entry (pinned in transcript.rs), and far below the parked graph's guess of 8 KB.
+    expect(graph).toBeGreaterThan(40_000 * 184)
+    expect(graph).toBeLessThan(40_000 * 1024)
+  } finally {
+    for (const doc of docs) doc.close()
+  }
+  await expect.poll(() => alive()).toEqual({ jobs: 0, tasks: 0, handles: 0 })
+  expect(core.debugStats().ledger.used).toBe(base)
+})
+
+it('M5 PR 1: closing a session mid-index ends its graph and releases it', async () => {
+  const path = join(dir, 'transcript-close.jsonl')
+  writeFileSync(path, session(50_000)) // about 12 MiB: 12 chunk reads
+  const { used: base } = core.debugStats().ledger
+  const doc = core.Doc.open(path)
+  core.setReadDelay(50)
+  expect((await doc.structuredBuild(doc.generation, new core.Cancel())).done).toBe(false)
+  await expect.poll(() => structuredBytes(doc), { timeout: 5_000 }).toBeGreaterThan(1 << 20) // the graph is growing
+  expect((await doc.structuredBuild(doc.generation, new core.Cancel())).done).toBe(false)
+  doc.close()
+  core.setReadDelay(0)
+  await expect.poll(() => alive()).toEqual({ jobs: 0, tasks: 0, handles: 0 })
+  expect(core.debugStats().ledger.used).toBe(base)
+})

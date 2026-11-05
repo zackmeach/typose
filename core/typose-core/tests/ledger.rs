@@ -423,6 +423,29 @@ fn transcript_shape(step: usize, name: &str, path: &Path) {
     assert!(live <= reserved, "{name}: {live} bytes live since it opened, {reserved} reserved");
     assert_eq!(budget::totals().used, before.used, "{name}: the ledger isn't back to its baseline");
     assert!(leaked.unsigned_abs() < 64 << 10, "{name}: {leaked} bytes still live");
+    // A budget with room for the index and half the graph: the graph turns off, the index stays whole for Rows, and
+    // nothing stays charged.
+    ARMED.store(true, SeqCst);
+    let raw = Raw::open(path).unwrap();
+    raw.document().store().set_cache_active(false); // its floor only: the budget's room is the index's and the graph's
+    let (opened, limit) = (budget::totals().used, budget::totals().limit);
+    let index = jsonl::Index::with_encoding(raw.source_encoding()).unwrap();
+    budget::set_limit(opened + typose_core::structured::TEMP_BYTES + (1 << 20) + charged / 2).unwrap();
+    let temp = Reservation::new(typose_core::structured::TEMP_BYTES).unwrap();
+    let built = index.build_reserved(raw.document(), 1, temp);
+    budget::set_limit(limit).unwrap();
+    let progress = index.progress.read().unwrap().clone();
+    let graph = index.transcript.lock().unwrap();
+    let (ready, reason, held) = (graph.ready, graph.reason.clone(), graph.charged());
+    drop(graph);
+    drop(index);
+    drop(raw);
+    ARMED.store(false, SeqCst);
+    println!("{name:>24}: under half the graph's budget: {reason:?}, the index done={}", progress.done);
+    assert!(built.is_ok() && progress.done && progress.error.is_none(), "{name}: {built:?} {:?}", progress.error);
+    assert!(!ready && held == 0, "{name}: the graph wasn't turned off");
+    assert_eq!(reason.as_deref(), Some("Transcript graph exceeds its memory or record limit; Rows remains available"));
+    assert_eq!(budget::totals().used, before.used, "{name}: a refused graph left something charged");
 }
 
 /// Builds `path` as Markdown, checked throughout, holds the build, then drops it and the document: the ledger is back
