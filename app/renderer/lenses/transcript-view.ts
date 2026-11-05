@@ -11,13 +11,15 @@ const make = (tag: string, text?: string, className?: string): HTMLElement => {
   return element
 }
 /** A node's text, a string decoded. A cut preview (`more`) ends mid-token: it's closed after its last whole escape, at
- *  most 6 characters back (`\uXXXX`). The renderer has no other decoder for one: Rows' summaries are decoded natively. */
+ *  most 6 characters back (`\uXXXX`), less a high surrogate whose pair the cut split. The renderer has no other
+ *  decoder for one: Rows' summaries are decoded natively. */
 const string = (node?: StructuredNode): string => {
   if (!node) return ''
   if (node.kind !== 'string') return node.text
   for (let cut = 0; cut <= (node.more ? 6 : 0); cut++) {
     try {
-      return JSON.parse(node.text.slice(0, node.text.length - cut) + (node.more ? '"' : '')) as string
+      const text = JSON.parse(node.text.slice(0, node.text.length - cut) + (node.more ? '"' : '')) as string
+      return node.more ? text.replace(/[\uD800-\uDBFF]$/, '') : text
     } catch {
       // a shorter cut
     }

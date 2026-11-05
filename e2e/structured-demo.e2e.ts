@@ -549,17 +549,21 @@ test('a text over 64 KiB previews its decoded start, not its JSON source', async
   const file = fixture('transcript-long.jsonl', claudeSession([
     { role: 'user', content: 'line one\nline "two"\n' + 'z'.repeat(70_000) },
     { role: 'assistant', content: 'Reply fixture' },
-    { role: 'user', content: 'Done fixture' }
-  ]))
+    { role: 'user', content: 'Done fixture' },
+    // Escaped surrogate pairs, the 4,096-byte preview cut falling between a pair's two escapes.
+    { role: 'assistant', content: 'a'.repeat(6) + '@'.repeat(6000) }
+  ]).replace(/@/g, '\\uD83D\\uDE00'))
   const live = await launch({ hooks: true, file })
   const card = live.win.getByRole('region', { name: 'Reader card 1' })
   await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
   const preview = card.locator('pre.transcript-text')
-  await expect(preview).toHaveCount(1)
-  const text = (await preview.textContent())!
+  await expect(preview).toHaveCount(2)
+  const text = (await preview.first().textContent())!
   expect(text.slice(0, 24)).toBe('line one\nline "two"\nzzzz')
   expect(text.endsWith('z … (source preview)')).toBe(true)
-  await expect(card.getByRole('button', { name: 'View complete content in Rows', exact: true })).toBeVisible()
+  // The cut leaves no lone high surrogate.
+  expect(await preview.nth(1).textContent()).toBe('a'.repeat(6) + '\u{1F600}'.repeat(340) + ' … (source preview)')
+  await expect(card.getByRole('button', { name: 'View complete content in Rows', exact: true })).toHaveCount(2)
   expect(live.pageErrors).toEqual([])
 })
 
