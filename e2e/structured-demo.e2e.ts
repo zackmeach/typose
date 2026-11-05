@@ -315,6 +315,8 @@ test('OpenAI arguments parse from their JSON string, numbers as written, and wha
     ['nul', '{"decoded":"\u0000"}'],
     // JSON in JSON: one level is parsed, so the value is a string.
     ['nested', JSON.stringify(JSON.stringify({ a: 1 }))],
+    // A key past the 4 KiB a node's key shows.
+    ['longkey', JSON.stringify({ ['k'.repeat(5000)]: 1 })],
     // 64 KiB of source, quotes included: in the bound, but deeper than the scanner nests.
     ['deep', '['.repeat(65_534)],
     ['big', JSON.stringify({ big: 'x'.repeat(70_000) })],
@@ -348,6 +350,9 @@ test('OpenAI arguments parse from their JSON string, numbers as written, and wha
   tool = await open('nested', 'nested({"a":1})')
   await expect(tool.locator('.tree-key')).toHaveCount(0)
   await expect(tool.locator('.tree-string')).toHaveText('"{\\"a\\":1}"')
+  // A parsed key isn't in the source as such, so its preview promises no Copy key.
+  tool = await open('longkey', `longkey(${'k'.repeat(80)} …)`)
+  await expect(tool.locator('.tree-key')).toHaveText(/^k{4095} … \(key preview\): $/)
   // Not parsed: the string, as before.
   for (const [name, summary] of [['nul', 'nul({"decoded":"\u0000"})'], ['deep', `deep(${'['.repeat(80)} …)`],
     ['big', `big({"big":"${'x'.repeat(72)} …)`], ['invalid', 'invalid({"a":)'], ['empty', 'empty()']] as const) {

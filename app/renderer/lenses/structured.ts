@@ -320,7 +320,8 @@ export class StructuredLens {
     const fold = el('button', node.container !== undefined ? '›' : ' ', 'tree-fold')
     fold.type = 'button'; fold.disabled = node.container === undefined || depth >= 100
     fold.setAttribute('aria-label', `Expand ${node.key ?? path}`)
-    if (node.key !== undefined) row.append(fold, el('span', node.key + (node.keyMore ? ' … (key preview; Copy key for full source)' : '') + ': ', 'tree-key text'))
+    // A key with no source span (a parsed value's) has no Copy key to offer.
+    if (node.key !== undefined) row.append(fold, el('span', node.key + (node.keyMore ? node.keySpan ? ' … (key preview; Copy key for full source)' : ' … (key preview)' : '') + ': ', 'tree-key text'))
     else row.append(fold)
     const summary = node.kind === 'object' ? `{ ${node.children ?? '…'} items }` : node.kind === 'array' ? `[ ${node.children ?? '…'} items ]` : node.text
     row.append(el('span', summary + (node.more ? ' … (preview; copy value for full source)' : ''), `text tree-${node.kind}`))
