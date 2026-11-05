@@ -1387,7 +1387,7 @@ mod tests {
         assert_eq!(order(&graph), [("event", "b"), ("turn", "u1"), ("turn", "a2"), ("turn", "u3")]);
     }
     /// A compacted subagent session: each boundary names a record that isn't in the file. Each joins the latest message
-    /// before it, and the segments read as one chain.
+    /// before it, not the root event (`p1`) written between, and the segments read as one chain.
     #[test]
     fn boundaries_naming_absent_records_join_a_subagent_session_into_one_chain() {
         let index = fixture(
@@ -1395,6 +1395,7 @@ mod tests {
             &[
                 r#"{"type":"user","uuid":"s0","parentUuid":null,"isSidechain":true,"message":{"role":"user","content":"task"}}"#,
                 r#"{"type":"assistant","uuid":"s1","parentUuid":"s0","isSidechain":true,"message":{"role":"assistant","content":"one"}}"#,
+                r#"{"type":"progress","uuid":"p1","parentUuid":null,"isSidechain":true}"#,
                 r#"{"type":"system","subtype":"compact_boundary","uuid":"b1","parentUuid":null,"logicalParentUuid":"gone1","isSidechain":true}"#,
                 r#"{"type":"user","uuid":"s2","parentUuid":"b1","isSidechain":true,"message":{"role":"user","content":"summary"}}"#,
                 r#"{"type":"assistant","uuid":"s3","parentUuid":"s2","isSidechain":true,"message":{"role":"assistant","content":"two"}}"#,
@@ -1411,6 +1412,7 @@ mod tests {
             [
                 ("turn", "s0"),
                 ("turn", "s1"),
+                ("event", "p1"),
                 ("event", "b1"),
                 ("turn", "s2"),
                 ("turn", "s3"),
