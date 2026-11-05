@@ -524,10 +524,11 @@ export class TranscriptView {
       }
     }
     holder.addEventListener('click', (event) => {
-      const anchor = (event.target as HTMLElement).closest<HTMLElement>('a[data-href],a[href]')
+      const anchor = (event.target as HTMLElement).closest<HTMLElement>('a')
       if (!anchor) return
       event.preventDefault()
-      const target = anchor.dataset.href ?? anchor.getAttribute('href') ?? ''
+      // Only `data-href` names a target: the sanitizer leaves a dropped one (javascript:, data:) a bare `href="#"`.
+      const target = anchor.dataset.href
       if (target && this.options.openLocal)
         void this.options
           .openLocal(target, this.opened.path ?? '', {

@@ -504,6 +504,30 @@ test('a Markdown block the core makes a note (nested too deep) shows its text li
   expect(live.pageErrors).toEqual([])
 })
 
+test('a Transcript link without a target (javascript:, dropped by the sanitizer) sends nothing to the core', async () => {
+  const file = fixture('transcript-links.jsonl', claudeSession([
+    { role: 'user', content: 'Run [this link](javascript:alert(1)) now' },
+    { role: 'assistant', content: 'Reply fixture' },
+    { role: 'user', content: 'Done fixture' }
+  ]))
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  const link = card.locator('.transcript-markdown a')
+  await expect(link).toHaveText('this link')
+  await expect(link).not.toHaveAttribute('data-href')
+  await live.win.evaluate(() => {
+    const w = window as unknown as { typoseTest: TestHooks; calls: string[] }, core = w.typoseTest.core, call = core.call.bind(core)
+    w.calls = []
+    core.call = (...args: Parameters<typeof call>) => { w.calls.push(args[0]); return call(...args) }
+  })
+  await link.click()
+  // A link's open is asynchronous (a peek card, then the core): give it time to reach the core if it would.
+  await live.win.waitForTimeout(1500)
+  expect(await live.win.evaluate(() => (window as unknown as { calls: string[] }).calls)).not.toContain('openLocal')
+  expect(live.pageErrors).toEqual([])
+})
+
 test('JSONL Table discovers a global key after line 1,000 and retains original source row navigation', async () => {
   const lines = Array.from({ length: 1001 }, (_, index) => `{"common":"row ${index + 1}"}`)
   lines.push('{"common":"last row","late":"revealed"}')
