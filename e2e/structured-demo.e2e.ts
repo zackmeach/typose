@@ -1,5 +1,5 @@
 import { expect } from '@playwright/test'
-import { debugStats, fixture, launch, recordClipboard, test, type TestHooks } from './app'
+import { debugStats, fixture, launch, recordClipboard, runCommand, stubOpenDialog, test, type TestHooks } from './app'
 
 async function expectDistinctRows(card: import('@playwright/test').Locator, selector: string): Promise<void> {
   const boxes = await card.locator(selector).evaluateAll(elements => elements.map(element => element.getBoundingClientRect()).filter(box => box.width > 0 && box.height > 0).map(box => ({ top: box.top, bottom: box.bottom })))
@@ -419,6 +419,39 @@ test('a branch whose first record is a hidden tool result is labelled and anchor
   const tool = card.locator('.transcript-tool[data-tool-id="tool1"]')
   await tool.locator('summary').click()
   await expect(tool.locator('.transcript-tool-result')).toHaveCount(2)
+  expect(live.pageErrors).toEqual([])
+})
+
+test('reading Rows by keyboard while the graph indexes keeps Rows when the Transcript becomes ready', async () => {
+  const file = fixture('transcript-keyboard.jsonl', claudeSession(Array.from({ length: 6 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: `Keyboard turn ${i}` }))))
+  const live = await launch({ hooks: true })
+  await live.win.waitForFunction(() => 'typoseTest' in window)
+  // The graph is "still indexing" until the test says: the first build reply is marked not ready, and the next waits.
+  await live.win.evaluate(() => {
+    const w = window as unknown as { typoseTest: TestHooks; ready?: () => void }, core = w.typoseTest.core, call = core.call.bind(core)
+    const ready = new Promise<void>(done => { w.ready = done })
+    let builds = 0
+    core.call = async (...args: Parameters<typeof call>) => {
+      const reply = await call(...args) as { done: boolean; transcript?: { ready: boolean } }
+      if (args[0] !== 'structuredBuild') return reply
+      if (++builds === 1) return { ...reply, done: false, transcript: { ...reply.transcript!, ready: false } }
+      await ready
+      return reply
+    }
+  })
+  await stubOpenDialog(live.app, file)
+  await runCommand(live.win, 'Open file…')
+  await live.win.getByRole('button', { name: 'Browse…', exact: true }).click()
+  const card = live.win.getByRole('region', { name: 'Reader card 1' }), transcript = card.getByRole('tab', { name: 'Transcript', exact: true })
+  await expect(card.locator('[data-lens="rows"]')).toBeVisible({ timeout: 30_000 })
+  await expect(transcript).toBeDisabled()
+  await card.locator('.structured-view').focus()
+  await live.win.keyboard.press('ArrowDown')
+  await live.win.keyboard.press('ArrowDown')
+  await live.win.evaluate(() => (window as unknown as { ready: () => void }).ready())
+  await expect(transcript).toBeEnabled()
+  await expect(card.locator('[data-lens="rows"]')).toBeVisible()
+  await expect(card.locator('[data-lens="transcript"]')).toHaveCount(0)
   expect(live.pageErrors).toEqual([])
 })
 

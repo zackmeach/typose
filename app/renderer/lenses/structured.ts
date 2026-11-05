@@ -80,7 +80,8 @@ export class StructuredLens {
     this.element.append(this.content); host.append(this.element)
     this.find = new SourceFind(host, this.element, core, opened, options.budget ?? undefined, (line, hit) => this.reveal(line, hit?.start), options.onFrozen)
     this.element.addEventListener('keydown', this.key)
-    this.element.addEventListener('pointerdown', () => { this.moved = true })
+    // Reading by pointer or by keyboard is moving: a lens decided later (Transcript once ready) leaves the reader here.
+    for (const type of ['pointerdown', 'keydown']) this.element.addEventListener(type, () => { this.moved = true })
     this.element.addEventListener('scroll', () => { this.moved = true; if (this.mode === 'rows') this.schedule() }, { passive: true })
     if (mode === 'transcript') this.transcript = new TranscriptView(this.content, core, source, opened, this.abort.signal, {
       tree: (node, record) => this.treeNode(node, 0, '$', record, 1), select: (element, span) => this.select(element, span),
