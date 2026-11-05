@@ -50,6 +50,8 @@
 .structured-problem-list { max-height:320px; overflow:auto; }
 /* Transcript (brief §5.4): Rendered's 70ch reading column, its turns' Markdown in the reading font. */
 .structured-view[data-mode=transcript] .structured-content { min-width:0; }
+/* Its Trees wrap a long key or value in the column, where Tree and Rows keep each node on one line. */
+.structured-view[data-mode=transcript] .tree-row { white-space:pre-wrap; overflow-wrap:anywhere; }
 .transcript-pane { width:min(100%, 70ch); margin:0 auto; }
 .transcript-controls { display:flex; flex-direction:column; align-items:flex-start; gap:8px; padding:8px 0; color:var(--text2); }
 /* Rows' detail buttons; :where() leaves .structured-problem its colour. */

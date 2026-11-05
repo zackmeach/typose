@@ -355,6 +355,9 @@ test('OpenAI arguments parse from their JSON string, numbers as written, and wha
     await expect(tool.locator('.tree-key')).toHaveCount(0)
     await expect(tool.locator('.tree-string')).toHaveCount(1)
   }
+  // Their long strings wrap in the reading column: the Transcript doesn't scroll sideways.
+  const { scrollWidth, clientWidth } = await card.locator('.structured-view').evaluate(view => ({ scrollWidth: view.scrollWidth, clientWidth: view.clientWidth }))
+  expect(scrollWidth).toBeLessThanOrEqual(clientWidth)
   // Arguments that aren't a string show as they are.
   tool = await open('object', 'object()')
   await expect(tool.locator('.tree-object')).toHaveText('{ 0 items }')
