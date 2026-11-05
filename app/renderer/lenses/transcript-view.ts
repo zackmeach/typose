@@ -29,7 +29,7 @@ const string = (node?: StructuredNode): string => {
 /** `n` and its noun, singular for one. */
 const count = (n: number, noun: string): string => `${n} ${noun}${n === 1 ? '' : 's'}`
 interface Options {
-  tree(node: StructuredNode, record: number): Promise<HTMLElement>
+  tree(node: StructuredNode, record: number, path?: string): Promise<HTMLElement>
   select(element: HTMLElement, span: SourceSpan): void
   rows(record?: number): void
   frozen(error: unknown): void
@@ -201,6 +201,8 @@ export class TranscriptView {
               : `Conversation ${item.record + 1} · line ${item.record + 1} · ${count(item.children, 'turn')}`
         )
       )
+      // A dataset line's other keys (brief §5.4), on its divider, when it has any besides its conversation.
+      if (item.kind === 'conversation' && (item.root.children ?? 0) > 1) group.append(this.lineMetadata(item))
       // A branch's or sidechain's members are off the main chain, and set apart (structured.css .transcript-group).
       const children = make('div', undefined, item.kind === 'conversation' ? undefined : 'transcript-group')
       group.append(children)
@@ -236,12 +238,6 @@ export class TranscriptView {
       if (group.open) {
         loaded = true
         await load(0)
-      }
-      if (item.kind === 'conversation') {
-        const metadata = document.createElement('details')
-        metadata.append(make('summary', 'Line metadata'))
-        this.lazyTree(metadata, item.root, item.record)
-        group.append(metadata)
       }
       return group
     }
@@ -374,6 +370,35 @@ export class TranscriptView {
           .catch(this.options.frozen)
       }
     })
+  }
+  /** A dataset line's top-level keys, each its own Tree, but for its first `messages`: the conversation the graph read. */
+  private lineMetadata(item: TranscriptItem): HTMLDetailsElement {
+    const metadata = document.createElement('details')
+    metadata.append(make('summary', 'Line metadata'))
+    let conversation = true
+    const load = async (start: number) => {
+      const page = await this.source.children(item.root.container!, start, item.record)
+      for (const field of page.nodes) {
+        if (conversation && field.key === 'messages') conversation = false
+        else metadata.append(await this.options.tree(field, item.record, `$[${JSON.stringify(field.key)}]`))
+      }
+      if (page.next !== undefined) {
+        const more = make('button', 'Show more line metadata')
+        more.onclick = () => {
+          more.remove()
+          void load(page.next!).catch(this.options.frozen)
+        }
+        metadata.append(more)
+      }
+    }
+    let loaded = false
+    metadata.addEventListener('toggle', () => {
+      if (metadata.open && !loaded) {
+        loaded = true
+        void load(0).catch(this.options.frozen)
+      }
+    })
+    return metadata
   }
   private async fields(node: StructuredNode, record: number): Promise<StructuredNode[]> {
     if (node.container === undefined) return []

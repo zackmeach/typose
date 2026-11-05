@@ -84,7 +84,7 @@ export class StructuredLens {
     for (const type of ['pointerdown', 'keydown']) this.element.addEventListener(type, () => { this.moved = true })
     this.element.addEventListener('scroll', () => { this.moved = true; if (this.mode === 'rows') this.schedule() }, { passive: true })
     if (mode === 'transcript') this.transcript = new TranscriptView(this.content, core, source, opened, this.abort.signal, {
-      tree: (node, record) => this.treeNode(node, 0, '$', record, 1), select: (element, span) => this.select(element, span),
+      tree: (node, record, path) => this.treeNode(node, 0, path ?? '$', record, 1), select: (element, span) => this.select(element, span),
       rows: line => options.onRows(line), frozen: error => this.error(error), openLocal: options.onOpenLocal,
       // The document's Rendered share, which JSONL has no other use for: it's set, not a high-water mark like Grid's.
       reserve: bytes => options.budget?.reserveRendered(opened.gen, bytes) ?? Promise.resolve(false)

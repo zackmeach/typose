@@ -283,7 +283,12 @@ test('OpenAI dataset Transcript keeps conversations separate and tool results un
   await expect(card.getByText('Conversation 1 · line 1 · 3 turns', { exact: true })).toBeVisible()
   await expect(card.getByText('Conversation 4 · line 4 · 1 turn', { exact: true })).toBeVisible()
   await expect(card.getByText('System prompt', { exact: true })).toHaveCount(3)
-  await expect(card.getByText('Line metadata', { exact: true })).toHaveCount(4)
+  // Line metadata holds a line's other keys, not its conversation, on the divider; a line with none has none (§5.4).
+  await expect(card.getByText('Line metadata', { exact: true })).toHaveCount(3)
+  const first = card.locator('.transcript-conversation').first(), metadata = first.locator('> details')
+  expect(await first.evaluate(group => [...group.children].map(child => child.tagName))).toEqual(['SUMMARY', 'DETAILS', 'DIV'])
+  await metadata.locator('> summary').click()
+  await expect(metadata.locator('.tree-key')).toHaveText(['metadata: ', 'fixture: '])
   // A dataset's conversations are the file's own, not off a chain: no indent.
   expect(await card.locator('.transcript-conversation > div').evaluateAll(groups => groups.map(group => getComputedStyle(group).borderLeftWidth)))
     .toEqual(['0px', '0px', '0px', '0px'])
