@@ -454,6 +454,26 @@ test('Transcript reserves the mounted page’s HTML, flat to the last page, and 
   expect(live.pageErrors).toEqual([])
 })
 
+test('Transcript gives back a page’s Tree nodes when it moves on, so a tool input on page 9 still expands itself', async () => {
+  // 180 calls, 20 to a page, each input three fields: opening a page's calls mounts 80 Tree nodes.
+  const file = fixture('transcript-tree-budget.jsonl', claudeSession(Array.from({ length: 180 }, (_, i) =>
+    ({ role: 'assistant' as const, content: [{ type: 'tool_use', id: `call${i}`, name: 'read', input: { file_path: `/work/f${i}.md`, line: i, n: 3 } }] }))))
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.getByText('1–20 of 180', { exact: true })).toBeVisible({ timeout: 30_000 })
+  const tools = card.locator('.transcript-tool')
+  // Pages 1 to 8, every call opened, as a reader would.
+  for (let page = 1; page <= 8; page++) {
+    for (let i = 0; i < 20; i++) await tools.nth(i).locator('> summary').click()
+    await expect(card.locator('.transcript-tool > .tree-entry')).toHaveCount(20)
+    await card.getByRole('button', { name: 'Next turns', exact: true }).click()
+    await expect(card.getByText(`${page * 20 + 1}–${page * 20 + 20} of 180`, { exact: true })).toBeVisible()
+  }
+  await tools.first().locator('> summary').click()
+  await expect(tools.first().locator('.tree-key')).toHaveText(['file_path: ', 'line: ', 'n: '])
+  expect(live.pageErrors).toEqual([])
+})
+
 test('Transcript shows HTML-like tags in message text as literal text, never interpreted or stripped', async () => {
   const texts = [
     // Raw HTML that Rendered keeps (b, img) or drops (a stray end tag), beside Markdown that renders.

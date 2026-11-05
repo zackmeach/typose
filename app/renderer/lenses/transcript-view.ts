@@ -32,6 +32,8 @@ interface Options {
   tree(node: StructuredNode, record: number, path?: string): Promise<HTMLElement>
   /** The Tree's notice that `count` more nodes would pass its display limit, if they would. */
   limit(count: number): HTMLElement | undefined
+  /** `count` Tree nodes left the page: they no longer count toward the display limits. */
+  unmounted(count: number): void
   select(element: HTMLElement, span: SourceSpan): void
   rows(record?: number): void
   frozen(error: unknown): void
@@ -161,8 +163,9 @@ export class TranscriptView {
       make('span', `${page.items.length ? start + 1 : 0}–${start + page.items.length} of ${page.total}`)
     )
     body.append(navigation)
-    // The page this one replaces stops what it still had loading.
+    // The page this one replaces stops what it still had loading, and gives back its Trees' nodes.
     this.shown?.abort.abort()
+    this.options.unmounted(this.host.querySelectorAll('.tree-entry').length)
     this.host.replaceChildren(body)
     if (commit) this.host.parentElement!.scrollTop = 0
     this.shown = pane
