@@ -1,5 +1,5 @@
 import { expect } from '@playwright/test'
-import { fixture, launch, recordClipboard, test } from './app'
+import { fixture, launch, recordClipboard, test, type TestHooks } from './app'
 
 async function expectDistinctRows(card: import('@playwright/test').Locator, selector: string): Promise<void> {
   const boxes = await card.locator(selector).evaluateAll(elements => elements.map(element => element.getBoundingClientRect()).filter(box => box.width > 0 && box.height > 0).map(box => ({ top: box.top, bottom: box.bottom })))
@@ -279,6 +279,37 @@ test('OpenAI dataset Transcript keeps conversations separate and tool results un
   await tool.locator('summary').click()
   await expect(tool.locator('.transcript-tool-result').getByText('Dataset result fixture', { exact: true })).toBeVisible()
   await expect(card.locator('.transcript-turn > h3').filter({ hasText: /^Tool$/ })).toHaveCount(0)
+  expect(live.pageErrors).toEqual([])
+})
+
+/** A Claude Code session of `turns` on one chain: each turn's record the child of the one before. */
+const claudeSession = (turns: { role: 'user' | 'assistant'; content: unknown }[]): string =>
+  turns.map((message, i) => JSON.stringify({ type: message.role, uuid: `t${i}`, parentUuid: i ? `t${i - 1}` : null, message })).join('\n') + '\n'
+
+test('Transcript shows a refused Markdown block as literal text, and a failing item never fails its page', async () => {
+  // One 48 KB paragraph: under the text query's 64 KiB, but its HTML passes the core's display bound, so it's refused.
+  const long = 'refused '.repeat(6000)
+  const file = fixture('transcript-refused.jsonl', claudeSession([
+    { role: 'user', content: 'Before fixture' },
+    { role: 'assistant', content: [{ type: 'text', text: long }] },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'tool9', name: 'read', input: { file: 'local.md' } }] },
+    { role: 'user', content: 'After fixture' }
+  ]))
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  await expect(card.getByText('After fixture', { exact: true })).toBeVisible()
+  expect(await card.locator('pre.transcript-text').textContent()).toBe(long)
+  // One item's query fails (injected here): that item says so, and the rest of its page shows.
+  await live.win.evaluate(() => {
+    const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core, call = core.call.bind(core)
+    core.call = (...args: Parameters<typeof call>) => args[0] === 'structuredTranscriptTools' ? Promise.reject(new Error('tools fixture failure')) : call(...args)
+  })
+  await card.getByRole('tab', { name: 'Rows', exact: true }).click()
+  await card.getByRole('tab', { name: 'Transcript', exact: true }).click()
+  await expect(card.getByRole('button', { name: 'This item couldn’t be shown · tools fixture failure · View in Rows', exact: true })).toBeVisible()
+  await expect(card.getByText('Before fixture', { exact: true })).toBeVisible()
+  await expect(card.getByText('After fixture', { exact: true })).toBeVisible()
   expect(live.pageErrors).toEqual([])
 })
 

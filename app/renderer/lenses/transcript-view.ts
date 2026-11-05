@@ -1,5 +1,5 @@
-import type { Opened, SourceSpan, StructuredNode, TranscriptItem, TranscriptTool } from '../../shared/protocol'
-import type { CoreClient } from '../core'
+import type { Opened, SourceSpan, StructuredNode, TranscriptItem, TranscriptText, TranscriptTool } from '../../shared/protocol'
+import { CoreCallError, type CoreClient } from '../core'
 import type { LocalGesture } from '../reader-window'
 import type { StructuredSource } from './structured-source'
 
@@ -101,7 +101,23 @@ export class TranscriptView {
     body.append(navigation)
     if (!this.signal.aborted && epoch === this.serial) this.host.replaceChildren(body)
   }
+  /** One item, or why it couldn't be shown: one item's failure never fails its page. */
   private async item(item: TranscriptItem): Promise<HTMLElement> {
+    try {
+      return await this.render(item)
+    } catch (error) {
+      if (this.signal.aborted || (error instanceof CoreCallError && error.code === 'Frozen')) throw error
+      const problem = make(
+        'button',
+        `This item couldn’t be shown · ${error instanceof Error ? error.message : String(error)} · View in Rows`,
+        'structured-problem'
+      )
+      // A branch or sidechain's record is its first member in file order, which can be a hidden results-only one.
+      problem.onclick = () => this.options.rows(item.kind === 'branch' || item.kind === 'sidechain' ? undefined : item.record)
+      return problem
+    }
+  }
+  private async render(item: TranscriptItem): Promise<HTMLElement> {
     if (item.kind === 'branch' || item.kind === 'sidechain' || item.kind === 'conversation') {
       const group = document.createElement('details')
       group.className = 'transcript-conversation'
@@ -374,6 +390,17 @@ export class TranscriptView {
         )
       )
   }
+  /** A string node's whole text: its preview when that's all of it, else its source (at most the text query's 64 KiB). */
+  private async whole(node: StructuredNode): Promise<string> {
+    const view = this.opened.view
+    if (!node.more || !view) return string(node)
+    const bytes = await this.core.call(
+      'sourceBytes',
+      { view, start: node.span.start, count: node.span.end - node.span.start },
+      this.signal
+    )
+    return string({ ...node, text: new TextDecoder(this.opened.encoding, { ignoreBOM: true }).decode(bytes) })
+  }
   private async markdown(parent: HTMLElement, node: StructuredNode, record: number): Promise<void> {
     if (node.span.end - node.span.start > 65536) {
       parent.append(make('pre', string(node) + ' … (source preview)', 'transcript-text'))
@@ -385,11 +412,19 @@ export class TranscriptView {
     const holder = make('div', undefined, 'transcript-markdown md-content')
     parent.append(holder)
     const load = async (block: number) => {
-      const page = await this.core.call(
-        'structuredTranscriptText',
-        { ref: this.source.info.ref, start: node.span.start, end: node.span.end, block },
-        this.signal
-      )
+      let page: TranscriptText
+      try {
+        page = await this.core.call(
+          'structuredTranscriptText',
+          { ref: this.source.info.ref, start: node.span.start, end: node.span.end, block },
+          this.signal
+        )
+      } catch (error) {
+        // A block whose HTML passes the core's display bound: the text shows literally, and whole, instead.
+        if (!(error instanceof CoreCallError && error.code === 'Refused')) throw error
+        holder.replaceWith(make('pre', await this.whole(node), 'transcript-text'))
+        return
+      }
       if (this.signal.aborted) return
       for (const html of page.html) {
         this.htmlCharge += html.length * 1280
