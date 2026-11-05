@@ -84,7 +84,8 @@ export class StructuredLens {
     for (const type of ['pointerdown', 'keydown']) this.element.addEventListener(type, () => { this.moved = true })
     this.element.addEventListener('scroll', () => { this.moved = true; if (this.mode === 'rows') this.schedule() }, { passive: true })
     if (mode === 'transcript') this.transcript = new TranscriptView(this.content, core, source, opened, this.abort.signal, {
-      tree: (node, record) => this.treeNode(node, 0, '$', record, 1), select: (element, span) => this.select(element, span),
+      tree: (node, record, path) => this.treeNode(node, 0, path ?? '$', record, 1), limit: count => this.overLimit(count),
+      unmounted: count => { this.mounted = Math.max(0, this.mounted - count) }, select: (element, span) => this.select(element, span),
       rows: line => options.onRows(line), frozen: error => this.error(error), openLocal: options.onOpenLocal,
       // The document's Rendered share, which JSONL has no other use for: it's set, not a high-water mark like Grid's.
       reserve: bytes => options.budget?.reserveRendered(opened.gen, bytes) ?? Promise.resolve(false)
@@ -307,6 +308,10 @@ export class StructuredLens {
     this.element.querySelector('[aria-selected="true"]')?.setAttribute('aria-selected', 'false')
     node.setAttribute('aria-selected', 'true'); this.selected = span; this.selectedNode = tree; this.selectedPath = path
   }
+  /** The notice that `count` more nodes would pass the Tree's display limit, if they would. */
+  private overLimit(count: number): HTMLElement | undefined {
+    return this.mounted + count > 2000 ? el('p', 'Tree display limit reached (2,000 nodes) · View in Raw or copy the source value', 'structured-problem') : undefined
+  }
   private async treeNode(node: StructuredNode, depth: number, path: string, record?: number, automatic = 0): Promise<HTMLElement> {
     this.mounted++
     const wrapper = el('div', undefined, 'tree-entry'), row = el('div', undefined, `tree-row ${node.duplicate ? 'structured-problem' : ''}`)
@@ -316,7 +321,8 @@ export class StructuredLens {
     const fold = el('button', node.container !== undefined ? '›' : ' ', 'tree-fold')
     fold.type = 'button'; fold.disabled = node.container === undefined || depth >= 100
     fold.setAttribute('aria-label', `Expand ${node.key ?? path}`)
-    if (node.key !== undefined) row.append(fold, el('span', node.key + (node.keyMore ? ' … (key preview; Copy key for full source)' : '') + ': ', 'tree-key text'))
+    // A key with no source span (a parsed value's) has no Copy key to offer.
+    if (node.key !== undefined) row.append(fold, el('span', node.key + (node.keyMore ? node.keySpan ? ' … (key preview; Copy key for full source)' : ' … (key preview)' : '') + ': ', 'tree-key text'))
     else row.append(fold)
     const summary = node.kind === 'object' ? `{ ${node.children ?? '…'} items }` : node.kind === 'array' ? `[ ${node.children ?? '…'} items ]` : node.text
     row.append(el('span', summary + (node.more ? ' … (preview; copy value for full source)' : ''), `text tree-${node.kind}`))
@@ -327,9 +333,10 @@ export class StructuredLens {
     let expanded = false, loaded = false
     const load = async (start: number, wholeLevel = false): Promise<void> => {
       if (this.stopped || node.container === undefined) return
-      const result = await this.source.children(node.container, start, record)
+      const result = await this.source.children(node.container, start, record, node.scope)
       if (this.stopped) return
-      if (this.mounted + result.nodes.length > 2000) { children.append(el('p', 'Tree display limit reached (2,000 nodes) · View in Raw or copy the source value', 'structured-problem')); return }
+      const limit = this.overLimit(result.nodes.length)
+      if (limit) { children.append(limit); return }
       for (const child of result.nodes) children.append(await this.treeNode(child, depth + 1, `${path}${child.key === undefined ? `[${child.ordinal}]` : `[${JSON.stringify(child.key)}]`}`, record, 0))
       if (result.next !== undefined) {
         if (wholeLevel) { await load(result.next, true); return }

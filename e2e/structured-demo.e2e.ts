@@ -283,14 +283,121 @@ test('OpenAI dataset Transcript keeps conversations separate and tool results un
   await expect(card.getByText('Conversation 1 · line 1 · 3 turns', { exact: true })).toBeVisible()
   await expect(card.getByText('Conversation 4 · line 4 · 1 turn', { exact: true })).toBeVisible()
   await expect(card.getByText('System prompt', { exact: true })).toHaveCount(3)
-  await expect(card.getByText('Line metadata', { exact: true })).toHaveCount(4)
+  // Line metadata holds a line's other keys, not its conversation, on the divider; a line with none has none (§5.4).
+  await expect(card.getByText('Line metadata', { exact: true })).toHaveCount(3)
+  const first = card.locator('.transcript-conversation').first(), metadata = first.locator('> details')
+  expect(await first.evaluate(group => [...group.children].map(child => child.tagName))).toEqual(['SUMMARY', 'DETAILS', 'DIV'])
+  await metadata.locator('> summary').click()
+  await expect(metadata.locator('.tree-key')).toHaveText(['metadata: ', 'fixture: '])
   // A dataset's conversations are the file's own, not off a chain: no indent.
   expect(await card.locator('.transcript-conversation > div').evaluateAll(groups => groups.map(group => getComputedStyle(group).borderLeftWidth)))
     .toEqual(['0px', '0px', '0px', '0px'])
   const tool = card.locator('.transcript-tool[data-tool-id="reused"]').first()
+  // The arguments are parsed from their JSON string (§5.4): summarised and shown as a Claude call's input is.
+  await expect(tool.locator('> summary')).toHaveText('lookup(exact: 3.10)')
   await tool.locator('summary').click()
+  await expect(tool.locator('.tree-key')).toHaveText(['exact: '])
+  await expect(tool.locator('.tree-number')).toHaveText('3.10')
   await expect(tool.locator('.transcript-tool-result').getByText('Dataset result fixture', { exact: true })).toBeVisible()
   await expect(card.locator('.transcript-turn > h3').filter({ hasText: /^Tool$/ })).toHaveCount(0)
+  expect(live.pageErrors).toEqual([])
+})
+
+test('OpenAI arguments parse from their JSON string, numbers as written, and what isn’t JSON shows as the string', async () => {
+  // Each call's arguments, under its name: what parses, hostile inputs, and what stays as it is.
+  const calls: [string, unknown][] = [
+    ['numbers', '{"exact":3.10,"huge":1e400,"digits":123456789012345678901234567890}'],
+    ['keys', '{"__proto__":{"polluted":true},"a":1,"a":2}'],
+    // A lone surrogate escaped in the JSON, and one in the string itself, which only the outer escape can hold.
+    ['surrogates', '{"escaped":"\\ud800","decoded":"\ud800"}'],
+    ['nuls', '{"escaped":"\\u0000"}'],
+    // A NUL in the string itself is a raw control character in the JSON it holds: not JSON.
+    ['nul', '{"decoded":"\u0000"}'],
+    // JSON in JSON: one level is parsed, so the value is a string.
+    ['nested', JSON.stringify(JSON.stringify({ a: 1 }))],
+    // A key past the 4 KiB a node's key shows.
+    ['longkey', JSON.stringify({ ['k'.repeat(5000)]: 1 })],
+    // 64 KiB of source, quotes included: in the bound, but deeper than the scanner nests.
+    ['deep', '['.repeat(65_534)],
+    ['big', JSON.stringify({ big: 'x'.repeat(70_000) })],
+    ['invalid', '{"a":'],
+    ['empty', ''],
+    ['object', {}],
+    ['none', null]
+  ]
+  const lines = [{ role: 'user', content: 'Arguments fixture' }, ...calls.map(([name, args]) =>
+    ({ role: 'assistant', content: null, tool_calls: [{ id: name, type: 'function', function: { name, arguments: args } }] }))]
+  const live = await launch({ hooks: true, file: fixture('transcript-arguments.jsonl', lines.map(line => JSON.stringify(line)).join('\n') + '\n') })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  const open = async (name: string, summary: string | RegExp) => {
+    const tool = card.locator(`.transcript-tool[data-tool-id="${name}"]`)
+    await expect(tool.locator('> summary')).toHaveText(summary)
+    await tool.locator('> summary').click()
+    return tool
+  }
+  let tool = await open('numbers', 'numbers(exact: 3.10, huge: 1e400, digits: 123456789012345678901234567890)')
+  await expect(tool.locator('.tree-object')).toHaveText('{ 3 items }')
+  await expect(tool.locator('.tree-number')).toHaveText(['3.10', '1e400', '123456789012345678901234567890'])
+  tool = await open('keys', 'keys(__proto__: {…}, a: 1, a: 2)')
+  await expect(tool.locator('.tree-key')).toHaveText(['__proto__: ', 'a: ', 'a: '])
+  await expect(tool.locator('.tree-row').filter({ hasText: 'Duplicate key' })).toHaveCount(1)
+  expect(await live.win.evaluate(() => ({} as Record<string, unknown>).polluted)).toBeUndefined()
+  tool = await open('surrogates', /^surrogates\(escaped: ".", decoded: "\uFFFD+"\)$/u)
+  await expect(tool.locator('.tree-string')).toHaveText(['"\\ud800"', /^"\uFFFD+"$/u])
+  tool = await open('nuls', 'nuls(escaped: "\u0000")')
+  await expect(tool.locator('.tree-string')).toHaveText('"\\u0000"')
+  tool = await open('nested', 'nested({"a":1})')
+  await expect(tool.locator('.tree-key')).toHaveCount(0)
+  await expect(tool.locator('.tree-string')).toHaveText('"{\\"a\\":1}"')
+  // A parsed key isn't in the source as such, so its preview promises no Copy key.
+  tool = await open('longkey', `longkey(${'k'.repeat(80)} …)`)
+  await expect(tool.locator('.tree-key')).toHaveText(/^k{4095} … \(key preview\): $/)
+  // Not parsed: the string, as before.
+  for (const [name, summary] of [['nul', 'nul({"decoded":"\u0000"})'], ['deep', `deep(${'['.repeat(80)} …)`],
+    ['big', `big({"big":"${'x'.repeat(72)} …)`], ['invalid', 'invalid({"a":)'], ['empty', 'empty()']] as const) {
+    tool = await open(name, summary)
+    await expect(tool.locator('.tree-key')).toHaveCount(0)
+    await expect(tool.locator('.tree-string')).toHaveCount(1)
+  }
+  // Their long strings wrap in the reading column: the Transcript doesn't scroll sideways.
+  const { scrollWidth, clientWidth } = await card.locator('.structured-view').evaluate(view => ({ scrollWidth: view.scrollWidth, clientWidth: view.clientWidth }))
+  expect(scrollWidth).toBeLessThanOrEqual(clientWidth)
+  // Arguments that aren't a string show as they are.
+  tool = await open('object', 'object()')
+  await expect(tool.locator('.tree-object')).toHaveText('{ 0 items }')
+  tool = await open('none', 'none(null)')
+  await expect(tool.locator('.tree-null')).toHaveText('null')
+  expect(live.pageErrors).toEqual([])
+})
+
+test('Line metadata pages a wide line only up to the Tree’s 2,000-node limit, so a later Tree still expands', async () => {
+  // 2,500 other keys around the conversation, and a second `messages`, which is other data.
+  const conversation = JSON.stringify([{ role: 'user', content: 'Wide fixture' },
+    { role: 'assistant', content: null, tool_calls: [{ id: 'later', type: 'function', function: { name: 'later', arguments: '{"a":1,"b":2,"c":3}' } }] }])
+  const keys = (from: number, to: number) => Array.from({ length: to - from }, (_, i) => `"k${from + i}":${from + i}`).join(',')
+  const wide = `{${keys(0, 5)},"messages":${conversation},"messages":[{"role":"user","content":"duplicate"}],${keys(5, 2500)}}`
+  const single = JSON.stringify({ messages: [{ role: 'user', content: 'Single fixture' }] })
+  const live = await launch({ hooks: true, file: fixture('transcript-wide-metadata.jsonl', [wide, single, single].join('\n') + '\n') })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  const group = card.locator('.transcript-conversation').first(), metadata = group.locator('> details')
+  await metadata.locator('> summary').click()
+  const more = metadata.getByRole('button', { name: 'Show more line metadata', exact: true })
+  const limit = metadata.getByText('Tree display limit reached (2,000 nodes) · View in Raw or copy the source value', { exact: true })
+  await expect(more.or(limit)).toBeVisible()
+  while (await more.isVisible()) {
+    await more.click()
+    await expect(more.or(limit)).toBeVisible()
+  }
+  await expect(limit).toBeVisible()
+  expect(await metadata.locator(':scope > .tree-entry').count()).toBeLessThanOrEqual(2000)
+  // The second `messages` shows; the first, the conversation, doesn't.
+  await expect(metadata.locator(':scope > .tree-entry > .tree-row > .tree-key').filter({ hasText: /^messages: $/ })).toHaveCount(1)
+  const tool = group.locator('.transcript-tool[data-tool-id="later"]')
+  await tool.locator('> summary').click()
+  await tool.locator('.tree-fold').first().click()
+  await expect(tool.locator('.tree-key')).toHaveText(['a: ', 'b: ', 'c: '])
   expect(live.pageErrors).toEqual([])
 })
 
@@ -347,6 +454,46 @@ test('Transcript reserves the mounted page’s HTML, flat to the last page, and 
   expect(live.pageErrors).toEqual([])
 })
 
+test('Transcript gives back a page’s Tree nodes when it moves on, so a tool input on page 9 still expands itself', async () => {
+  // 180 calls, 20 to a page, each input three fields: opening a page's calls mounts 80 Tree nodes.
+  const file = fixture('transcript-tree-budget.jsonl', claudeSession(Array.from({ length: 180 }, (_, i) =>
+    ({ role: 'assistant' as const, content: [{ type: 'tool_use', id: `call${i}`, name: 'read', input: { file_path: `/work/f${i}.md`, line: i, n: 3 } }] }))))
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.getByText('1–20 of 180', { exact: true })).toBeVisible({ timeout: 30_000 })
+  const tools = card.locator('.transcript-tool')
+  // Pages 1 to 8, every call opened, as a reader would.
+  for (let page = 1; page <= 8; page++) {
+    for (let i = 0; i < 20; i++) await tools.nth(i).locator('> summary').click()
+    await expect(card.locator('.transcript-tool > .tree-entry')).toHaveCount(20)
+    await card.getByRole('button', { name: 'Next turns', exact: true }).click()
+    await expect(card.getByText(`${page * 20 + 1}–${page * 20 + 20} of 180`, { exact: true })).toBeVisible()
+  }
+  await tools.first().locator('> summary').click()
+  await expect(tools.first().locator('.tree-key')).toHaveText(['file_path: ', 'line: ', 'n: '])
+  expect(live.pageErrors).toEqual([])
+})
+
+test('a left click on a Tree row in Transcript selects the row, so Copy copies its value, not the record', async () => {
+  const file = fixture('transcript-select.jsonl', claudeSession([
+    { role: 'user', content: 'Select fixture' },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'select', name: 'read', input: { file_path: '/tmp/x', n: 2 } }] },
+    { role: 'user', content: 'After fixture' }
+  ]))
+  const live = await launch({ hooks: true, file })
+  const copied = await recordClipboard(live.app)
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.getByText('Select fixture', { exact: true })).toBeVisible({ timeout: 30_000 })
+  const tool = card.locator('.transcript-tool[data-tool-id="select"]')
+  await tool.locator('> summary').click()
+  const row = tool.locator('.tree-row').filter({ hasText: 'file_path' })
+  await row.locator('.tree-string').click()
+  await live.win.keyboard.press('ControlOrMeta+c')
+  await expect.poll(copied).toEqual(['"/tmp/x"'])
+  await expect(row).toHaveAttribute('aria-selected', 'true')
+  expect(live.pageErrors).toEqual([])
+})
+
 test('Transcript shows HTML-like tags in message text as literal text, never interpreted or stripped', async () => {
   const texts = [
     // Raw HTML that Rendered keeps (b, img) or drops (a stray end tag), beside Markdown that renders.
@@ -379,6 +526,26 @@ test('Transcript shows HTML-like tags in message text as literal text, never int
   await expect(markdown.nth(2)).toContainText('<b>surrogate</b> after a lone surrogate')
   await expect(markdown.nth(3)).toHaveText('See data-source-map="L:0:1:9999" then <b>mapped</b>')
   await expect(markdown.nth(4).locator('code')).toHaveText('<b>')
+  expect(live.pageErrors).toEqual([])
+})
+
+test('Transcript shows every image as a placeholder, embedded or remote, until the bounded image path (Z43) lands', async () => {
+  // A 1×1 PNG, small enough for a node's 4 KiB preview: embedded as a block, and as a data URL.
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+  const file = fixture('transcript-images.jsonl', claudeSession([
+    { role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: png } }] },
+    { role: 'assistant', content: [{ type: 'image_url', image_url: { url: `data:image/png;base64,${png}` } }] },
+    { role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.invalid/remote.png' } }] },
+    // A URL that isn't http(s) isn't a remote image.
+    { role: 'assistant', content: [{ type: 'image_url', image_url: { url: 'javascript:alert(1)' } }] },
+    { role: 'assistant', content: 'Images fixture' }
+  ]))
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.getByText('Images fixture', { exact: true })).toBeVisible({ timeout: 30_000 })
+  const embedded = 'Image preview unavailable · inspect embedded data in Message metadata'
+  await expect(card.locator('.transcript-image-placeholder')).toHaveText([embedded, embedded, 'Remote image · not loaded · inspect the source in Message metadata', embedded])
+  await expect(card.getByRole('img', { name: 'Embedded image' })).toHaveCount(0)
   expect(live.pageErrors).toEqual([])
 })
 

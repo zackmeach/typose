@@ -33,6 +33,7 @@ export function structuredNode(value: unknown, size: number): StructuredNode {
   if (typeof value.keyMore === 'boolean') result.keyMore = value.keyMore
   if (value.container != null) result.container = number(value.container, 0xffff_ffff)
   if (value.children != null) result.children = number(value.children)
+  if (value.scope != null) result.scope = structuredSpan(value.scope, size)
   return result
 }
 

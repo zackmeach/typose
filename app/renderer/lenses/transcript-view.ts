@@ -29,7 +29,11 @@ const string = (node?: StructuredNode): string => {
 /** `n` and its noun, singular for one. */
 const count = (n: number, noun: string): string => `${n} ${noun}${n === 1 ? '' : 's'}`
 interface Options {
-  tree(node: StructuredNode, record: number): Promise<HTMLElement>
+  tree(node: StructuredNode, record: number, path?: string): Promise<HTMLElement>
+  /** The Tree's notice that `count` more nodes would pass its display limit, if they would. */
+  limit(count: number): HTMLElement | undefined
+  /** `count` Tree nodes left the page: they no longer count toward the display limits. */
+  unmounted(count: number): void
   select(element: HTMLElement, span: SourceSpan): void
   rows(record?: number): void
   frozen(error: unknown): void
@@ -159,8 +163,9 @@ export class TranscriptView {
       make('span', `${page.items.length ? start + 1 : 0}–${start + page.items.length} of ${page.total}`)
     )
     body.append(navigation)
-    // The page this one replaces stops what it still had loading.
+    // The page this one replaces stops what it still had loading, and gives back its Trees' nodes.
     this.shown?.abort.abort()
+    this.options.unmounted(this.host.querySelectorAll('.tree-entry').length)
     this.host.replaceChildren(body)
     if (commit) this.host.parentElement!.scrollTop = 0
     this.shown = pane
@@ -201,6 +206,8 @@ export class TranscriptView {
               : `Conversation ${item.record + 1} · line ${item.record + 1} · ${count(item.children, 'turn')}`
         )
       )
+      // A dataset line's other keys (brief §5.4), on its divider, when it has any besides its conversation.
+      if (item.kind === 'conversation' && (item.root.children ?? 0) > 1) group.append(this.lineMetadata(item))
       // A branch's or sidechain's members are off the main chain, and set apart (structured.css .transcript-group).
       const children = make('div', undefined, item.kind === 'conversation' ? undefined : 'transcript-group')
       group.append(children)
@@ -237,12 +244,6 @@ export class TranscriptView {
         loaded = true
         await load(0)
       }
-      if (item.kind === 'conversation') {
-        const metadata = document.createElement('details')
-        metadata.append(make('summary', 'Line metadata'))
-        this.lazyTree(metadata, item.root, item.record)
-        group.append(metadata)
-      }
       return group
     }
     if (item.kind === 'event') {
@@ -266,8 +267,9 @@ export class TranscriptView {
           : `${item.role ? item.role[0]!.toUpperCase() + item.role.slice(1) : 'Unknown'}${item.timestamp ? ' · ' + item.timestamp : ''}`
       )
     )
+    // A Tree row selects itself (structured.ts), and keeps that selection.
     turn.addEventListener('click', (event) => {
-      if (!(event.target as HTMLElement).closest('button,a,summary,input')) this.options.select(turn, item.span)
+      if (!(event.target as HTMLElement).closest('button,a,summary,input,.tree-row')) this.options.select(turn, item.span)
     })
     let tools: TranscriptTool[] = []
     if (item.tools) {
@@ -375,9 +377,44 @@ export class TranscriptView {
       }
     })
   }
+  /** A dataset line's top-level keys, each its own Tree, but for its first `messages`: the conversation the graph read. */
+  private lineMetadata(item: TranscriptItem): HTMLDetailsElement {
+    const metadata = document.createElement('details')
+    metadata.append(make('summary', 'Line metadata'))
+    let conversation = true
+    const load = async (start: number) => {
+      const page = await this.source.children(item.root.container!, start, item.record)
+      // Its Trees count toward the lens's display limit, as any Tree's do.
+      const limit = this.options.limit(page.nodes.length)
+      if (limit) {
+        metadata.append(limit)
+        return
+      }
+      for (const field of page.nodes) {
+        if (conversation && field.key === 'messages') conversation = false
+        else metadata.append(await this.options.tree(field, item.record, `$[${JSON.stringify(field.key)}]`))
+      }
+      if (page.next !== undefined) {
+        const more = make('button', 'Show more line metadata')
+        more.onclick = () => {
+          more.remove()
+          void load(page.next!).catch(this.options.frozen)
+        }
+        metadata.append(more)
+      }
+    }
+    let loaded = false
+    metadata.addEventListener('toggle', () => {
+      if (metadata.open && !loaded) {
+        loaded = true
+        void load(0).catch(this.options.frozen)
+      }
+    })
+    return metadata
+  }
   private async fields(node: StructuredNode, record: number): Promise<StructuredNode[]> {
     if (node.container === undefined) return []
-    const page = await this.source.children(node.container, 0, record)
+    const page = await this.source.children(node.container, 0, record, node.scope)
     return page.nodes
   }
   private async content(
@@ -448,35 +485,21 @@ export class TranscriptView {
     }
     await blocks(0)
   }
+  /** Every image is a placeholder until the bounded `data:` path with its pixel caps (Z43) and the remote-image gate
+   *  (§4.6) land: an http(s) URL is a remote image, and anything else isn't one to load. */
   private async image(parent: HTMLElement, fields: StructuredNode[], record: number): Promise<void> {
-    const image = fields.find(
-      (field) => field.key === 'image_url' || field.key === 'source' || field.key === 'image_url'
-    )
+    const image = fields.find((field) => field.key === 'image_url' || field.key === 'source')
     let url = image?.kind === 'string' ? string(image) : ''
-    if (image?.container !== undefined) {
-      const values = await this.fields(image, record),
-        data = values.find((value) => value.key === 'data'),
-        media = values.find((value) => value.key === 'media_type')
-      if (data && media && !data.more) url = `data:${string(media)};base64,${string(data)}`
-      else url = string(values.find((value) => value.key === 'url'))
-    }
-    if (/^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(url) && url.length <= 2 << 20) {
-      const thumbnail = document.createElement('img')
-      thumbnail.src = url
-      thumbnail.alt = 'Embedded image'
-      thumbnail.className = 'transcript-image'
-      thumbnail.loading = 'lazy'
-      parent.append(thumbnail)
-    } else
-      parent.append(
-        make(
-          'p',
-          url
-            ? 'Remote image · not loaded · inspect the source in Message metadata'
-            : 'Image preview unavailable · inspect embedded data in Message metadata',
-          'transcript-image-placeholder'
-        )
+    if (image?.container !== undefined) url = string((await this.fields(image, record)).find((value) => value.key === 'url'))
+    parent.append(
+      make(
+        'p',
+        /^https?:/i.test(url)
+          ? 'Remote image · not loaded · inspect the source in Message metadata'
+          : 'Image preview unavailable · inspect embedded data in Message metadata',
+        'transcript-image-placeholder'
       )
+    )
   }
   /** A string node's whole text: its preview when that's all of it, else its source (at most the text query's 64 KiB). */
   private async whole(node: StructuredNode, signal: AbortSignal): Promise<string> {

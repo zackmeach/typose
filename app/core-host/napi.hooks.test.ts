@@ -317,3 +317,32 @@ it('M5 PR 1: an index the budget stops releases its half-built graph, and Page s
   await expect.poll(() => alive()).toEqual({ jobs: 0, tasks: 0, handles: 0 })
   expect(core.debugStats().ledger.used).toBe(base)
 })
+
+it('M5 PR 3: a ledger too tight to parse a call\'s arguments shows them as the string, and fails no Tools page', async () => {
+  const path = join(dir, 'transcript-tight.jsonl')
+  // Arguments of about 60 KiB, whose parse reserves 7 times that.
+  const args = JSON.stringify({ text: 'x'.repeat(60_000) })
+  const lines = [{ role: 'user', content: 'q' }, { role: 'assistant', content: null, tool_calls: [{ id: 'c', type: 'function', function: { name: 'f', arguments: args } }] }, { role: 'tool', tool_call_id: 'c', content: 'r' }]
+  writeFileSync(path, lines.map((line) => JSON.stringify(line) + '\n').join(''))
+  const { used: base } = core.debugStats().ledger
+  const doc = core.Doc.open(path)
+  try {
+    await indexed(doc)
+    let info = await doc.structuredBuild(doc.generation, new core.Cancel())
+    while (!info.done) info = await doc.structuredBuild(doc.generation, new core.Cancel())
+    const call = (await doc.structuredTranscript(doc.generation, info.revision, 0, 20, new core.Cancel())).items[1]!
+    const input = async () => (await doc.structuredTranscriptTools(doc.generation, info.revision, call.id, 0, 32, new core.Cancel())).tools[0]!.input
+    const { used, limit } = core.debugStats().ledger
+    try {
+      core.setLimit(used + (16 << 20) + (64 << 10)) // the query's temporaries, not the parse
+      expect(await input()).toMatchObject({ kind: 'string', more: true })
+    } finally {
+      core.setLimit(limit)
+    }
+    expect(await input()).toMatchObject({ kind: 'object', scope: expect.anything() })
+  } finally {
+    doc.close()
+  }
+  await expect.poll(() => alive()).toEqual({ jobs: 0, tasks: 0, handles: 0 })
+  expect(core.debugStats().ledger.used).toBe(base)
+})

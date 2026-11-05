@@ -186,6 +186,12 @@ describe('Transcript through the core host', () => {
     const call = turns.items[2]!
     expect(await c.value('structuredTranscriptTools', { ref: info.ref, item: call.id, start: 0, count: 32 })).toMatchObject({ total: 1, tools: [{ name: 'lookup_order', id: 'call_1', results: 1 }] })
     expect(await c.value('structuredTranscriptTools', { ref: info.ref, item: call.id, start: 0, count: 32, call: 0 })).toMatchObject({ results: [{ record: 0, content: { kind: 'string' } }] })
+    // Its arguments, parsed from their JSON string: their children page with the string's span as the scope.
+    const input = (await c.value<TranscriptTools>('structuredTranscriptTools', { ref: info.ref, item: call.id, start: 0, count: 32 })).tools[0]!.input!
+    expect(DATASET.slice(input.span.start, input.span.end)).toBe(String.raw`"{\"order_id\": \"A-1001\"}"`)
+    expect(input).toMatchObject({ kind: 'object', container: 0, children: 1, scope: input.span })
+    const args = await c.value<StructuredChildren>('structuredChildren', { ref: info.ref, record: 0, container: 0, start: 0, count: 128, scope: input.scope })
+    expect(args).toEqual({ nodes: [{ ordinal: 0, kind: 'string', key: 'order_id', keyMore: false, text: '"A-1001"', more: false, duplicate: false, span: input.span, scope: input.span }] })
 
     const { counts, html } = await walk(c, info.ref)
     expect(counts).toEqual({ pages: 164, items: 720, tools: 160, results: 160, texts: 640, children: 0 })
@@ -209,6 +215,10 @@ describe('Transcript through the core host', () => {
       ['structuredTranscriptText', { ...text, block: 65_537 }, 'block'],
       ['structuredTranscriptText', { ...text, end: 1 }, 'end'],
       ['structuredTranscriptText', { ...text, end: SESSION.length + 1 }, 'end'],
+      ['structuredChildren', { ref, container: 0, start: 0, count: 1, scope: 'span' }, 'scope'],
+      ['structuredChildren', { ref, container: 0, start: 0, count: 1, scope: { start: -1, end: 2 } }, 'scope'],
+      ['structuredChildren', { ref, container: 0, start: 0, count: 1, scope: { start: 2, end: 2 } }, 'scope'],
+      ['structuredChildren', { ref, container: 0, start: 0, count: 1, scope: { start: 0, end: SESSION.length + 1 } }, 'scope'],
     ] as const) expect(await c.call(method, params), `${method} ${field}`).toMatchObject({ error: { code: 'InvalidParams', field } })
     // In range but not in this graph: refused by the core.
     expect(await c.call('structuredTranscript', { ref, start: 0, count: 20, group: 2 ** 32 - 2 })).toMatchObject({ error: { code: 'InvalidParams' } })
@@ -217,6 +227,30 @@ describe('Transcript through the core host', () => {
     const generic = await c.open('generic.jsonl', '{"a":1}\n{"b":2}\n')
     expect(await c.call('structuredTranscript', { ref: generic.info.ref, start: 0, count: 20 }))
       .toMatchObject({ error: { code: 'Refused', message: expect.stringContaining('No supported transcript schema') } })
+  })
+
+  it('a scope parses only a string in an OpenAI transcript, inside the record the request names', async () => {
+    const c = await client()
+    const refused = { error: { code: 'InvalidParams', message: expect.stringContaining('OpenAI transcript') } }
+    // A Claude session whose tool input is a JSON string: shown as the string, and a scope over it is refused.
+    const input = '{"command":"ls","n":3.10}', token = JSON.stringify(input)
+    const claude = [0, 1, 2, 3].map((i) => `${JSON.stringify({ type: i % 2 ? 'assistant' : 'user', uuid: `u${i}`, parentUuid: i ? `u${i - 1}` : null,
+      message: { role: i % 2 ? 'assistant' : 'user', content: i % 2 ? [{ type: 'tool_use', id: `t${i}`, name: 'Bash', input }] : 'hi' } })}\n`).join('')
+    const session = (await c.open('claude-string-input.jsonl', claude)).info.ref
+    const call = (await page(c, session)).items[1]!
+    expect((await c.value<TranscriptTools>('structuredTranscriptTools', { ref: session, item: call.id, start: 0, count: 32 })).tools[0]!.input).toMatchObject({ kind: 'string' })
+    const at = claude.indexOf(token)
+    expect(await c.call('structuredChildren', { ref: session, record: 1, container: 0, start: 0, count: 128, scope: { start: at, end: at + token.length } })).toMatchObject(refused)
+    // An OpenAI dataset: line 0's arguments parse in record 0, and are refused in another record or in none.
+    const dataset = (await c.open('finetune-scope.jsonl', DATASET)).info.ref
+    const args = String.raw`"{\"order_id\": \"A-1001\"}"`, from = DATASET.indexOf(args), scope = { start: from, end: from + args.length }
+    const children = (params: Record<string, unknown>) => c.call('structuredChildren', { ref: dataset, container: 0, start: 0, count: 128, scope, ...params })
+    expect(await children({ record: 0 })).toMatchObject({ result: { nodes: [{ key: 'order_id', text: '"A-1001"' }] } })
+    expect(await children({ record: 1 })).toMatchObject(refused)
+    expect(await children({})).toMatchObject(refused)
+    // In its record, but not a JSON string that holds JSON.
+    expect(await children({ record: 0, scope: { start: 0, end: 10 } }))
+      .toMatchObject({ error: { code: 'InvalidParams', message: expect.stringContaining('not a JSON string that holds JSON') } })
   })
 
   it('a record that is both an OpenAI message and a dataset line counts once, and the file opens', async () => {

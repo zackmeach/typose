@@ -50,6 +50,8 @@
 .structured-problem-list { max-height:320px; overflow:auto; }
 /* Transcript (brief §5.4): Rendered's 70ch reading column, its turns' Markdown in the reading font. */
 .structured-view[data-mode=transcript] .structured-content { min-width:0; }
+/* Its Trees wrap a long key or value in the column, where Tree and Rows keep each node on one line. */
+.structured-view[data-mode=transcript] .tree-row { white-space:pre-wrap; overflow-wrap:anywhere; }
 .transcript-pane { width:min(100%, 70ch); margin:0 auto; }
 .transcript-controls { display:flex; flex-direction:column; align-items:flex-start; gap:8px; padding:8px 0; color:var(--text2); }
 /* Rows' detail buttons; :where() leaves .structured-problem its colour. */
@@ -61,5 +63,4 @@
 .transcript-markdown a { color:var(--accent); text-decoration:underline; cursor:pointer; }
 .transcript-tool { margin:8px 0; padding:4px 0; }
 .transcript-tool-result, .transcript-group { margin:8px 0 8px 16px; border-left:1px solid var(--guide,#434348); padding-left:12px; }
-.transcript-image { max-width:100%; max-height:320px; object-fit:contain; display:block; }
 .transcript-image-placeholder { color:var(--text2); }
