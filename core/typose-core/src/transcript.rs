@@ -320,7 +320,7 @@ impl Graph {
         mut children: Vec<usize>,
     ) -> Result<usize, Stop> {
         json::room(&mut self.items, &mut self.charge).map_err(|_| MEMORY)?;
-        // `children` grew in `finish_temp`: it keeps its length.
+        // `children` grew within `finish_temp`'s reservation; the graph pays for its length.
         self.charge.grow((children.len() * size_of::<usize>()) as u64).map_err(|_| MEMORY)?;
         children.shrink_to_fit();
         let id = self.items.len();
@@ -574,7 +574,7 @@ enum Climb {
 /// From `start` up through `up` until a parent satisfies `stop`, or none is left: that parent, where the run attaches,
 /// and the run's first node, the last before it. Every node on the way has the same answer, so `memo` keeps it and no
 /// node is climbed twice: linear over a graph, where a walk from each node was quadratic (M5 PR 1: a 20,000-message
-/// branch took 6.4 s). `None` on a cycle.
+/// branch took 6.4-6.8 s). `None` on a cycle.
 fn climb(
     start: usize,
     memo: &mut [Climb],
@@ -662,9 +662,9 @@ fn finish_temp(records: usize, turns: usize, calls: usize, results: usize) -> u6
     let copies = table::<&str>(records) + records;
     let tools = table::<((usize, &str), Place)>(calls)
         + results * (size_of::<(usize, &str, Place)>() + size_of::<(Place, Place)>());
-    // Four flags, three indexes (messages or events, the climb's path, the chain), two parents (direct and nearest
-    // message), two memos, and a group with the stable sort's scratch for it, a record; its uuid table, the two group
-    // tables and their lists.
+    // A record's four flags, three indexes (messages or events, the climb's path, the chain), two parents (direct and
+    // nearest message), two memos, and its group with the stable sort's scratch for it; then the uuid table, the two
+    // group tables and their lists.
     let claude = records
         * (4 + 3 * size_of::<usize>()
             + 2 * size_of::<Option<usize>>()
