@@ -2,9 +2,10 @@
 //! record's spans and container ids as the JSONL index reads it, and `finish` builds the displayed order once the file
 //! is indexed. Past a cap, the graph is off and Rows remains.
 use crate::budget::Reservation;
+use crate::doc::DocError;
 use crate::json::{Child, JsonIndex, Kind, Span};
 use crate::jsonl::{named_fields, read_string, visit_members};
-use crate::store::{ByteStore, StoreError};
+use crate::store::{ByteStore, StoreError, cancelled};
 use std::collections::{HashMap, HashSet};
 
 /// The most records a graph holds.
@@ -14,6 +15,8 @@ pub const MAX_CALLS: usize = 1024;
 pub const MAX_RESULTS: usize = 128;
 /// Item ids are below this (`limits`' `item` and `group` rows): a graph that could need more items is off.
 pub const MAX_ITEMS: u64 = u32::MAX as u64;
+/// `finish` checks its cancel flag this often, in steps.
+const CANCEL_EVERY: u64 = 4096;
 
 #[derive(Clone, Debug)]
 pub struct SourceRef {
@@ -97,6 +100,8 @@ pub struct Graph {
     pub reason: Option<String>,
     pub schema: Option<&'static str>,
     pub census: Census,
+    /// The last `finish`'s steps, which a test bounds: they're linear in the graph.
+    pub steps: u64,
     charge: Reservation,
 }
 impl Default for Graph {
@@ -114,6 +119,7 @@ impl Graph {
             reason: None,
             schema: None,
             census: Census::default(),
+            steps: 0,
             charge: Reservation::none(),
         }
     }
@@ -220,35 +226,45 @@ impl Graph {
     pub fn reject_undetected(&mut self) {
         self.disable("No supported transcript schema was detected in the first 200 parsed records");
     }
-    pub fn finish(&mut self, schema: Option<&'static str>) {
+    /// Builds the displayed order once every record is observed: linear in the graph's records, turns and links, and
+    /// cancellable, checking the read's flag (`store::cancellable`) every `CANCEL_EVERY` steps. A cancelled finish
+    /// leaves the graph off.
+    pub fn finish(&mut self, schema: Option<&'static str>) -> Result<(), DocError> {
         if self.reason.is_some() {
-            return;
+            return Ok(());
         }
         let Some(schema) = schema else {
             self.reject_undetected();
-            return;
+            return Ok(());
         };
         self.schema = Some(schema);
+        let mut steps = Steps(0);
+        let built = self.build(schema, &mut steps);
+        self.steps = steps.0;
+        match built {
+            Ok(()) => self.ready = true,
+            Err(Stop::Off(reason)) => self.disable(reason),
+            Err(Stop::Cancelled) => {
+                self.disable("Transcript indexing was cancelled");
+                return Err(DocError::Cancelled);
+            }
+        }
+        Ok(())
+    }
+    fn build(&mut self, schema: &'static str, steps: &mut Steps) -> Result<(), Stop> {
         if schema == "claude-code-v1" {
-            self.drop_copies();
+            self.drop_copies(steps)?;
         }
         // Each item is a turn or stands for a record (an event, a conversation, a group rooted at it).
         let turns: usize = self.entries.iter().map(|entry| entry.turns.len()).sum();
         if (self.entries.len() + turns) as u64 > MAX_ITEMS {
-            self.disable("Transcript graph exceeds its item limit; Rows remains available");
-            return;
+            return Err(Stop::Off("Transcript graph exceeds its item limit; Rows remains available"));
         }
         if self.charge.grow(self.entries.len() as u64 * 4096).is_err() {
-            self.disable("Transcript graph finalization exceeds its memory budget; Rows remains available");
-            return;
+            return Err(Stop::Off("Transcript graph finalization exceeds its memory budget; Rows remains available"));
         }
-        self.match_tools(schema);
-        if schema == "claude-code-v1" {
-            self.claude();
-        } else {
-            self.openai(schema);
-        }
-        self.ready = self.reason.is_none();
+        self.match_tools(schema, steps)?;
+        if schema == "claude-code-v1" { self.claude(steps) } else { self.openai(schema, steps) }
     }
     /// Claude Code writes some records twice. On this PC (M5 PR 1), 10 of 274 sessions hold 12,351 later copies of
     /// earlier records, in runs that each follow a `bridge-session` or `pr-link` record; every later copy is timestamped
@@ -256,10 +272,13 @@ impl Graph {
     /// `version`, `message.usage`), never in role or content. Where their `parentUuid`s differ (279 copies), the later
     /// one mostly points at the copy before it in its run. So the first copy is the record, in its place in time and in
     /// the file; later copies leave the graph, with what they were charged.
-    fn drop_copies(&mut self) {
+    fn drop_copies(&mut self, steps: &mut Steps) -> Result<(), Stop> {
         let mut seen = HashSet::with_capacity(self.entries.len());
-        let keep: Vec<bool> =
-            self.entries.iter().map(|entry| entry.uuid.as_deref().is_none_or(|uuid| seen.insert(uuid))).collect();
+        let mut keep = Vec::with_capacity(self.entries.len());
+        for entry in &self.entries {
+            steps.tick()?;
+            keep.push(entry.uuid.as_deref().is_none_or(|uuid| seen.insert(uuid)));
+        }
         drop(seen);
         let (mut at, mut freed) = (0, 0);
         self.entries.retain(|entry| {
@@ -268,46 +287,53 @@ impl Graph {
             keep[at - 1]
         });
         self.charge.shrink(freed);
+        Ok(())
     }
     fn item(&mut self, kind: &'static str, entry: usize, turn: Option<usize>, children: Vec<usize>) -> usize {
         let id = self.items.len();
         self.items.push(Item { kind, entry, turn, children });
         id
     }
-    fn turn_items(&mut self, entry: usize) -> Vec<usize> {
+    fn turn_items(&mut self, entry: usize, steps: &mut Steps) -> Result<Vec<usize>, Stop> {
         let count = self.entries[entry].turns.len();
         let mut items = Vec::new();
         for index in 0..count {
+            steps.tick()?;
             let turn = &self.entries[entry].turns[index];
             if turn.only_results && turn.results.iter().all(|result| result.linked) {
                 continue;
             }
             items.push(self.item("turn", entry, Some(index), Vec::new()));
         }
-        items
+        Ok(items)
     }
-    fn match_tools(&mut self, schema: &str) {
+    fn match_tools(&mut self, schema: &str, steps: &mut Steps) -> Result<(), Stop> {
         let mut calls = HashMap::new();
         let mut results = Vec::new();
         for (entry_index, entry) in self.entries.iter().enumerate() {
+            steps.tick()?;
             if !same_schema(entry.schema, schema) {
                 continue;
             }
             for (turn_index, turn) in entry.turns.iter().enumerate() {
+                steps.tick()?;
                 self.census.messages += 1;
                 let prefix = if entry.schema == "openai-dataset-v1" { entry_index + 1 } else { 0 };
                 for (call_index, call) in turn.calls.iter().enumerate() {
+                    steps.tick()?;
                     if !call.id.is_empty() {
                         calls.insert((prefix, call.id.clone()), (entry_index, turn_index, call_index));
                     }
                     self.census.calls += 1;
                 }
                 for (result_index, result) in turn.results.iter().enumerate() {
+                    steps.tick()?;
                     results.push((prefix, entry_index, turn_index, result_index, result.id.clone()));
                 }
             }
         }
         for (prefix, entry, turn, result, id) in results {
+            steps.tick()?;
             if let Some(&(caller, caller_turn, call)) = calls.get(&(prefix, id)) {
                 self.entries[caller].turns[caller_turn].calls[call].results.push(ResultLink { entry, turn, result });
                 self.entries[entry].turns[turn].results[result].linked = true;
@@ -316,11 +342,13 @@ impl Graph {
                 self.census.unmatched_results += 1;
             }
         }
+        Ok(())
     }
-    fn openai(&mut self, schema: &str) {
+    fn openai(&mut self, schema: &str, steps: &mut Steps) -> Result<(), Stop> {
         for entry in 0..self.entries.len() {
+            steps.tick()?;
             if same_schema(self.entries[entry].schema, schema) {
-                let turns = self.turn_items(entry);
+                let turns = self.turn_items(entry, steps)?;
                 if self.entries[entry].schema == "openai-dataset-v1" {
                     let item = self.item("conversation", entry, None, turns);
                     self.main.push(item);
@@ -333,129 +361,103 @@ impl Graph {
                 self.main.push(item);
             }
         }
+        Ok(())
     }
-    fn claude(&mut self) {
-        let mut ids = HashMap::new();
-        let mut messages = Vec::new();
-        let mut events = Vec::new();
-        for (index, entry) in self.entries.iter().enumerate() {
-            if let Some(uuid) = &entry.uuid {
-                ids.insert(uuid.clone(), index); // unique: `drop_copies` ran
-            }
-            if entry.schema == "claude-code-v1" {
-                messages.push(index);
-            } else {
-                events.push(index);
-            }
-        }
+    fn claude(&mut self, steps: &mut Steps) -> Result<(), Stop> {
+        let n = self.entries.len();
+        let message: Vec<bool> = self.entries.iter().map(|entry| entry.schema == "claude-code-v1").collect();
+        let messages: Vec<usize> = (0..n).filter(|&index| message[index]).collect();
+        let events: Vec<usize> = (0..n).filter(|&index| !message[index]).collect();
         self.census.events = events.len() as u64;
-        // Session events may carry UUIDs and sit between two messages in the parent chain.
-        let direct: Vec<Option<usize>> =
-            self.entries.iter().map(|entry| entry.parent.as_ref().and_then(|id| ids.get(id)).copied()).collect();
-        let mut parents = vec![None; self.entries.len()];
-        for &message in &messages {
-            let mut current = direct[message];
-            let mut visited = HashSet::new();
-            while let Some(index) = current {
-                if !visited.insert(index) {
-                    self.disable("Transcript parent graph contains an event cycle; inspect in Rows");
-                    return;
-                }
-                if self.entries[index].schema == "claude-code-v1" {
-                    break;
-                }
-                current = direct[index];
+        let mut ids = HashMap::with_capacity(n);
+        for (index, entry) in self.entries.iter().enumerate() {
+            steps.tick()?;
+            if let Some(uuid) = &entry.uuid {
+                ids.insert(uuid.as_str(), index); // unique: `drop_copies` ran
             }
-            parents[message] = current;
         }
-        let parent = |index: usize| parents[index];
+        let mut direct = Vec::with_capacity(n);
+        for entry in &self.entries {
+            steps.tick()?;
+            direct.push(entry.parent.as_deref().and_then(|id| ids.get(id).copied()));
+        }
+        drop(ids);
+        // Session events may carry UUIDs and sit between two messages: a message's parent is the nearest message above.
+        let mut memo = vec![Climb::Unknown; n];
+        let mut path = Vec::with_capacity(n);
+        let mut parents = vec![None; n];
+        for &index in &messages {
+            let found = climb(index, &mut memo, &mut path, |at| direct[at], |at| message[at], steps)?;
+            parents[index] =
+                found.ok_or(Stop::Off("Transcript parent graph contains an event cycle; inspect in Rows"))?.0;
+        }
         // A subagent's own session is all sidechain (every agent-*.jsonl on this PC, 2,712 of 2,986 session files):
         // with no main chain to attach to, its sidechain is the chain, ending at its latest leaf like any other.
         let sidechain_only = messages.iter().all(|&index| self.entries[index].sidechain);
         let side: Vec<bool> = self.entries.iter().map(|entry| entry.sidechain && !sidechain_only).collect();
-        let mut has_child = HashSet::new();
+        let mut has_child = vec![false; n];
         for &index in &messages {
             if !side[index]
-                && let Some(parent) = parent(index)
+                && let Some(parent) = parents[index]
             {
-                has_child.insert(parent);
+                has_child[parent] = true;
             }
         }
-        let leaf = messages.iter().rev().find(|&&index| !side[index] && !has_child.contains(&index)).copied();
-        let Some(mut current) = leaf else {
-            self.disable("Transcript has no leaf message; inspect its graph in Rows");
-            return;
-        };
+        let leaf = messages.iter().rev().find(|&&index| !side[index] && !has_child[index]).copied();
+        let mut at = Some(leaf.ok_or(Stop::Off("Transcript has no leaf message; inspect its graph in Rows"))?);
+        let mut on_chain = vec![false; n];
         let mut chain = Vec::new();
-        let mut seen = HashSet::new();
-        loop {
-            if !seen.insert(current) {
-                self.disable("Transcript parent graph contains a cycle; inspect in Rows");
-                return;
+        while let Some(index) = at {
+            steps.tick()?;
+            if on_chain[index] {
+                return Err(Stop::Off(CYCLE));
             }
-            chain.push(current);
-            let Some(next) = parent(current) else {
-                break;
-            };
-            current = next;
+            on_chain[index] = true;
+            chain.push(index);
+            at = parents[index];
         }
         chain.reverse();
-        let chain_set: HashSet<usize> = chain.iter().copied().collect();
-        let mut branches: HashMap<(Option<usize>, usize), Vec<usize>> = HashMap::new();
-        let mut sides: HashMap<(Option<usize>, usize), Vec<usize>> = HashMap::new();
+        // Each message off the chain joins its run's group, keyed by the run's first message: a sidechain run up to the
+        // message it hangs from, or a branch up to where it forks from the chain.
+        memo.fill(Climb::Unknown);
+        let mut branch_memo = memo;
+        let mut side_memo = vec![Climb::Unknown; n];
+        let mut groups = Vec::with_capacity(messages.len() - chain.len());
         for &index in &messages {
-            if chain_set.contains(&index) {
+            if on_chain[index] {
                 continue;
             }
-            let sidechain = side[index];
-            let mut attach = parent(index);
-            let mut root = index;
-            let mut visited = HashSet::new();
-            while let Some(ancestor) = attach {
-                if !visited.insert(ancestor) {
-                    self.disable("Transcript parent graph contains a cycle; inspect in Rows");
-                    return;
-                }
-                if sidechain {
-                    if !side[ancestor] {
-                        break;
-                    }
-                } else if chain_set.contains(&ancestor) {
-                    break;
-                }
-                root = ancestor;
-                attach = parent(ancestor);
-            }
-            (if sidechain { &mut sides } else { &mut branches }).entry((attach, root)).or_default().push(index);
+            let found = if side[index] {
+                climb(index, &mut side_memo, &mut path, |at| parents[at], |at| !side[at], steps)?
+            } else {
+                climb(index, &mut branch_memo, &mut path, |at| parents[at], |at| on_chain[at], steps)?
+            };
+            let (attach, root) = found.ok_or(Stop::Off(CYCLE))?;
+            groups.push((!side[index], root, attach, index));
         }
+        // Sidechains first, since a branch nests the ones hanging from its messages; each by its first message, and its
+        // members in file order (the sort is stable).
+        groups.sort_by_key(|&(branch, root, _, _)| (branch, root));
         let mut side_items: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
-        let mut sides: Vec<_> = sides.into_iter().collect();
-        sides.sort_by_key(|((_, root), _)| *root);
-        for ((attach, _), entries) in sides {
-            let first = entries[0];
-            let mut children = Vec::new();
-            for entry in entries {
-                children.extend(self.turn_items(entry));
-            }
-            self.census.sidechains += 1;
-            let item = self.item("sidechain", first, None, children);
-            side_items.entry(attach).or_default().push(item);
-        }
         let mut branch_items: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
-        let mut branches: Vec<_> = branches.into_iter().collect();
-        branches.sort_by_key(|((_, root), _)| *root);
-        for ((attach, _), entries) in branches {
-            let first = entries[0];
+        for group in groups.chunk_by(|a, b| (a.0, a.1) == (b.0, b.1)) {
+            let (branch, _, attach, first) = group[0];
             let mut children = Vec::new();
-            for entry in entries {
-                children.extend(self.turn_items(entry));
-                if let Some(side) = side_items.remove(&Some(entry)) {
-                    children.extend(side);
+            for &(_, _, _, entry) in group {
+                children.extend(self.turn_items(entry, steps)?);
+                if branch && let Some(nested) = side_items.remove(&Some(entry)) {
+                    children.extend(nested);
                 }
             }
-            self.census.branches += 1;
-            let item = self.item("branch", first, None, children);
-            branch_items.entry(attach).or_default().push(item);
+            let (kind, items) = if branch {
+                self.census.branches += 1;
+                ("branch", &mut branch_items)
+            } else {
+                self.census.sidechains += 1;
+                ("sidechain", &mut side_items)
+            };
+            let item = self.item(kind, first, None, children);
+            items.entry(attach).or_default().push(item);
         }
         if let Some(branch) = branch_items.remove(&None) {
             self.main.extend(branch);
@@ -466,11 +468,12 @@ impl Graph {
         let mut event_at = 0;
         for entry in chain {
             while event_at < events.len() && events[event_at] < entry {
+                steps.tick()?;
                 let item = self.item("event", events[event_at], None, Vec::new());
                 self.main.push(item);
                 event_at += 1;
             }
-            let turns = self.turn_items(entry);
+            let turns = self.turn_items(entry, steps)?;
             self.main.extend(turns);
             if let Some(branch) = branch_items.remove(&Some(entry)) {
                 self.main.extend(branch);
@@ -480,13 +483,74 @@ impl Graph {
             }
         }
         while event_at < events.len() {
+            steps.tick()?;
             let item = self.item("event", events[event_at], None, Vec::new());
             self.main.push(item);
             event_at += 1;
         }
-        self.main.extend(branch_items.into_values().flatten());
-        self.main.extend(side_items.into_values().flatten());
+        // A branch forks from the chain, and a sidechain hangs from the chain or a branch's message, or from neither.
+        debug_assert!(branch_items.is_empty() && side_items.is_empty(), "a group was left out of the main order");
+        Ok(())
     }
+}
+const CYCLE: &str = "Transcript parent graph contains a cycle; inspect in Rows";
+/// How `finish` stopped short.
+enum Stop {
+    /// The graph is off for this reason; Rows remains.
+    Off(&'static str),
+    Cancelled,
+}
+/// `finish`'s work, counted: it checks its cancel flag every `CANCEL_EVERY` steps.
+struct Steps(u64);
+impl Steps {
+    fn tick(&mut self) -> Result<(), Stop> {
+        if self.0.is_multiple_of(CANCEL_EVERY) && cancelled() {
+            return Err(Stop::Cancelled);
+        }
+        self.0 += 1;
+        Ok(())
+    }
+}
+/// A node's place in a climb (`climb`).
+#[derive(Clone, Copy)]
+enum Climb {
+    Unknown,
+    Visiting,
+    /// Where its run attaches, and the run's first node.
+    Done(Option<usize>, usize),
+}
+/// From `start` up through `up` until a parent satisfies `stop`, or none is left: that parent, where the run attaches,
+/// and the run's first node, the last before it. Every node on the way has the same answer, so `memo` keeps it and no
+/// node is climbed twice: linear over a graph, where a walk from each node was quadratic (M5 PR 1: a 20,000-message
+/// branch took 6.4 s). `None` on a cycle.
+fn climb(
+    start: usize,
+    memo: &mut [Climb],
+    path: &mut Vec<usize>,
+    up: impl Fn(usize) -> Option<usize>,
+    stop: impl Fn(usize) -> bool,
+    steps: &mut Steps,
+) -> Result<Option<(Option<usize>, usize)>, Stop> {
+    path.clear();
+    let mut at = start;
+    let found = loop {
+        steps.tick()?;
+        match memo[at] {
+            Climb::Done(attach, root) => break (attach, root),
+            Climb::Visiting => return Ok(None),
+            Climb::Unknown => {}
+        }
+        memo[at] = Climb::Visiting;
+        path.push(at);
+        match up(at) {
+            Some(parent) if !stop(parent) => at = parent,
+            parent => break (parent, at),
+        }
+    };
+    for &node in path.iter() {
+        memo[node] = Climb::Done(found.0, found.1);
+    }
+    Ok(Some(found))
 }
 /// What an entry is charged.
 fn estimate(entry: &Entry) -> u64 {
@@ -624,7 +688,15 @@ fn turn(store: &ByteStore, index: &JsonIndex, container: u32, claude: bool) -> R
 
 #[cfg(test)]
 mod tests {
-    use crate::{budget::Reservation, doc::Document, jsonl::Index, store::testutil::temp_file};
+    use super::Graph;
+    use crate::{
+        budget::Reservation,
+        doc::{DocError, Document},
+        json::{self, Span},
+        jsonl::Index,
+        store::{cancellable, testutil::temp_file},
+    };
+    use std::sync::{Arc, atomic::AtomicBool};
     fn fixture(name: &str, lines: &[&str]) -> Index {
         let file = temp_file(name, lines.join("\n").as_bytes());
         let doc = Document::open(&file).unwrap();
@@ -813,5 +885,68 @@ mod tests {
             })
             .collect();
         assert_eq!(shown, vec![("turn", "s0"), ("turn", "s1"), ("branch", "old"), ("turn", "s3")]);
+    }
+    /// `finish` is linear: off the chain, each message of a 4,000-message branch is 1 to 4,000 messages from the fork,
+    /// about 8 million steps for a walk from each. Memoized climbs take a few steps a record.
+    #[test]
+    fn finish_is_linear_in_a_long_branch() {
+        let record = |uuid: &str, parent: &str| {
+            format!(
+                r#"{{"type":"user","uuid":"{uuid}","parentUuid":{parent},"message":{{"role":"user","content":"x"}}}}"#
+            )
+        };
+        let mut lines = vec![record("u0", "null"), record("a1", r#""u0""#)];
+        lines.extend((2..=4000).map(|i| record(&format!("a{i}"), &format!(r#""a{}""#, i - 1))));
+        lines.push(record("b1", r#""u0""#));
+        let index = fixture("transcript-long-branch", &lines.iter().map(String::as_str).collect::<Vec<_>>());
+        let graph = index.transcript.lock().unwrap();
+        assert!(graph.ready, "{:?}", graph.reason);
+        let branch = graph.main.iter().map(|&id| &graph.items[id]).find(|item| item.kind == "branch").unwrap();
+        assert_eq!((graph.census.branches, branch.children.len()), (1, 4000));
+        let records = graph.entries.len() as u64;
+        assert!(graph.steps < 16 * records, "{} steps for {records} records", graph.steps);
+    }
+    /// A parent cycle off the chain turns the graph off, rather than looping or losing its messages.
+    #[test]
+    fn a_parent_cycle_turns_the_graph_off() {
+        let index = fixture(
+            "transcript-cycle",
+            &[
+                r#"{"type":"user","uuid":"a","parentUuid":"b","message":{"role":"user","content":"a"}}"#,
+                r#"{"type":"assistant","uuid":"b","parentUuid":"a","message":{"role":"assistant","content":"b"}}"#,
+                r#"{"type":"user","uuid":"z","parentUuid":null,"message":{"role":"user","content":"z"}}"#,
+            ],
+        );
+        let graph = index.transcript.lock().unwrap();
+        assert!(!graph.ready);
+        assert_eq!(graph.reason.as_deref(), Some(super::CYCLE));
+        assert_eq!(graph.charged(), 0);
+    }
+    /// A cancelled `finish` stops at its next check, leaving the graph off and holding nothing.
+    #[test]
+    fn a_cancelled_finish_turns_the_graph_off() {
+        let lines = [
+            r#"{"type":"user","uuid":"u","parentUuid":null,"message":{"role":"user","content":"start"}}"#,
+            r#"{"type":"assistant","uuid":"a","parentUuid":"u","message":{"role":"assistant","content":"reply"}}"#,
+        ];
+        let file = temp_file("transcript-cancelled", lines.join("\n").as_bytes());
+        let doc = Document::open(&file).unwrap();
+        let mut graph = Graph::new();
+        doc.verified(1, |store| {
+            let mut at = 0;
+            for (line, text) in lines.iter().enumerate() {
+                let span = Span { start: at, end: at + text.len() as u64 };
+                graph.observe(store, &json::scan(store, span.start..span.end, false)?, line as u64, span)?;
+                at = span.end + 1;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(graph.entries.len(), 2);
+        assert!(graph.charged() > 0);
+        let cancel = Arc::new(AtomicBool::new(true));
+        assert!(matches!(cancellable(&cancel, || graph.finish(Some("claude-code-v1"))), Err(DocError::Cancelled)));
+        assert!(!graph.ready && graph.entries.is_empty() && graph.items.is_empty());
+        assert_eq!(graph.charged(), 0);
     }
 }

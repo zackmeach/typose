@@ -110,7 +110,7 @@ impl Index {
         })?;
         if complete {
             let schema = detected_schema(&self.progress.read().unwrap());
-            self.transcript.lock().unwrap().finish(schema);
+            self.transcript.lock().unwrap().finish(schema)?;
         }
         self.progress.write().unwrap().done = complete;
         Ok(())
