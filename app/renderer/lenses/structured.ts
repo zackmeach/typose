@@ -85,7 +85,8 @@ export class StructuredLens {
     if (mode === 'transcript') this.transcript = new TranscriptView(this.content, core, source, opened, this.abort.signal, {
       tree: (node, record) => this.treeNode(node, 0, '$', record, 1), select: (element, span) => this.select(element, span),
       rows: line => options.onRows(line), frozen: error => this.error(error), openLocal: options.onOpenLocal,
-      reserve: bytes => options.budget?.reserveGrid(opened.gen, bytes) ?? Promise.resolve(false)
+      // The document's Rendered share, which JSONL has no other use for: it's set, not a high-water mark like Grid's.
+      reserve: bytes => options.budget?.reserveRendered(opened.gen, bytes) ?? Promise.resolve(false)
     })
     this.unsubscribe = source.subscribe?.(() => {
       if (this.stopped || this.mode === 'tree') return
@@ -501,7 +502,7 @@ export class StructuredLens {
   freeze(): void { this.stopped = true; this.abort.abort(); this.copies.cancel(); this.find.freeze('source changed') }
   yieldReservation(): void { this.copies.cancel() }
   resumeReservation(): void {}
-  dispose(): void { this.stopped = true; cancelAnimationFrame(this.frame); this.resize?.disconnect(); this.unsubscribe?.(); this.abort.abort(); this.copies.cancel(); this.find.destroy(); this.context?.remove(); this.element.remove() }
+  dispose(): void { this.stopped = true; cancelAnimationFrame(this.frame); this.resize?.disconnect(); this.unsubscribe?.(); this.abort.abort(); this.copies.cancel(); this.find.destroy(); this.context?.remove(); this.element.remove(); if (this.transcript) void this.options.budget?.reserveRendered(this.opened.gen, 0) }
   printPlan(): PrintPlan { const pages = Math.ceil(this.lines / PRINT_LINES_PER_PAGE); return { unit: 'line', total: this.lines, current: this.line, indexed: this.indexed, totalPages: pages, allFits: pages <= MAX_PRINT_PAGES && this.opened.size <= MAX_PRINT_BYTES } }
   printRange(start: number, end: number, signal: AbortSignal): Promise<PrintPayload> {
     return printLines(this.core, this.opened, this.options.budget, start, end, this.lines, () => !this.stopped && this.indexed, signal)

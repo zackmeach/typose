@@ -1,5 +1,5 @@
 import { expect } from '@playwright/test'
-import { fixture, launch, recordClipboard, test, type TestHooks } from './app'
+import { debugStats, fixture, launch, recordClipboard, test, type TestHooks } from './app'
 
 async function expectDistinctRows(card: import('@playwright/test').Locator, selector: string): Promise<void> {
   const boxes = await card.locator(selector).evaluateAll(elements => elements.map(element => element.getBoundingClientRect()).filter(box => box.width > 0 && box.height > 0).map(box => ({ top: box.top, bottom: box.bottom })))
@@ -310,6 +310,28 @@ test('Transcript shows a refused Markdown block as literal text, and a failing i
   await expect(card.getByRole('button', { name: 'This item couldn’t be shown · tools fixture failure · View in Rows', exact: true })).toBeVisible()
   await expect(card.getByText('Before fixture', { exact: true })).toBeVisible()
   await expect(card.getByText('After fixture', { exact: true })).toBeVisible()
+  expect(live.pageErrors).toEqual([])
+})
+
+test('Transcript reserves the mounted page’s HTML, flat to the last page, and releases it when it unmounts', async () => {
+  // Five pages of 20 identical turns: each page's HTML is the same size.
+  const text = 'Bounded page fixture '.repeat(48)
+  const file = fixture('transcript-pages.jsonl', claudeSession(Array.from({ length: 100 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: text }))))
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  // What the renderer holds reserved for its one document's view.
+  const held = async () => (await debugStats(live.win)).surfaces!.bytes
+  await expect(card.getByText('1–20 of 100', { exact: true })).toBeVisible({ timeout: 30_000 })
+  const first = await held()
+  for (let page = 1; page < 5; page++) {
+    await card.getByRole('button', { name: 'Next turns', exact: true }).click()
+    await expect(card.getByText(`${page * 20 + 1}–${page * 20 + 20} of 100`, { exact: true })).toBeVisible()
+  }
+  // Each page replaces the one before and its charge: the fifth holds what the first did.
+  await expect.poll(held).toBe(first)
+  await card.getByRole('tab', { name: 'Rows', exact: true }).click()
+  await expect(card.locator('[data-lens="rows"]')).toBeVisible()
+  await expect.poll(held).toBeLessThan(first)
   expect(live.pageErrors).toEqual([])
 })
 

@@ -25,13 +25,20 @@ interface Options {
   openLocal?(target: string, path: string, gesture: LocalGesture): Promise<boolean>
   reserve(bytes: number): Promise<boolean>
 }
+/** One page's DOM, shown or being built: what its HTML and literal text are charged. */
+interface Pane {
+  bytes: number
+}
+/** The snapshot's allowance for one character of mounted HTML or text: its DOM nodes, its text and the HTML string. */
+const CHAR_BYTES = 1280
 /** Native graph descriptors own ordering and links; this view only presents bounded pages. */
 export class TranscriptView {
   private serial = 0
   private start = 0
   private showEvents = false
   private history: number[] = []
-  private htmlCharge = 0
+  private shown?: Pane
+  private building?: Pane
   constructor(
     private readonly host: HTMLElement,
     private readonly core: CoreClient,
@@ -41,8 +48,32 @@ export class TranscriptView {
     private readonly options: Options
   ) {}
 
+  /** Only the shown page and the one being built are reserved: reading to the end holds one page's charge, and the lens
+   *  releases it when it unmounts. */
   async show(start = this.start): Promise<void> {
-    const epoch = ++this.serial
+    const epoch = ++this.serial,
+      pane: Pane = { bytes: 0 }
+    this.building = pane
+    try {
+      await this.build(start, epoch, pane)
+    } finally {
+      // The page this one replaced is released, or this one, if a newer page replaced it first.
+      if (this.building === pane) this.building = undefined
+      if (!this.signal.aborted) void this.options.reserve(this.held())
+    }
+  }
+  private held(): number {
+    return (this.shown?.bytes ?? 0) + (this.building?.bytes ?? 0)
+  }
+  /** Charges `chars` to `pane` before they mount, unless it's off the screen already; refused, they don't mount. */
+  private async charge(pane: Pane, chars: number): Promise<void> {
+    pane.bytes += chars * CHAR_BYTES
+    if (this.signal.aborted || (pane !== this.shown && pane !== this.building)) return
+    if (await this.options.reserve(this.held())) return
+    pane.bytes -= chars * CHAR_BYTES
+    throw new Error('Transcript display exceeds the memory budget · use Rows or Raw')
+  }
+  private async build(start: number, epoch: number, pane: Pane): Promise<void> {
     const page = await this.core.call(
       'structuredTranscript',
       { ref: this.source.info.ref, start, count: 20, events: this.showEvents },
@@ -77,7 +108,7 @@ export class TranscriptView {
     body.append(controls)
     for (const item of page.items) {
       if (this.signal.aborted || epoch !== this.serial) return
-      body.append(await this.item(item))
+      body.append(await this.item(item, pane))
     }
     const navigation = make('div', undefined, 'structured-pagination')
     if (this.history.length) {
@@ -99,12 +130,15 @@ export class TranscriptView {
       make('span', `${page.items.length ? start + 1 : 0}–${start + page.items.length} of ${page.total}`)
     )
     body.append(navigation)
-    if (!this.signal.aborted && epoch === this.serial) this.host.replaceChildren(body)
+    if (!this.signal.aborted && epoch === this.serial) {
+      this.host.replaceChildren(body)
+      this.shown = pane
+    }
   }
   /** One item, or why it couldn't be shown: one item's failure never fails its page. */
-  private async item(item: TranscriptItem): Promise<HTMLElement> {
+  private async item(item: TranscriptItem, pane: Pane): Promise<HTMLElement> {
     try {
-      return await this.render(item)
+      return await this.render(item, pane)
     } catch (error) {
       if (this.signal.aborted || (error instanceof CoreCallError && error.code === 'Frozen')) throw error
       const problem = make(
@@ -117,7 +151,7 @@ export class TranscriptView {
       return problem
     }
   }
-  private async render(item: TranscriptItem): Promise<HTMLElement> {
+  private async render(item: TranscriptItem, pane: Pane): Promise<HTMLElement> {
     if (item.kind === 'branch' || item.kind === 'sidechain' || item.kind === 'conversation') {
       const group = document.createElement('details')
       group.className = 'transcript-conversation'
@@ -143,7 +177,7 @@ export class TranscriptView {
           this.signal
         )
         if (this.signal.aborted) return
-        for (const child of page.items) children.append(await this.item(child))
+        for (const child of page.items) children.append(await this.item(child, pane))
         if (page.next !== undefined) {
           const more = make('button', 'Show more messages')
           more.onclick = () => {
@@ -208,37 +242,37 @@ export class TranscriptView {
         const more = make('button', 'Show more tool calls')
         more.onclick = () => {
           more.remove()
-          void this.moreTools(turn, item, first.next!).catch(this.options.frozen)
+          void this.moreTools(turn, item, first.next!, pane).catch(this.options.frozen)
         }
         turn.append(more)
       }
     }
     const used = new Set<number>()
-    await this.content(turn, item.content, item.record, item, tools, used)
-    for (const tool of tools) if (!used.has(tool.ordinal)) turn.append(this.tool(item, tool))
+    await this.content(turn, item.content, item.record, pane, item, tools, used)
+    for (const tool of tools) if (!used.has(tool.ordinal)) turn.append(this.tool(item, tool, pane))
     const metadata = document.createElement('details')
     metadata.append(make('summary', 'Message metadata'))
     this.lazyTree(metadata, item.root, item.record)
     turn.append(metadata)
     return turn
   }
-  private async moreTools(parent: HTMLElement, item: TranscriptItem, start: number): Promise<void> {
+  private async moreTools(parent: HTMLElement, item: TranscriptItem, start: number, pane: Pane): Promise<void> {
     const page = await this.core.call(
       'structuredTranscriptTools',
       { ref: this.source.info.ref, item: item.id, start, count: 32 },
       this.signal
     )
-    for (const tool of page.tools) parent.append(this.tool(item, tool))
+    for (const tool of page.tools) parent.append(this.tool(item, tool, pane))
     if (page.next !== undefined) {
       const more = make('button', 'Show more tool calls')
       more.onclick = () => {
         more.remove()
-        void this.moreTools(parent, item, page.next!).catch(this.options.frozen)
+        void this.moreTools(parent, item, page.next!, pane).catch(this.options.frozen)
       }
       parent.append(more)
     }
   }
-  private tool(item: TranscriptItem, tool: TranscriptTool): HTMLElement {
+  private tool(item: TranscriptItem, tool: TranscriptTool, pane: Pane): HTMLElement {
     const disclosure = document.createElement('details')
     disclosure.className = 'transcript-tool'
     disclosure.dataset.toolId = tool.id
@@ -254,7 +288,7 @@ export class TranscriptView {
       for (const result of page.results) {
         const block = make('div', undefined, 'transcript-tool-result')
         block.append(make('strong', `Tool result · line ${result.record + 1}`))
-        await this.content(block, result.content ?? result.block, result.record)
+        await this.content(block, result.content ?? result.block, result.record, pane)
         disclosure.append(block)
       }
       if (page.next !== undefined) {
@@ -297,13 +331,14 @@ export class TranscriptView {
     parent: HTMLElement,
     node: StructuredNode | undefined,
     record: number,
+    pane: Pane,
     item?: TranscriptItem,
     tools: TranscriptTool[] = [],
     used = new Set<number>()
   ): Promise<void> {
     if (!node || this.signal.aborted) return
     if (node.kind === 'string') {
-      await this.markdown(parent, node, record)
+      await this.markdown(parent, node, record, pane)
       return
     }
     if (node.kind !== 'array' || node.container === undefined) {
@@ -328,11 +363,11 @@ export class TranscriptView {
         )
         if (call && item) {
           used.add(call.ordinal)
-          parent.append(this.tool(item, call))
+          parent.append(this.tool(item, call, pane))
           continue
         }
         if ((type === 'text' || type === 'input_text' || type === 'output_text') && text) {
-          await this.markdown(parent, text, record)
+          await this.markdown(parent, text, record, pane)
           continue
         }
         if (type === 'image' || type === 'image_url' || type === 'input_image') {
@@ -401,9 +436,11 @@ export class TranscriptView {
     )
     return string({ ...node, text: new TextDecoder(this.opened.encoding, { ignoreBOM: true }).decode(bytes) })
   }
-  private async markdown(parent: HTMLElement, node: StructuredNode, record: number): Promise<void> {
+  private async markdown(parent: HTMLElement, node: StructuredNode, record: number, pane: Pane): Promise<void> {
     if (node.span.end - node.span.start > 65536) {
-      parent.append(make('pre', string(node) + ' … (source preview)', 'transcript-text'))
+      const preview = string(node) + ' … (source preview)'
+      await this.charge(pane, preview.length)
+      parent.append(make('pre', preview, 'transcript-text'))
       const raw = make('button', 'View complete content in Rows')
       raw.onclick = () => this.options.rows(record)
       parent.append(raw)
@@ -422,13 +459,14 @@ export class TranscriptView {
       } catch (error) {
         // A block whose HTML passes the core's display bound: the text shows literally, and whole, instead.
         if (!(error instanceof CoreCallError && error.code === 'Refused')) throw error
-        holder.replaceWith(make('pre', await this.whole(node), 'transcript-text'))
+        const text = await this.whole(node)
+        await this.charge(pane, text.length)
+        holder.replaceWith(make('pre', text, 'transcript-text'))
         return
       }
       if (this.signal.aborted) return
+      await this.charge(pane, page.html.reduce((chars, html) => chars + html.length, 0))
       for (const html of page.html) {
-        this.htmlCharge += html.length * 1280
-        if (!await this.options.reserve((32 << 20) + this.htmlCharge)) throw new Error('Transcript display exceeds the memory budget · use Rows or Raw')
         const fragment = make('div', undefined, 'md-block')
         fragment.innerHTML = html
         holder.append(fragment)
