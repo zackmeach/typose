@@ -17,9 +17,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use typose_core::budget::{self, Work};
+use typose_core::budget::{self, Reservation, Work};
 use typose_core::doc::{DocError, STRUCT_BYTES};
 use typose_core::images::{self, ImageError};
+use typose_core::jsonl;
 use typose_core::md::MAX_SOURCE;
 use typose_core::pages::MAX_ITEMS;
 use typose_core::raw::Raw;
@@ -324,6 +325,104 @@ fn padded_tables(len: usize) -> String {
         s.push_str(&format!("{}\n{}\n{}\n", "|a".repeat(362), "|-".repeat(362), "a\n".repeat(724)));
     }
     s
+}
+
+/// A Claude Code session for the transcript graph (M5 PR 1): tool calls and their results, sidechains, session events
+/// between messages, a 2,000-message branch, and a rerun of its first records after a `bridge-session` record.
+fn claude_session() -> String {
+    let message = |kind: &str, uuid: &str, parent: &str, side: bool, content: &str| {
+        format!(
+            r#"{{"type":"{kind}","uuid":"{uuid}","parentUuid":{parent},"isSidechain":{side},"timestamp":"2026-11-04T12:00:00.000Z","message":{{"role":"{kind}","content":{content}}}}}"#
+        )
+    };
+    let mut lines = Vec::new();
+    let mut parent = "null".to_string();
+    for i in 0..10_000 {
+        let content = if i % 2 == 0 {
+            format!(
+                r#"[{{"type":"tool_result","tool_use_id":"t{i}a","content":"r"}},{{"type":"tool_result","tool_use_id":"t{i}b","content":"r"}}]"#
+            )
+        } else {
+            r#""question""#.into()
+        };
+        lines.push(message("user", &format!("u{i}"), &parent, false, &content));
+        parent = format!(r#""u{i}""#);
+        if i % 7 == 0 {
+            lines.push(format!(r#"{{"type":"system","uuid":"e{i}","parentUuid":{parent}}}"#));
+            parent = format!(r#""e{i}""#);
+        }
+        let calls = format!(
+            r#"[{{"type":"text","text":"answer"}},{{"type":"tool_use","id":"t{}a","name":"read","input":{{"path":"x"}}}},{{"type":"tool_use","id":"t{}b","name":"grep","input":{{}}}}]"#,
+            i + 1,
+            i + 1
+        );
+        lines.push(message("assistant", &format!("a{i}"), &parent, false, &calls));
+        if i % 50 == 0 {
+            lines.push(message("assistant", &format!("s{i}"), &format!(r#""a{i}""#), true, r#""side""#));
+        }
+        parent = format!(r#""a{i}""#);
+    }
+    lines.extend((0..2000).map(|i| {
+        let fork = if i == 0 { r#""a0""#.to_string() } else { format!(r#""b{}""#, i - 1) };
+        message("assistant", &format!("b{i}"), &fork, false, r#""branch""#)
+    }));
+    lines.push(r#"{"type":"bridge-session","sessionId":"s"}"#.into());
+    lines.extend(lines[..500].to_vec());
+    lines.push(message("user", "last", &parent, false, r#""last""#));
+    lines.join(
+        "
+",
+    ) + "
+"
+}
+
+/// An OpenAI fine-tuning dataset: conversations of a system prompt and 40 rounds of a tool call, its result and a
+/// question, so each record's turns grow long.
+fn openai_dataset() -> String {
+    let round = |i: usize| {
+        format!(
+            r#"{{"role":"assistant","content":null,"tool_calls":[{{"id":"c{i}","type":"function","function":{{"name":"lookup","arguments":"{{}}"}}}}]}},{{"role":"tool","tool_call_id":"c{i}","content":"r"}},{{"role":"user","content":"q"}}"#
+        )
+    };
+    let line = format!(
+        r#"{{"messages":[{{"role":"system","content":"s"}},{}],"metadata":{{"split":"train"}}}}"#,
+        (0..40).map(round).collect::<Vec<_>>().join(",")
+    );
+    vec![line; 1000].join(
+        "
+",
+    ) + "
+"
+}
+
+/// Indexes `path` as JSONL, with its transcript graph, checked throughout; holds it, then drops it and the document:
+/// the ledger is back to its baseline.
+fn transcript_shape(step: usize, name: &str, path: &Path) {
+    let before = budget::totals();
+    STEP.store(step, SeqCst);
+    ARMED.store(true, SeqCst);
+    let start = (LIVE.load(SeqCst), budget::in_use().0);
+    let raw = Raw::open(path).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let index = jsonl::Index::with_encoding(raw.source_encoding()).unwrap();
+    let temp = Reservation::new(typose_core::structured::TEMP_BYTES).unwrap();
+    index.build_reserved(raw.document(), 1, temp).unwrap_or_else(|e| panic!("{name}: {e}"));
+    // The build's temporaries are released: the graph, the index and the document hold only what they're charged.
+    let (live, reserved) = (LIVE.load(SeqCst) - start.0, budget::in_use().0 - start.1);
+    let graph = index.transcript.lock().unwrap();
+    let (ready, entries, items, charged) = (graph.ready, graph.entries.len(), graph.items.len(), graph.charged());
+    drop(graph);
+    drop(index);
+    drop(raw);
+    ARMED.store(false, SeqCst);
+    let leaked = LIVE.load(SeqCst) as i64 - BASELINE.load(SeqCst) as i64;
+    println!(
+        "{name:>24}: {entries} records, {items} items, {charged} charged for the graph; once built, {live} live and \
+         {reserved} reserved since it opened; live past baseline after: {leaked}"
+    );
+    assert!(ready, "{name}: the transcript graph is off");
+    assert!(live <= reserved, "{name}: {live} bytes live since it opened, {reserved} reserved");
+    assert_eq!(budget::totals().used, before.used, "{name}: the ledger isn't back to its baseline");
+    assert!(leaked.unsigned_abs() < 64 << 10, "{name}: {leaked} bytes still live");
 }
 
 /// Builds `path` as Markdown, checked throughout, holds the build, then drops it and the document: the ledger is back
@@ -725,6 +824,9 @@ fn main() {
         fs::write(path, bytes).unwrap();
     }
     let markdown: Vec<(&str, PathBuf)> = markdown.into_iter().map(|(name, path, _)| (name, path)).collect();
+    let transcripts = [("Claude Code session", at("claude.jsonl")), ("OpenAI dataset", at("dataset.jsonl"))];
+    fs::write(&transcripts[0].1, claude_session()).unwrap();
+    fs::write(&transcripts[1].1, openai_dataset()).unwrap();
 
     budget::set_limit(8 << 30).unwrap();
     // A first build makes the statics a build uses once for the process (ammonia's builder, html5ever's atoms).
@@ -811,6 +913,10 @@ fn main() {
     assert_eq!(after - grown, opened, "a refused build left something charged");
     assert_eq!(budget::totals().used, used);
     println!("a build under a tight budget: {}; the cache grew {grown} bytes reading for it", refused.unwrap_err());
+    // M5 PR 1: the transcript graph's reservations, from its structs' sizes, cover what it holds as it's built and held.
+    for (k, (name, path)) in transcripts.iter().enumerate() {
+        transcript_shape(4 * shapes.len() + 3 + markdown.len() + k, name, path);
+    }
 
     JOB.store(0, SeqCst);
     ROUND.fetch_add(1, SeqCst);
@@ -823,6 +929,7 @@ fn main() {
         .into_iter()
         .chain(markdown.iter().map(|m| m.0))
         .chain(["a Markdown build refused"])
+        .chain(transcripts.iter().map(|t| t.0))
         .collect();
     let place = match shapes.get(at / 4) {
         Some(s) => format!("{}: {}", s.name, ["open", "fill the cache", "index", "8 pages"][at % 4]),

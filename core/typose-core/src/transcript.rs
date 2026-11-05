@@ -1,9 +1,14 @@
 //! Source-backed transcript metadata (brief §5.4). Payloads remain in the verified JSONL source: `observe` keeps each
 //! record's spans and container ids as the JSONL index reads it, and `finish` builds the displayed order once the file
 //! is indexed. Past a cap, the graph is off and Rows remains.
+//!
+//! **Memory (spec §3.6, plan C1).** What the graph keeps is reserved at its real size: each vector's slots from its
+//! element's `size_of` and its capacity (`json::room` grows the long ones), and each string's capacity (`heap`).
+//! `finish` reserves its temporaries before it makes any (`finish_temp`). A refusal turns the graph off and releases
+//! all it holds, as closing the document does.
 use crate::budget::Reservation;
 use crate::doc::DocError;
-use crate::json::{Child, JsonIndex, Kind, Span};
+use crate::json::{self, Child, JsonIndex, Kind, Span};
 use crate::jsonl::{named_fields, read_string, visit_members};
 use crate::store::{ByteStore, StoreError, cancelled};
 use std::collections::{HashMap, HashSet};
@@ -128,10 +133,10 @@ impl Graph {
     }
     fn disable(&mut self, reason: &str) {
         self.reason = Some(reason.into());
-        self.entries.clear();
-        self.entries.shrink_to_fit();
-        self.items.clear();
-        self.main.clear();
+        // The memory, then what paid for it.
+        self.entries = Vec::new();
+        self.items = Vec::new();
+        self.main = Vec::new();
         self.charge = Reservation::none();
     }
     pub fn observe(&mut self, store: &ByteStore, index: &JsonIndex, line: u64, span: Span) -> Result<(), StoreError> {
@@ -168,6 +173,9 @@ impl Graph {
                 .map(|node| read_string(store, node.value))
                 .transpose()
         };
+        // The entry's turns, reserved as they're made, until the entry is charged to the graph. Declared first, so it's
+        // released after them.
+        let mut held = Reservation::none();
         let mut entry = Entry {
             line,
             span,
@@ -190,36 +198,43 @@ impl Graph {
             self.disable("A transcript graph ID exceeds its metadata limit; Rows preserves the source");
             return Ok(());
         }
+        let mut fits = true;
         let event_type = string("type")?.unwrap_or_default();
         if matches!(event_type.as_str(), "user" | "assistant")
             && let Some(container) =
                 fields.get("message").filter(|node| node.kind == Kind::Object).and_then(|node| node.container)
         {
             entry.schema = "claude-code-v1";
-            entry.turns.push(turn(store, index, container, true)?);
+            fits = add(&mut entry.turns, &mut held, turn(store, index, container, true)?);
         } else if let Some(container) =
             fields.get("messages").filter(|node| node.kind == Kind::Array).and_then(|node| node.container)
         {
             entry.schema = "openai-dataset-v1";
             visit_members(store, index, container, |message| {
                 if let Some(container) = message.container.filter(|_| message.kind == Kind::Object) {
-                    entry.turns.push(turn(store, index, container, false)?);
+                    fits = add(&mut entry.turns, &mut held, turn(store, index, container, false)?);
                 }
-                Ok(true)
+                Ok(fits)
             })?;
         } else if string("role")?.is_some_and(|role| crate::jsonl::known_role(&role)) && fields.contains_key("content")
         {
             entry.schema = "openai-chat-v1";
-            entry.turns.push(turn(store, index, 0, false)?);
+            fits = add(&mut entry.turns, &mut held, turn(store, index, 0, false)?);
         }
         if entry.turns.iter().any(|turn| turn.results.len() > MAX_RESULTS || turn.calls.len() > MAX_CALLS) {
             self.disable("A turn exceeds the bounded Transcript tool metadata limit; Rows preserves every block");
             return Ok(());
         }
-        if self.entries.len() >= MAX_ENTRIES || self.charge.grow(estimate(&entry)).is_err() {
+        if !fits
+            || self.entries.len() >= MAX_ENTRIES
+            || fit(&mut entry.turns, &mut held).is_err()
+            || self.charge.grow(heap(&entry)).is_err()
+            || json::room(&mut self.entries, &mut self.charge).is_err()
+        {
             self.disable("Transcript graph exceeds its memory or record limit; Rows remains available");
             return Ok(());
         }
+        drop(held);
         self.entries.push(entry);
         Ok(())
     }
@@ -252,19 +267,27 @@ impl Graph {
         Ok(())
     }
     fn build(&mut self, schema: &'static str, steps: &mut Steps) -> Result<(), Stop> {
+        let turns = || self.entries.iter().flat_map(|entry| &entry.turns);
+        let count =
+            (turns().count(), turns().map(|turn| turn.calls.len()).sum(), turns().map(|turn| turn.results.len()).sum());
+        // Each item is a turn or stands for a record (an event, a conversation, a group rooted at it).
+        if (self.entries.len() + count.0) as u64 > MAX_ITEMS {
+            return Err(Stop::Off("Transcript graph exceeds its item limit; Rows remains available"));
+        }
+        let _temp = Reservation::new(finish_temp(self.entries.len(), count.0, count.1, count.2)).map_err(|_| MEMORY)?;
         if schema == "claude-code-v1" {
             self.drop_copies(steps)?;
         }
-        // Each item is a turn or stands for a record (an event, a conversation, a group rooted at it).
-        let turns: usize = self.entries.iter().map(|entry| entry.turns.len()).sum();
-        if (self.entries.len() + turns) as u64 > MAX_ITEMS {
-            return Err(Stop::Off("Transcript graph exceeds its item limit; Rows remains available"));
-        }
-        if self.charge.grow(self.entries.len() as u64 * 4096).is_err() {
-            return Err(Stop::Off("Transcript graph finalization exceeds its memory budget; Rows remains available"));
-        }
         self.match_tools(schema, steps)?;
-        if schema == "claude-code-v1" { self.claude(steps) } else { self.openai(schema, steps) }
+        if schema == "claude-code-v1" {
+            self.claude(steps)?;
+        } else {
+            self.openai(schema, steps)?;
+        }
+        // What the vectors grew past their length goes back.
+        fit(&mut self.entries, &mut self.charge).map_err(|_| MEMORY)?;
+        fit(&mut self.items, &mut self.charge).map_err(|_| MEMORY)?;
+        fit(&mut self.main, &mut self.charge).map_err(|_| MEMORY)
     }
     /// Claude Code writes some records twice. On this PC (M5 PR 1), 10 of 274 sessions hold 12,351 later copies of
     /// earlier records, in runs that each follow a `bridge-session` or `pr-link` record; every later copy is timestamped
@@ -283,16 +306,34 @@ impl Graph {
         let (mut at, mut freed) = (0, 0);
         self.entries.retain(|entry| {
             at += 1;
-            freed += if keep[at - 1] { 0 } else { estimate(entry) };
+            freed += if keep[at - 1] { 0 } else { heap(entry) };
             keep[at - 1]
         });
         self.charge.shrink(freed);
         Ok(())
     }
-    fn item(&mut self, kind: &'static str, entry: usize, turn: Option<usize>, children: Vec<usize>) -> usize {
+    fn item(
+        &mut self,
+        kind: &'static str,
+        entry: usize,
+        turn: Option<usize>,
+        mut children: Vec<usize>,
+    ) -> Result<usize, Stop> {
+        json::room(&mut self.items, &mut self.charge).map_err(|_| MEMORY)?;
+        // `children` grew in `finish_temp`: it keeps its length.
+        self.charge.grow((children.len() * size_of::<usize>()) as u64).map_err(|_| MEMORY)?;
+        children.shrink_to_fit();
         let id = self.items.len();
         self.items.push(Item { kind, entry, turn, children });
-        id
+        Ok(id)
+    }
+    /// Puts `items` next in the main order.
+    fn show(&mut self, items: impl IntoIterator<Item = usize>) -> Result<(), Stop> {
+        for item in items {
+            json::room(&mut self.main, &mut self.charge).map_err(|_| MEMORY)?;
+            self.main.push(item);
+        }
+        Ok(())
     }
     fn turn_items(&mut self, entry: usize, steps: &mut Steps) -> Result<Vec<usize>, Stop> {
         let count = self.entries[entry].turns.len();
@@ -303,13 +344,14 @@ impl Graph {
             if turn.only_results && turn.results.iter().all(|result| result.linked) {
                 continue;
             }
-            items.push(self.item("turn", entry, Some(index), Vec::new()));
+            items.push(self.item("turn", entry, Some(index), Vec::new())?);
         }
         Ok(items)
     }
     fn match_tools(&mut self, schema: &str, steps: &mut Steps) -> Result<(), Stop> {
-        let mut calls = HashMap::new();
-        let mut results = Vec::new();
+        let turns = || self.entries.iter().flat_map(|entry| &entry.turns);
+        let mut calls = HashMap::with_capacity(turns().map(|turn| turn.calls.len()).sum());
+        let mut results = Vec::with_capacity(turns().map(|turn| turn.results.len()).sum());
         for (entry_index, entry) in self.entries.iter().enumerate() {
             steps.tick()?;
             if !same_schema(entry.schema, schema) {
@@ -322,25 +364,37 @@ impl Graph {
                 for (call_index, call) in turn.calls.iter().enumerate() {
                     steps.tick()?;
                     if !call.id.is_empty() {
-                        calls.insert((prefix, call.id.clone()), (entry_index, turn_index, call_index));
+                        calls.insert((prefix, call.id.as_str()), (entry_index, turn_index, call_index));
                     }
                     self.census.calls += 1;
                 }
                 for (result_index, result) in turn.results.iter().enumerate() {
                     steps.tick()?;
-                    results.push((prefix, entry_index, turn_index, result_index, result.id.clone()));
+                    results.push((prefix, result.id.as_str(), (entry_index, turn_index, result_index)));
                 }
             }
         }
-        for (prefix, entry, turn, result, id) in results {
+        let mut links: Vec<(Place, Place)> = Vec::with_capacity(results.len());
+        for (prefix, id, result) in results {
             steps.tick()?;
-            if let Some(&(caller, caller_turn, call)) = calls.get(&(prefix, id)) {
-                self.entries[caller].turns[caller_turn].calls[call].results.push(ResultLink { entry, turn, result });
-                self.entries[entry].turns[turn].results[result].linked = true;
-                self.census.matched_results += 1;
-            } else {
-                self.census.unmatched_results += 1;
+            match calls.get(&(prefix, id)) {
+                Some(&call) => links.push((call, result)),
+                None => self.census.unmatched_results += 1,
             }
+        }
+        drop(calls);
+        // Each call's results in file order, in a vector of exactly their number.
+        links.sort_unstable();
+        for group in links.chunk_by(|a, b| a.0 == b.0) {
+            let (entry, turn, call) = group[0].0;
+            self.charge.grow((group.len() * size_of::<ResultLink>()) as u64).map_err(|_| MEMORY)?;
+            let call = &mut self.entries[entry].turns[turn].calls[call];
+            call.results = group.iter().map(|&(_, (entry, turn, result))| ResultLink { entry, turn, result }).collect();
+            for &(_, (entry, turn, result)) in group {
+                steps.tick()?;
+                self.entries[entry].turns[turn].results[result].linked = true;
+            }
+            self.census.matched_results += group.len() as u64;
         }
         Ok(())
     }
@@ -350,15 +404,15 @@ impl Graph {
             if same_schema(self.entries[entry].schema, schema) {
                 let turns = self.turn_items(entry, steps)?;
                 if self.entries[entry].schema == "openai-dataset-v1" {
-                    let item = self.item("conversation", entry, None, turns);
-                    self.main.push(item);
+                    let item = self.item("conversation", entry, None, turns)?;
+                    self.show([item])?;
                 } else {
-                    self.main.extend(turns);
+                    self.show(turns)?;
                 }
             } else {
                 self.census.events += 1;
-                let item = self.item("event", entry, None, Vec::new());
-                self.main.push(item);
+                let item = self.item("event", entry, None, Vec::new())?;
+                self.show([item])?;
             }
         }
         Ok(())
@@ -366,8 +420,11 @@ impl Graph {
     fn claude(&mut self, steps: &mut Steps) -> Result<(), Stop> {
         let n = self.entries.len();
         let message: Vec<bool> = self.entries.iter().map(|entry| entry.schema == "claude-code-v1").collect();
-        let messages: Vec<usize> = (0..n).filter(|&index| message[index]).collect();
-        let events: Vec<usize> = (0..n).filter(|&index| !message[index]).collect();
+        let count = message.iter().filter(|&&is| is).count();
+        let (mut messages, mut events) = (Vec::with_capacity(count), Vec::with_capacity(n - count));
+        for (index, &is) in message.iter().enumerate() {
+            (if is { &mut messages } else { &mut events }).push(index);
+        }
         self.census.events = events.len() as u64;
         let mut ids = HashMap::with_capacity(n);
         for (index, entry) in self.entries.iter().enumerate() {
@@ -406,7 +463,7 @@ impl Graph {
         let leaf = messages.iter().rev().find(|&&index| !side[index] && !has_child[index]).copied();
         let mut at = Some(leaf.ok_or(Stop::Off("Transcript has no leaf message; inspect its graph in Rows"))?);
         let mut on_chain = vec![false; n];
-        let mut chain = Vec::new();
+        let mut chain = Vec::with_capacity(messages.len());
         while let Some(index) = at {
             steps.tick()?;
             if on_chain[index] {
@@ -438,8 +495,8 @@ impl Graph {
         // Sidechains first, since a branch nests the ones hanging from its messages; each by its first message, and its
         // members in file order (the sort is stable).
         groups.sort_by_key(|&(branch, root, _, _)| (branch, root));
-        let mut side_items: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
-        let mut branch_items: HashMap<Option<usize>, Vec<usize>> = HashMap::new();
+        let mut side_items: HashMap<Option<usize>, Vec<usize>> = HashMap::with_capacity(groups.len());
+        let mut branch_items: HashMap<Option<usize>, Vec<usize>> = HashMap::with_capacity(groups.len());
         for group in groups.chunk_by(|a, b| (a.0, a.1) == (b.0, b.1)) {
             let (branch, _, attach, first) = group[0];
             let mut children = Vec::new();
@@ -456,36 +513,28 @@ impl Graph {
                 self.census.sidechains += 1;
                 ("sidechain", &mut side_items)
             };
-            let item = self.item(kind, first, None, children);
+            let item = self.item(kind, first, None, children)?;
             items.entry(attach).or_default().push(item);
         }
-        if let Some(branch) = branch_items.remove(&None) {
-            self.main.extend(branch);
-        }
-        if let Some(side) = side_items.remove(&None) {
-            self.main.extend(side);
-        }
+        self.show(branch_items.remove(&None).into_iter().flatten())?;
+        self.show(side_items.remove(&None).into_iter().flatten())?;
         let mut event_at = 0;
         for entry in chain {
             while event_at < events.len() && events[event_at] < entry {
                 steps.tick()?;
-                let item = self.item("event", events[event_at], None, Vec::new());
-                self.main.push(item);
+                let item = self.item("event", events[event_at], None, Vec::new())?;
+                self.show([item])?;
                 event_at += 1;
             }
             let turns = self.turn_items(entry, steps)?;
-            self.main.extend(turns);
-            if let Some(branch) = branch_items.remove(&Some(entry)) {
-                self.main.extend(branch);
-            }
-            if let Some(side) = side_items.remove(&Some(entry)) {
-                self.main.extend(side);
-            }
+            self.show(turns)?;
+            self.show(branch_items.remove(&Some(entry)).into_iter().flatten())?;
+            self.show(side_items.remove(&Some(entry)).into_iter().flatten())?;
         }
         while event_at < events.len() {
             steps.tick()?;
-            let item = self.item("event", events[event_at], None, Vec::new());
-            self.main.push(item);
+            let item = self.item("event", events[event_at], None, Vec::new())?;
+            self.show([item])?;
             event_at += 1;
         }
         // A branch forks from the chain, and a sidechain hangs from the chain or a branch's message, or from neither.
@@ -494,6 +543,9 @@ impl Graph {
     }
 }
 const CYCLE: &str = "Transcript parent graph contains a cycle; inspect in Rows";
+const MEMORY: Stop = Stop::Off("Transcript graph exceeds its memory budget; Rows remains available");
+/// A turn, or a call or result in it: its entry, turn and ordinal.
+type Place = (usize, usize, usize);
 /// How `finish` stopped short.
 enum Stop {
     /// The graph is off for this reason; Rows remains.
@@ -552,23 +604,78 @@ fn climb(
     }
     Ok(Some(found))
 }
-/// What an entry is charged.
-fn estimate(entry: &Entry) -> u64 {
-    let mut bytes = 2048
-        + (entry.timestamp.len()
-            + entry.uuid.as_ref().map_or(0, String::len)
-            + entry.parent.as_ref().map_or(0, String::len)) as u64
-            * 8;
-    for turn in &entry.turns {
-        bytes += 2048 + turn.role.len() as u64 * 8;
-        for call in &turn.calls {
-            bytes += 2048 + (call.id.len() + call.name.len()) as u64 * 8;
-        }
-        for result in &turn.results {
-            bytes += 1024 + result.id.len() as u64 * 8;
-        }
+/// What a turn holds on the heap: its role, and its calls' and results' slots and strings.
+fn turn_heap(turn: &Turn) -> u64 {
+    let calls: usize = turn
+        .calls
+        .iter()
+        .map(|call| call.id.capacity() + call.name.capacity() + call.results.capacity() * size_of::<ResultLink>())
+        .sum();
+    let results: usize = turn.results.iter().map(|result| result.id.capacity()).sum();
+    (turn.role.capacity()
+        + turn.calls.capacity() * size_of::<ToolCall>()
+        + calls
+        + turn.results.capacity() * size_of::<ToolResult>()
+        + results) as u64
+}
+/// What an entry holds on the heap, its slot in `Graph::entries` aside: its strings, and its turns' slots and heap.
+fn heap(entry: &Entry) -> u64 {
+    let strings = entry.timestamp.capacity()
+        + entry.uuid.as_ref().map_or(0, String::capacity)
+        + entry.parent.as_ref().map_or(0, String::capacity);
+    (strings + entry.turns.capacity() * size_of::<Turn>()) as u64 + entry.turns.iter().map(turn_heap).sum::<u64>()
+}
+/// Adds `turn` to `turns`, reserving its heap and its slot (`json::room`) in `held` first. False if the ledger refuses.
+fn add(turns: &mut Vec<Turn>, held: &mut Reservation, turn: Turn) -> bool {
+    if held.grow(turn_heap(&turn)).is_err() || json::room(turns, held).is_err() {
+        return false;
     }
-    bytes
+    turns.push(turn);
+    true
+}
+/// Shrinks `values`, whose capacity `charge` pays for, to its length, and releases the rest. The smaller block is
+/// reserved first, since a moving realloc holds both.
+fn fit<T>(values: &mut Vec<T>, charge: &mut Reservation) -> Result<(), crate::budget::OverBudget> {
+    let old = values.capacity();
+    if old > values.len() {
+        charge.grow((values.len() * size_of::<T>()) as u64)?;
+        values.shrink_to_fit();
+        charge.shrink((old * size_of::<T>()) as u64);
+    }
+    Ok(())
+}
+/// The most a `HashMap` or `HashSet` of `T`s made `with_capacity(n)` allocates: hashbrown's buckets, n × 8/7 to a
+/// power of two, each a `T` and a control byte, then a group of control bytes and its alignment.
+fn table<T>(n: usize) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    let buckets = if n < 8 { 8 } else { (n * 8 / 7).next_power_of_two() };
+    buckets * (size_of::<T>() + 1) + 32
+}
+/// `finish`'s temporaries for `records` records of `turns` turns, `calls` tool calls and `results` tool results,
+/// reserved before it makes any. Each table is one `with_capacity` (`table`) and each list one `Vec::with_capacity` of
+/// at most a record, call or result each; the lists of items it collects grow, so they count four slots an item, a
+/// growing `Vec`'s most. Its phases run one after another, and this is their sum.
+fn finish_temp(records: usize, turns: usize, calls: usize, results: usize) -> u64 {
+    type Group = (bool, usize, Option<usize>, usize);
+    let copies = table::<&str>(records) + records;
+    let tools = table::<((usize, &str), Place)>(calls)
+        + results * (size_of::<(usize, &str, Place)>() + size_of::<(Place, Place)>());
+    // Four flags, three indexes (messages or events, the climb's path, the chain), two parents (direct and nearest
+    // message), two memos, and a group with the stable sort's scratch for it, a record; its uuid table, the two group
+    // tables and their lists.
+    let claude = records
+        * (4 + 3 * size_of::<usize>()
+            + 2 * size_of::<Option<usize>>()
+            + 2 * size_of::<Climb>()
+            + 2 * size_of::<Group>()
+            + 4 * size_of::<usize>())
+        + table::<(&str, usize)>(records)
+        + 2 * table::<(Option<usize>, Vec<usize>)>(records);
+    // `turn_items`' lists and the groups' children: an item each, both growing.
+    let lists = 2 * 4 * size_of::<usize>() * (records + turns);
+    (copies + tools + claude + lists) as u64
 }
 fn same_schema(entry: &str, schema: &str) -> bool {
     entry == schema || entry.starts_with("openai-") && schema.starts_with("openai-")
@@ -620,7 +727,7 @@ fn turn(store: &ByteStore, index: &JsonIndex, container: u32, claude: bool) -> R
                         _ => {}
                     }
                 }
-                Ok(true)
+                Ok(turn.calls.len() <= MAX_CALLS && turn.results.len() <= MAX_RESULTS)
             })?;
             turn.only_results = blocks > 0 && blocks == turn.results.len();
         }
@@ -647,7 +754,7 @@ fn turn(store: &ByteStore, index: &JsonIndex, container: u32, claude: bool) -> R
                         });
                     }
                 }
-                Ok(true)
+                Ok(turn.calls.len() <= MAX_CALLS)
             })?;
         }
         if matches!(turn.role.as_str(), "tool" | "function") {
@@ -683,6 +790,8 @@ fn turn(store: &ByteStore, index: &JsonIndex, container: u32, claude: bool) -> R
             }
         }
     }
+    turn.calls.shrink_to_fit();
+    turn.results.shrink_to_fit();
     Ok(turn)
 }
 
@@ -948,5 +1057,52 @@ mod tests {
         assert!(matches!(cancellable(&cancel, || graph.finish(Some("claude-code-v1"))), Err(DocError::Cancelled)));
         assert!(!graph.ready && graph.entries.is_empty() && graph.items.is_empty());
         assert_eq!(graph.charged(), 0);
+    }
+    /// Reservations come from the structs' sizes (`heap`, `turn_heap`, `finish_temp`). A change to these structs fails
+    /// this: then check those still count every field that holds memory. After `finish`, the graph is charged exactly
+    /// what it holds.
+    #[test]
+    fn the_charge_is_what_the_graph_holds() {
+        use super::{Climb, Entry, Item, ResultLink, SourceRef, ToolCall, ToolResult, Turn, heap};
+        assert_eq!(
+            [
+                size_of::<SourceRef>(),
+                size_of::<ResultLink>(),
+                size_of::<ToolCall>(),
+                size_of::<ToolResult>(),
+                size_of::<Turn>(),
+                size_of::<Entry>(),
+                size_of::<Item>(),
+                size_of::<Climb>(),
+            ],
+            [40, 24, 152, 112, 120, 184, 64, 24]
+        );
+        let line = r#"{"messages":[{"role":"system","content":"s"},{"role":"assistant","content":null,"tool_calls":[{"id":"t","function":{"name":"lookup","arguments":"{}"}},{"id":"u","function":{"name":"find","arguments":"{}"}}]},{"role":"tool","tool_call_id":"t","content":"one"},{"role":"tool","tool_call_id":"u","content":"two"}]}"#;
+        for (name, lines) in [
+            ("transcript-charge-dataset", vec![line; 3]),
+            (
+                "transcript-charge-claude",
+                vec![
+                    r#"{"type":"user","uuid":"u0","parentUuid":null,"timestamp":"2026-11-04T12:00:00Z","message":{"role":"user","content":"start"}}"#,
+                    r#"{"type":"assistant","uuid":"a1","parentUuid":"u0","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"read","input":{}}]}}"#,
+                    r#"{"type":"user","uuid":"u1","parentUuid":"a1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"r"}]}}"#,
+                    r#"{"type":"assistant","uuid":"old","parentUuid":"u1","message":{"role":"assistant","content":"old"}}"#,
+                    r#"{"type":"assistant","uuid":"s1","parentUuid":"u1","isSidechain":true,"message":{"role":"assistant","content":"side"}}"#,
+                    r#"{"type":"system","uuid":"e1","parentUuid":"u1"}"#,
+                    r#"{"type":"assistant","uuid":"new","parentUuid":"e1","message":{"role":"assistant","content":"new"}}"#,
+                ],
+            ),
+        ] {
+            let index = fixture(name, &lines);
+            let graph = index.transcript.lock().unwrap();
+            assert!(graph.ready, "{name}: {:?}", graph.reason);
+            let held = graph.entries.capacity() * size_of::<Entry>()
+                + graph.items.capacity() * size_of::<Item>()
+                + graph.main.capacity() * size_of::<usize>()
+                + graph.items.iter().map(|item| item.children.capacity() * size_of::<usize>()).sum::<usize>();
+            let held = held as u64 + graph.entries.iter().map(heap).sum::<u64>();
+            assert_eq!(graph.charged(), held, "{name}");
+            assert_eq!(graph.entries.capacity(), graph.entries.len(), "{name}: finish fits its vectors");
+        }
     }
 }
