@@ -3,6 +3,7 @@ import { CoreCallError, type CoreClient } from '../core'
 import type { LocalGesture } from '../reader-window'
 import type { StructuredSource } from './structured-source'
 import { mappedRange } from './rendered-selection'
+import { RENDERED_PER_UNIT } from './rendered-charge'
 
 const make = (tag: string, text?: string, className?: string): HTMLElement => {
   const element = document.createElement(tag)
@@ -54,7 +55,8 @@ interface Options {
 interface Pane {
   bytes: number
 }
-/** The snapshot's allowance for one character of mounted HTML or text: its DOM nodes, its text and the HTML string. */
+/** The snapshot's allowance for one character of mounted HTML: its DOM nodes, its text and the HTML string. Literal
+ *  text is one text node: Rendered's allowance for a unit of text (`RENDERED_PER_UNIT`). */
 const CHAR_BYTES = 1280
 /** Native graph descriptors own ordering and links; this view only presents bounded pages. */
 export class TranscriptView {
@@ -90,12 +92,12 @@ export class TranscriptView {
   private held(): number {
     return (this.shown?.bytes ?? 0) + (this.building?.bytes ?? 0)
   }
-  /** Charges `chars` to `pane` before they mount, unless it's off the screen already; refused, they don't mount. */
-  private async charge(pane: Pane, chars: number): Promise<void> {
-    pane.bytes += chars * CHAR_BYTES
+  /** Charges `bytes` to `pane` before they mount, unless it's off the screen already; refused, they don't mount. */
+  private async charge(pane: Pane, bytes: number): Promise<void> {
+    pane.bytes += bytes
     if (this.signal.aborted || (pane !== this.shown && pane !== this.building)) return
     if (await this.options.reserve(this.held())) return
-    pane.bytes -= chars * CHAR_BYTES
+    pane.bytes -= bytes
     throw new Error('Transcript display exceeds the memory budget · use Rows or Raw')
   }
   private async build(start: number, epoch: number, pane: Pane): Promise<void> {
@@ -464,7 +466,7 @@ export class TranscriptView {
   private async markdown(parent: HTMLElement, node: StructuredNode, record: number, pane: Pane): Promise<void> {
     if (node.span.end - node.span.start > 65536) {
       const preview = string(node) + ' … (source preview)'
-      await this.charge(pane, preview.length)
+      await this.charge(pane, preview.length * RENDERED_PER_UNIT)
       parent.append(make('pre', preview, 'transcript-text'))
       const raw = make('button', 'View complete content in Rows')
       raw.onclick = () => this.options.rows(record)
@@ -478,7 +480,7 @@ export class TranscriptView {
     /** The text, literally and whole, in place of its Markdown. */
     const literal = async () => {
       text ??= await this.whole(node)
-      await this.charge(pane, text.length)
+      await this.charge(pane, text.length * RENDERED_PER_UNIT)
       holder.replaceWith(make('pre', text, 'transcript-text'))
     }
     const load = async (block: number) => {
@@ -504,7 +506,7 @@ export class TranscriptView {
         await literal()
         return
       }
-      await this.charge(pane, page.html.reduce((chars, html) => chars + html.length, 0))
+      await this.charge(pane, page.html.reduce((chars, html) => chars + html.length, 0) * CHAR_BYTES)
       for (const html of page.html) {
         const fragment = make('div', undefined, 'md-block')
         fragment.innerHTML = html
