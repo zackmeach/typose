@@ -104,7 +104,14 @@ export interface StructuredRef { session: number; doc: number; gen: number; revi
 export interface SourceSpan { start: number; end: number }
 export interface StructuredProblem { kind: string; count: number; message: string; first: SourceSpan; line?: number; column?: number }
 export interface StructuredNode { ordinal: number; kind: 'object' | 'array' | 'string' | 'number' | 'boolean' | 'null' | 'alias' | 'comment'; span: SourceSpan; key?: string; keySpan?: SourceSpan; keyMore?: boolean; text: string; more: boolean; container?: number; children?: number; duplicate?: boolean }
-export interface StructuredInfo { ref: StructuredRef; format: 'json' | 'jsonl' | 'yaml'; status: 'ready' | 'partial' | 'indexing' | 'locked'; reason?: string; parsedAs?: 'json' | 'jsonc'; root?: StructuredNode; rows?: number; parsed?: number; failed?: number; blank?: number; columns?: number; tableOff?: string; schema?: string; done: boolean; problems: StructuredProblem[]; transcript?: { adapter: 'claude-code-v1' | 'openai-chat-v1'; confidence: number; mode?: 'messages' | 'dataset' } }
+export interface StructuredInfo { ref: StructuredRef; format: 'json' | 'jsonl' | 'yaml'; status: 'ready' | 'partial' | 'indexing' | 'locked'; reason?: string; parsedAs?: 'json' | 'jsonc'; root?: StructuredNode; rows?: number; parsed?: number; failed?: number; blank?: number; columns?: number; tableOff?: string; schema?: string; done: boolean; problems: StructuredProblem[]; transcript?: TranscriptInfo }
+export interface TranscriptInfo { adapter: 'claude-code-v1' | 'openai-chat-v1'; confidence: number; mode: 'messages' | 'dataset'; ready: boolean; reason?: string; messages: number; events: number; branches: number; sidechains: number; calls: number; matchedResults: number; unmatchedResults: number }
+export interface TranscriptItem { id: number; kind: 'turn' | 'conversation' | 'event' | 'branch' | 'sidechain'; record: number; span: SourceSpan; root: StructuredNode; role?: string; timestamp?: string; content?: StructuredNode; messageContainer?: number; children: number; tools: number; linkedResults: SourceSpan[] }
+export interface TranscriptPage { items: TranscriptItem[]; total: number; next?: number; events: number }
+export interface TranscriptTool { ordinal: number; id: string; name: string; block: StructuredNode; input?: StructuredNode; results: number }
+export interface TranscriptResult { record: number; span: SourceSpan; block: StructuredNode; content?: StructuredNode }
+export interface TranscriptTools { tools: TranscriptTool[]; results: TranscriptResult[]; total: number; next?: number }
+export interface TranscriptText { html: string[]; next?: number; total: number }
 export interface StructuredChildren { nodes: StructuredNode[]; next?: number }
 export interface StructuredRow { line: number; span: SourceSpan; status: 'valid' | 'failed'; timestamp?: string; type?: string; summary: string; root?: StructuredNode; problem?: string; more: boolean }
 export interface StructuredRows { rows: StructuredRow[]; nextLine?: number; done: boolean }
@@ -163,6 +170,9 @@ export interface Methods {
   structuredChildren: { params: { ref: StructuredRef; record?: number; container: number; start: number; count: number }; result: StructuredChildren }
   structuredRows: { params: { ref: StructuredRef; start: number; count: number }; result: StructuredRows }
   structuredColumns: { params: { ref: StructuredRef; start: number; count: number }; result: StructuredColumns }
+  structuredTranscript: { params: { ref: StructuredRef; start: number; count: number; group?: number; events?: boolean }; result: TranscriptPage }
+  structuredTranscriptTools: { params: { ref: StructuredRef; item: number; start: number; count: number; call?: number }; result: TranscriptTools }
+  structuredTranscriptText: { params: { ref: StructuredRef; start: number; end: number; block: number }; result: TranscriptText }
   sourceFindStart: { params: { view: ViewRef; query: string; matchCase: boolean }; result: SourceFindInfo }
   sourceFindScan: { params: { ref: SourceFindRef }; result: SourceFindPage }
   sourceFindSeek: { params: { ref: SourceFindRef; from?: number; direction: 'next' | 'previous' }; result: SourceFindSeek }

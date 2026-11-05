@@ -53,7 +53,7 @@ import {
 import { isRecord, isValid } from './numbers'
 import { boundedLink, decodedLocalTarget, localTarget } from './local-target'
 import { isExecutable } from '../shared/handoff'
-import { structuredChildren, structuredColumns, structuredInfo, structuredRows } from './structured-validation'
+import { structuredChildren, structuredColumns, structuredInfo, structuredRows, transcriptPage, transcriptText, transcriptTools } from './structured-validation'
 import { findNumber, findProgress, sourceHit, sourceHits, csvFindHit, csvFindHits } from './find-validation'
 
 declare const __TEST_HOOKS__: boolean
@@ -775,6 +775,37 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         const page = await doc.structuredColumns(ref.gen, ref.revision, start, count, cancel)
         if (structuredReference(ref).lease !== lease) throw new Refusal('Stale', 'the structured view was replaced while reading columns')
         return structuredColumns(page, doc.size)
+      })
+    },
+    structuredTranscript: (p, req) => {
+      const { ref, lease, doc } = structuredReference(p.ref)
+      const start = int(p, 'start'), count = csvRequestNumber(p.count, 'count', 1, 128)
+      const group = p.group === undefined ? undefined : int(p, 'group')
+      if (p.events !== undefined && typeof p.events !== 'boolean') throw new Refusal('InvalidParams', 'events must be boolean', 'events')
+      return read(req, ref.doc, async (cancel) => {
+        const page = await doc.structuredTranscript(ref.gen, ref.revision, start, count, cancel, group, p.events as boolean | undefined)
+        if (structuredReference(ref).lease !== lease) throw new Refusal('Stale', 'the Transcript view was replaced while reading')
+        return transcriptPage(page, doc.size)
+      })
+    },
+    structuredTranscriptTools: (p, req) => {
+      const { ref, lease, doc } = structuredReference(p.ref)
+      const item = int(p, 'item'), start = int(p, 'start'), count = csvRequestNumber(p.count, 'count', 1, 32)
+      const call = p.call === undefined ? undefined : int(p, 'call')
+      return read(req, ref.doc, async (cancel) => {
+        const page = await doc.structuredTranscriptTools(ref.gen, ref.revision, item, start, count, cancel, call)
+        if (structuredReference(ref).lease !== lease) throw new Refusal('Stale', 'the Transcript view was replaced while reading')
+        return transcriptTools(page, doc.size)
+      })
+    },
+    structuredTranscriptText: (p, req) => {
+      const { ref, lease, doc } = structuredReference(p.ref)
+      const start = int(p, 'start'), end = int(p, 'end'), block = int(p, 'block')
+      if (end <= start || end > doc.size) throw new Refusal('InvalidParams', 'end must be past start and within the document', 'end')
+      return read(req, ref.doc, async (cancel) => {
+        const page = await doc.structuredTranscriptText(ref.gen, ref.revision, start, end, block, cancel)
+        if (structuredReference(ref).lease !== lease) throw new Refusal('Stale', 'the Transcript view was replaced while reading')
+        return transcriptText(page)
       })
     },
     sourceBytes: (p,req):Promise<Uint8Array> => {

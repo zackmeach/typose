@@ -25,6 +25,7 @@ pub mod raw;
 pub mod sanitize;
 pub mod store;
 pub mod structured;
+pub mod transcript;
 
 #[cfg(test)]
 mod big_offsets;

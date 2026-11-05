@@ -2,11 +2,12 @@
 //! `i64`, which wrap, truncate or turn NaN into 0) and is checked to be a finite integer within its declared
 //! range before any conversion. It's never clamped or wrapped.
 use crate::doc::MAX_SAFE;
-use crate::pages::MAX_ITEMS;
+use crate::pages::{MAX_ITEMS, PIECE_BYTES};
+use crate::transcript;
 
 /// Every numeric protocol field and its inclusive range. The core host checks requests against this same table,
 /// which it reads through the addon, so the two sides can't drift.
-pub const RANGES: [(&str, u64, u64); 11] = [
+pub const RANGES: [(&str, u64, u64); 16] = [
     ("id", 1, MAX_SAFE),       // a request id
     ("protocol", 0, MAX_SAFE), // the handshake's protocol version
     ("doc", 1, MAX_SAFE),      // a document id
@@ -22,6 +23,14 @@ pub const RANGES: [(&str, u64, u64); 11] = [
     ("bytes", 0, MAX_SAFE),
     // The core host's `os.totalmem()`, which sets the ledger's limit.
     ("totalmem", 1, MAX_SAFE),
+    // Transcript queries (brief §5.4): an item id, of a group to page or a turn whose tools to list; a tool call's
+    // ordinal in its turn; a text span's end, past its start; and a text page's first rendered block, of a text of at
+    // most `PIECE_BYTES`, where each block takes at least a byte.
+    ("group", 0, transcript::MAX_ITEMS - 1),
+    ("item", 0, transcript::MAX_ITEMS - 1),
+    ("call", 0, transcript::MAX_CALLS as u64 - 1),
+    ("end", 1, MAX_SAFE),
+    ("block", 0, PIECE_BYTES as u64),
 ];
 
 /// `x` as an integer, if it's a finite whole number within `field`'s range. The error names the field. A field with no

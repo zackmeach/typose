@@ -39,6 +39,7 @@ pub struct Index {
     columns: Mutex<Columns>,
     charge: Mutex<Reservation>,
     encoding: &'static encoding_rs::Encoding,
+    pub transcript: Mutex<crate::transcript::Graph>,
 }
 impl Index {
     pub fn with_encoding(encoding: &'static encoding_rs::Encoding) -> Result<Self, DocError> {
@@ -47,10 +48,11 @@ impl Index {
             columns: Mutex::new(Columns::default()),
             charge: Mutex::new(Reservation::new(16 << 10).map_err(DocError::Memory)?),
             encoding,
+            transcript: Mutex::new(crate::transcript::Graph::new()),
         })
     }
     pub fn charged(&self) -> u64 {
-        self.charge.lock().unwrap().bytes()
+        self.charge.lock().unwrap().bytes() + self.transcript.lock().unwrap().charged()
     }
     pub fn column_count(&self) -> usize {
         self.columns.lock().unwrap().values.len()
@@ -106,6 +108,10 @@ impl Index {
             }
             Ok(true)
         })?;
+        if complete {
+            let schema = detected_schema(&self.progress.read().unwrap());
+            self.transcript.lock().unwrap().finish(schema);
+        }
         self.progress.write().unwrap().done = complete;
         Ok(())
     }
@@ -194,7 +200,28 @@ impl Index {
             progress.openai_messages += u64::from(openai_message);
             progress.openai_dataset += u64::from(dataset);
         }
+        let progress = self.progress.read().unwrap();
+        let undetected = progress.sample_parsed >= 200 && detected_schema(&progress).is_none();
+        drop(progress);
+        let mut graph = self.transcript.lock().unwrap();
+        if undetected {
+            graph.reject_undetected();
+        } else {
+            graph.observe(store, &index, line, span)?;
+        }
         Ok(true)
+    }
+}
+
+/// Brief §5.4's detection: 3 of the first 200 parsed records match a schema. Dataset lines and message lines are both
+/// OpenAI chat; the more numerous names the mode.
+pub fn detected_schema(progress: &Progress) -> Option<&'static str> {
+    if progress.claude >= 3 {
+        Some("claude-code-v1")
+    } else if progress.openai_dataset + progress.openai_messages >= 3 {
+        Some(if progress.openai_dataset >= progress.openai_messages { "openai-dataset-v1" } else { "openai-chat-v1" })
+    } else {
+        None
     }
 }
 
