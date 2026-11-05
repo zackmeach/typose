@@ -171,7 +171,8 @@ export class TranscriptView {
               : `Conversation ${item.record + 1} · line ${item.record + 1} · ${count(item.children, 'turn')}`
         )
       )
-      const children = make('div')
+      // A branch's or sidechain's members are off the main chain, and set apart (structured.css .transcript-group).
+      const children = make('div', undefined, item.kind === 'conversation' ? undefined : 'transcript-group')
       group.append(children)
       let loaded = false
       const load = async (start: number) => {

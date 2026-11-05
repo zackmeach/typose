@@ -256,6 +256,10 @@ test('Claude Transcript uses the full graph, nests tool results and preserves li
   await expect(card.getByText('Old branch fixture', { exact: true })).toBeVisible()
   await card.getByText('Sidechain · 1 message', { exact: true }).click()
   await expect(card.getByText('Sidechain fixture', { exact: true })).toBeVisible()
+  // Their members sit apart from the main chain: indented, on a guide line, as a tool's results are.
+  const guides = (scope: import('@playwright/test').Locator) => scope.locator('.transcript-conversation > div').evaluateAll(groups =>
+    groups.map(group => { const style = getComputedStyle(group); return `${style.marginLeft} ${style.borderLeftWidth} ${style.paddingLeft}` }))
+  expect(await guides(card)).toEqual(['16px 1px 12px', '16px 1px 12px'])
   const tool = card.locator('.transcript-tool[data-tool-id="tool1"]')
   // Brief §5.4's `name(args summary)`: the input's first fields, as written.
   await expect(tool.locator('summary')).toHaveText('read(amount: 3.10, file: "local.md")')
@@ -280,6 +284,9 @@ test('OpenAI dataset Transcript keeps conversations separate and tool results un
   await expect(card.getByText('Conversation 4 · line 4 · 1 turn', { exact: true })).toBeVisible()
   await expect(card.getByText('System prompt', { exact: true })).toHaveCount(3)
   await expect(card.getByText('Line metadata', { exact: true })).toHaveCount(4)
+  // A dataset's conversations are the file's own, not off a chain: no indent.
+  expect(await card.locator('.transcript-conversation > div').evaluateAll(groups => groups.map(group => getComputedStyle(group).borderLeftWidth)))
+    .toEqual(['0px', '0px', '0px', '0px'])
   const tool = card.locator('.transcript-tool[data-tool-id="reused"]').first()
   await tool.locator('summary').click()
   await expect(tool.locator('.transcript-tool-result').getByText('Dataset result fixture', { exact: true })).toBeVisible()
