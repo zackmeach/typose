@@ -30,6 +30,8 @@ const string = (node?: StructuredNode): string => {
 const count = (n: number, noun: string): string => `${n} ${noun}${n === 1 ? '' : 's'}`
 interface Options {
   tree(node: StructuredNode, record: number, path?: string): Promise<HTMLElement>
+  /** The Tree's notice that `count` more nodes would pass its display limit, if they would. */
+  limit(count: number): HTMLElement | undefined
   select(element: HTMLElement, span: SourceSpan): void
   rows(record?: number): void
   frozen(error: unknown): void
@@ -378,6 +380,12 @@ export class TranscriptView {
     let conversation = true
     const load = async (start: number) => {
       const page = await this.source.children(item.root.container!, start, item.record)
+      // Its Trees count toward the lens's display limit, as any Tree's do.
+      const limit = this.options.limit(page.nodes.length)
+      if (limit) {
+        metadata.append(limit)
+        return
+      }
       for (const field of page.nodes) {
         if (conversation && field.key === 'messages') conversation = false
         else metadata.append(await this.options.tree(field, item.record, `$[${JSON.stringify(field.key)}]`))

@@ -363,6 +363,36 @@ test('OpenAI arguments parse from their JSON string, numbers as written, and wha
   expect(live.pageErrors).toEqual([])
 })
 
+test('Line metadata pages a wide line only up to the Tree’s 2,000-node limit, so a later Tree still expands', async () => {
+  // 2,500 other keys around the conversation, and a second `messages`, which is other data.
+  const conversation = JSON.stringify([{ role: 'user', content: 'Wide fixture' },
+    { role: 'assistant', content: null, tool_calls: [{ id: 'later', type: 'function', function: { name: 'later', arguments: '{"a":1,"b":2,"c":3}' } }] }])
+  const keys = (from: number, to: number) => Array.from({ length: to - from }, (_, i) => `"k${from + i}":${from + i}`).join(',')
+  const wide = `{${keys(0, 5)},"messages":${conversation},"messages":[{"role":"user","content":"duplicate"}],${keys(5, 2500)}}`
+  const single = JSON.stringify({ messages: [{ role: 'user', content: 'Single fixture' }] })
+  const live = await launch({ hooks: true, file: fixture('transcript-wide-metadata.jsonl', [wide, single, single].join('\n') + '\n') })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  const group = card.locator('.transcript-conversation').first(), metadata = group.locator('> details')
+  await metadata.locator('> summary').click()
+  const more = metadata.getByRole('button', { name: 'Show more line metadata', exact: true })
+  const limit = metadata.getByText('Tree display limit reached (2,000 nodes) · View in Raw or copy the source value', { exact: true })
+  await expect(more.or(limit)).toBeVisible()
+  while (await more.isVisible()) {
+    await more.click()
+    await expect(more.or(limit)).toBeVisible()
+  }
+  await expect(limit).toBeVisible()
+  expect(await metadata.locator(':scope > .tree-entry').count()).toBeLessThanOrEqual(2000)
+  // The second `messages` shows; the first, the conversation, doesn't.
+  await expect(metadata.locator(':scope > .tree-entry > .tree-row > .tree-key').filter({ hasText: /^messages: $/ })).toHaveCount(1)
+  const tool = group.locator('.transcript-tool[data-tool-id="later"]')
+  await tool.locator('> summary').click()
+  await tool.locator('.tree-fold').first().click()
+  await expect(tool.locator('.tree-key')).toHaveText(['a: ', 'b: ', 'c: '])
+  expect(live.pageErrors).toEqual([])
+})
+
 /** A Claude Code session of `turns` on one chain: each turn's record the child of the one before. */
 const claudeSession = (turns: { role: 'user' | 'assistant'; content: unknown }[]): string =>
   turns.map((message, i) => JSON.stringify({ type: message.role, uuid: `t${i}`, parentUuid: i ? `t${i - 1}` : null, message })).join('\n') + '\n'
