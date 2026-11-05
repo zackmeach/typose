@@ -163,15 +163,19 @@ export class TranscriptView {
       return await this.render(item, pane)
     } catch (error) {
       if (pane.signal.aborted || (error instanceof CoreCallError && error.code === 'Frozen')) throw error
-      const problem = make(
-        'button',
-        `This item couldn’t be shown · ${error instanceof Error ? error.message : String(error)} · View in Rows`,
-        'structured-problem'
-      )
-      // A branch or sidechain's record is its first member in file order, which can be a hidden results-only one.
-      problem.onclick = () => this.options.rows(item.kind === 'branch' || item.kind === 'sidechain' ? undefined : item.record)
-      return problem
+      return this.problem(item, error)
     }
+  }
+  /** Why `item` couldn't be shown, with View in Rows. */
+  private problem(item: TranscriptItem, error: unknown): HTMLElement {
+    const problem = make(
+      'button',
+      `This item couldn’t be shown · ${error instanceof Error ? error.message : String(error)} · View in Rows`,
+      'structured-problem'
+    )
+    // A branch or sidechain's record is its first member in file order, which can be a hidden results-only one.
+    problem.onclick = () => this.options.rows(item.kind === 'branch' || item.kind === 'sidechain' ? undefined : item.record)
+    return problem
   }
   private async render(item: TranscriptItem, pane: Pane): Promise<HTMLElement> {
     if (item.kind === 'branch' || item.kind === 'sidechain' || item.kind === 'conversation') {
@@ -193,6 +197,11 @@ export class TranscriptView {
       const children = make('div', undefined, item.kind === 'conversation' ? undefined : 'transcript-group')
       group.append(children)
       let loaded = false
+      // A load the reader asked for that fails says so in the group, as a failing item does on its page.
+      const failed = (error: unknown) => {
+        if (pane.signal.aborted || (error instanceof CoreCallError && error.code === 'Frozen')) this.lost(pane)(error)
+        else children.append(this.problem(item, error))
+      }
       const load = async (start: number) => {
         const page = await this.core.call(
           'structuredTranscript',
@@ -205,7 +214,7 @@ export class TranscriptView {
           const more = make('button', 'Show more messages')
           more.onclick = () => {
             more.remove()
-            void load(page.next!).catch(this.lost(pane))
+            void load(page.next!).catch(failed)
           }
           children.append(more)
         }
@@ -213,7 +222,7 @@ export class TranscriptView {
       group.addEventListener('toggle', () => {
         if (group.open && !loaded) {
           loaded = true
-          void load(0).catch(this.lost(pane))
+          void load(0).catch(failed)
         }
       })
       if (group.open) {

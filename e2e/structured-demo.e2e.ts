@@ -398,10 +398,12 @@ test('a Transcript graph that is off says why, where a disabled structured lens 
 })
 
 test('a branch whose first record is a hidden tool result is labelled and anchored by what it shows (F6)', async () => {
-  // The branch's records in file order: r1b, a results-only record (its result nests under tool1), then b1.
+  // The branch's records in file order: r1b, a results-only record (its result nests under tool1), then b1. 150 session
+  // events before them put r1b at line 153, far enough down that Rows opened there wouldn't show line 1.
   const file = fixture('transcript-f6.jsonl', [
     { type: 'user', uuid: 'u0', parentUuid: null, message: { role: 'user', content: 'Question fixture' } },
     { type: 'assistant', uuid: 'a1', parentUuid: 'u0', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tool1', name: 'read', input: { file: 'local.md' } }] } },
+    ...Array.from({ length: 150 }, () => ({ type: 'queue-operation', operation: 'padding fixture' })),
     { type: 'user', uuid: 'r1b', parentUuid: 'a1', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tool1', content: 'Retried result fixture' }] } },
     { type: 'assistant', uuid: 'b1', parentUuid: 'r1b', message: { role: 'assistant', content: 'Branch reply fixture' } },
     { type: 'user', uuid: 'r1', parentUuid: 'a1', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tool1', content: 'Main result fixture' }] } },
@@ -419,6 +421,18 @@ test('a branch whose first record is a hidden tool result is labelled and anchor
   const tool = card.locator('.transcript-tool[data-tool-id="tool1"]')
   await tool.locator('summary').click()
   await expect(tool.locator('.transcript-tool-result')).toHaveCount(2)
+  // The branch's own load fails (injected): its failure link opens Rows without a line, never at the hidden record's.
+  await live.win.evaluate(() => {
+    const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core, call = core.call.bind(core)
+    core.call = (...args: Parameters<typeof call>) =>
+      args[0] === 'structuredTranscript' && (args[1] as { group?: number }).group !== undefined ? Promise.reject(new Error('group fixture failure')) : call(...args)
+  })
+  await card.getByRole('tab', { name: 'Rows', exact: true }).click()
+  await card.getByRole('tab', { name: 'Transcript', exact: true }).click()
+  await card.locator('.transcript-conversation > summary').click()
+  await card.getByRole('button', { name: 'This item couldn’t be shown · group fixture failure · View in Rows', exact: true }).click()
+  await expect(card.locator('[data-lens="rows"]')).toBeVisible()
+  await expect(card.locator('.jsonl-entry[data-line="0"]')).toBeVisible()
   expect(live.pageErrors).toEqual([])
 })
 
