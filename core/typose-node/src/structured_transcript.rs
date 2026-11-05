@@ -177,11 +177,12 @@ pub(super) fn argument_children(
 ) -> std::result::Result<StructuredChildren, DocError> {
     // Only what the Tools query parses: a string in an OpenAI transcript, inside the record the request names.
     let openai = entry.jsonl.as_ref().is_some_and(|index| openai(&index.transcript.lock().unwrap()));
+    // The graph first: any other document is refused here, before its record's line is looked up.
     let range = match record {
-        Some(line) => super::record_range(raw, entry.generation, line)?,
-        None => None,
+        Some(line) if openai => super::record_range(raw, entry.generation, line)?,
+        _ => None,
     };
-    if !openai || !range.is_some_and(|range| range.start <= scope.start && scope.end <= range.end) {
+    if !range.is_some_and(|range| range.start <= scope.start && scope.end <= range.end) {
         return Err(DocError::Invalid("A scope must be a string in the named record of an OpenAI transcript".into()));
     }
     let arguments = model::Arguments::read(raw.document(), entry.generation, scope, raw.source_encoding())?
