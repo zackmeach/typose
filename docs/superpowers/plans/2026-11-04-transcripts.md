@@ -31,12 +31,13 @@
 |---|---|---|---|---|
 | 1 | **Transcript core** | Port `transcript.rs` and `structured_transcript.rs` onto main's JSONL index, with glue in `jsonl.rs`, `lib.rs`, node `structured.rs`, `protocol.ts`, `structured-validation.ts` and `dispatch.ts`. **The crash fix is at the root:** `limits::int` returns an error for an unknown field instead of panicking, and `RANGES` gains rows for the new fields, which the core host then validates too. **Fixes:** duplicate UUIDs never refuse the file (which copy wins is chosen from real sessions and written down); a sidechain-only file falls back to its latest leaf; a linear, cancellable `finish`; `slot(Work::Page)` in `Read<Q>`; per-entry estimates near real struct sizes. **Tests:** Rust unit tests for each fix; a core-host Vitest over the two synthetic fixtures that drives the page, tools and text queries. The lens stays hidden, since the renderer is still the stub | large | Opus, 2 rounds |
 | 2 | **Transcript lens** | Port `transcript-view.ts` and its CSS, and wire it into renderer `structured.ts` and `ReaderCard.tsx`, replacing the stub. **Fixes:** a per-item failure catch, with a refused Markdown block shown as literal text; an HTML reservation sized to the mounted page and released on unmount; HTML-like tags literal per §5.4. The two snapshot e2e tests, with `ff85dc9` | decent–large | Opus, 2 rounds |
-| 3 | **OpenAI and remote images** | Tool-call arguments parsed from their JSON string; line metadata showing only the other keys; remote `image_url` behind the §4.6 gate | decent | Opus, 2 rounds (security) |
+| 3 | **OpenAI tool calls and line metadata** | Tool-call arguments parsed from their JSON string in the core (`transcript::Arguments`, with the json module reading memory through `json::Source`): within the text query's 64 KiB, strict JSON, numbers as written, duplicate keys flagged, reserved for one query; otherwise the string as before. The parsed Tree pages through `structuredChildren`'s new `scope`. Line metadata shows only a dataset line's other keys, on its divider, and only when it has some | decent | Opus, 2 rounds (security) |
 | 4 | **Install** | Package main, install, open real sessions (subagent, duplicate-UUID and largest files included), record the payload hash | small | PM |
 
 ## Out of scope
 - `catch_unwind` across typose-node. Main has the same exposure: a panic in any napi method kills the core host. It's a separate decision.
 - Transcript Find, and Go to inside Transcript (M6).
+- Remote and `data:` images, and Transcript links, move to the reader-to-workspace plan's deferred item, "advanced link resolution/wikilinks/hand-off and remote/data images": the §4.6 "Load remote images" gate, the main-process fetch session and the Z43 bounded `data:` path don't exist anywhere in the app yet, and Transcript reuses Rendered's.
 - Mac/Linux qualification.
 
 ## Done when
