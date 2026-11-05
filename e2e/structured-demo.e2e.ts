@@ -474,6 +474,26 @@ test('Transcript gives back a page’s Tree nodes when it moves on, so a tool in
   expect(live.pageErrors).toEqual([])
 })
 
+test('a left click on a Tree row in Transcript selects the row, so Copy copies its value, not the record', async () => {
+  const file = fixture('transcript-select.jsonl', claudeSession([
+    { role: 'user', content: 'Select fixture' },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'select', name: 'read', input: { file_path: '/tmp/x', n: 2 } }] },
+    { role: 'user', content: 'After fixture' }
+  ]))
+  const live = await launch({ hooks: true, file })
+  const copied = await recordClipboard(live.app)
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.getByText('Select fixture', { exact: true })).toBeVisible({ timeout: 30_000 })
+  const tool = card.locator('.transcript-tool[data-tool-id="select"]')
+  await tool.locator('> summary').click()
+  const row = tool.locator('.tree-row').filter({ hasText: 'file_path' })
+  await row.locator('.tree-string').click()
+  await live.win.keyboard.press('ControlOrMeta+c')
+  await expect.poll(copied).toEqual(['"/tmp/x"'])
+  await expect(row).toHaveAttribute('aria-selected', 'true')
+  expect(live.pageErrors).toEqual([])
+})
+
 test('Transcript shows HTML-like tags in message text as literal text, never interpreted or stripped', async () => {
   const texts = [
     // Raw HTML that Rendered keeps (b, img) or drops (a stray end tag), beside Markdown that renders.

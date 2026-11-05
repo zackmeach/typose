@@ -267,8 +267,9 @@ export class TranscriptView {
           : `${item.role ? item.role[0]!.toUpperCase() + item.role.slice(1) : 'Unknown'}${item.timestamp ? ' · ' + item.timestamp : ''}`
       )
     )
+    // A Tree row selects itself (structured.ts), and keeps that selection.
     turn.addEventListener('click', (event) => {
-      if (!(event.target as HTMLElement).closest('button,a,summary,input')) this.options.select(turn, item.span)
+      if (!(event.target as HTMLElement).closest('button,a,summary,input,.tree-row')) this.options.select(turn, item.span)
     })
     let tools: TranscriptTool[] = []
     if (item.tools) {
