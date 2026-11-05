@@ -374,6 +374,31 @@ test('a Transcript graph that is off says why, where a disabled structured lens 
   expect(live.pageErrors).toEqual([])
 })
 
+test('a branch whose first record is a hidden tool result is labelled and anchored by what it shows (F6)', async () => {
+  // The branch's records in file order: r1b, a results-only record (its result nests under tool1), then b1.
+  const file = fixture('transcript-f6.jsonl', [
+    { type: 'user', uuid: 'u0', parentUuid: null, message: { role: 'user', content: 'Question fixture' } },
+    { type: 'assistant', uuid: 'a1', parentUuid: 'u0', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tool1', name: 'read', input: { file: 'local.md' } }] } },
+    { type: 'user', uuid: 'r1b', parentUuid: 'a1', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tool1', content: 'Retried result fixture' }] } },
+    { type: 'assistant', uuid: 'b1', parentUuid: 'r1b', message: { role: 'assistant', content: 'Branch reply fixture' } },
+    { type: 'user', uuid: 'r1', parentUuid: 'a1', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tool1', content: 'Main result fixture' }] } },
+    { type: 'assistant', uuid: 'a2', parentUuid: 'r1', message: { role: 'assistant', content: 'Main answer fixture' } }
+  ].map(record => JSON.stringify(record)).join('\n') + '\n')
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  const branch = card.locator('.transcript-conversation')
+  await expect(branch.locator('summary').first()).toHaveText('1 messages on another branch')
+  await expect(branch).not.toHaveAttribute('data-line')
+  await branch.locator('summary').first().click()
+  await expect(branch.locator('.transcript-turn > h3')).toHaveText(['Assistant'])
+  await expect(branch.getByText('Branch reply fixture', { exact: true })).toBeVisible()
+  const tool = card.locator('.transcript-tool[data-tool-id="tool1"]')
+  await tool.locator('summary').click()
+  await expect(tool.locator('.transcript-tool-result')).toHaveCount(2)
+  expect(live.pageErrors).toEqual([])
+})
+
 test('JSONL Table discovers a global key after line 1,000 and retains original source row navigation', async () => {
   const lines = Array.from({ length: 1001 }, (_, index) => `{"common":"row ${index + 1}"}`)
   lines.push('{"common":"last row","late":"revealed"}')
