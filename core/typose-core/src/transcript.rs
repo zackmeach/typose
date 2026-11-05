@@ -1008,6 +1008,7 @@ pub struct Arguments {
 impl Arguments {
     /// The value the JSON string at `span` holds. `None`, so the string shows as it is, past `PIECE_BYTES` of source
     /// (the text query's bound) or of value, for a span that isn't one string, or for a value that isn't strict JSON.
+    /// The ledger's refusal, of its reservation or of either scan's, is `DocError::Memory`.
     pub fn read(
         doc: &Document,
         generation: u32,
@@ -1023,7 +1024,7 @@ impl Arguments {
         let source = doc.read(generation, span.start, span.end)?;
         let text = encoding.decode_without_bom_handling(&source).0;
         let token = json::parse(text.as_bytes()).map_err(in_memory)?;
-        if token.error.is_some() || token.root != Some((Kind::String, Span { start: 0, end: text.len() as u64 })) {
+        if stopped(&token)? || token.root != Some((Kind::String, Span { start: 0, end: text.len() as u64 })) {
             return Ok(None);
         }
         let bytes = json::unescape(text.as_bytes()).into_owned();
@@ -1031,11 +1032,8 @@ impl Arguments {
             return Ok(None);
         }
         let index = json::parse(&bytes).map_err(in_memory)?;
-        match index.error.map(|error| error.kind) {
-            Some(json::ErrorKind::Memory(e)) => return Err(DocError::Memory(e)),
-            Some(json::ErrorKind::Cancelled) => return Err(DocError::Cancelled),
-            Some(_) => return Ok(None),
-            None => {}
+        if stopped(&index)? {
+            return Ok(None);
         }
         let Some((kind, value)) = index.root else {
             return Ok(None); // empty, or only whitespace
@@ -1080,6 +1078,15 @@ impl Arguments {
             shown.len() == bytes.len(),
         );
         (slice.text, used < bytes.len())
+    }
+}
+/// Whether a scan stopped at a syntax or depth error. A memory refusal or a cancel is an error, at either of
+/// `Arguments::read`'s scans, as its reservation's refusal is.
+fn stopped(index: &JsonIndex) -> Result<bool, DocError> {
+    match index.error.map(|error| error.kind) {
+        Some(json::ErrorKind::Memory(e)) => Err(DocError::Memory(e)),
+        Some(json::ErrorKind::Cancelled) => Err(DocError::Cancelled),
+        error => Ok(error.is_some()),
     }
 }
 /// Reads from memory don't fail, but a `StoreError` here would be reported, never a panic.

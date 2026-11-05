@@ -357,9 +357,13 @@ impl Query for Tools {
                     // An OpenAI call's `arguments`, a JSON string of JSON (brief §5.4): parsed, or the string it is.
                     Some(node) if openai && node.kind == json::Kind::String => {
                         let encoding = c.raw.source_encoding();
-                        match model::Arguments::read(c.raw.document(), c.entry.generation, node.span, encoding)? {
-                            Some(arguments) => Some(parsed(&arguments, node.span, 0, arguments.root.clone(), false)),
-                            None => Some(value(&c.raw, c.entry.generation, node)?),
+                        match model::Arguments::read(c.raw.document(), c.entry.generation, node.span, encoding) {
+                            Ok(Some(arguments)) => {
+                                Some(parsed(&arguments, node.span, 0, arguments.root.clone(), false))
+                            }
+                            // A tight ledger costs the parse, not the page: the string shows, as it did before.
+                            Ok(None) | Err(DocError::Memory(_)) => Some(value(&c.raw, c.entry.generation, node)?),
+                            Err(error) => return Err(error),
                         }
                     }
                     input => input.as_ref().map(|node| value(&c.raw, c.entry.generation, node)).transpose()?,
