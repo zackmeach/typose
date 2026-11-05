@@ -745,13 +745,15 @@ impl<'a, I: Iterator<Item = (Event<'a>, Range<usize>)>> Iterator for Events<'_, 
                     Event::End(TagEnd::HtmlBlock) => {
                         let (mut html, raw) = (String::new(), self.raw.take().unwrap_or_default());
                         if self.literal_html {
-                            // Literal, the block keeps its lines and a block's spacing: a paragraph, a <br> a line.
+                            // Literal, the block keeps its lines and a block's spacing: a paragraph, a <br> a line,
+                            // at any of CommonMark's line endings (CRLF, CR, LF).
                             html.push_str("<p>");
-                            for (i, line) in raw.trim_end_matches(['\r', '\n']).split('\n').enumerate() {
+                            let raw = raw.replace("\r\n", "\n");
+                            for (i, line) in raw.trim_end_matches(['\r', '\n']).split(['\r', '\n']).enumerate() {
                                 if i > 0 {
                                     html.push_str("<br>");
                                 }
-                                escape_text(line.trim_end_matches('\r'), &mut html);
+                                escape_text(line, &mut html);
                             }
                             html.push_str("</p>\n");
                         } else {
@@ -1008,6 +1010,15 @@ mod tests {
     fn a_fragments_html_block_is_literal() {
         assert_eq!(
             fragment_htmls("<details>\n<summary>x</summary>\nbody\n</details>\n"),
+            ["<p>&lt;details&gt;<br>&lt;summary&gt;x&lt;/summary&gt;<br>body<br>&lt;/details&gt;</p>\n"]
+        );
+    }
+
+    /// A fragment's literal HTML block breaks its lines at CommonMark's three line endings: CRLF, a lone CR and LF.
+    #[test]
+    fn a_fragments_html_block_keeps_every_line_ending() {
+        assert_eq!(
+            fragment_htmls("<details>\r\n<summary>x</summary>\rbody\n</details>\r\n"),
             ["<p>&lt;details&gt;<br>&lt;summary&gt;x&lt;/summary&gt;<br>body<br>&lt;/details&gt;</p>\n"]
         );
     }
