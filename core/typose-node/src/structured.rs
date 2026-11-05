@@ -2,6 +2,8 @@
 use super::*;
 use std::sync::atomic::{AtomicU32, AtomicU64};
 use typose_core::{json, jsonl, structured as core_structured};
+#[path = "structured_transcript.rs"]
+mod transcript;
 
 pub(super) fn format(path: &std::path::Path) -> Option<&'static str> {
     match path.extension().and_then(|s| s.to_str()).map(str::to_ascii_lowercase).as_deref() {
@@ -90,6 +92,7 @@ pub struct StructuredInfo {
     pub columns: Option<f64>,
     pub table_off: Option<String>,
     pub schema: Option<String>,
+    pub transcript: Option<transcript::TranscriptInfo>,
 }
 #[napi(object)]
 pub struct StructuredChildren {
@@ -164,6 +167,7 @@ fn describe(raw: &Raw, entry: &Entry) -> std::result::Result<StructuredInfo, Doc
         columns: None,
         table_off: None,
         schema: None,
+        transcript: None,
     };
     if let Some(tree) = &entry.tree {
         let index = &tree.index;
@@ -256,6 +260,7 @@ fn describe(raw: &Raw, entry: &Entry) -> std::result::Result<StructuredInfo, Doc
             }
             .into(),
         );
+        info.transcript = transcript::describe(index);
         if let Some((line, first)) = progress.first_failed {
             info.problems.push(StructuredProblem {
                 kind: "parse".into(),

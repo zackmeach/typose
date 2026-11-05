@@ -808,7 +808,6 @@ impl Lines {
 
 /// The items of `text`, the decoded file whose first `front` bytes are its front matter (plan §2.1). `cancelled` is
 /// checked every `CANCEL_EVERY` events.
-#[cfg(test)]
 fn blocks(
     text: &str,
     front: usize,
@@ -932,6 +931,17 @@ pub fn build(
     let front = front_matter_end(&text, encoding, bom).unwrap_or(0);
     temp.grow(parse_temp(text.len(), table_cells(&text[front..]))).map_err(DocError::Memory)?;
     blocks_mapped(&text, front, encoding, &edges, cancelled)
+}
+
+/// Markdown embedded in another document (a transcript's text block), of at most `PIECE_BYTES`: its items, built as a
+/// file's are, with the parse's temporaries and its decode reserved first.
+pub fn render_fragment(text: &str, cancelled: &dyn Fn() -> bool) -> Result<Rendered, DocError> {
+    if text.len() > PIECE_BYTES {
+        return Err(DocError::Refused("Markdown fragment exceeds 64 KiB".into()));
+    }
+    let temp = parse_temp(text.len(), table_cells(text)) + 40 * text.len() as u64;
+    let _temp = Reservation::new(temp).map_err(DocError::Memory)?;
+    blocks(text, 0, UTF_8, cancelled)
 }
 
 #[cfg(test)]
