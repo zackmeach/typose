@@ -751,8 +751,14 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
       const start = csvRequestNumber(p.start, 'start')
       const count = csvRequestNumber(p.count, 'count', 1, 128)
       const record = p.record === undefined ? undefined : csvRequestNumber(p.record, 'record')
+      // A parsed value's children: the span of the JSON string it was parsed from, at most the text query's 64 KiB.
+      const s = p.scope
+      if (s !== undefined && !isRecord(s)) throw new Refusal('InvalidParams', 'scope must be a source span', 'scope')
+      const scope = s === undefined ? undefined : { start: int(s, 'start', 'scope'), end: int(s, 'end', 'scope') }
+      if (scope && (scope.end <= scope.start || scope.end > doc.size || scope.end - scope.start > 65_536))
+        throw new Refusal('InvalidParams', 'scope must be a span of at most 64 KiB in the document', 'scope')
       return read(req, ref.doc, async (cancel) => {
-        const page = await doc.structuredChildren(ref.gen, ref.revision, container, start, count, cancel, record)
+        const page = await doc.structuredChildren(ref.gen, ref.revision, container, start, count, cancel, record, scope)
         if (structuredReference(ref).lease !== lease) throw new Refusal('Stale', 'the structured index was replaced while reading')
         return structuredChildren(page, doc.size)
       })

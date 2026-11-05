@@ -103,7 +103,7 @@ export interface ViewRef { session: number; surface: number; id: number; doc: nu
 export interface StructuredRef { session: number; doc: number; gen: number; revision: number }
 export interface SourceSpan { start: number; end: number }
 export interface StructuredProblem { kind: string; count: number; message: string; first: SourceSpan; line?: number; column?: number }
-export interface StructuredNode { ordinal: number; kind: 'object' | 'array' | 'string' | 'number' | 'boolean' | 'null' | 'alias' | 'comment'; span: SourceSpan; key?: string; keySpan?: SourceSpan; keyMore?: boolean; text: string; more: boolean; container?: number; children?: number; duplicate?: boolean }
+export interface StructuredNode { ordinal: number; kind: 'object' | 'array' | 'string' | 'number' | 'boolean' | 'null' | 'alias' | 'comment'; span: SourceSpan; key?: string; keySpan?: SourceSpan; keyMore?: boolean; text: string; more: boolean; container?: number; children?: number; duplicate?: boolean; scope?: SourceSpan }
 export interface StructuredInfo { ref: StructuredRef; format: 'json' | 'jsonl' | 'yaml'; status: 'ready' | 'partial' | 'indexing' | 'locked'; reason?: string; parsedAs?: 'json' | 'jsonc'; root?: StructuredNode; rows?: number; parsed?: number; failed?: number; blank?: number; columns?: number; tableOff?: string; schema?: string; done: boolean; problems: StructuredProblem[]; transcript?: TranscriptInfo }
 export interface TranscriptInfo { adapter: 'claude-code-v1' | 'openai-chat-v1'; confidence: number; mode: 'messages' | 'dataset'; ready: boolean; reason?: string; messages: number; events: number; branches: number; sidechains: number; calls: number; matchedResults: number; unmatchedResults: number }
 export interface TranscriptItem { id: number; kind: 'turn' | 'conversation' | 'event' | 'branch' | 'sidechain'; record: number; span: SourceSpan; root: StructuredNode; role?: string; timestamp?: string; content?: StructuredNode; messageContainer?: number; children: number; tools: number; linkedResults: SourceSpan[] }
@@ -167,7 +167,7 @@ export interface Methods {
   sourceLineAt: { params: { view: ViewRef; offset: number }; result: { line: number } }
   sourceVerify: { params: { view: ViewRef; start: number; end: number }; result: boolean }
   structuredBuild: { params: { view: ViewRef }; result: StructuredInfo }
-  structuredChildren: { params: { ref: StructuredRef; record?: number; container: number; start: number; count: number }; result: StructuredChildren }
+  structuredChildren: { params: { ref: StructuredRef; record?: number; container: number; start: number; count: number; scope?: SourceSpan }; result: StructuredChildren }
   structuredRows: { params: { ref: StructuredRef; start: number; count: number }; result: StructuredRows }
   structuredColumns: { params: { ref: StructuredRef; start: number; count: number }; result: StructuredColumns }
   structuredTranscript: { params: { ref: StructuredRef; start: number; count: number; group?: number; events?: boolean }; result: TranscriptPage }

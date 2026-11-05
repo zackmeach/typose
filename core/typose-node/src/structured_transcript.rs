@@ -110,15 +110,7 @@ fn value(raw: &Raw, generation: u32, reference: &model::SourceRef) -> std::resul
     );
     Ok(StructuredNode {
         ordinal: 0.,
-        kind: match reference.kind {
-            json::Kind::Object => "object",
-            json::Kind::Array => "array",
-            json::Kind::String => "string",
-            json::Kind::Number => "number",
-            json::Kind::True | json::Kind::False => "boolean",
-            json::Kind::Null => "null",
-        }
-        .into(),
+        kind: kind(reference.kind),
         span: span(reference.span),
         key: None,
         key_span: None,
@@ -128,7 +120,73 @@ fn value(raw: &Raw, generation: u32, reference: &model::SourceRef) -> std::resul
         container,
         children: container.map(|_| reference.children as f64),
         duplicate: false,
+        scope: None,
     })
+}
+fn kind(kind: json::Kind) -> String {
+    match kind {
+        json::Kind::Object => "object",
+        json::Kind::Array => "array",
+        json::Kind::String => "string",
+        json::Kind::Number => "number",
+        json::Kind::True | json::Kind::False => "boolean",
+        json::Kind::Null => "null",
+    }
+    .into()
+}
+/// A node of a value parsed from an OpenAI call's `arguments` string (`model::Arguments`): its text as that value has
+/// it, a number as written. Its span is the string's in the source, which Copy copies, and so is its scope, which pages
+/// its children (`argument_children`). It has no key span: the key isn't in the source as such.
+fn parsed(
+    arguments: &model::Arguments,
+    scope: json::Span,
+    ordinal: u64,
+    child: json::Child,
+    duplicate: bool,
+) -> StructuredNode {
+    let container = child.container;
+    let (text, more) = if container.is_some() { (String::new(), false) } else { arguments.text(child.value) };
+    StructuredNode {
+        ordinal: ordinal as f64,
+        kind: kind(child.kind),
+        span: span(scope),
+        key: child.key.map(|key| arguments.key(key)),
+        key_span: None,
+        key_more: child.key.is_some_and(|key| key.end - key.start > 4096),
+        text,
+        more,
+        container,
+        children: container.and_then(|id| arguments.index.containers.get(id as usize)).map(|c| c.children as f64),
+        duplicate,
+        scope: Some(span(scope)),
+    }
+}
+/// A page of a parsed `arguments` value's children, bounded as `Children` bounds a page.
+pub(super) fn argument_children(
+    raw: &Raw,
+    generation: u32,
+    scope: json::Span,
+    container: u32,
+    start: u64,
+    count: usize,
+) -> std::result::Result<StructuredChildren, DocError> {
+    let arguments = model::Arguments::read(raw.document(), generation, scope, raw.source_encoding())?
+        .ok_or_else(|| DocError::Invalid("The scope is not a JSON string that holds JSON".into()))?;
+    let mut nodes = Vec::new();
+    let mut bytes = 1024;
+    for (ordinal, child, duplicate) in arguments.children(container, start, count)? {
+        let value = parsed(&arguments, scope, ordinal, child, duplicate);
+        let cost =
+            512 + 6 * (value.text.encode_utf16().count() + value.key.as_ref().map_or(0, |k| k.encode_utf16().count()));
+        if bytes + cost > 256 << 10 {
+            break;
+        }
+        bytes += cost;
+        nodes.push(value);
+    }
+    let next = start + nodes.len() as u64;
+    let total = arguments.index.containers.get(container as usize).map_or(0, |c| c.children);
+    Ok(StructuredChildren { nodes, next: (next < total).then_some(next as f64) })
 }
 pub struct Context {
     raw: Arc<Raw>,
@@ -278,9 +336,20 @@ impl Query for Tools {
             }
         } else {
             total = turn.calls.len();
+            let openai = graph.entries[item.entry].schema.starts_with("openai-");
             for (ordinal, call) in turn.calls.iter().enumerate().skip(self.start).take(self.count) {
                 let block = value(&c.raw, c.entry.generation, &call.block)?;
-                let input = call.input.as_ref().map(|node| value(&c.raw, c.entry.generation, node)).transpose()?;
+                let input = match &call.input {
+                    // An OpenAI call's `arguments`, a JSON string of JSON (brief §5.4): parsed, or the string it is.
+                    Some(node) if openai && node.kind == json::Kind::String => {
+                        let encoding = c.raw.source_encoding();
+                        match model::Arguments::read(c.raw.document(), c.entry.generation, node.span, encoding)? {
+                            Some(arguments) => Some(parsed(&arguments, node.span, 0, arguments.root.clone(), false)),
+                            None => Some(value(&c.raw, c.entry.generation, node)?),
+                        }
+                    }
+                    input => input.as_ref().map(|node| value(&c.raw, c.entry.generation, node)).transpose()?,
+                };
                 let cost = 2048
                     + (block.text.encode_utf16().count()
                         + input.as_ref().map_or(0, |node| node.text.encode_utf16().count())

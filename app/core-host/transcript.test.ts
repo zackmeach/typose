@@ -186,6 +186,12 @@ describe('Transcript through the core host', () => {
     const call = turns.items[2]!
     expect(await c.value('structuredTranscriptTools', { ref: info.ref, item: call.id, start: 0, count: 32 })).toMatchObject({ total: 1, tools: [{ name: 'lookup_order', id: 'call_1', results: 1 }] })
     expect(await c.value('structuredTranscriptTools', { ref: info.ref, item: call.id, start: 0, count: 32, call: 0 })).toMatchObject({ results: [{ record: 0, content: { kind: 'string' } }] })
+    // Its arguments, parsed from their JSON string: their children page with the string's span as the scope.
+    const input = (await c.value<TranscriptTools>('structuredTranscriptTools', { ref: info.ref, item: call.id, start: 0, count: 32 })).tools[0]!.input!
+    expect(DATASET.slice(input.span.start, input.span.end)).toBe(String.raw`"{\"order_id\": \"A-1001\"}"`)
+    expect(input).toMatchObject({ kind: 'object', container: 0, children: 1, scope: input.span })
+    const args = await c.value<StructuredChildren>('structuredChildren', { ref: info.ref, record: 0, container: 0, start: 0, count: 128, scope: input.scope })
+    expect(args).toEqual({ nodes: [{ ordinal: 0, kind: 'string', key: 'order_id', keyMore: false, text: '"A-1001"', more: false, duplicate: false, span: input.span, scope: input.span }] })
 
     const { counts, html } = await walk(c, info.ref)
     expect(counts).toEqual({ pages: 164, items: 720, tools: 160, results: 160, texts: 640, children: 0 })
@@ -209,7 +215,14 @@ describe('Transcript through the core host', () => {
       ['structuredTranscriptText', { ...text, block: 65_537 }, 'block'],
       ['structuredTranscriptText', { ...text, end: 1 }, 'end'],
       ['structuredTranscriptText', { ...text, end: SESSION.length + 1 }, 'end'],
+      ['structuredChildren', { ref, container: 0, start: 0, count: 1, scope: 'span' }, 'scope'],
+      ['structuredChildren', { ref, container: 0, start: 0, count: 1, scope: { start: -1, end: 2 } }, 'scope'],
+      ['structuredChildren', { ref, container: 0, start: 0, count: 1, scope: { start: 2, end: 2 } }, 'scope'],
+      ['structuredChildren', { ref, container: 0, start: 0, count: 1, scope: { start: 0, end: SESSION.length + 1 } }, 'scope'],
     ] as const) expect(await c.call(method, params), `${method} ${field}`).toMatchObject({ error: { code: 'InvalidParams', field } })
+    // A scope the core host passes that isn't a JSON string of JSON: refused by the core.
+    expect(await c.call('structuredChildren', { ref, container: 0, start: 0, count: 1, scope: { start: 0, end: 10 } }))
+      .toMatchObject({ error: { code: 'InvalidParams', message: expect.stringContaining('not a JSON string that holds JSON') } })
     // In range but not in this graph: refused by the core.
     expect(await c.call('structuredTranscript', { ref, start: 0, count: 20, group: 2 ** 32 - 2 })).toMatchObject({ error: { code: 'InvalidParams' } })
     expect(await c.call('structuredTranscriptTools', { ref, item: u2.id, start: 0, count: 32, call: 1023 })).toMatchObject({ error: { code: 'InvalidParams' } })

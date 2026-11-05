@@ -7,10 +7,12 @@
 //! `finish` reserves its temporaries before it makes any (`finish_temp`). A refusal turns the graph off and releases
 //! all it holds, as closing the document does.
 use crate::budget::Reservation;
-use crate::doc::DocError;
+use crate::doc::{DocError, Document};
 use crate::json::{self, Child, JsonIndex, Kind, Span};
 use crate::jsonl::{named_fields, read_string, visit_members};
+use crate::pages::PIECE_BYTES;
 use crate::store::{ByteStore, StoreError, cancelled};
+use encoding_rs::Encoding;
 use std::collections::{HashMap, HashSet};
 use xxhash_rust::xxh3::xxh3_64;
 
@@ -994,6 +996,97 @@ fn legacy_id(name: &str) -> String {
     "function:".chars().chain(name).collect()
 }
 
+/// An OpenAI tool call's `arguments` (brief §5.4): the JSON a JSON string holds, decoded and indexed in memory for one
+/// query, so its Tree reads as a Claude call's input does, a number as written. What it holds is reserved, its bytes
+/// here and its index by the scan, and released with it.
+pub struct Arguments {
+    pub root: Child,
+    pub index: JsonIndex,
+    pub bytes: Vec<u8>,
+    _charge: Reservation,
+}
+impl Arguments {
+    /// The value the JSON string at `span` holds. `None`, so the string shows as it is, past `PIECE_BYTES` of source
+    /// (the text query's bound) or of value, for a span that isn't one string, or for a value that isn't strict JSON.
+    pub fn read(
+        doc: &Document,
+        generation: u32,
+        span: Span,
+        encoding: &'static Encoding,
+    ) -> Result<Option<Self>, DocError> {
+        let length = span.end.saturating_sub(span.start);
+        if length > PIECE_BYTES as u64 {
+            return Ok(None);
+        }
+        // The source; its text, at most 3 bytes a byte of it; and the value, at most the text.
+        let charge = Reservation::new(7 * length).map_err(DocError::Memory)?;
+        let source = doc.read(generation, span.start, span.end)?;
+        let text = encoding.decode_without_bom_handling(&source).0;
+        let token = json::parse(text.as_bytes()).map_err(in_memory)?;
+        if token.error.is_some() || token.root != Some((Kind::String, Span { start: 0, end: text.len() as u64 })) {
+            return Ok(None);
+        }
+        let bytes = json::unescape(text.as_bytes()).into_owned();
+        if bytes.len() > PIECE_BYTES {
+            return Ok(None);
+        }
+        let index = json::parse(&bytes).map_err(in_memory)?;
+        match index.error.map(|error| error.kind) {
+            Some(json::ErrorKind::Memory(e)) => return Err(DocError::Memory(e)),
+            Some(json::ErrorKind::Cancelled) => return Err(DocError::Cancelled),
+            Some(_) => return Ok(None),
+            None => {}
+        }
+        let Some((kind, value)) = index.root else {
+            return Ok(None); // empty, or only whitespace
+        };
+        let container = matches!(kind, Kind::Object | Kind::Array).then_some(0);
+        Ok(Some(Self {
+            root: Child { key: None, value, kind, container, text: Vec::new() },
+            index,
+            bytes,
+            _charge: charge,
+        }))
+    }
+    /// A page of `container`'s children, each with whether its key repeats an earlier one's (brief §5.5).
+    pub fn children(&self, container: u32, start: u64, count: usize) -> Result<Vec<(u64, Child, bool)>, DocError> {
+        let children = json::children(&self.bytes[..], &self.index, container, start, count).map_err(in_memory)?;
+        let members =
+            self.index.containers.get(container as usize).filter(|c| c.kind == Kind::Object).map_or(0, |c| c.children);
+        // `duplicate_keys`' set of key hashes, reserved as a record-scoped Tree reserves it: 80 bytes a member.
+        let _keys = Reservation::new(members * 80).map_err(DocError::Memory)?;
+        let found = match members {
+            0 | 1 => Vec::new(),
+            _ => json::duplicate_keys(&self.bytes[..], &self.index, container)
+                .map_err(in_memory)?
+                .ok_or(DocError::Cancelled)?,
+        };
+        Ok(children.into_iter().zip(start..).map(|(child, at)| (at, child, found.binary_search(&at).is_ok())).collect())
+    }
+    /// A key, decoded from its first 4,096 bytes, as `jsonl::read_string_encoding` reads one.
+    pub fn key(&self, key: Span) -> String {
+        let token = self.bytes.get(key.start as usize..key.end.min(key.start + 4096) as usize).unwrap_or_default();
+        String::from_utf8_lossy(&json::unescape(token)).into_owned()
+    }
+    /// A scalar's first 4,096 bytes as text, as written, and whether that cut it short.
+    pub fn text(&self, value: Span) -> (String, bool) {
+        let bytes = self.bytes.get(value.start as usize..value.end as usize).unwrap_or_default();
+        let shown = &bytes[..bytes.len().min(4096)];
+        let (slice, used) = crate::encoding::decode_prefix(
+            shown,
+            encoding_rs::UTF_8,
+            value.start,
+            shown.len(),
+            shown.len() == bytes.len(),
+        );
+        (slice.text, used < bytes.len())
+    }
+}
+/// Reads from memory don't fail, but a `StoreError` here would be reported, never a panic.
+fn in_memory(e: StoreError) -> DocError {
+    DocError::Invalid(format!("in-memory JSON read failed: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::Graph;
@@ -1580,5 +1673,105 @@ mod tests {
             assert_eq!(graph.charged(), held, "{name}");
             assert_eq!(graph.entries.capacity(), graph.entries.len(), "{name}: finish fits its vectors");
         }
+    }
+    /// Brief §5.4's OpenAI `arguments`, each a JSON string as the file holds it: what parses, hostile inputs, and what
+    /// stays the string (`None`).
+    #[test]
+    fn arguments_parse_from_their_json_string_or_stay_the_string() {
+        use super::{Arguments, Kind};
+        use encoding_rs::{UTF_8, WINDOWS_1252};
+        let bound = |text: &str| format!("\"{text}\"").into_bytes();
+        let piece = super::PIECE_BYTES;
+        let tokens: Vec<Vec<u8>> = vec![
+            br#""{\"exact\":3.10,\"huge\":1e400,\"digits\":123456789012345678901234567890}""#.to_vec(),
+            br#""{\"__proto__\":{\"polluted\":true},\"a\":1,\"a\":2}""#.to_vec(),
+            // A lone surrogate escaped in the JSON, and one in the string, which decodes to bytes that aren't UTF-8.
+            br#""{\"escaped\":\"\\ud800\",\"decoded\":\"\ud800\"}""#.to_vec(),
+            br#""{\"escaped\":\"\\u0000\"}""#.to_vec(),
+            // A NUL in the string is a raw control character in the JSON it holds.
+            br#""{\"decoded\":\"\u0000\"}""#.to_vec(),
+            // JSON in JSON: one level, so the value is a string.
+            br#""\"{\\\"a\\\":1}\"""#.to_vec(),
+            // 64 KiB of source with its quotes: in the bound, but nested past the scanner's depth.
+            bound(&"[".repeat(piece - 2)),
+            bound(&"1".repeat(piece - 2)),
+            bound(&"1".repeat(piece - 1)),
+            br#""{\"a\":""#.to_vec(),
+            br#""""#.to_vec(),
+            br#""  ""#.to_vec(),
+            br#""null""#.to_vec(),
+            br#"{}"#.to_vec(),
+            br#"null"#.to_vec(),
+            br#""a","b""#.to_vec(),
+            br#""\uFEFF{}""#.to_vec(),
+            // Windows-1252: é is 2 bytes of UTF-8, so the value of 64 KiB of source passes the bound.
+            [&b"\"\\\""[..], &[0xE9; 1000], b"\\\"\""].concat(),
+            [&b"\"\\\""[..], &[0xE9; 65530], b"\\\"\""].concat(),
+        ];
+        let file = temp_file("transcript-arguments", &tokens.join(&b'\n'));
+        let doc = Document::open(&file).unwrap();
+        let mut at = 0;
+        let spans: Vec<Span> = tokens
+            .iter()
+            .map(|token| {
+                let span = Span { start: at, end: at + token.len() as u64 };
+                at = span.end + 1;
+                span
+            })
+            .collect();
+        let read = |i: usize, encoding| Arguments::read(&doc, 1, spans[i], encoding).unwrap();
+        let fields = |arguments: &Arguments| -> Vec<(String, String, bool)> {
+            let children = arguments.children(0, 0, 128).unwrap();
+            children
+                .into_iter()
+                .map(|(_, c, d)| (arguments.key(c.key.unwrap()), arguments.text(c.value).0, d))
+                .collect()
+        };
+        let field = |key: &str, text: &str, duplicate| (key.to_string(), text.to_string(), duplicate);
+
+        // Numbers as written, not as an f64 has them.
+        let numbers = read(0, UTF_8).unwrap();
+        assert_eq!((numbers.root.kind, numbers.root.container), (Kind::Object, Some(0)));
+        assert_eq!(
+            fields(&numbers),
+            [
+                field("exact", "3.10", false),
+                field("huge", "1e400", false),
+                field("digits", &"1234567890".repeat(3), false)
+            ]
+        );
+        let page = numbers.children(0, 1, 1).unwrap();
+        assert_eq!((page.len(), page[0].0, numbers.text(page[0].1.value).0), (1, 1, "1e400".into()));
+        // Its bytes and its index are both reserved.
+        assert_eq!(numbers._charge.bytes(), 7 * tokens[0].len() as u64);
+        assert!(numbers.index.charged() > 0);
+        // `__proto__` is a key like any other, and a repeated key is kept and flagged.
+        let keys = read(1, UTF_8).unwrap();
+        assert_eq!(fields(&keys)[1..], [field("a", "1", false), field("a", "2", true)]);
+        assert_eq!(fields(&keys)[0].0, "__proto__");
+        assert_eq!(
+            fields(&read(2, UTF_8).unwrap()),
+            [field("escaped", r#""\ud800""#, false), field("decoded", "\"\u{FFFD}\u{FFFD}\u{FFFD}\"", false)]
+        );
+        assert_eq!(fields(&read(3, UTF_8).unwrap()), [field("escaped", r#""\u0000""#, false)]);
+        assert!(read(4, UTF_8).is_none());
+        let nested = read(5, UTF_8).unwrap();
+        assert_eq!((nested.root.kind, nested.root.container), (Kind::String, None));
+        assert_eq!(nested.text(nested.root.value), (r#""{\"a\":1}""#.into(), false));
+        assert!(read(6, UTF_8).is_none());
+        // At the bound a value parses, its text cut as a Tree's is; one byte past it, it stays the string.
+        let long = read(7, UTF_8).unwrap();
+        assert_eq!(long.text(long.root.value), ("1".repeat(4096), true));
+        assert!(read(8, UTF_8).is_none());
+        for i in 9..12 {
+            assert!(read(i, UTF_8).is_none(), "{i}");
+        }
+        assert_eq!(read(12, UTF_8).unwrap().root.kind, Kind::Null);
+        for i in 13..17 {
+            assert!(read(i, UTF_8).is_none(), "{i}");
+        }
+        let text = read(17, WINDOWS_1252).unwrap();
+        assert_eq!(text.text(text.root.value).0, format!("\"{}\"", "é".repeat(1000)));
+        assert!(read(18, WINDOWS_1252).is_none());
     }
 }

@@ -327,7 +327,7 @@ export class StructuredLens {
     let expanded = false, loaded = false
     const load = async (start: number, wholeLevel = false): Promise<void> => {
       if (this.stopped || node.container === undefined) return
-      const result = await this.source.children(node.container, start, record)
+      const result = await this.source.children(node.container, start, record, node.scope)
       if (this.stopped) return
       if (this.mounted + result.nodes.length > 2000) { children.append(el('p', 'Tree display limit reached (2,000 nodes) · View in Raw or copy the source value', 'structured-problem')); return }
       for (const child of result.nodes) children.append(await this.treeNode(child, depth + 1, `${path}${child.key === undefined ? `[${child.ordinal}]` : `[${JSON.stringify(child.key)}]`}`, record, 0))

@@ -65,6 +65,9 @@ pub struct StructuredNode {
     pub container: Option<u32>,
     pub children: Option<f64>,
     pub duplicate: bool,
+    /// A node of a value parsed from a JSON string (an OpenAI call's `arguments`): that string's span, which its
+    /// children are paged from (`structured_children`'s `scope`).
+    pub scope: Option<Span>,
 }
 #[napi(object)]
 pub struct StructuredProblem {
@@ -148,6 +151,7 @@ fn node(
         container,
         children,
         duplicate,
+        scope: None,
     })
 }
 fn describe(raw: &Raw, entry: &Entry) -> std::result::Result<StructuredInfo, DocError> {
@@ -380,6 +384,7 @@ pub struct Children {
     start: u64,
     count: usize,
     record: Option<u64>,
+    scope: Option<json::Span>,
     cancel: Arc<AtomicBool>,
     slot: Option<Slot>,
     _charge: Reservation,
@@ -395,6 +400,16 @@ impl Task for Children {
             self.slot = Some(slot(Work::Page, &store::cancelled)?);
             // One identity check for the page, not one per node key and value.
             self.raw.document().batch(self.entry.generation, || {
+                if let Some(scope) = self.scope {
+                    return transcript::argument_children(
+                        &self.raw,
+                        self.entry.generation,
+                        scope,
+                        self.container,
+                        self.start,
+                        self.count,
+                    );
+                }
                 let record_tree;
                 let tree = if let Some(record) = self.record {
                     if self.entry.format != "jsonl" {
@@ -517,6 +532,7 @@ impl Doc {
         count: f64,
         cancel: &Cancel,
         record: Option<f64>,
+        scope: Option<Span>,
     ) -> std::result::Result<AsyncTask<Children>, Error<Code>> {
         let container = u32::try_from(int("start", container)?)
             .map_err(|_| Error::new(Code::InvalidParams, "container exceeds u32"))?;
@@ -535,6 +551,12 @@ impl Doc {
             start,
             count,
             record: record.map(|line| int("line", line)).transpose()?,
+            // A parsed value's children: the span of the JSON string it was parsed from.
+            scope: scope
+                .map(|scope| {
+                    Ok::<_, Error<Code>>(json::Span { start: int("start", scope.start)?, end: int("end", scope.end)? })
+                })
+                .transpose()?,
             cancel: cancel.flag.clone(),
             slot: None,
             _charge: charge,

@@ -402,7 +402,7 @@ export class TranscriptView {
   }
   private async fields(node: StructuredNode, record: number): Promise<StructuredNode[]> {
     if (node.container === undefined) return []
-    const page = await this.source.children(node.container, 0, record)
+    const page = await this.source.children(node.container, 0, record, node.scope)
     return page.nodes
   }
   private async content(

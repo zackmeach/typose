@@ -293,9 +293,73 @@ test('OpenAI dataset Transcript keeps conversations separate and tool results un
   expect(await card.locator('.transcript-conversation > div').evaluateAll(groups => groups.map(group => getComputedStyle(group).borderLeftWidth)))
     .toEqual(['0px', '0px', '0px', '0px'])
   const tool = card.locator('.transcript-tool[data-tool-id="reused"]').first()
+  // The arguments are parsed from their JSON string (§5.4): summarised and shown as a Claude call's input is.
+  await expect(tool.locator('> summary')).toHaveText('lookup(exact: 3.10)')
   await tool.locator('summary').click()
+  await expect(tool.locator('.tree-key')).toHaveText(['exact: '])
+  await expect(tool.locator('.tree-number')).toHaveText('3.10')
   await expect(tool.locator('.transcript-tool-result').getByText('Dataset result fixture', { exact: true })).toBeVisible()
   await expect(card.locator('.transcript-turn > h3').filter({ hasText: /^Tool$/ })).toHaveCount(0)
+  expect(live.pageErrors).toEqual([])
+})
+
+test('OpenAI arguments parse from their JSON string, numbers as written, and what isn’t JSON shows as the string', async () => {
+  // Each call's arguments, under its name: what parses, hostile inputs, and what stays as it is.
+  const calls: [string, unknown][] = [
+    ['numbers', '{"exact":3.10,"huge":1e400,"digits":123456789012345678901234567890}'],
+    ['keys', '{"__proto__":{"polluted":true},"a":1,"a":2}'],
+    // A lone surrogate escaped in the JSON, and one in the string itself, which only the outer escape can hold.
+    ['surrogates', '{"escaped":"\\ud800","decoded":"\ud800"}'],
+    ['nuls', '{"escaped":"\\u0000"}'],
+    // A NUL in the string itself is a raw control character in the JSON it holds: not JSON.
+    ['nul', '{"decoded":"\u0000"}'],
+    // JSON in JSON: one level is parsed, so the value is a string.
+    ['nested', JSON.stringify(JSON.stringify({ a: 1 }))],
+    // 64 KiB of source, quotes included: in the bound, but deeper than the scanner nests.
+    ['deep', '['.repeat(65_534)],
+    ['big', JSON.stringify({ big: 'x'.repeat(70_000) })],
+    ['invalid', '{"a":'],
+    ['empty', ''],
+    ['object', {}],
+    ['none', null]
+  ]
+  const lines = [{ role: 'user', content: 'Arguments fixture' }, ...calls.map(([name, args]) =>
+    ({ role: 'assistant', content: null, tool_calls: [{ id: name, type: 'function', function: { name, arguments: args } }] }))]
+  const live = await launch({ hooks: true, file: fixture('transcript-arguments.jsonl', lines.map(line => JSON.stringify(line)).join('\n') + '\n') })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  const open = async (name: string, summary: string | RegExp) => {
+    const tool = card.locator(`.transcript-tool[data-tool-id="${name}"]`)
+    await expect(tool.locator('> summary')).toHaveText(summary)
+    await tool.locator('> summary').click()
+    return tool
+  }
+  let tool = await open('numbers', 'numbers(exact: 3.10, huge: 1e400, digits: 123456789012345678901234567890)')
+  await expect(tool.locator('.tree-object')).toHaveText('{ 3 items }')
+  await expect(tool.locator('.tree-number')).toHaveText(['3.10', '1e400', '123456789012345678901234567890'])
+  tool = await open('keys', 'keys(__proto__: {…}, a: 1, a: 2)')
+  await expect(tool.locator('.tree-key')).toHaveText(['__proto__: ', 'a: ', 'a: '])
+  await expect(tool.locator('.tree-row').filter({ hasText: 'Duplicate key' })).toHaveCount(1)
+  expect(await live.win.evaluate(() => ({} as Record<string, unknown>).polluted)).toBeUndefined()
+  tool = await open('surrogates', /^surrogates\(escaped: ".", decoded: "\uFFFD+"\)$/u)
+  await expect(tool.locator('.tree-string')).toHaveText(['"\\ud800"', /^"\uFFFD+"$/u])
+  tool = await open('nuls', 'nuls(escaped: "\u0000")')
+  await expect(tool.locator('.tree-string')).toHaveText('"\\u0000"')
+  tool = await open('nested', 'nested({"a":1})')
+  await expect(tool.locator('.tree-key')).toHaveCount(0)
+  await expect(tool.locator('.tree-string')).toHaveText('"{\\"a\\":1}"')
+  // Not parsed: the string, as before.
+  for (const [name, summary] of [['nul', 'nul({"decoded":"\u0000"})'], ['deep', `deep(${'['.repeat(80)} …)`],
+    ['big', `big({"big":"${'x'.repeat(72)} …)`], ['invalid', 'invalid({"a":)'], ['empty', 'empty()']] as const) {
+    tool = await open(name, summary)
+    await expect(tool.locator('.tree-key')).toHaveCount(0)
+    await expect(tool.locator('.tree-string')).toHaveCount(1)
+  }
+  // Arguments that aren't a string show as they are.
+  tool = await open('object', 'object()')
+  await expect(tool.locator('.tree-object')).toHaveText('{ 0 items }')
+  tool = await open('none', 'none(null)')
+  await expect(tool.locator('.tree-null')).toHaveText('null')
   expect(live.pageErrors).toEqual([])
 })
 

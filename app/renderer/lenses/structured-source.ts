@@ -1,4 +1,4 @@
-import type { Opened, StructuredChildren, StructuredInfo } from '../../shared/protocol'
+import type { Opened, SourceSpan, StructuredChildren, StructuredInfo } from '../../shared/protocol'
 import type { CoreClient } from '../core'
 import { CoreCallError } from '../core'
 import type { LensBudget } from './lens-budget'
@@ -7,7 +7,8 @@ const YAML_BUILD_MS = 5000
 
 export interface StructuredSource {
   info: StructuredInfo
-  children(container: number, start: number, record?: number): Promise<StructuredChildren>
+  /** A container's children; of a value parsed from a JSON string, with its `scope`. */
+  children(container: number, start: number, record?: number, scope?: SourceSpan): Promise<StructuredChildren>
   subscribe?(listener: () => void): () => void
   dispose(): void
 }
@@ -18,7 +19,7 @@ export async function prepareStructured(core: CoreClient, opened: Opened, budget
     const info = await core.call('structuredBuild', { view }, signal)
     let stopped = false, timer: ReturnType<typeof setTimeout> | undefined
     const listeners = new Set<() => void>()
-    const source: StructuredSource = { info, children: (container, start, record) => core.call('structuredChildren', { ref: source.info.ref, container, start, count: 128, record }, signal),
+    const source: StructuredSource = { info, children: (container, start, record, scope) => core.call('structuredChildren', { ref: source.info.ref, container, start, count: 128, record, scope }, signal),
       subscribe: listener => { listeners.add(listener); return () => listeners.delete(listener) }, dispose() { stopped = true; clearTimeout(timer); listeners.clear() } }
     const poll = async () => {
       if (stopped || signal.aborted || source.info.done || source.info.status === 'locked' || source.info.status === 'partial' && source.info.reason) return

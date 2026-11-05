@@ -216,6 +216,32 @@ pub fn scan(store: &ByteStore, range: Range<u64>, jsonc: bool) -> Result<JsonInd
     if start == 0 && store.read(0, end.min(3))? == b"\xEF\xBB\xBF" {
         start = 3; // a UTF-8 BOM at the file's start (spec §4.1): the document starts after it
     }
+    scan_span(store, Span { start, end }, jsonc)
+}
+
+/// What the scanner and enumeration read: a document's store, or bytes in memory (`parse`).
+pub trait Source {
+    fn read(&self, start: u64, end: u64) -> Result<Vec<u8>, StoreError>;
+}
+impl Source for ByteStore {
+    fn read(&self, start: u64, end: u64) -> Result<Vec<u8>, StoreError> {
+        ByteStore::read(self, start, end)
+    }
+}
+impl Source for [u8] {
+    fn read(&self, start: u64, end: u64) -> Result<Vec<u8>, StoreError> {
+        let end = (end as usize).min(self.len());
+        Ok(self[(start as usize).min(end)..end].to_vec())
+    }
+}
+
+/// `bytes` as strict JSON, all of them, with no BOM to skip: a value held in memory, such as an OpenAI tool call's
+/// decoded `arguments` (`transcript::Arguments`). Its spans are offsets into `bytes`.
+pub fn parse(bytes: &[u8]) -> Result<JsonIndex, StoreError> {
+    scan_span(bytes, Span { start: 0, end: bytes.len() as u64 }, false)
+}
+
+fn scan_span<S: Source + ?Sized>(store: &S, Span { start, end }: Span, jsonc: bool) -> Result<JsonIndex, StoreError> {
     let mut s = Scanner::new(jsonc, Span { start, end });
     let mut pos = start;
     let stopped = 'scan: {
@@ -254,8 +280,8 @@ pub fn scan(store: &ByteStore, range: Range<u64>, jsonc: bool) -> Result<JsonInd
 /// Up to `count` children of `container`, starting at child `first`, holding at most `MAX_PAGE` bytes of text,
 /// checked before each push (spec §3.4): the next page starts after the last child returned. Starts at the nearest
 /// checkpoint, jumps over nested containers through the index and over long scalars through `long_scalars`.
-pub fn children(
-    store: &ByteStore,
+pub fn children<S: Source + ?Sized>(
+    store: &S,
     index: &JsonIndex,
     container: u32,
     first: u64,
@@ -284,7 +310,11 @@ pub fn children(
 /// `None` if cancelled (checked every 1,024 members). Runs over the whole object once; the Tree calls it when
 /// the object is first expanded. While it runs it holds a pre-sized set of 128-bit key hashes: 17–34 bytes
 /// per member (136 MB for a 5M-key object).
-pub fn duplicate_keys(store: &ByteStore, index: &JsonIndex, container: u32) -> Result<Option<Vec<u64>>, StoreError> {
+pub fn duplicate_keys<S: Source + ?Sized>(
+    store: &S,
+    index: &JsonIndex,
+    container: u32,
+) -> Result<Option<Vec<u64>>, StoreError> {
     let members = index.containers.get(container as usize).filter(|c| c.kind == Kind::Object).map_or(0, |c| c.children);
     let (mut seen, mut dups, mut ordinal) = (HashSet::with_capacity(members as usize), Vec::new(), 0u64);
     let mut cancelled = false;
@@ -732,7 +762,7 @@ impl Scanner {
 }
 
 /// 1-based line and character column of `offset`, counted from `from`; (0, 0) if cancelled first.
-fn line_col(store: &ByteStore, from: u64, offset: u64) -> Result<(u64, u64), StoreError> {
+fn line_col<S: Source + ?Sized>(store: &S, from: u64, offset: u64) -> Result<(u64, u64), StoreError> {
     let (mut line, mut column, mut pos) = (1u64, 1u64, from);
     while pos < offset {
         if crate::store::cancelled() {
@@ -757,15 +787,15 @@ fn line_col(store: &ByteStore, from: u64, offset: u64) -> Result<(u64, u64), Sto
 }
 
 /// Pull reader for enumeration: `[pos, end)` through the store, `WINDOW` bytes at a time.
-struct Cursor<'s> {
-    store: &'s ByteStore,
+struct Cursor<'s, S: ?Sized> {
+    store: &'s S,
     pos: u64,
     end: u64,
     buf: Vec<u8>,
     buf_start: u64,
 }
 
-impl Cursor<'_> {
+impl<S: Source + ?Sized> Cursor<'_, S> {
     /// The buffered bytes from `pos` on, refilled when used up; empty at `end`.
     fn rest(&mut self) -> Result<&[u8], StoreError> {
         if self.pos < self.buf_start || self.pos >= self.buf_start + self.buf.len() as u64 {
@@ -875,12 +905,12 @@ fn scalar_kind(first: u8) -> Kind {
 }
 
 /// Visits the children of `container` from child `first` on, until `visit` returns false.
-fn walk(
-    store: &ByteStore,
+fn walk<S: Source + ?Sized>(
+    store: &S,
     index: &JsonIndex,
     container: u32,
     first: u64,
-    mut visit: impl FnMut(&mut Cursor<'_>, Child) -> Result<bool, StoreError>,
+    mut visit: impl FnMut(&mut Cursor<'_, S>, Child) -> Result<bool, StoreError>,
 ) -> Result<(), StoreError> {
     let Some(c) = index.containers.get(container as usize).filter(|c| first < c.children) else { return Ok(()) };
     let cps = index.checkpoints_of(container);
