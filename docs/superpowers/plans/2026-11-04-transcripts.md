@@ -37,7 +37,7 @@
 ## Out of scope
 - `catch_unwind` across typose-node. Main has the same exposure: a panic in any napi method kills the core host. It's a separate decision.
 - Transcript Find, and Go to inside Transcript (M6).
-- Remote and `data:` images, and Transcript links, move to the reader-to-workspace plan's deferred item, "advanced link resolution/wikilinks/hand-off and remote/data images": the §4.6 "Load remote images" gate, the main-process fetch session and the Z43 bounded `data:` path don't exist anywhere in the app yet, and Transcript reuses Rendered's.
+- Remote images, with the §4.6 "Load remote images" bar and the main-process fetch session, and the Z43 bounded `data:` path with its per-image pixel caps, are deferred to the reader-to-workspace plan's item "advanced link resolution/wikilinks/hand-off and remote/data images"; until they land, Transcript shows a placeholder for every image. Transcript links need the core to open a link from a non-Markdown source (`Document::link_target` in `doc.rs` refuses one, and the core host's `resolve` in `dispatch.ts` returns inert for one), so they are deferred with hand-off.
 - Mac/Linux qualification.
 
 ## Done when
