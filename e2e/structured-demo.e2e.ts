@@ -542,6 +542,24 @@ test('a Transcript link without a target (javascript:, dropped by the sanitizer)
   expect(live.pageErrors).toEqual([])
 })
 
+test('a text over 64 KiB previews its decoded start, not its JSON source', async () => {
+  const file = fixture('transcript-long.jsonl', claudeSession([
+    { role: 'user', content: 'line one\nline "two"\n' + 'z'.repeat(70_000) },
+    { role: 'assistant', content: 'Reply fixture' },
+    { role: 'user', content: 'Done fixture' }
+  ]))
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  const preview = card.locator('pre.transcript-text')
+  await expect(preview).toHaveCount(1)
+  const text = (await preview.textContent())!
+  expect(text.slice(0, 24)).toBe('line one\nline "two"\nzzzz')
+  expect(text.endsWith('z … (source preview)')).toBe(true)
+  await expect(card.getByRole('button', { name: 'View complete content in Rows', exact: true })).toBeVisible()
+  expect(live.pageErrors).toEqual([])
+})
+
 test('JSONL Table discovers a global key after line 1,000 and retains original source row navigation', async () => {
   const lines = Array.from({ length: 1001 }, (_, index) => `{"common":"row ${index + 1}"}`)
   lines.push('{"common":"last row","late":"revealed"}')

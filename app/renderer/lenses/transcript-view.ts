@@ -10,13 +10,19 @@ const make = (tag: string, text?: string, className?: string): HTMLElement => {
   if (className) element.className = className
   return element
 }
+/** A node's text, a string decoded. A cut preview (`more`) ends mid-token: it's closed after its last whole escape, at
+ *  most 6 characters back (`\uXXXX`). The renderer has no other decoder for one: Rows' summaries are decoded natively. */
 const string = (node?: StructuredNode): string => {
   if (!node) return ''
-  try {
-    return node.kind === 'string' ? (JSON.parse(node.text) as string) : node.text
-  } catch {
-    return node.text
+  if (node.kind !== 'string') return node.text
+  for (let cut = 0; cut <= (node.more ? 6 : 0); cut++) {
+    try {
+      return JSON.parse(node.text.slice(0, node.text.length - cut) + (node.more ? '"' : '')) as string
+    } catch {
+      // a shorter cut
+    }
   }
+  return node.text
 }
 /** `n` and its noun, singular for one. */
 const count = (n: number, noun: string): string => `${n} ${noun}${n === 1 ? '' : 's'}`
@@ -477,7 +483,7 @@ export class TranscriptView {
       { view, start: node.span.start, count: node.span.end - node.span.start },
       signal
     )
-    return string({ ...node, text: new TextDecoder(this.opened.encoding, { ignoreBOM: true }).decode(bytes) })
+    return string({ ...node, more: false, text: new TextDecoder(this.opened.encoding, { ignoreBOM: true }).decode(bytes) })
   }
   private async markdown(parent: HTMLElement, node: StructuredNode, record: number, pane: Pane): Promise<void> {
     if (node.span.end - node.span.start > 65536) {
