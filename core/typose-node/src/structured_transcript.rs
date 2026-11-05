@@ -175,7 +175,8 @@ pub(super) fn argument_children(
     start: u64,
     count: usize,
 ) -> std::result::Result<StructuredChildren, DocError> {
-    // Only what the Tools query parses: a string in an OpenAI transcript, inside the record the request names.
+    // Any string that holds JSON inside the named record of a ready OpenAI graph: a call's `arguments`, which the Tools
+    // query offers, or any other string there (a key, a tool result, another schema's line). Nothing outside it.
     let openai = entry.jsonl.as_ref().is_some_and(|index| openai(&index.transcript.lock().unwrap()));
     // The graph first: any other document is refused here, before its record's line is looked up.
     let range = match record {
