@@ -467,10 +467,11 @@ impl Graph {
                 ids.insert(uuid.as_str(), index); // unique: `drop_copies` ran
             }
         }
-        // Compaction leaves a `compact_boundary` record with no parent; its logical parent joins the session before it to
-        // the session after. On this PC (M5 PR 1, 27 sessions over 10 MiB), 94 boundaries cut 52,151 of 79,735 messages
-        // off the main chain. Only an earlier record is a logical parent: 4 of the 94, each a session's first, name a
-        // later one, which would close a cycle.
+        // Compaction leaves a `compact_boundary` record with no parent; its logical parent joins the session before it
+        // to the session after. On this PC (M5 PR 1, 27 sessions over 10 MiB), the graph keeps 85 boundaries
+        // (`drop_copies` drops 9 later copies), which cut 52,151 of 79,735 messages off the main chain. Only an earlier
+        // record is a logical parent: 81 of the 85 name one, and 4, each its file's first, name a later one, which
+        // would close a cycle.
         let mut direct = Vec::with_capacity(n);
         for (index, entry) in self.entries.iter().enumerate() {
             steps.tick()?;
@@ -492,6 +493,7 @@ impl Graph {
         let sidechain_only = messages.iter().all(|&index| self.entries[index].sidechain);
         let side: Vec<bool> = self.entries.iter().map(|entry| entry.sidechain && !sidechain_only).collect();
         memo.fill(Climb::Unknown);
+        self.lanes(&messages, &side, &mut parents, steps)?;
         self.parallel_calls(&messages, &side, &mut parents, &mut memo, &mut path, steps)?;
         let mut has_child = vec![false; n];
         for &index in &messages {
@@ -586,12 +588,64 @@ impl Graph {
         debug_assert!(branch_items.is_empty() && side_items.is_empty(), "a group was left out of the main order");
         Ok(())
     }
+    /// Interleaved lanes. Claude Code runs a message's calls while the message still streams, and hangs the message's
+    /// next record from the result it wrote last, so the message's records split into two lanes through the file. On
+    /// this PC (M5 PR 1, 27 sessions over 10 MiB), that left 58 false branches in 11 files, hiding 96 calls of messages
+    /// on the chain. Here a record of message M whose parent is a record of only results, all to M's calls, hangs
+    /// instead from M's previous record in the file. That makes M one run again, before `parallel_calls` closes its
+    /// results' forks (it moves 3,446 records in those 27 files). The new parent is always earlier in the file, but a
+    /// parent written later can still close a cycle; the climbs after this turn the graph off.
+    fn lanes(
+        &self,
+        messages: &[usize],
+        side: &[bool],
+        parents: &mut [Option<usize>],
+        steps: &mut Steps,
+    ) -> Result<(), Stop> {
+        let entries = &self.entries;
+        // Each record's results, by the message whose calls they answer (none if more than one, or one with no
+        // `message.id`) and how many link (`match_tools` links each once).
+        let mut answers = vec![(None, 0u32); entries.len()];
+        for entry in entries {
+            steps.tick()?;
+            for link in entry.turns.iter().flat_map(|turn| &turn.calls).flat_map(|call| &call.results) {
+                steps.tick()?;
+                let (message, count) = &mut answers[link.entry];
+                if *count == 0 {
+                    *message = entry.message;
+                } else if *message != entry.message {
+                    *message = None;
+                }
+                *count += 1;
+            }
+        }
+        // Each message's last record so far, in file order.
+        let mut last = HashMap::with_capacity(messages.len());
+        for &index in messages {
+            steps.tick()?;
+            let Some(message) = entries[index].message.filter(|_| !side[index]) else {
+                continue;
+            };
+            if let (Some(previous), Some(parent)) = (last.insert(message, index), parents[index])
+                && parent != previous
+                && entries[parent].turns.first().is_some_and(|turn| {
+                    turn.only_results
+                        && !turn.results.is_empty()
+                        && answers[parent] == (Some(message), turn.results.len() as u32)
+                })
+            {
+                parents[index] = Some(previous);
+            }
+        }
+        Ok(())
+    }
     /// Parallel tool calls. Claude Code writes an assistant message's blocks as records of one `message.id`, each the
     /// parent of the next, and each tool result as a child of the record holding its call: a message's calls fork
     /// each of its records but the last, into the next one and that record's result. On this PC (M5 PR 1, 27 sessions
-    /// over 10 MiB), 2,742 of 2,779 forks have exactly that shape: an assistant parent with two children, a record of
-    /// its `message.id` first in the file, then a record of only results to the parent's calls. There the result hangs
-    /// from the message's last record instead, and the fork closes. Every other fork stays a branch.
+    /// over 10 MiB), the graph after compaction's logical parents has 2,790 forks, and 2,742 have exactly that shape:
+    /// an assistant parent with two children, a record of its `message.id` first in the file, then a record of only
+    /// results to the parent's calls. After `lanes`, 2,937 do. There the result hangs from the message's last record
+    /// instead, and the fork closes. Every other fork stays a branch.
     fn parallel_calls(
         &self,
         messages: &[usize],
@@ -776,16 +830,19 @@ fn finish_temp(records: usize, turns: usize, calls: usize, results: usize) -> u6
     let copies = table::<&str>(records) + records;
     let tools = table::<((usize, &str), Place)>(calls) + results * size_of::<(Place, Place)>();
     // A record's four flags, three indexes (messages or events, the climb's path, the chain), three parents (direct,
-    // nearest message, and its message's next record), its first two children, two memos, and its group with the
-    // stable sort's scratch for it; then the uuid table, the two group tables and their lists.
+    // nearest message, and its message's next record), the message its results answer (`lanes`), its first two
+    // children, two memos, and its group with the stable sort's scratch for it; then the uuid table, `lanes`' table of
+    // each message's last record, the two group tables and their lists.
     let claude = records
         * (4 + 3 * size_of::<usize>()
             + 3 * size_of::<Option<usize>>()
+            + size_of::<(Option<u64>, u32)>()
             + size_of::<(u8, usize, usize)>()
             + 2 * size_of::<Climb>()
             + 2 * size_of::<Group>()
             + 4 * size_of::<usize>())
         + table::<(&str, usize)>(records)
+        + table::<(u64, usize)>(records)
         + 2 * table::<(Option<usize>, Vec<usize>)>(records);
     // `turn_items`' lists and the groups' children: an item each, both growing.
     let lists = 2 * 4 * size_of::<usize>() * (records + turns);
@@ -1350,6 +1407,131 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(true));
         assert!(matches!(cancellable(&cancel, || graph.finish(Some("claude-code-v1"))), Err(DocError::Cancelled)));
         assert!(!graph.ready && graph.entries.is_empty() && graph.items.is_empty());
+        assert_eq!(graph.charged(), 0);
+    }
+    fn said(uuid: &str, parent: &str, message: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","uuid":"{uuid}","parentUuid":"{parent}","message":{{"id":"{message}","role":"assistant","content":[{{"type":"text","text":"x"}}]}}}}"#
+        )
+    }
+    /// Interleaved lanes (`lanes`): each record of message M0 after the first two hangs from a result, in two lanes
+    /// through the file. They read as one chain, each result under its call. This is round 2's review fixture `p1-lanes`.
+    #[test]
+    fn interleaved_lanes_are_one_chain() {
+        let lines = [
+            START.to_string(),
+            call("p", "u0", "tp", "M0"),
+            call("a0", "p", "t0", "M0"),
+            result("rp", "p", "tp"),
+            call("a2", "rp", "t2", "M0"),
+            result("r0", "a0", "t0"),
+            call("a4", "r0", "t4", "M0"),
+            result("r2", "a2", "t2"),
+            call("a6", "r2", "t6", "M0"),
+            result("r4", "a4", "t4"),
+            call("a8", "r4", "t8", "M0"),
+            result("r6", "a6", "t6"),
+            result("r8", "a8", "t8"),
+            said("n", "r8", "M1"),
+        ];
+        let index = fixture("transcript-lanes", &lines.iter().map(String::as_str).collect::<Vec<_>>());
+        let graph = index.transcript.lock().unwrap();
+        assert!(graph.ready, "{:?}", graph.reason);
+        assert_eq!((graph.census.branches, graph.census.matched_results), (0, 6));
+        let turns: Vec<_> = ["u0", "p", "a0", "a2", "a4", "a6", "a8", "n"].map(|uuid| ("turn", uuid)).into();
+        assert_eq!(order(&graph), turns);
+        assert!(
+            graph
+                .entries
+                .iter()
+                .flat_map(|entry| &entry.turns)
+                .flat_map(|turn| &turn.calls)
+                .all(|call| call.results.len() == 1)
+        );
+    }
+    /// A session in one of the shapes `probe2b.cjs` found lanes in (M5 PR 1, round 3), and the records to show. The
+    /// spec lists records in file order: `c` a call of message M0, `d` one of M1, `t` text of M1, `r` a record of one
+    /// tool result, each with its parent's rank, or `x` for M0's earlier records `P0`, `P1`, …, written first, each the
+    /// parent of the next. A result answers its parent's call, or with `x` the next earlier record's; other records with
+    /// `x` hang from the last of them. `n` names the record the session goes on from.
+    fn shape(spec: &str) -> (Vec<String>, Vec<String>) {
+        let tokens: Vec<_> = spec.split(' ').collect();
+        let earlier = tokens.iter().filter(|token| token.starts_with('r') && token.ends_with(":x")).count();
+        let mut lines = vec![START.to_string()];
+        let mut shown = vec!["u0".to_string()];
+        for j in 0..earlier {
+            let parent = if j == 0 { "u0".to_string() } else { format!("P{}", j - 1) };
+            lines.push(call(&format!("P{j}"), &parent, &format!("tP{j}"), "M0"));
+            shown.push(format!("P{j}"));
+        }
+        let mut answered = 0;
+        for token in tokens {
+            let (kind, rest) = token.split_at(1);
+            if kind == "n" {
+                lines.push(reply(&format!("r{rest}")));
+                shown.push("n".into());
+                continue;
+            }
+            let (rank, parent) = rest.split_once(':').unwrap();
+            let uuid = format!("r{rank}");
+            let under = if parent == "x" { format!("P{}", earlier - 1) } else { format!("r{parent}") };
+            lines.push(match kind {
+                "c" | "d" => call(&uuid, &under, &format!("t{rank}"), if kind == "c" { "M0" } else { "M1" }),
+                "t" => said(&uuid, &under, "M1"),
+                _ if parent == "x" => {
+                    answered += 1;
+                    result(&uuid, &format!("P{}", answered - 1), &format!("tP{}", answered - 1))
+                }
+                _ => result(&uuid, &under, &format!("t{parent}")),
+            });
+            if kind != "r" {
+                shown.push(uuid);
+            }
+        }
+        (lines, shown)
+    }
+    /// The 11 distinct shapes of the 12 commonest `probe2b.cjs` found among the 58 lane branches in the 27 sessions over
+    /// 10 MiB (the 12th is the 1st, with the chain on its other lane), each closed by a reply under the shape's last
+    /// record on the chain: one chain, every record but the results in file order.
+    #[test]
+    fn the_lane_shapes_found_are_one_chain() {
+        for (case, (found, spec)) in [
+            (5, "c0:x r1:x c2:1 r3:0 c4:3 r5:2 c6:5 r7:4 c8:7 n8"),
+            (4, "c0:x r1:x c2:1 r3:0 c4:3 r5:2 r6:4 c7:6 n7"),
+            (3, "c0:x r1:x c2:1 r3:0 c4:3 r5:2 c6:5 r7:4 n6"),
+            (3, "c0:x r1:x c2:1 r3:0 c4:3 c5:4 r6:2 r7:4 r8:5 n8"),
+            (2, "c0:x r1:x c2:1 c3:2 r4:x c5:4 r6:0 r7:2 r8:3 r9:5 t10:9 n10"),
+            (2, "c0:x r1:x c2:1 c3:2 r4:0 c5:4 r6:2 r7:3 r8:5 n6"),
+            (2, "c0:x r1:x c2:1 c3:2 r4:0 c5:4 r6:2 r7:3 r8:5 c9:8 n6"),
+            (2, "c0:x r1:x c2:1 r3:0 c4:3 r5:2 r6:4 t7:6 n7"),
+            (2, "c0:x r1:x c2:1 c3:2 r4:0 c5:4 r6:2 r7:3 r8:5 c9:8 n9"),
+            (2, "c0:x r1:x c2:1 c3:2 r4:0 c5:4 r6:2 r7:3 r8:5 d9:8 n9"),
+            (1, "c0:x r1:x c2:1 c3:2 c4:3 r5:0 c6:5 r7:6 t8:7 n8"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (lines, shown) = shape(spec);
+            let index = fixture(
+                &format!("transcript-lane-shape-{case}"),
+                &lines.iter().map(String::as_str).collect::<Vec<_>>(),
+            );
+            let graph = index.transcript.lock().unwrap();
+            assert!(graph.ready, "{spec}: {:?}", graph.reason);
+            assert_eq!(graph.census.branches, 0, "{spec} (found {found} times)");
+            let turns: Vec<_> = shown.iter().map(|uuid| ("turn", uuid.as_str())).collect();
+            assert_eq!(order(&graph), turns, "{spec} (found {found} times)");
+        }
+    }
+    /// `lanes` gives a record an earlier parent, but a record can name a later one: a cycle that closes turns the
+    /// graph off rather than looping.
+    #[test]
+    fn a_lane_that_closes_a_cycle_turns_the_graph_off() {
+        let lines = [START.to_string(), call("a", "b", "t1", "M"), result("r", "u0", "t1"), call("b", "r", "t2", "M")];
+        let index = fixture("transcript-lane-cycle", &lines.iter().map(String::as_str).collect::<Vec<_>>());
+        let graph = index.transcript.lock().unwrap();
+        assert!(!graph.ready);
+        assert_eq!(graph.reason.as_deref(), Some(super::CYCLE));
         assert_eq!(graph.charged(), 0);
     }
     /// Reservations come from the structs' sizes (`heap`, `turn_heap`, `finish_temp`). A change to these structs fails

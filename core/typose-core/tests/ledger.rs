@@ -415,6 +415,41 @@ fn lossy_dataset() -> Vec<u8> {
         [br#"{"messages":[{"role":"assistant","content":null,"tool_calls":["#.as_slice(), &calls, b"]}]}\n"].concat();
     row.repeat(3)
 }
+/// A Claude Code session of 2,000 messages, each in two interleaved lanes (M5 PR 1, round 3): a call hangs from the
+/// result written last, and the next prompt from the message's reply.
+fn lanes_session() -> String {
+    let call = |k: usize, uuid: &str, parent: &str| {
+        format!(
+            r#"{{"type":"assistant","uuid":"{k}-{uuid}","parentUuid":"{k}-{parent}","message":{{"id":"M{k}","role":"assistant","content":[{{"type":"tool_use","id":"{k}-t-{uuid}","name":"read","input":{{}}}}]}}}}"#
+        )
+    };
+    let result = |k: usize, uuid: &str, call: &str| {
+        format!(
+            r#"{{"type":"user","uuid":"{k}-{uuid}","parentUuid":"{k}-{call}","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"{k}-t-{call}","content":"r"}}]}}}}"#
+        )
+    };
+    let mut lines = Vec::new();
+    for k in 0..2000 {
+        let prompt = if k == 0 { "null".to_string() } else { format!(r#""{}-n""#, k - 1) };
+        lines.push(format!(
+            r#"{{"type":"user","uuid":"{k}-u","parentUuid":{prompt},"message":{{"role":"user","content":"question"}}}}"#
+        ));
+        lines.extend([
+            call(k, "p", "u"),
+            call(k, "a0", "p"),
+            result(k, "rp", "p"),
+            call(k, "a2", "rp"),
+            result(k, "r0", "a0"),
+            call(k, "a4", "r0"),
+            result(k, "r2", "a2"),
+            result(k, "r4", "a4"),
+        ]);
+        lines.push(format!(
+            r#"{{"type":"assistant","uuid":"{k}-n","parentUuid":"{k}-r4","message":{{"id":"N{k}","role":"assistant","content":"done"}}}}"#
+        ));
+    }
+    lines.join("\n") + "\n"
+}
 
 /// Indexes `path` as JSONL, with its transcript graph, checked throughout; holds it, then drops it and the document:
 /// the ledger is back to its baseline.
@@ -457,17 +492,22 @@ fn transcript_shape(step: usize, name: &str, path: &Path) {
     let temp = Reservation::new(typose_core::structured::TEMP_BYTES).unwrap();
     let built = index.build_reserved(raw.document(), 1, temp);
     budget::set_limit(limit).unwrap();
-    let progress = index.progress.read().unwrap().clone();
+    // Checked in place, not copied out: the allocation check counts the test's own allocations too, and with the
+    // build's temporaries released, the statics earlier steps left (`live past baseline after`) take most of the room.
+    let progress = index.progress.read().unwrap();
+    assert!(built.is_ok() && progress.done && progress.error.is_none(), "{name}: {built:?} {:?}", progress.error);
+    drop(progress);
     let graph = index.transcript.lock().unwrap();
-    let (ready, reason, held) = (graph.ready, graph.reason.clone(), graph.charged());
+    assert!(!graph.ready && graph.charged() == 0, "{name}: the graph wasn't turned off");
+    assert_eq!(
+        graph.reason.as_deref(),
+        Some("Transcript graph exceeds its memory or record limit; Rows remains available")
+    );
     drop(graph);
     drop(index);
     drop(raw);
     ARMED.store(false, SeqCst);
-    println!("{name:>24}: under half the graph's budget: {reason:?}, the index done={}", progress.done);
-    assert!(built.is_ok() && progress.done && progress.error.is_none(), "{name}: {built:?} {:?}", progress.error);
-    assert!(!ready && held == 0, "{name}: the graph wasn't turned off");
-    assert_eq!(reason.as_deref(), Some("Transcript graph exceeds its memory or record limit; Rows remains available"));
+    println!("{name:>24}: under half the graph's budget: turned off for its memory, the index done");
     assert_eq!(budget::totals().used, before.used, "{name}: a refused graph left something charged");
 }
 
@@ -875,11 +915,13 @@ fn main() {
         ("OpenAI dataset", at("dataset.jsonl")),
         ("lossy tool calls", at("lossy.jsonl")),
         ("lossy dataset calls", at("lossy-dataset.jsonl")),
+        ("interleaved lanes", at("lanes.jsonl")),
     ];
     fs::write(&transcripts[0].1, claude_session()).unwrap();
     fs::write(&transcripts[1].1, openai_dataset()).unwrap();
     fs::write(&transcripts[2].1, lossy_session()).unwrap();
     fs::write(&transcripts[3].1, lossy_dataset()).unwrap();
+    fs::write(&transcripts[4].1, lanes_session()).unwrap();
 
     budget::set_limit(8 << 30).unwrap();
     // A first build makes the statics a build uses once for the process (ammonia's builder, html5ever's atoms).
