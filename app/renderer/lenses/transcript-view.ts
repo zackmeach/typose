@@ -287,7 +287,7 @@ export class TranscriptView {
     }
     const used = new Set<number>()
     await this.content(turn, item.content, item.record, pane, item, tools, used)
-    for (const tool of tools) if (!used.has(tool.ordinal)) turn.append(await this.tool(item, tool, pane))
+    for (const tool of tools) if (!used.has(tool.ordinal) && !pane.signal.aborted) turn.append(await this.tool(item, tool, pane))
     const metadata = document.createElement('details')
     metadata.append(make('summary', 'Message metadata'))
     this.lazyTree(metadata, item.root, item.record)
@@ -311,9 +311,10 @@ export class TranscriptView {
     }
   }
   /** Brief §5.4's `name(args summary)`: a string input's text, or an object's first fields as `key: value`, in at most
-   *  80 characters, with ` …` when cut. */
-  private async arguments(input: StructuredNode | undefined, record: number): Promise<string> {
-    if (!input) return ''
+   *  80 characters, with ` …` when cut. Nothing once its page is dropped: the fields query takes the source's signal,
+   *  not the page's. */
+  private async arguments(input: StructuredNode | undefined, record: number, pane: Pane): Promise<string> {
+    if (!input || pane.signal.aborted) return ''
     const value = (field: StructuredNode) => (field.kind === 'object' ? '{…}' : field.kind === 'array' ? '[…]' : field.text)
     const text = (
       input.container === undefined
@@ -326,7 +327,7 @@ export class TranscriptView {
     const disclosure = document.createElement('details')
     disclosure.className = 'transcript-tool'
     disclosure.dataset.toolId = tool.id
-    disclosure.append(make('summary', `${tool.name}(${await this.arguments(tool.input, item.record)})`))
+    disclosure.append(make('summary', `${tool.name}(${await this.arguments(tool.input, item.record, pane)})`))
     let loaded = false
     const results = async (start: number) => {
       const page = await this.core.call(
