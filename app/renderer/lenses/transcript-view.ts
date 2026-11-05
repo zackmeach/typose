@@ -18,6 +18,8 @@ const string = (node?: StructuredNode): string => {
     return node.text
   }
 }
+/** `n` and its noun, singular for one. */
+const count = (n: number, noun: string): string => `${n} ${noun}${n === 1 ? '' : 's'}`
 interface Options {
   tree(node: StructuredNode, record: number): Promise<HTMLElement>
   select(element: HTMLElement, span: SourceSpan): void
@@ -163,10 +165,10 @@ export class TranscriptView {
         make(
           'summary',
           item.kind === 'branch'
-            ? `${item.children} messages on another branch`
+            ? `${count(item.children, 'message')} on another branch`
             : item.kind === 'sidechain'
-              ? `Sidechain · ${item.children} messages`
-              : `Conversation ${item.record + 1} · line ${item.record + 1} · ${item.children} turns`
+              ? `Sidechain · ${count(item.children, 'message')}`
+              : `Conversation ${item.record + 1} · line ${item.record + 1} · ${count(item.children, 'turn')}`
         )
       )
       const children = make('div')
