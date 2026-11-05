@@ -745,7 +745,15 @@ impl<'a, I: Iterator<Item = (Event<'a>, Range<usize>)>> Iterator for Events<'_, 
                     Event::End(TagEnd::HtmlBlock) => {
                         let (mut html, raw) = (String::new(), self.raw.take().unwrap_or_default());
                         if self.literal_html {
-                            escape_text(&raw, &mut html)
+                            // Literal, the block keeps its lines and a block's spacing: a paragraph, a <br> a line.
+                            html.push_str("<p>");
+                            for (i, line) in raw.trim_end_matches(['\r', '\n']).split('\n').enumerate() {
+                                if i > 0 {
+                                    html.push_str("<br>");
+                                }
+                                escape_text(line.trim_end_matches('\r'), &mut html);
+                            }
+                            html.push_str("</p>\n");
                         } else {
                             escape_raw(&raw, &mut html)
                         }
@@ -994,12 +1002,13 @@ mod tests {
         );
     }
 
-    /// A CommonMark type-6 HTML block, gathered whole, is literal in a fragment too.
+    /// A CommonMark type-6 HTML block, gathered whole, is literal in a fragment too: a paragraph of its own, its lines
+    /// kept as lines.
     #[test]
     fn a_fragments_html_block_is_literal() {
         assert_eq!(
             fragment_htmls("<details>\n<summary>x</summary>\nbody\n</details>\n"),
-            ["&lt;details&gt;\n&lt;summary&gt;x&lt;/summary&gt;\nbody\n&lt;/details&gt;\n"]
+            ["<p>&lt;details&gt;<br>&lt;summary&gt;x&lt;/summary&gt;<br>body<br>&lt;/details&gt;</p>\n"]
         );
     }
 

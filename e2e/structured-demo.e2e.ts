@@ -372,7 +372,10 @@ test('Transcript shows HTML-like tags in message text as literal text, never int
   await expect(markdown.locator('b, i, details, summary, .tp-img')).toHaveCount(0)
   await expect(markdown.nth(0)).toHaveText('Reply <b>bold?</b> <img src="local.png" alt="pic"> stray </i> and this stays Markdown')
   await expect(markdown.nth(0).locator('strong')).toHaveText('this')
-  await expect(markdown.nth(1)).toHaveText('<details> <summary>open?</summary> hidden? </details>')
+  // The HTML block keeps its lines, as a paragraph of its own.
+  const block = markdown.nth(1).locator('.md-block > p')
+  await expect(block.locator('br')).toHaveCount(3)
+  expect(await block.evaluate(paragraph => (paragraph as HTMLElement).innerText)).toBe('<details>\n<summary>open?</summary>\nhidden?\n</details>')
   await expect(markdown.nth(2)).toContainText('<b>surrogate</b> after a lone surrogate')
   await expect(markdown.nth(3)).toHaveText('See data-source-map="L:0:1:9999" then <b>mapped</b>')
   await expect(markdown.nth(4).locator('code')).toHaveText('<b>')
