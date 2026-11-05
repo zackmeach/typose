@@ -73,6 +73,12 @@ export function mappedBoundary(encoded: string, offset: number, side: 'start' | 
   return side === 'start' ? offset === map.units ? end : start : offset === 0 ? start : end
 }
 
+/** A run's whole source-byte range: its first unit's start to its last unit's end. */
+export function mappedRange(encoded: string): [number, number] | undefined {
+  const map = parseMap(encoded)
+  return map?.units ? [unitRange(map, 0)[0], unitRange(map, map.units - 1)[1]] : undefined
+}
+
 /** The map of the same run once its first `units` display units are removed (a callout's `[!KIND]` marker). */
 export function dropMappedUnits(encoded: string, units: number): string {
   const map = parseMap(encoded)

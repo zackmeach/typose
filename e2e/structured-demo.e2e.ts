@@ -335,6 +335,27 @@ test('Transcript reserves the mounted page’s HTML, flat to the last page, and 
   expect(live.pageErrors).toEqual([])
 })
 
+test('Transcript shows HTML-like tags in message text as literal text, never interpreted or stripped', async () => {
+  // Allowlisted raw HTML that Rendered would keep (and a stray end tag it would drop), in a user message.
+  const tags = 'Reply <b>bold?</b> <img src="local.png" alt="pic"> stray </i> <details><summary>open?</summary>hidden?</details>'
+  const file = fixture('transcript-tags.jsonl', claudeSession([
+    { role: 'user', content: tags },
+    { role: 'assistant', content: [{ type: 'text', text: 'Code `<b>` stays code, and **this** stays Markdown' }] },
+    { role: 'user', content: 'Done fixture' }
+  ]))
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  await expect(card.getByText('Done fixture', { exact: true })).toBeVisible()
+  const user = card.locator('.transcript-turn').first()
+  await expect(user.locator('b, i, details:not(:has(> summary:text-is("Message metadata"))), .tp-img')).toHaveCount(0)
+  expect(await user.locator('pre.transcript-text').textContent()).toBe(tags)
+  // A tag inside code is the code's text: that message keeps its Markdown.
+  await expect(card.locator('.transcript-markdown code')).toHaveText('<b>')
+  await expect(card.locator('.transcript-markdown strong')).toHaveText('this')
+  expect(live.pageErrors).toEqual([])
+})
+
 test('JSONL Table discovers a global key after line 1,000 and retains original source row navigation', async () => {
   const lines = Array.from({ length: 1001 }, (_, index) => `{"common":"row ${index + 1}"}`)
   lines.push('{"common":"last row","late":"revealed"}')
