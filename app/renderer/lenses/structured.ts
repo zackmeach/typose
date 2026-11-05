@@ -5,6 +5,8 @@ import type { LensBudget } from './lens-budget'
 import type { StructuredSource } from './structured-source'
 import { copySourceSpan } from './source-copy'
 import { SourceCopyQueue } from './source-copy-queue'
+import { TranscriptView } from './transcript-view'
+import type { LocalGesture } from '../reader-window'
 import { printLines } from './raw'
 import { PRINT_LINES_PER_PAGE, type PrintPayload, type PrintPlan } from '../print'
 import { spacerHeight, toLogical, toNative } from '../virtual/scrollmath'
@@ -30,12 +32,10 @@ const large = (record: StructuredRow): boolean => record.more || record.span.end
 const el = <K extends keyof HTMLElementTagNameMap>(tag: K, text?: string, className?: string): HTMLElementTagNameMap[K] => {
   const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node
 }
-const decoded = (node: StructuredNode | undefined): string => {
-  if (!node) return ''
-  if (node.kind !== 'string') return node.text
-  try { return JSON.parse(node.text) as string } catch { return node.text }
+interface Options {
+  budget: LensBudget | null; atLine?: number; notice(message: string): void; onFrozen(reason: string): void; onShowRaw(line: number): void; onRows(line?: number): void
+  onOpenLocal?(target: string, path: string, gesture: LocalGesture): Promise<boolean>
 }
-interface Options { budget: LensBudget | null; atLine?: number; notice(message: string): void; onFrozen(reason: string): void; onShowRaw(line: number): void; onRows(): void }
 
 /** A bounded source-backed view. No source object is reconstructed with JSON.parse. */
 export class StructuredLens {
@@ -71,20 +71,28 @@ export class StructuredLens {
   private retryAt = 0
   private focusLine = 0
   private anchor?: number
+  private readonly transcript?: TranscriptView
 
   constructor(host: HTMLElement, private readonly core: CoreClient, private readonly opened: Opened,
     private readonly source: StructuredSource, private readonly mode: StructuredMode, private readonly options: Options) {
     this.lines = opened.lines; this.indexed = opened.indexed
-    this.element.tabIndex = 0; this.element.setAttribute('aria-label', `${mode === 'tree' ? 'Tree' : mode === 'rows' ? 'Rows' : mode === 'table' ? 'Table' : 'Transcript'} view`)
+    this.element.tabIndex = 0; this.element.dataset.mode = mode; this.element.setAttribute('aria-label', `${mode === 'tree' ? 'Tree' : mode === 'rows' ? 'Rows' : mode === 'table' ? 'Table' : 'Transcript'} view`)
     this.element.append(this.content); host.append(this.element)
     this.find = new SourceFind(host, this.element, core, opened, options.budget ?? undefined, (line, hit) => this.reveal(line, hit?.start), options.onFrozen)
     this.element.addEventListener('keydown', this.key)
-    this.element.addEventListener('pointerdown', () => { this.moved = true })
+    // Reading by pointer or by keyboard is moving: a lens decided later (Transcript once ready) leaves the reader here.
+    for (const type of ['pointerdown', 'keydown']) this.element.addEventListener(type, () => { this.moved = true })
     this.element.addEventListener('scroll', () => { this.moved = true; if (this.mode === 'rows') this.schedule() }, { passive: true })
+    if (mode === 'transcript') this.transcript = new TranscriptView(this.content, core, source, opened, this.abort.signal, {
+      tree: (node, record) => this.treeNode(node, 0, '$', record, 1), select: (element, span) => this.select(element, span),
+      rows: line => options.onRows(line), frozen: error => this.error(error), openLocal: options.onOpenLocal,
+      // The document's Rendered share, which JSONL has no other use for: it's set, not a high-water mark like Grid's.
+      reserve: bytes => options.budget?.reserveRendered(opened.gen, bytes) ?? Promise.resolve(false)
+    })
     this.unsubscribe = source.subscribe?.(() => {
       if (this.stopped || this.mode === 'tree') return
       if (this.mode === 'rows') this.schedule()
-      else void this.page(this.line).catch(error => this.error(error))
+      else void (this.transcript ? this.transcript.show() : this.page(this.line)).catch(error => this.error(error))
     })
     void this.start(options.atLine ?? 0)
   }
@@ -100,6 +108,7 @@ export class StructuredLens {
         }
         this.showProblems()
       } else if (this.mode === 'rows') this.startRows(at)
+      else if (this.transcript) await this.transcript.show(0)
       else await this.page(at)
     } catch (error) { this.error(error) }
   }
@@ -358,7 +367,6 @@ export class StructuredLens {
     this.line = result.rows[0]?.line ?? start; this.mounted = 0
     const pageBody = el('div')
     if (this.mode === 'table') await this.table(result.rows, pageBody)
-    else if (this.mode === 'transcript') await this.transcript(result.rows, pageBody)
     else for (const row of result.rows) pageBody.append(this.row(row))
     if (this.stopped || epoch !== this.serial) return
     const nav = el('div', undefined, 'structured-pagination')
@@ -425,67 +433,6 @@ export class StructuredLens {
     }
     table.append(body); parent.append(el('p', metadata.done ? 'Source column union · Inspect record shows every field.' : 'Columns grow as indexing discovers keys · …other keys preserves fields outside this column window.'), table)
   }
-  private async transcript(rows: StructuredRow[], parent: HTMLElement): Promise<void> {
-    const failed = rows.filter(row => row.status === 'failed')
-    if (failed.length || this.source.info.failed) { const button = el('button', `${this.source.info.failed ?? failed.length} lines couldn’t be parsed · View in Rows`, 'structured-problem'); button.onclick = this.options.onRows; parent.append(button) }
-    const adapter = this.source.info.transcript?.adapter
-    for (const row of rows) {
-      if (row.status === 'failed') continue
-      const fields = await this.fields(row)
-      const get = (key: string) => fields.find(node => node.key === key)
-      if (adapter === 'claude-code-v1') {
-        const type = decoded(get('type')), message = get('message')
-        if (!message || !['user', 'assistant'].includes(type)) {
-          const event = el('details', undefined, 'session-event'); event.append(el('summary', `Session event · ${type || 'unknown'} · line ${row.line + 1}`), this.row(row)); parent.append(event); continue
-        }
-        const side = decoded(get('isSidechain')) === 'true'
-        const turn = side ? el('details', undefined, 'transcript-turn') : el('section', undefined, 'transcript-turn')
-        if (side) turn.append(el('summary', 'Sidechain · expand message'))
-        turn.append(el('h3', `${type === 'user' ? 'User' : 'Assistant'} · ${row.timestamp ?? ''}`))
-        const messageFields = message.container !== undefined ? (await this.source.children(message.container, 0, row.line)).nodes : []
-        await this.contentBlock(turn, messageFields.find(node => node.key === 'content'), row.line)
-        const metadata = el('details'); metadata.append(el('summary', 'Message metadata / branch references'), this.row(row)); turn.append(metadata)
-        parent.append(turn)
-      } else {
-        const messages = get('messages')
-        if (messages?.container !== undefined) {
-          const conversation = el('details', undefined, 'transcript-conversation'); conversation.open = true
-          const nodes = (await this.source.children(messages.container, 0, row.line)).nodes
-          conversation.append(el('summary', `Conversation ${row.line + 1} · line ${row.line + 1} · ${messages.children ?? nodes.length} turns`))
-          for (const node of nodes) await this.openAiTurn(conversation, node, row.line)
-          const metadata = el('details'); metadata.append(el('summary', 'Line metadata'), this.row(row)); conversation.append(metadata); parent.append(conversation)
-        } else await this.openAiFields(parent, fields, row.line)
-      }
-    }
-  }
-  private async openAiTurn(parent: HTMLElement, node: StructuredNode, record: number): Promise<void> {
-    const fields = node.container === undefined ? [] : (await this.source.children(node.container, 0, record)).nodes
-    await this.openAiFields(parent, fields, record)
-  }
-  private async openAiFields(parent: HTMLElement, fields: StructuredNode[], record: number): Promise<void> {
-    const role = decoded(fields.find(n => n.key === 'role'))
-    const turn = ['system', 'developer'].includes(role) ? el('details', undefined, 'transcript-turn') : el('section', undefined, 'transcript-turn')
-    turn.dataset.line = String(record)
-    turn.append(el(turn.tagName === 'DETAILS' ? 'summary' : 'h3', ['system', 'developer'].includes(role) ? 'System prompt' : role ? role[0]!.toUpperCase() + role.slice(1) : 'Unknown message'))
-    await this.contentBlock(turn, fields.find(node => node.key === 'content'), record)
-    for (const extra of fields.filter(node => !['role', 'content'].includes(node.key ?? ''))) { const detail = el('details'); detail.append(el('summary', extra.key ?? extra.kind), await this.treeNode(extra, 0, '$', record)); turn.append(detail) }
-    parent.append(turn)
-  }
-  private async contentBlock(parent: HTMLElement, node: StructuredNode | undefined, record: number): Promise<void> {
-    if (!node) return
-    if (node.kind === 'string') { parent.append(el('pre', decoded(node) + (node.more ? ' … (preview; inspect source for full content)' : ''), 'transcript-text text')); return }
-    if (node.kind === 'array' && node.container !== undefined) {
-      const blocks = (await this.source.children(node.container, 0, record)).nodes
-      for (const block of blocks) {
-        const fields = block.container !== undefined ? (await this.source.children(block.container, 0, record)).nodes : []
-        const type = decoded(fields.find(field => field.key === 'type'))
-        const text = fields.find(field => field.key === 'text')
-        if (type === 'text' && text) await this.contentBlock(parent, text, record)
-        else { const disclosure = el('details'); disclosure.append(el('summary', type === 'thinking' ? 'Thinking' : type || block.kind), await this.treeNode(block, 0, '$', record)); parent.append(disclosure) }
-      }
-      if ((node.children ?? 0) > blocks.length) parent.append(el('p', 'More content blocks · inspect record in Rows'))
-    } else { const disclosure = el('details'); disclosure.append(el('summary', 'Content'), await this.treeNode(node, 0, '$', record)); parent.append(disclosure) }
-  }
   private showProblems(): void {
     for (const problem of this.source.info.problems) {
       const button = el('button', `! ${problem.message} · View in Raw`, 'structured-problem')
@@ -531,6 +478,7 @@ export class StructuredLens {
   private reveal(line: number, offset?: number): void {
     this.line = line
     if (this.mode === 'rows') { this.focusLine = this.anchor = line; this.renderRows(); return }
+    if (this.mode === 'transcript') { this.options.notice('Find and line navigation use the verified source in Raw'); this.options.onShowRaw(line); return }
     if (this.mode !== 'tree') { void this.page(line).catch(e => this.error(e)); return }
     const view = this.opened.view
     if (!view) return
@@ -555,7 +503,7 @@ export class StructuredLens {
   freeze(): void { this.stopped = true; this.abort.abort(); this.copies.cancel(); this.find.freeze('source changed') }
   yieldReservation(): void { this.copies.cancel() }
   resumeReservation(): void {}
-  dispose(): void { this.stopped = true; cancelAnimationFrame(this.frame); this.resize?.disconnect(); this.unsubscribe?.(); this.abort.abort(); this.copies.cancel(); this.find.destroy(); this.context?.remove(); this.element.remove() }
+  dispose(): void { this.stopped = true; cancelAnimationFrame(this.frame); this.resize?.disconnect(); this.unsubscribe?.(); this.abort.abort(); this.copies.cancel(); this.find.destroy(); this.context?.remove(); this.element.remove(); if (this.transcript) void this.options.budget?.reserveRendered(this.opened.gen, 0) }
   printPlan(): PrintPlan { const pages = Math.ceil(this.lines / PRINT_LINES_PER_PAGE); return { unit: 'line', total: this.lines, current: this.line, indexed: this.indexed, totalPages: pages, allFits: pages <= MAX_PRINT_PAGES && this.opened.size <= MAX_PRINT_BYTES } }
   printRange(start: number, end: number, signal: AbortSignal): Promise<PrintPayload> {
     return printLines(this.core, this.opened, this.options.budget, start, end, this.lines, () => !this.stopped && this.indexed, signal)

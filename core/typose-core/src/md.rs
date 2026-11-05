@@ -283,8 +283,9 @@ fn read_temp(len: u64, decoded: Option<usize>) -> u64 {
 /// 23 of other allocations (an autolink's own target). A node bound is charged this much, a third to spare.
 const PARSE_PER_NODE: u64 = 192;
 /// One block's working memory besides ammonia's: the writer's buffer (`HTML_MAX`); an HTML block's text gathered and
-/// escaped, at most 64 KiB of source, 192 KiB decoded, written 4 bytes a byte twice over by `escape_raw`'s replaces; a
-/// heading's text and its slug's copies; and the strings pulldown-cmark makes for one block's events.
+/// escaped, at most 64 KiB of source, 192 KiB decoded, written 4 bytes a byte twice over by `escape_raw`'s replaces (a
+/// fragment's `escape_text`: once, at most 6 bytes a byte); a heading's text and its slug's copies; and the strings
+/// pulldown-cmark makes for one block's events.
 const BLOCK_TEMP: u64 = 8 << 20;
 /// ammonia on one block's HTML (`HTML_MAX`): measured at most 83 bytes a byte (raw `<b>` × 87,381), with output at most
 /// 2.4 times its input; then `sanitize`'s rewrite. 128 bytes a byte.
@@ -488,6 +489,8 @@ struct Events<'p, 'b, 'a, I> {
     alt: Option<usize>,
     /// An HTML block's text so far.
     raw: Option<String>,
+    /// A transcript's text block (`render_fragment`): all raw HTML is literal text (brief §5.4), not §4.6's allowlist.
+    literal_html: bool,
     /// A top-level heading's text, for its slug.
     heading: Option<String>,
 }
@@ -652,9 +655,14 @@ impl<'a, I: Iterator<Item = (Event<'a>, Range<usize>)>> Events<'_, '_, 'a, I> {
             }
             _ => {}
         }
+        let literal = self.literal_html;
         let escaped = |t: &str| {
             let mut out = String::new();
-            escape_raw(t, &mut out);
+            if literal {
+                escape_text(t, &mut out)
+            } else {
+                escape_raw(t, &mut out)
+            }
             out
         };
         Ok(match event {
@@ -735,8 +743,22 @@ impl<'a, I: Iterator<Item = (Event<'a>, Range<usize>)>> Iterator for Events<'_, 
                         continue;
                     }
                     Event::End(TagEnd::HtmlBlock) => {
-                        let mut html = String::new();
-                        escape_raw(&self.raw.take().unwrap_or_default(), &mut html);
+                        let (mut html, raw) = (String::new(), self.raw.take().unwrap_or_default());
+                        if self.literal_html {
+                            // Literal, the block keeps its lines and a block's spacing: a paragraph, a <br> a line,
+                            // at any of CommonMark's line endings (CRLF, CR, LF).
+                            html.push_str("<p>");
+                            let raw = raw.replace("\r\n", "\n");
+                            for (i, line) in raw.trim_end_matches(['\r', '\n']).split(['\r', '\n']).enumerate() {
+                                if i > 0 {
+                                    html.push_str("<br>");
+                                }
+                                escape_text(line, &mut html);
+                            }
+                            html.push_str("</p>\n");
+                        } else {
+                            escape_raw(&raw, &mut html)
+                        }
                         self.pending = Some(event);
                         return Some(Event::Html(html.into()));
                     }
@@ -807,16 +829,17 @@ impl Lines {
 }
 
 /// The items of `text`, the decoded file whose first `front` bytes are its front matter (plan §2.1). `cancelled` is
-/// checked every `CANCEL_EVERY` events.
+/// checked every `CANCEL_EVERY` events. `literal_html`: raw HTML is literal text (`Events::literal_html`).
 fn blocks(
     text: &str,
     front: usize,
     encoding: &'static Encoding,
+    literal_html: bool,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Rendered, DocError> {
     let map = crate::encoding::decode(text.as_bytes(), UTF_8, 0).map;
     let edges = byte_edges(text, &map);
-    blocks_mapped(text, front, encoding, &edges, cancelled)
+    blocks_mapped(text, front, encoding, &edges, literal_html, cancelled)
 }
 
 fn blocks_mapped(
@@ -824,6 +847,7 @@ fn blocks_mapped(
     front: usize,
     encoding: &'static Encoding,
     edges: &[u64],
+    literal_html: bool,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Rendered, DocError> {
     let mut out = Rendered::new().map_err(DocError::Memory)?;
@@ -873,6 +897,7 @@ fn blocks_mapped(
             stop: None,
             alt: None,
             raw: None,
+            literal_html,
             heading: None,
         };
         buf.clear();
@@ -930,18 +955,18 @@ pub fn build(
     }
     let front = front_matter_end(&text, encoding, bom).unwrap_or(0);
     temp.grow(parse_temp(text.len(), table_cells(&text[front..]))).map_err(DocError::Memory)?;
-    blocks_mapped(&text, front, encoding, &edges, cancelled)
+    blocks_mapped(&text, front, encoding, &edges, false, cancelled)
 }
 
 /// Markdown embedded in another document (a transcript's text block), of at most `PIECE_BYTES`: its items, built as a
-/// file's are, with the parse's temporaries and its decode reserved first.
+/// file's are, with the parse's temporaries and its decode reserved first. Its raw HTML is literal text (brief §5.4).
 pub fn render_fragment(text: &str, cancelled: &dyn Fn() -> bool) -> Result<Rendered, DocError> {
     if text.len() > PIECE_BYTES {
         return Err(DocError::Refused("Markdown fragment exceeds 64 KiB".into()));
     }
     let temp = parse_temp(text.len(), table_cells(text)) + 40 * text.len() as u64;
     let _temp = Reservation::new(temp).map_err(DocError::Memory)?;
-    blocks(text, 0, UTF_8, cancelled)
+    blocks(text, 0, UTF_8, true, cancelled)
 }
 
 #[cfg(test)]
@@ -957,11 +982,55 @@ mod tests {
     fn render(md: &str) -> Rendered {
         let text = lone_cr_to_lf(md.to_owned());
         let front = front_matter_end(&text, UTF_8, 0).unwrap_or(0);
-        blocks(&text, front, UTF_8, &|| false).unwrap()
+        blocks(&text, front, UTF_8, false, &|| false).unwrap()
     }
 
     fn htmls(md: &str) -> Vec<String> {
         render(md).items().iter().map(|i| semantic_html(&i.html)).collect()
+    }
+
+    /// `htmls` of a transcript's text block (`render_fragment`).
+    fn fragment_htmls(md: &str) -> Vec<String> {
+        render_fragment(md, &|| false).unwrap().items().iter().map(|i| semantic_html(&i.html)).collect()
+    }
+
+    /// Brief §5.4: a transcript's HTML-like tags are literal text, never interpreted or stripped, and its Markdown
+    /// still renders.
+    #[test]
+    fn a_fragments_inline_html_is_literal_beside_its_markdown() {
+        assert_eq!(
+            fragment_htmls("a <b>x</b> **y** </i> <img src=\"p.png\">"),
+            ["<p>a &lt;b&gt;x&lt;/b&gt; <strong>y</strong> &lt;/i&gt; &lt;img src=\"p.png\"&gt;</p>\n"]
+        );
+    }
+
+    /// A CommonMark type-6 HTML block, gathered whole, is literal in a fragment too: a paragraph of its own, its lines
+    /// kept as lines.
+    #[test]
+    fn a_fragments_html_block_is_literal() {
+        assert_eq!(
+            fragment_htmls("<details>\n<summary>x</summary>\nbody\n</details>\n"),
+            ["<p>&lt;details&gt;<br>&lt;summary&gt;x&lt;/summary&gt;<br>body<br>&lt;/details&gt;</p>\n"]
+        );
+    }
+
+    /// A fragment's literal HTML block breaks its lines at CommonMark's three line endings: CRLF, a lone CR and LF.
+    #[test]
+    fn a_fragments_html_block_keeps_every_line_ending() {
+        assert_eq!(
+            fragment_htmls("<details>\r\n<summary>x</summary>\rbody\n</details>\r\n"),
+            ["<p>&lt;details&gt;<br>&lt;summary&gt;x&lt;/summary&gt;<br>body<br>&lt;/details&gt;</p>\n"]
+        );
+    }
+
+    /// Rendered keeps brief §4.6's allowlist for the same source, inline and in a block.
+    #[test]
+    fn rendered_keeps_its_raw_html_allowlist() {
+        assert_eq!(htmls("a <b>x</b> **y**"), ["<p>a <b>x</b> <strong>y</strong></p>\n"]);
+        assert_eq!(
+            htmls("<details>\n<summary>x</summary>\nbody\n</details>\n"),
+            ["<details>\n<summary>x</summary>\nbody\n</details>\n"]
+        );
     }
 
     /// Structural snapshots ignore provenance wrappers, which are tested independently below.
@@ -1347,7 +1416,7 @@ mod tests {
             checks.set(checks.get() + 1);
             checks.get() > 2
         };
-        assert!(matches!(blocks(&md, 0, UTF_8, &cancelled), Err(DocError::Cancelled)));
+        assert!(matches!(blocks(&md, 0, UTF_8, false, &cancelled), Err(DocError::Cancelled)));
         assert_eq!(checks.get(), 3);
         let path = temp_file("md-cancel", md.as_bytes());
         let raw = Raw::open(&path).unwrap();

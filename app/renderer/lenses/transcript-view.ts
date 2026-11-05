@@ -1,0 +1,565 @@
+import type { Opened, SourceSpan, StructuredNode, TranscriptItem, TranscriptText, TranscriptTool } from '../../shared/protocol'
+import { CoreCallError, type CoreClient } from '../core'
+import type { LocalGesture } from '../reader-window'
+import type { StructuredSource } from './structured-source'
+import { RENDERED_PER_UNIT } from './rendered-charge'
+
+const make = (tag: string, text?: string, className?: string): HTMLElement => {
+  const element = document.createElement(tag)
+  if (text !== undefined) element.textContent = text
+  if (className) element.className = className
+  return element
+}
+/** A node's text, a string decoded. A cut preview (`more`) ends mid-token: it's closed after its last whole escape, at
+ *  most 6 characters back (`\uXXXX`), less a high surrogate whose pair the cut split. The renderer has no other
+ *  decoder for one: Rows' summaries are decoded natively. */
+const string = (node?: StructuredNode): string => {
+  if (!node) return ''
+  if (node.kind !== 'string') return node.text
+  for (let cut = 0; cut <= (node.more ? 6 : 0); cut++) {
+    try {
+      const text = JSON.parse(node.text.slice(0, node.text.length - cut) + (node.more ? '"' : '')) as string
+      return node.more ? text.replace(/[\uD800-\uDBFF]$/, '') : text
+    } catch {
+      // a shorter cut
+    }
+  }
+  return node.text
+}
+/** `n` and its noun, singular for one. */
+const count = (n: number, noun: string): string => `${n} ${noun}${n === 1 ? '' : 's'}`
+interface Options {
+  tree(node: StructuredNode, record: number): Promise<HTMLElement>
+  select(element: HTMLElement, span: SourceSpan): void
+  rows(record?: number): void
+  frozen(error: unknown): void
+  openLocal?(target: string, path: string, gesture: LocalGesture): Promise<boolean>
+  reserve(bytes: number): Promise<boolean>
+}
+/** One page's DOM, shown or being built: what its HTML and literal text are charged, and the signal its queries take,
+ *  aborted once another page replaces it or supersedes its build. */
+interface Pane {
+  bytes: number
+  abort: AbortController
+  signal: AbortSignal
+}
+/** The snapshot's allowance for one character of mounted HTML: its DOM nodes, its text and the HTML string. Literal
+ *  text is one text node: Rendered's allowance for a unit of text (`RENDERED_PER_UNIT`). */
+const CHAR_BYTES = 1280
+/** Native graph descriptors own ordering and links; this view only presents bounded pages. */
+export class TranscriptView {
+  private serial = 0
+  private start = 0
+  private showEvents = false
+  private history: number[] = []
+  private shown?: Pane
+  private building?: Pane
+  constructor(
+    private readonly host: HTMLElement,
+    private readonly core: CoreClient,
+    private readonly source: StructuredSource,
+    private readonly opened: Opened,
+    private readonly signal: AbortSignal,
+    private readonly options: Options
+  ) {}
+
+  /** Only the shown page and the one being built are reserved: reading to the end holds one page's charge, and the lens
+   *  releases it when it unmounts. `commit` runs as the page is shown: Next and Previous move the history then. */
+  async show(start = this.start, commit?: () => void): Promise<void> {
+    const epoch = ++this.serial,
+      abort = new AbortController(),
+      pane: Pane = { bytes: 0, abort, signal: AbortSignal.any([this.signal, abort.signal]) }
+    // A build this one supersedes stops, its group, tool and text queries with it.
+    this.building?.abort.abort()
+    this.building = pane
+    try {
+      await this.build(start, epoch, pane, commit)
+    } catch (error) {
+      if (!abort.signal.aborted) throw error
+    } finally {
+      // The page this one replaced is released, or this one, if a newer page replaced it first.
+      if (this.building === pane) this.building = undefined
+      if (!this.signal.aborted) void this.options.reserve(this.held())
+    }
+  }
+  /** A page's later load failed: it says so, unless the page was replaced or superseded, which aborted it. */
+  private lost(pane: Pane): (error: unknown) => void {
+    return (error) => {
+      if (!pane.signal.aborted) this.options.frozen(error)
+    }
+  }
+  private held(): number {
+    return (this.shown?.bytes ?? 0) + (this.building?.bytes ?? 0)
+  }
+  /** Charges `bytes` to `pane` before they mount, unless it's off the screen already; refused, they don't mount. */
+  private async charge(pane: Pane, bytes: number): Promise<void> {
+    pane.bytes += bytes
+    if (this.signal.aborted || (pane !== this.shown && pane !== this.building)) return
+    if (await this.options.reserve(this.held())) return
+    pane.bytes -= bytes
+    throw new Error('Transcript display exceeds the memory budget · use Rows or Raw')
+  }
+  /** A page `commit` moves to (Next, Previous) starts at its top, not where the last one was scrolled to. */
+  private async build(start: number, epoch: number, pane: Pane, commit?: () => void): Promise<void> {
+    const page = await this.core.call(
+      'structuredTranscript',
+      { ref: this.source.info.ref, start, count: 20, events: this.showEvents },
+      pane.signal
+    )
+    if (pane.signal.aborted || epoch !== this.serial) return
+    this.start = start
+    const body = make('div', undefined, 'transcript-pane'),
+      controls = make('div', undefined, 'transcript-controls')
+    if (page.events) {
+      const label = make('label'),
+        check = document.createElement('input')
+      check.type = 'checkbox'
+      check.checked = this.showEvents
+      check.onchange = () => {
+        this.showEvents = check.checked
+        void this.show(0, () => (this.history = [])).catch(this.options.frozen)
+      }
+      label.append(check, document.createTextNode(` Show ${page.events.toLocaleString()} session events`))
+      controls.append(label)
+    }
+    if (this.source.info.failed) {
+      const failed = make(
+        'button',
+        `${this.source.info.failed} lines couldn’t be parsed · View in Rows`,
+        'structured-problem'
+      )
+      failed.onclick = () => this.options.rows()
+      controls.append(failed)
+    }
+    body.append(controls)
+    for (const item of page.items) {
+      if (pane.signal.aborted || epoch !== this.serial) return
+      body.append(await this.item(item, pane))
+    }
+    if (pane.signal.aborted || epoch !== this.serial) return
+    // The history moves as the page is shown, so its navigation is made after.
+    commit?.()
+    const navigation = make('div', undefined, 'structured-pagination')
+    if (this.history.length) {
+      const previous = make('button', 'Previous turns')
+      // One page at a time: a click while a page builds is ignored.
+      previous.onclick = () => {
+        if (!this.building) void this.show(this.history.at(-1)!, () => this.history.pop()).catch(this.options.frozen)
+      }
+      navigation.append(previous)
+    }
+    if (page.next !== undefined) {
+      const next = make('button', 'Next turns')
+      next.onclick = () => {
+        if (!this.building) void this.show(page.next!, () => this.history.push(start)).catch(this.options.frozen)
+      }
+      navigation.append(next)
+    }
+    navigation.append(
+      make('span', `${page.items.length ? start + 1 : 0}–${start + page.items.length} of ${page.total}`)
+    )
+    body.append(navigation)
+    // The page this one replaces stops what it still had loading.
+    this.shown?.abort.abort()
+    this.host.replaceChildren(body)
+    if (commit) this.host.parentElement!.scrollTop = 0
+    this.shown = pane
+  }
+  /** One item, or why it couldn't be shown: one item's failure never fails its page. */
+  private async item(item: TranscriptItem, pane: Pane): Promise<HTMLElement> {
+    try {
+      return await this.render(item, pane)
+    } catch (error) {
+      if (pane.signal.aborted || (error instanceof CoreCallError && error.code === 'Frozen')) throw error
+      return this.problem(item, error)
+    }
+  }
+  /** Why `item` couldn't be shown, with View in Rows. */
+  private problem(item: TranscriptItem, error: unknown): HTMLElement {
+    const problem = make(
+      'button',
+      `This item couldn’t be shown · ${error instanceof Error ? error.message : String(error)} · View in Rows`,
+      'structured-problem'
+    )
+    // A branch or sidechain's record is its first member in file order, which can be a hidden results-only one.
+    problem.onclick = () => this.options.rows(item.kind === 'branch' || item.kind === 'sidechain' ? undefined : item.record)
+    return problem
+  }
+  private async render(item: TranscriptItem, pane: Pane): Promise<HTMLElement> {
+    if (item.kind === 'branch' || item.kind === 'sidechain' || item.kind === 'conversation') {
+      const group = document.createElement('details')
+      group.className = 'transcript-conversation'
+      group.dataset.transcriptItem = String(item.id)
+      group.open = item.kind === 'conversation'
+      group.append(
+        make(
+          'summary',
+          item.kind === 'branch'
+            ? `${count(item.children, 'message')} on another branch`
+            : item.kind === 'sidechain'
+              ? `Sidechain · ${count(item.children, 'message')}`
+              : `Conversation ${item.record + 1} · line ${item.record + 1} · ${count(item.children, 'turn')}`
+        )
+      )
+      // A branch's or sidechain's members are off the main chain, and set apart (structured.css .transcript-group).
+      const children = make('div', undefined, item.kind === 'conversation' ? undefined : 'transcript-group')
+      group.append(children)
+      let loaded = false
+      // A load the reader asked for that fails says so in the group, as a failing item does on its page.
+      const failed = (error: unknown) => {
+        if (pane.signal.aborted || (error instanceof CoreCallError && error.code === 'Frozen')) this.lost(pane)(error)
+        else children.append(this.problem(item, error))
+      }
+      const load = async (start: number) => {
+        const page = await this.core.call(
+          'structuredTranscript',
+          { ref: this.source.info.ref, start, count: 20, group: item.id, events: this.showEvents },
+          pane.signal
+        )
+        if (pane.signal.aborted) return
+        for (const child of page.items) children.append(await this.item(child, pane))
+        if (page.next !== undefined) {
+          const more = make('button', 'Show more messages')
+          more.onclick = () => {
+            more.remove()
+            void load(page.next!).catch(failed)
+          }
+          children.append(more)
+        }
+      }
+      group.addEventListener('toggle', () => {
+        if (group.open && !loaded) {
+          loaded = true
+          void load(0).catch(failed)
+        }
+      })
+      if (group.open) {
+        loaded = true
+        await load(0)
+      }
+      if (item.kind === 'conversation') {
+        const metadata = document.createElement('details')
+        metadata.append(make('summary', 'Line metadata'))
+        this.lazyTree(metadata, item.root, item.record)
+        group.append(metadata)
+      }
+      return group
+    }
+    if (item.kind === 'event') {
+      const event = document.createElement('details')
+      event.className = 'session-event transcript-turn'
+      event.dataset.line = String(item.record)
+      event.append(make('summary', `Session event · line ${item.record + 1}`))
+      this.lazyTree(event, item.root, item.record)
+      return event
+    }
+    const system = item.role === 'system' || item.role === 'developer'
+    const turn = system ? document.createElement('details') : make('section')
+    turn.className = 'transcript-turn'
+    turn.dataset.line = String(item.record)
+    turn.dataset.transcriptItem = String(item.id)
+    turn.append(
+      make(
+        system ? 'summary' : 'h3',
+        system
+          ? 'System prompt'
+          : `${item.role ? item.role[0]!.toUpperCase() + item.role.slice(1) : 'Unknown'}${item.timestamp ? ' · ' + item.timestamp : ''}`
+      )
+    )
+    turn.addEventListener('click', (event) => {
+      if (!(event.target as HTMLElement).closest('button,a,summary,input')) this.options.select(turn, item.span)
+    })
+    let tools: TranscriptTool[] = []
+    if (item.tools) {
+      const first = await this.core.call(
+        'structuredTranscriptTools',
+        { ref: this.source.info.ref, item: item.id, start: 0, count: 32 },
+        pane.signal
+      )
+      tools = first.tools
+      // Further tool pages are always reachable, rather than disappearing behind the preview bound.
+      if (first.next !== undefined) {
+        const more = make('button', 'Show more tool calls')
+        more.onclick = () => {
+          more.remove()
+          void this.moreTools(turn, item, first.next!, pane).catch(this.lost(pane))
+        }
+        turn.append(more)
+      }
+    }
+    const used = new Set<number>()
+    await this.content(turn, item.content, item.record, pane, item, tools, used)
+    for (const tool of tools) if (!used.has(tool.ordinal) && !pane.signal.aborted) turn.append(await this.tool(item, tool, pane))
+    const metadata = document.createElement('details')
+    metadata.append(make('summary', 'Message metadata'))
+    this.lazyTree(metadata, item.root, item.record)
+    turn.append(metadata)
+    return turn
+  }
+  private async moreTools(parent: HTMLElement, item: TranscriptItem, start: number, pane: Pane): Promise<void> {
+    const page = await this.core.call(
+      'structuredTranscriptTools',
+      { ref: this.source.info.ref, item: item.id, start, count: 32 },
+      pane.signal
+    )
+    for (const tool of page.tools) parent.append(await this.tool(item, tool, pane))
+    if (page.next !== undefined) {
+      const more = make('button', 'Show more tool calls')
+      more.onclick = () => {
+        more.remove()
+        void this.moreTools(parent, item, page.next!, pane).catch(this.lost(pane))
+      }
+      parent.append(more)
+    }
+  }
+  /** Brief §5.4's `name(args summary)`: a string input's text, or an object's first fields as `key: value`, in at most
+   *  80 characters, with ` …` when cut. Nothing once its page is dropped: the fields query takes the source's signal,
+   *  not the page's. */
+  private async arguments(input: StructuredNode | undefined, record: number, pane: Pane): Promise<string> {
+    if (!input || pane.signal.aborted) return ''
+    const value = (field: StructuredNode) =>
+      field.kind === 'object' ? '{…}' : field.kind === 'array' ? '[…]' : field.kind === 'string' ? `"${string(field)}"` : field.text
+    const text = (
+      input.container === undefined
+        ? string(input)
+        : (await this.fields(input, record)).map((field) => `${field.key ?? field.ordinal}: ${value(field)}`).join(', ')
+    ).replace(/\s+/g, ' ')
+    return text.length > 80 || input.more ? text.slice(0, 80) + ' …' : text
+  }
+  private async tool(item: TranscriptItem, tool: TranscriptTool, pane: Pane): Promise<HTMLElement> {
+    const disclosure = document.createElement('details')
+    disclosure.className = 'transcript-tool'
+    disclosure.dataset.toolId = tool.id
+    disclosure.append(make('summary', `${tool.name}(${await this.arguments(tool.input, item.record, pane)})`))
+    let loaded = false
+    const results = async (start: number) => {
+      const page = await this.core.call(
+        'structuredTranscriptTools',
+        { ref: this.source.info.ref, item: item.id, call: tool.ordinal, start, count: 32 },
+        pane.signal
+      )
+      for (const result of page.results) {
+        const block = make('div', undefined, 'transcript-tool-result')
+        block.append(make('strong', `Tool result · line ${result.record + 1}`))
+        await this.content(block, result.content ?? result.block, result.record, pane)
+        disclosure.append(block)
+      }
+      if (page.next !== undefined) {
+        const more = make('button', 'Show more tool results')
+        more.onclick = () => {
+          more.remove()
+          void results(page.next!).catch(this.lost(pane))
+        }
+        disclosure.append(more)
+      }
+    }
+    disclosure.addEventListener('toggle', () => {
+      if (!disclosure.open || loaded) return
+      loaded = true
+      void (async () => {
+        if (tool.input) disclosure.append(await this.options.tree(tool.input, item.record))
+        if (tool.results) await results(0)
+      })().catch(this.lost(pane))
+    })
+    return disclosure
+  }
+  private lazyTree(disclosure: HTMLDetailsElement, node: StructuredNode, record: number): void {
+    let loaded = false
+    disclosure.addEventListener('toggle', () => {
+      if (disclosure.open && !loaded) {
+        loaded = true
+        void this.options
+          .tree(node, record)
+          .then((tree) => disclosure.append(tree))
+          .catch(this.options.frozen)
+      }
+    })
+  }
+  private async fields(node: StructuredNode, record: number): Promise<StructuredNode[]> {
+    if (node.container === undefined) return []
+    const page = await this.source.children(node.container, 0, record)
+    return page.nodes
+  }
+  private async content(
+    parent: HTMLElement,
+    node: StructuredNode | undefined,
+    record: number,
+    pane: Pane,
+    item?: TranscriptItem,
+    tools: TranscriptTool[] = [],
+    used = new Set<number>()
+  ): Promise<void> {
+    if (!node || pane.signal.aborted) return
+    if (node.kind === 'string') {
+      await this.markdown(parent, node, record, pane)
+      return
+    }
+    if (node.kind !== 'array' || node.container === undefined) {
+      if (node.kind !== 'null') {
+        const extra = document.createElement('details')
+        extra.append(make('summary', 'Content'))
+        this.lazyTree(extra, node, record)
+        parent.append(extra)
+      }
+      return
+    }
+    const blocks = async (start: number) => {
+      const page = await this.source.children(node.container!, start, record)
+      for (const block of page.nodes) {
+        if (pane.signal.aborted) return
+        if (item?.linkedResults.some((span) => span.start === block.span.start && span.end === block.span.end)) continue
+        const fields = await this.fields(block, record),
+          type = string(fields.find((field) => field.key === 'type')),
+          text = fields.find((field) => field.key === 'text')
+        const call = tools.find(
+          (tool) => tool.block.span.start === block.span.start && tool.block.span.end === block.span.end
+        )
+        if (call && item) {
+          used.add(call.ordinal)
+          parent.append(await this.tool(item, call, pane))
+          continue
+        }
+        if ((type === 'text' || type === 'input_text' || type === 'output_text') && text) {
+          await this.markdown(parent, text, record, pane)
+          continue
+        }
+        if (type === 'image' || type === 'image_url' || type === 'input_image') {
+          await this.image(parent, fields, record)
+          continue
+        }
+        const extra = document.createElement('details')
+        extra.append(
+          make(
+            'summary',
+            type === 'thinking' ? 'Thinking' : type === 'tool_result' ? 'Tool result (unmatched)' : type || block.kind
+          )
+        )
+        this.lazyTree(extra, block, record)
+        parent.append(extra)
+      }
+      if (page.next !== undefined) {
+        const more = make('button', 'Show more content blocks')
+        more.onclick = () => {
+          more.remove()
+          void blocks(page.next!).catch(this.lost(pane))
+        }
+        parent.append(more)
+      }
+    }
+    await blocks(0)
+  }
+  private async image(parent: HTMLElement, fields: StructuredNode[], record: number): Promise<void> {
+    const image = fields.find(
+      (field) => field.key === 'image_url' || field.key === 'source' || field.key === 'image_url'
+    )
+    let url = image?.kind === 'string' ? string(image) : ''
+    if (image?.container !== undefined) {
+      const values = await this.fields(image, record),
+        data = values.find((value) => value.key === 'data'),
+        media = values.find((value) => value.key === 'media_type')
+      if (data && media && !data.more) url = `data:${string(media)};base64,${string(data)}`
+      else url = string(values.find((value) => value.key === 'url'))
+    }
+    if (/^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(url) && url.length <= 2 << 20) {
+      const thumbnail = document.createElement('img')
+      thumbnail.src = url
+      thumbnail.alt = 'Embedded image'
+      thumbnail.className = 'transcript-image'
+      thumbnail.loading = 'lazy'
+      parent.append(thumbnail)
+    } else
+      parent.append(
+        make(
+          'p',
+          url
+            ? 'Remote image · not loaded · inspect the source in Message metadata'
+            : 'Image preview unavailable · inspect embedded data in Message metadata',
+          'transcript-image-placeholder'
+        )
+      )
+  }
+  /** A string node's whole text: its preview when that's all of it, else its source (at most the text query's 64 KiB). */
+  private async whole(node: StructuredNode, signal: AbortSignal): Promise<string> {
+    const view = this.opened.view
+    if (!node.more || !view) return string(node)
+    const bytes = await this.core.call(
+      'sourceBytes',
+      { view, start: node.span.start, count: node.span.end - node.span.start },
+      signal
+    )
+    return string({ ...node, more: false, text: new TextDecoder(this.opened.encoding, { ignoreBOM: true }).decode(bytes) })
+  }
+  private async markdown(parent: HTMLElement, node: StructuredNode, record: number, pane: Pane): Promise<void> {
+    if (node.span.end - node.span.start > 65536) {
+      const preview = string(node) + ' … (source preview)'
+      await this.charge(pane, preview.length * RENDERED_PER_UNIT)
+      parent.append(make('pre', preview, 'transcript-text'))
+      const raw = make('button', 'View complete content in Rows')
+      raw.onclick = () => this.options.rows(record)
+      parent.append(raw)
+      return
+    }
+    const holder = make('div', undefined, 'transcript-markdown md-content')
+    parent.append(holder)
+    /** The text, literally and whole, in place of its Markdown. */
+    const literal = async () => {
+      const text = await this.whole(node, pane.signal)
+      await this.charge(pane, text.length * RENDERED_PER_UNIT)
+      holder.replaceWith(make('pre', text, 'transcript-text'))
+    }
+    const load = async (block: number) => {
+      let page: TranscriptText
+      try {
+        page = await this.core.call(
+          'structuredTranscriptText',
+          { ref: this.source.info.ref, start: node.span.start, end: node.span.end, block },
+          pane.signal
+        )
+      } catch (error) {
+        // A block whose HTML passes the core's display bound: the text shows literally, and whole, instead.
+        if (!(error instanceof CoreCallError && error.code === 'Refused')) throw error
+        await literal()
+        return
+      }
+      if (pane.signal.aborted) return
+      // A block the core turned into a note (nested too deep, too large) comes as empty HTML: as refused, so literal.
+      if (page.html.some((html) => !html)) {
+        await literal()
+        return
+      }
+      await this.charge(pane, page.html.reduce((chars, html) => chars + html.length, 0) * CHAR_BYTES)
+      for (const html of page.html) {
+        const fragment = make('div', undefined, 'md-block')
+        fragment.innerHTML = html
+        holder.append(fragment)
+      }
+      if (page.next !== undefined) {
+        const more = make('button', 'Show more text')
+        more.onclick = () => {
+          more.remove()
+          void load(page.next!).catch(this.lost(pane))
+        }
+        holder.append(more)
+      }
+    }
+    holder.addEventListener('click', (event) => {
+      const anchor = (event.target as HTMLElement).closest<HTMLElement>('a')
+      if (!anchor) return
+      event.preventDefault()
+      // Only `data-href` names a target: the sanitizer leaves a dropped one (javascript:, data:) a bare `href="#"`.
+      const target = anchor.dataset.href
+      if (target && this.options.openLocal)
+        void this.options
+          .openLocal(target, this.opened.path ?? '', {
+            mode: (event as MouseEvent).shiftKey
+              ? 'side'
+              : (event as MouseEvent).ctrlKey || (event as MouseEvent).metaKey
+                ? 'tab'
+                : 'peek',
+            trigger: anchor
+          })
+          .catch(this.options.frozen)
+    })
+    await load(0)
+  }
+}

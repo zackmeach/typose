@@ -1,5 +1,5 @@
 import { expect } from '@playwright/test'
-import { fixture, launch, recordClipboard, test } from './app'
+import { debugStats, fixture, launch, recordClipboard, runCommand, stubOpenDialog, test, type TestHooks } from './app'
 
 async function expectDistinctRows(card: import('@playwright/test').Locator, selector: string): Promise<void> {
   const boxes = await card.locator(selector).evaluateAll(elements => elements.map(element => element.getBoundingClientRect()).filter(box => box.width > 0 && box.height > 0).map(box => ({ top: box.top, bottom: box.bottom })))
@@ -209,7 +209,10 @@ test('a Claude-session-shaped JSONL reads in Rows, Table and Raw without stoppin
   ]
   const live = await launch({ hooks: true, file: fixture('structured-claude-shaped.jsonl', records.map(record => JSON.stringify(record)).join('\n') + '\n') })
   const card = live.win.getByRole('region', { name: 'Reader card 1' }), row = (line: number) => card.locator(`.jsonl-entry[data-line="${line}"]`)
-  await expect(card.locator('[data-lens="rows"]')).toBeVisible({ timeout: 30_000 })
+  // A detected session opens in Transcript (brief §5.4).
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  await card.getByRole('tab', { name: 'Rows', exact: true }).click()
+  await expect(card.locator('[data-lens="rows"]')).toBeVisible()
   await expect(row(0).locator('.text')).toHaveText('Read the launch plan and summarise it')
   await expect(row(1).locator('.text')).toHaveText(`Read launch-plan.md · ${Buffer.byteLength(JSON.stringify(records[1]))} B`)
   await expect(row(2).locator('.text')).toHaveText('# Launch plan Move the pier on Tuesday.')
@@ -227,6 +230,340 @@ test('a Claude-session-shaped JSONL reads in Rows, Table and Raw without stoppin
   await card.getByRole('tab', { name: 'Rows', exact: true }).click()
   await expect(row(4).locator('.text')).toHaveText('Launch plan review')
   await expect(live.win.getByText("Typose's core stopped")).toHaveCount(0)
+  expect(live.pageErrors).toEqual([])
+})
+
+test('Claude Transcript uses the full graph, nests tool results and preserves literal command tags', async () => {
+  const records = [
+    { type: 'user', uuid: 'u0', parentUuid: null, message: { role: 'user', content: [{ type: 'text', text: 'Please **inspect** <command-name>literal</command-name>.' }] } },
+    { type: 'system', uuid: 'event1', parentUuid: 'u0', detail: 'Session metadata fixture' },
+    { type: 'assistant', uuid: 'a1', parentUuid: 'event1', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tool1', name: 'read', input: { amount: 3.1, file: 'local.md', path: 'C:\\Users\\me\\f1.md' } }] } },
+    { type: 'user', uuid: 'u1', parentUuid: 'a1', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tool1', content: '**matched result**' }] } },
+    { type: 'assistant', uuid: 'old', parentUuid: 'u1', message: { role: 'assistant', content: 'Old branch fixture' } },
+    { type: 'assistant', uuid: 'new', parentUuid: 'u1', message: { role: 'assistant', content: 'Latest leaf fixture' } },
+    { type: 'assistant', uuid: 'side', parentUuid: 'a1', isSidechain: true, message: { role: 'assistant', content: 'Sidechain fixture' } },
+    { type: 'queue-operation', operation: 'fixture' }
+  ]
+  const source = records.map(record => JSON.stringify(record).replace('"amount":3.1', '"amount":3.10')).join('\n') + '\n{bad\n'
+  const live = await launch({ hooks: true, file: fixture('structured-claude.jsonl', source) })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  await expect(card.locator('.transcript-markdown strong').filter({ hasText: 'inspect' })).toBeVisible()
+  await expect(card.locator('.transcript-markdown').first()).toContainText('<command-name>literal</command-name>')
+  await expect(card.getByText('Latest leaf fixture', { exact: true })).toBeVisible()
+  await expect(card.getByText('Old branch fixture', { exact: true })).toHaveCount(0)
+  await card.getByText('1 message on another branch', { exact: true }).click()
+  await expect(card.getByText('Old branch fixture', { exact: true })).toBeVisible()
+  await card.getByText('Sidechain · 1 message', { exact: true }).click()
+  await expect(card.getByText('Sidechain fixture', { exact: true })).toBeVisible()
+  // Their members sit apart from the main chain: indented, on a guide line, as a tool's results are.
+  const guides = (scope: import('@playwright/test').Locator) => scope.locator('.transcript-conversation > div').evaluateAll(groups =>
+    groups.map(group => { const style = getComputedStyle(group); return `${style.marginLeft} ${style.borderLeftWidth} ${style.paddingLeft}` }))
+  expect(await guides(card)).toEqual(['16px 1px 12px', '16px 1px 12px'])
+  const tool = card.locator('.transcript-tool[data-tool-id="tool1"]')
+  // Brief §5.4's `name(args summary)`: the input's first fields, a number as written and a string decoded.
+  await expect(tool.locator('summary')).toHaveText('read(amount: 3.10, file: "local.md", path: "C:\\Users\\me\\f1.md")')
+  await tool.locator('summary').click()
+  await expect(tool.locator('.tree-number')).toHaveText('3.10')
+  await expect(tool.locator('.transcript-tool-result strong').filter({ hasText: 'matched result' })).toBeVisible()
+  await expect(card.locator('.transcript-turn > h3').filter({ hasText: /^User$/ })).toHaveCount(1)
+  await expect(card.getByRole('button', { name: '1 lines couldn’t be parsed · View in Rows', exact: true })).toBeVisible()
+  await card.getByRole('checkbox', { name: 'Show 2 session events', exact: true }).check()
+  await expect(card.locator('.session-event')).toHaveCount(2)
+  expect(live.pageErrors).toEqual([])
+})
+
+test('OpenAI dataset Transcript keeps conversations separate and tool results under their matching calls', async () => {
+  const line = JSON.stringify({ messages: [{ role: 'system', content: 'System fixture' }, { role: 'user', content: 'Question fixture' }, { role: 'assistant', content: null, tool_calls: [{ id: 'reused', type: 'function', function: { name: 'lookup', arguments: '{"exact":3.10}' } }] }, { role: 'tool', tool_call_id: 'reused', content: 'Dataset result fixture' }], metadata: { fixture: true } })
+  const single = JSON.stringify({ messages: [{ role: 'user', content: 'Single turn fixture' }] })
+  const live = await launch({ hooks: true, file: fixture('structured-openai-dataset.jsonl', [line, line, line, single].join('\n') + '\n') })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  await expect(card.locator('.transcript-conversation')).toHaveCount(4)
+  await expect(card.getByText('Conversation 1 · line 1 · 3 turns', { exact: true })).toBeVisible()
+  await expect(card.getByText('Conversation 4 · line 4 · 1 turn', { exact: true })).toBeVisible()
+  await expect(card.getByText('System prompt', { exact: true })).toHaveCount(3)
+  await expect(card.getByText('Line metadata', { exact: true })).toHaveCount(4)
+  // A dataset's conversations are the file's own, not off a chain: no indent.
+  expect(await card.locator('.transcript-conversation > div').evaluateAll(groups => groups.map(group => getComputedStyle(group).borderLeftWidth)))
+    .toEqual(['0px', '0px', '0px', '0px'])
+  const tool = card.locator('.transcript-tool[data-tool-id="reused"]').first()
+  await tool.locator('summary').click()
+  await expect(tool.locator('.transcript-tool-result').getByText('Dataset result fixture', { exact: true })).toBeVisible()
+  await expect(card.locator('.transcript-turn > h3').filter({ hasText: /^Tool$/ })).toHaveCount(0)
+  expect(live.pageErrors).toEqual([])
+})
+
+/** A Claude Code session of `turns` on one chain: each turn's record the child of the one before. */
+const claudeSession = (turns: { role: 'user' | 'assistant'; content: unknown }[]): string =>
+  turns.map((message, i) => JSON.stringify({ type: message.role, uuid: `t${i}`, parentUuid: i ? `t${i - 1}` : null, message })).join('\n') + '\n'
+
+test('Transcript shows a refused Markdown block as literal text, and a failing item never fails its page', async () => {
+  // One 48 KB paragraph: under the text query's 64 KiB, but its HTML passes the core's display bound, so it's refused.
+  const long = 'refused '.repeat(6000)
+  const file = fixture('transcript-refused.jsonl', claudeSession([
+    { role: 'user', content: 'Before fixture' },
+    { role: 'assistant', content: [{ type: 'text', text: long }] },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'tool9', name: 'read', input: { file: 'local.md' } }] },
+    { role: 'user', content: 'After fixture' }
+  ]))
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  await expect(card.getByText('After fixture', { exact: true })).toBeVisible()
+  expect(await card.locator('pre.transcript-text').textContent()).toBe(long)
+  // One item's query fails (injected here): that item says so, and the rest of its page shows.
+  await live.win.evaluate(() => {
+    const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core, call = core.call.bind(core)
+    core.call = (...args: Parameters<typeof call>) => args[0] === 'structuredTranscriptTools' ? Promise.reject(new Error('tools fixture failure')) : call(...args)
+  })
+  await card.getByRole('tab', { name: 'Rows', exact: true }).click()
+  await card.getByRole('tab', { name: 'Transcript', exact: true }).click()
+  await expect(card.getByRole('button', { name: 'This item couldn’t be shown · tools fixture failure · View in Rows', exact: true })).toBeVisible()
+  await expect(card.getByText('Before fixture', { exact: true })).toBeVisible()
+  await expect(card.getByText('After fixture', { exact: true })).toBeVisible()
+  expect(live.pageErrors).toEqual([])
+})
+
+test('Transcript reserves the mounted page’s HTML, flat to the last page, and releases it when it unmounts', async () => {
+  // Five pages of 20 identical turns: each page's HTML is the same size.
+  const text = 'Bounded page fixture '.repeat(48)
+  const file = fixture('transcript-pages.jsonl', claudeSession(Array.from({ length: 100 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: text }))))
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  // What the renderer holds reserved for its one document's view.
+  const held = async () => (await debugStats(live.win)).surfaces!.bytes
+  await expect(card.getByText('1–20 of 100', { exact: true })).toBeVisible({ timeout: 30_000 })
+  const first = await held()
+  for (let page = 1; page < 5; page++) {
+    await card.getByRole('button', { name: 'Next turns', exact: true }).click()
+    await expect(card.getByText(`${page * 20 + 1}–${page * 20 + 20} of 100`, { exact: true })).toBeVisible()
+  }
+  // Each page replaces the one before and its charge: the fifth holds what the first did.
+  await expect.poll(held).toBe(first)
+  await card.getByRole('tab', { name: 'Rows', exact: true }).click()
+  await expect(card.locator('[data-lens="rows"]')).toBeVisible()
+  await expect.poll(held).toBeLessThan(first)
+  expect(live.pageErrors).toEqual([])
+})
+
+test('Transcript shows HTML-like tags in message text as literal text, never interpreted or stripped', async () => {
+  const texts = [
+    // Raw HTML that Rendered keeps (b, img) or drops (a stray end tag), beside Markdown that renders.
+    'Reply <b>bold?</b> <img src="local.png" alt="pic"> stray </i> and **this** stays Markdown',
+    // A CommonMark type-6 HTML block.
+    '<details>\n<summary>open?</summary>\nhidden?\n</details>',
+    // Round 1's bypasses of a renderer-side check: a lone surrogate before the tag, and a source map in the text.
+    '\ud800<b>surrogate</b> after a lone surrogate',
+    'See data-source-map="L:0:1:9999" then <b>mapped</b>',
+    'Code `<b>` stays code'
+  ]
+  const file = fixture('transcript-tags.jsonl', claudeSession([
+    ...texts.map((text, i) => ({ role: i % 2 ? 'assistant' as const : 'user' as const, content: [{ type: 'text', text }] })),
+    { role: 'assistant', content: 'Done fixture' }
+  ]))
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  await expect(card.getByText('Done fixture', { exact: true })).toBeVisible()
+  const markdown = card.locator('.transcript-markdown')
+  await expect(markdown).toHaveCount(texts.length + 1)
+  await expect(card.locator('pre.transcript-text')).toHaveCount(0)
+  await expect(markdown.locator('b, i, details, summary, .tp-img')).toHaveCount(0)
+  await expect(markdown.nth(0)).toHaveText('Reply <b>bold?</b> <img src="local.png" alt="pic"> stray </i> and this stays Markdown')
+  await expect(markdown.nth(0).locator('strong')).toHaveText('this')
+  // The HTML block keeps its lines, as a paragraph of its own.
+  const block = markdown.nth(1).locator('.md-block > p')
+  await expect(block.locator('br')).toHaveCount(3)
+  expect(await block.evaluate(paragraph => (paragraph as HTMLElement).innerText)).toBe('<details>\n<summary>open?</summary>\nhidden?\n</details>')
+  await expect(markdown.nth(2)).toContainText('<b>surrogate</b> after a lone surrogate')
+  await expect(markdown.nth(3)).toHaveText('See data-source-map="L:0:1:9999" then <b>mapped</b>')
+  await expect(markdown.nth(4).locator('code')).toHaveText('<b>')
+  expect(live.pageErrors).toEqual([])
+})
+
+test('a Transcript graph that is off says why, where a disabled structured lens does', async () => {
+  // A parent cycle (the core's own fixture) turns the graph off; Rows remains.
+  const file = fixture('transcript-cycle.jsonl', [
+    { type: 'user', uuid: 'a', parentUuid: 'b', message: { role: 'user', content: 'a' } },
+    { type: 'assistant', uuid: 'b', parentUuid: 'a', message: { role: 'assistant', content: 'b' } },
+    { type: 'user', uuid: 'z', parentUuid: null, message: { role: 'user', content: 'z' } }
+  ].map(record => JSON.stringify(record)).join('\n') + '\n')
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' }), reason = 'Transcript parent graph contains a cycle; inspect in Rows'
+  await expect(card.locator('[data-lens="rows"]')).toBeVisible({ timeout: 30_000 })
+  const transcript = card.getByRole('tab', { name: 'Transcript', exact: true })
+  await expect(transcript).toBeDisabled()
+  await expect(transcript.getByTitle(reason)).toBeVisible()
+  await card.getByRole('button', { name: 'File info', exact: true }).click()
+  await expect(live.win.getByRole('dialog', { name: 'File info' }).getByText(reason, { exact: true })).toBeVisible()
+  expect(live.pageErrors).toEqual([])
+})
+
+test('a branch whose first record is a hidden tool result is labelled and anchored by what it shows (F6)', async () => {
+  // The branch's records in file order: r1b, a results-only record (its result nests under tool1), then b1. 150 session
+  // events before them put r1b at line 153, far enough down that Rows opened there wouldn't show line 1.
+  const file = fixture('transcript-f6.jsonl', [
+    { type: 'user', uuid: 'u0', parentUuid: null, message: { role: 'user', content: 'Question fixture' } },
+    { type: 'assistant', uuid: 'a1', parentUuid: 'u0', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tool1', name: 'read', input: { file: 'local.md' } }] } },
+    ...Array.from({ length: 150 }, () => ({ type: 'queue-operation', operation: 'padding fixture' })),
+    { type: 'user', uuid: 'r1b', parentUuid: 'a1', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tool1', content: 'Retried result fixture' }] } },
+    { type: 'assistant', uuid: 'b1', parentUuid: 'r1b', message: { role: 'assistant', content: 'Branch reply fixture' } },
+    { type: 'user', uuid: 'r1', parentUuid: 'a1', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tool1', content: 'Main result fixture' }] } },
+    { type: 'assistant', uuid: 'a2', parentUuid: 'r1', message: { role: 'assistant', content: 'Main answer fixture' } }
+  ].map(record => JSON.stringify(record)).join('\n') + '\n')
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  const branch = card.locator('.transcript-conversation')
+  await expect(branch.locator('summary').first()).toHaveText('1 message on another branch')
+  await expect(branch).not.toHaveAttribute('data-line')
+  await branch.locator('summary').first().click()
+  await expect(branch.locator('.transcript-turn > h3')).toHaveText(['Assistant'])
+  await expect(branch.getByText('Branch reply fixture', { exact: true })).toBeVisible()
+  const tool = card.locator('.transcript-tool[data-tool-id="tool1"]')
+  await tool.locator('summary').click()
+  await expect(tool.locator('.transcript-tool-result')).toHaveCount(2)
+  // The branch's own load fails (injected): its failure link opens Rows without a line, never at the hidden record's.
+  await live.win.evaluate(() => {
+    const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core, call = core.call.bind(core)
+    core.call = (...args: Parameters<typeof call>) =>
+      args[0] === 'structuredTranscript' && (args[1] as { group?: number }).group !== undefined ? Promise.reject(new Error('group fixture failure')) : call(...args)
+  })
+  await card.getByRole('tab', { name: 'Rows', exact: true }).click()
+  await card.getByRole('tab', { name: 'Transcript', exact: true }).click()
+  await card.locator('.transcript-conversation > summary').click()
+  await card.getByRole('button', { name: 'This item couldn’t be shown · group fixture failure · View in Rows', exact: true }).click()
+  await expect(card.locator('[data-lens="rows"]')).toBeVisible()
+  await expect(card.locator('.jsonl-entry[data-line="0"]')).toBeVisible()
+  expect(live.pageErrors).toEqual([])
+})
+
+test('reading Rows by keyboard while the graph indexes keeps Rows when the Transcript becomes ready', async () => {
+  const file = fixture('transcript-keyboard.jsonl', claudeSession(Array.from({ length: 6 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: `Keyboard turn ${i}` }))))
+  const live = await launch({ hooks: true })
+  await live.win.waitForFunction(() => 'typoseTest' in window)
+  // The graph is "still indexing" until the test says: the first build reply is marked not ready, and the next waits.
+  await live.win.evaluate(() => {
+    const w = window as unknown as { typoseTest: TestHooks; ready?: () => void }, core = w.typoseTest.core, call = core.call.bind(core)
+    const ready = new Promise<void>(done => { w.ready = done })
+    let builds = 0
+    core.call = async (...args: Parameters<typeof call>) => {
+      const reply = await call(...args) as { done: boolean; transcript?: { ready: boolean } }
+      if (args[0] !== 'structuredBuild') return reply
+      if (++builds === 1) return { ...reply, done: false, transcript: { ...reply.transcript!, ready: false } }
+      await ready
+      return reply
+    }
+  })
+  await stubOpenDialog(live.app, file)
+  await runCommand(live.win, 'Open file…')
+  await live.win.getByRole('button', { name: 'Browse…', exact: true }).click()
+  const card = live.win.getByRole('region', { name: 'Reader card 1' }), transcript = card.getByRole('tab', { name: 'Transcript', exact: true })
+  await expect(card.locator('[data-lens="rows"]')).toBeVisible({ timeout: 30_000 })
+  await expect(transcript).toBeDisabled()
+  await card.locator('.structured-view').focus()
+  await live.win.keyboard.press('ArrowDown')
+  await live.win.keyboard.press('ArrowDown')
+  await live.win.evaluate(() => (window as unknown as { ready: () => void }).ready())
+  await expect(transcript).toBeEnabled()
+  await expect(card.locator('[data-lens="rows"]')).toBeVisible()
+  await expect(card.locator('[data-lens="transcript"]')).toHaveCount(0)
+  expect(live.pageErrors).toEqual([])
+})
+
+test('Transcript paging starts each page at its top', async () => {
+  const text = 'Bounded page fixture '.repeat(48)
+  const file = fixture('transcript-scroll.jsonl', claudeSession(Array.from({ length: 100 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: `Turn ${i} ${text}` }))))
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' }), view = card.locator('.structured-view')
+  await expect(card.getByText('1–20 of 100', { exact: true })).toBeVisible({ timeout: 30_000 })
+  const bottom = () => view.evaluate(element => { element.scrollTop = element.scrollHeight; return element.scrollTop })
+  expect(await bottom()).toBeGreaterThan(0)
+  await card.getByRole('button', { name: 'Next turns', exact: true }).click()
+  await expect(card.getByText('21–40 of 100', { exact: true })).toBeVisible()
+  await expect.poll(() => view.evaluate(element => element.scrollTop)).toBe(0)
+  await expect(card.getByText('Turn 20 ', { exact: false })).toBeInViewport()
+  expect(await bottom()).toBeGreaterThan(0)
+  await card.getByRole('button', { name: 'Previous turns', exact: true }).click()
+  await expect(card.getByText('1–20 of 100', { exact: true })).toBeVisible()
+  await expect.poll(() => view.evaluate(element => element.scrollTop)).toBe(0)
+  expect(live.pageErrors).toEqual([])
+})
+
+test('Transcript paging ignores Next while a page builds, and each Previous goes back one page', async () => {
+  const file = fixture('transcript-paging.jsonl', claudeSession(Array.from({ length: 140 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: `Paging turn ${i}` }))))
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' }), previous = card.getByRole('button', { name: 'Previous turns', exact: true })
+  await expect(card.getByText('1–20 of 140', { exact: true })).toBeVisible({ timeout: 30_000 })
+  // Five clicks in one task: the first starts page 2, and the rest land while it builds.
+  await card.getByRole('button', { name: 'Next turns', exact: true }).evaluate(next => { for (let i = 0; i < 5; i++) (next as HTMLButtonElement).click() })
+  await expect(card.getByText('21–40 of 140', { exact: true })).toBeVisible()
+  await previous.click()
+  await expect(card.getByText('1–20 of 140', { exact: true })).toBeVisible()
+  await expect(previous).toHaveCount(0)
+  expect(live.pageErrors).toEqual([])
+})
+
+test('a Markdown block the core makes a note (nested too deep) shows its text literally', async () => {
+  // 70 nested quotes pass md.rs's MAX_DEPTH: the block comes back as a note, with no HTML.
+  const deep = '>'.repeat(70) + ' deep content fixture'
+  const file = fixture('transcript-deep.jsonl', claudeSession([
+    { role: 'user', content: deep },
+    { role: 'assistant', content: 'Reply fixture' },
+    { role: 'user', content: 'Done fixture' }
+  ]))
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  await expect(card.getByText('Done fixture', { exact: true })).toBeVisible()
+  await expect(card.locator('pre.transcript-text')).toHaveText(deep)
+  expect(live.pageErrors).toEqual([])
+})
+
+test('a Transcript link without a target (javascript:, dropped by the sanitizer) sends nothing to the core', async () => {
+  const file = fixture('transcript-links.jsonl', claudeSession([
+    { role: 'user', content: 'Run [this link](javascript:alert(1)) now' },
+    { role: 'assistant', content: 'Reply fixture' },
+    { role: 'user', content: 'Done fixture' }
+  ]))
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  const link = card.locator('.transcript-markdown a')
+  await expect(link).toHaveText('this link')
+  await expect(link).not.toHaveAttribute('data-href')
+  await live.win.evaluate(() => {
+    const w = window as unknown as { typoseTest: TestHooks; calls: string[] }, core = w.typoseTest.core, call = core.call.bind(core)
+    w.calls = []
+    core.call = (...args: Parameters<typeof call>) => { w.calls.push(args[0]); return call(...args) }
+  })
+  await link.click()
+  // A link's open is asynchronous (a peek card, then the core): give it time to reach the core if it would.
+  await live.win.waitForTimeout(1500)
+  expect(await live.win.evaluate(() => (window as unknown as { calls: string[] }).calls)).not.toContain('openLocal')
+  expect(live.pageErrors).toEqual([])
+})
+
+test('a text over 64 KiB previews its decoded start, not its JSON source', async () => {
+  const file = fixture('transcript-long.jsonl', claudeSession([
+    { role: 'user', content: 'line one\nline "two"\n' + 'z'.repeat(70_000) },
+    { role: 'assistant', content: 'Reply fixture' },
+    { role: 'user', content: 'Done fixture' },
+    // Escaped surrogate pairs, the 4,096-byte preview cut falling between a pair's two escapes.
+    { role: 'assistant', content: 'a'.repeat(6) + '@'.repeat(6000) }
+  ]).replace(/@/g, '\\uD83D\\uDE00'))
+  const live = await launch({ hooks: true, file })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  const preview = card.locator('pre.transcript-text')
+  await expect(preview).toHaveCount(2)
+  const text = (await preview.first().textContent())!
+  expect(text.slice(0, 24)).toBe('line one\nline "two"\nzzzz')
+  expect(text.endsWith('z … (source preview)')).toBe(true)
+  // The cut leaves no lone high surrogate.
+  expect(await preview.nth(1).textContent()).toBe('a'.repeat(6) + '\u{1F600}'.repeat(340) + ' … (source preview)')
+  await expect(card.getByRole('button', { name: 'View complete content in Rows', exact: true })).toHaveCount(2)
   expect(live.pageErrors).toEqual([])
 })
 

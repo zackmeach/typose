@@ -508,12 +508,14 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         const info = source.info
         const off = info.status === 'locked' ? info.reason ?? 'Structured view unavailable' : !info.root && info.format !== 'jsonl' ? 'Couldn’t parse · showing Raw' : undefined
         const configured = info.format === 'jsonl' ? shared.settings?.lens_jsonl : info.format === 'yaml' ? shared.settings?.lens_yaml : shared.settings?.lens_json
-        const preferred: LensName = configured === 'raw' ? 'raw' : info.format === 'jsonl' ? 'rows' : 'tree'
+        const preferred: LensName = configured === 'raw' ? 'raw' : info.format === 'jsonl' ? info.transcript?.ready ? 'transcript' : 'rows' : 'tree'
         const current = latest.current.card
         const already = current.kind === 'open' && current.opened === opened && ['tree', 'rows', 'table', 'transcript'].includes(current.lens ?? '')
         const go = !off && picked.current !== 'raw' && (picked.current !== null || preferred !== 'raw') && (already || picked.current !== null || !lens.current?.readerMoved())
-        const chosen = ['tree', 'rows', 'table', 'transcript'].includes(picked.current ?? '') ? picked.current! : already && lens.current?.readerMoved() ? current.lens! : preferred
-        setCard(c => c.kind === 'open' && c.opened === opened ? { ...c, structured: info, structuredOff: off, transcriptOff: info.transcript ? 'Transcript graph is not available in this checkpoint · use Rows' : undefined, lens: go && chosen !== 'transcript' ? chosen : 'raw' } : c)
+        // A Transcript pick (a restored tab's, say) waits in Rows until its graph is ready, which may be never.
+        const pick = picked.current === 'transcript' && !info.transcript?.ready ? 'rows' : picked.current
+        const chosen = ['tree', 'rows', 'table', 'transcript'].includes(pick ?? '') ? pick! : already && lens.current?.readerMoved() ? current.lens! : preferred
+        setCard(c => c.kind === 'open' && c.opened === opened ? { ...c, structured: info, structuredOff: off, transcriptOff: info.transcript && !info.transcript.ready ? info.transcript.reason ?? 'Transcript graph is indexing…' : undefined, lens: go ? chosen : 'raw' } : c)
       }
       update(); unsubscribe = source.subscribe?.(update)
     }).catch(error => {
@@ -1281,6 +1283,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
           {card.structured?.parsedAs ? <p>Parsed as {card.structured.parsedAs === 'jsonc' ? 'JSONC' : 'JSON'}</p> : null}
           {card.opened.format === 'jsonl' ? <p>{card.structured?.parsed === undefined ? '…' : jsonlCounts(card.structured, card.lines)} · {card.structured?.transcript?.adapter ?? 'Generic JSONL'}</p> : null}
           {card.structuredOff ? <p>{card.structuredOff}</p> : null}
+          {card.transcriptOff ? <p>{card.transcriptOff}</p> : null}
           <div className="structured-problem-list">{card.structured?.problems.map((problem, index) => <details key={index}><summary>{problem.kind}: {problem.count.toLocaleString()}</summary><button type="button" onClick={() => { jumpTo.current = Math.max(0, (problem.line ?? 1) - 1); onLens('raw') }}>{problem.message} · {problem.line ? `line ${problem.line}` : `byte ${problem.first.start}`}</button></details>)}</div>
         </Dialog></Popover>
       </DialogTrigger> : null}
@@ -1352,7 +1355,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   } : null
   const body = !host || card.kind !== 'open' ? message
     : 'structured' in shown.body && structuredSource.current
-      ? <LensHost {...host} mode={card.lens as StructuredMode} structured={structuredSource.current} onRows={() => onLens('rows')} />
+      ? <LensHost {...host} mode={card.lens as StructuredMode} structured={structuredSource.current} onRows={line => { if (line !== undefined) jumpTo.current = line; onLens('rows') }} />
     : 'raw' in shown.body ? <LensHost {...host} mode="raw" />
     : 'grid' in shown.body && card.csv ? (
       <LensHost {...host} mode="grid" csv={card.csv} csvOptions={card.csvOptions ?? CSV_OPTIONS}
@@ -1510,7 +1513,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       switchLens: () => {
         const c = latest.current.card
         if (c.kind !== 'open') return
-        const choices: LensName[] = c.opened.format === 'markdown' ? ['rendered', 'raw'] : c.opened.format === 'csv' ? ['grid', 'raw'] : c.opened.format === 'jsonl' ? ['rows', ...(c.structured && !c.structuredOff && !c.structured.tableOff ? ['table' as const] : []), 'raw'] : ['tree', 'raw']
+        const choices: LensName[] = c.opened.format === 'markdown' ? ['rendered', 'raw'] : c.opened.format === 'csv' ? ['grid', 'raw'] : c.opened.format === 'jsonl' ? [...(c.structured?.transcript && !c.structuredOff && !c.transcriptOff ? ['transcript' as const] : []), 'rows', ...(c.structured && !c.structuredOff && !c.structured.tableOff ? ['table' as const] : []), 'raw'] : ['tree', 'raw']
         onLens(choices[(choices.indexOf(c.lens ?? 'raw') + 1) % choices.length])
       },
       captureSession, restoreSession,
@@ -1684,7 +1687,7 @@ interface LensHostProps {
   frozen: boolean
   mode: 'raw' | 'rendered' | 'grid' | StructuredMode
   structured?: StructuredSource
-  onRows?(): void
+  onRows?(line?: number): void
   csv?: CsvInfo
   csvOptions?: CsvOptions
   onCsvInfo?(info: CsvInfo): void
@@ -1713,7 +1716,8 @@ function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place
     const onFrozenHere = (why: string) => handlers.current.onFrozen(why)
     let view: ShownLens
     if (structured && (mode === 'tree' || mode === 'rows' || mode === 'table' || mode === 'transcript')) {
-      view = new StructuredLens(host.current!, core, opened, structured, mode, { budget, atLine: at, notice, onFrozen: onFrozenHere, onShowRaw: line => handlers.current.onShowRaw(line), onRows: () => onRows?.() })
+      view = new StructuredLens(host.current!, core, opened, structured, mode, { budget, atLine: at, notice, onFrozen: onFrozenHere, onShowRaw: line => handlers.current.onShowRaw(line), onRows: line => onRows?.(line),
+        onOpenLocal: (target, path, gesture) => handlers.current.onOpenLocal(target, path, gesture) })
     } else if (mode === 'grid' && csv) {
       view = new GridLens(host.current!, core, opened, csv, limits, { atLine: at, options: csvOptions ?? CSV_OPTIONS,
         onFrozen: onFrozenHere, budget, onInfo: info => handlers.current.onCsvInfo?.(info),
