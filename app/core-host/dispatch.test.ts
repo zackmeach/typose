@@ -17,6 +17,7 @@ const headingLine = vi.fn((_gen: number, _fragment: string): number | null => nu
 const localPath = vi.fn((_gen: number, _target: string) => 'C:\\docs\\linked.md')
 const openLocal = vi.fn((_gen: number, _target: string): Doc => localDoc)
 const prepareImage = vi.fn(async (_gen: number, _target: string, _cancel: Cancel) => ({ id: 1, width: 1, height: 1, encodedBytes: 72, pixelBytes: 4 }))
+const prepareEmbeddedImage = vi.fn(async (_gen: number, _start: number, _end: number, _cancel: Cancel) => ({ id: 1, width: 1, height: 1, encodedBytes: 72, pixelBytes: 4 }))
 const imageChunk = vi.fn(async (_gen: number, _id: number, _offset: number, _cancel: Cancel) => new Uint8Array([137, 80, 78, 71]))
 const releaseImage = vi.fn((_gen: number, _id: number) => true)
 const setCacheActive = vi.fn((_gen: number, _active: boolean) => {})
@@ -39,6 +40,7 @@ const doc = {
   localPath,
   openLocal,
   prepareImage,
+  prepareEmbeddedImage,
   imageChunk,
   releaseImage,
   setCacheActive,
@@ -82,6 +84,8 @@ const savedTicket = { session: 7, id: '00000000-0000-4000-8000-000000000001' }
 const TABLE: [method: string, field: string, base: Record<string, unknown>][] = [
   ['prepareImage', 'doc', { gen: 1, src: 'one.png' }],
   ['prepareImage', 'gen', { doc: 1, src: 'one.png' }],
+  ['prepareImage', 'span.start', { doc: 1, gen: 1, span: { start: 0, end: 4 } }],
+  ['prepareImage', 'span.end', { doc: 1, gen: 1, span: { start: 0, end: 4 } }],
   ['imageChunk', 'doc', { gen: 1, ref: imageRef, offset: 0 }],
   ['imageChunk', 'gen', { doc: 1, ref: imageRef, offset: 0 }],
   ['imageChunk', 'offset', { doc: 1, gen: 1, ref: imageRef }],
@@ -154,7 +158,7 @@ function withValue(base: Record<string, unknown>, field: string, value: unknown)
 
 describe('every numeric parameter takes only integers in its range', () => {
   for (const [method, field, base] of TABLE) {
-    const { min, max } = range(field.replace(/^(continuation|ref|ticket)\./, ''))
+    const { min, max } = range(field.replace(/^(continuation|ref|ticket|span)\./, ''))
     for (const value of [...HOSTILE, min, max, max + 1]) {
       it(`${method}${base.lens === 'rendered' ? ' (rendered)' : ''}.${field} = ${String(value)}`, async () => {
         const response = await call(method, withValue(base, field, value))
@@ -164,7 +168,7 @@ describe('every numeric parameter takes only integers in its range', () => {
           return
         }
         expect(response).toMatchObject({ id: nextId - 1, session: 7, error: { code: 'InvalidParams', field } })
-        for (const spy of [openDoc, page, piece, render, mdPage, headingLine, localPath, openLocal, prepareImage, imageChunk, releaseImage, setCacheActive, reload, close, startIndex, reserveCache]) expect(spy).not.toHaveBeenCalled()
+        for (const spy of [openDoc, page, piece, render, mdPage, headingLine, localPath, openLocal, prepareImage, prepareEmbeddedImage, imageChunk, releaseImage, setCacheActive, reload, close, startIndex, reserveCache]) expect(spy).not.toHaveBeenCalled()
         // No state change: document 1 is still open, and the next open is document 2.
         expect(await call('page', { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 })).toHaveProperty('result')
         expect(await call('open', { path: 'c.txt', count: 1, bytes: 0 })).toMatchObject({ result: { doc: 2 } })
@@ -459,6 +463,63 @@ describe('local image resources', () => {
       expect(await call('reload', { doc: 1, count: 1, bytes: 0 })).toMatchObject({ result: { gen: 2 } })
       finish(new Uint8Array([137, 80, 78, 71]))
       expect(await reading).toMatchObject({ error: { code: 'Stale' } })
+    } finally { mutable.generation = 1 }
+  })
+})
+
+describe('embedded image resources (Z43)', () => {
+  const MAX_EMBEDDED = Math.ceil((8 << 20) / 3) * 4 + 64
+
+  it('forwards a span, never a URL, and stamps the same path-free reference', async () => {
+    expect(await call('prepareImage', { doc: 1, gen: 1, span: { start: 5, end: 9 } })).toMatchObject({
+      result: { ref: imageRef, width: 1, height: 1, encodedBytes: 72, pixelBytes: 4 }
+    })
+    expect(prepareEmbeddedImage).toHaveBeenCalledWith(1, 5, 9, expect.anything())
+    expect(prepareImage).not.toHaveBeenCalled()
+    expect(localPath).not.toHaveBeenCalled()
+  })
+
+  it('takes exactly one of src and span', async () => {
+    expect(await call('prepareImage', { doc: 1, gen: 1, src: 'one.png', span: { start: 0, end: 4 } }))
+      .toMatchObject({ error: { code: 'InvalidParams', field: 'span' } })
+    expect(await call('prepareImage', { doc: 1, gen: 1 })).toMatchObject({ error: { code: 'InvalidParams', field: 'src' } })
+    expect(prepareImage).not.toHaveBeenCalled()
+    expect(prepareEmbeddedImage).not.toHaveBeenCalled()
+  })
+
+  it('refuses a malformed, empty, reversed or unsafe span before the addon', async () => {
+    for (const span of [null, 3, 'data:image/png;base64,AAAA', [0, 4]])
+      expect(await call('prepareImage', { doc: 1, gen: 1, span })).toMatchObject({ error: { code: 'InvalidParams', field: 'span' } })
+    for (const [span, field] of [
+      [{}, 'span.start'], [{ start: 1 }, 'span.end'], [{ start: -1, end: 4 }, 'span.start'], [{ start: 0.5, end: 4 }, 'span.start'],
+      [{ start: '0', end: 4 }, 'span.start'], [{ start: 0, end: 2 ** 53 }, 'span.end'], [{ start: 0, end: 0 }, 'span.end'],
+      [{ start: 4, end: 4 }, 'span'], [{ start: 5, end: 4 }, 'span']
+    ] as const)
+      expect(await call('prepareImage', { doc: 1, gen: 1, span })).toMatchObject({ error: { code: 'InvalidParams', field } })
+    expect(prepareEmbeddedImage).not.toHaveBeenCalled()
+  })
+
+  it('refuses a span past the embedded bound, and admits one at it', async () => {
+    expect(await call('prepareImage', { doc: 1, gen: 1, span: { start: 7, end: 8 + MAX_EMBEDDED } }))
+      .toMatchObject({ error: { code: 'Refused', message: 'embedded image exceeds 8 MiB' } })
+    expect(prepareEmbeddedImage).not.toHaveBeenCalled()
+    expect(await call('prepareImage', { doc: 1, gen: 1, span: { start: 7, end: 7 + MAX_EMBEDDED } })).toHaveProperty('result')
+    expect(prepareEmbeddedImage).toHaveBeenCalledWith(1, 7, 7 + MAX_EMBEDDED, expect.anything())
+  })
+
+  it('refuses another generation before the addon and releases a result answered after Reload', async () => {
+    expect(await call('prepareImage', { doc: 1, gen: 2, span: { start: 0, end: 4 } })).toMatchObject({ error: { code: 'Stale' } })
+    expect(prepareEmbeddedImage).not.toHaveBeenCalled()
+    let finish = (_image: { id: number; width: number; height: number; encodedBytes: number; pixelBytes: number }) => {}
+    prepareEmbeddedImage.mockImplementationOnce(() => new Promise((ok) => { finish = ok }))
+    const preparing = dispatch({ id: 63, method: 'prepareImage', params: { doc: 1, gen: 1, span: { start: 0, end: 4 } } })
+    const mutable = doc as unknown as { generation: number }
+    reload.mockImplementationOnce(() => { mutable.generation = 2 })
+    try {
+      expect(await call('reload', { doc: 1, count: 1, bytes: 0 })).toMatchObject({ result: { gen: 2 } })
+      finish({ id: 1, width: 1, height: 1, encodedBytes: 72, pixelBytes: 4 })
+      expect(await preparing).toMatchObject({ error: { code: 'Stale' } })
+      expect(releaseImage).toHaveBeenCalledWith(1, 1)
     } finally { mutable.generation = 1 }
   })
 })

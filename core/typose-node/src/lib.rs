@@ -466,11 +466,17 @@ pub struct ImagePrepared {
     pub pixel_bytes: u32,
 }
 
+/// A local image's decoded target, or an embedded image's source span in its Markdown (`md.rs`).
+enum ImageSource {
+    Local(String),
+    Embedded(std::ops::Range<u64>),
+}
+
 /// Field order is deliberate: generation state drops before its last Raw Arc, charge drops last.
 pub struct PrepareImage {
     pending: Pending,
     raw: Arc<Raw>,
-    target: String,
+    source: ImageSource,
     generation: u32,
     cancel: Arc<AtomicBool>,
     #[cfg(feature = "test-hooks")]
@@ -483,7 +489,14 @@ impl Task for PrepareImage {
     type JsValue = ImagePrepared;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        Ok(image_resource::prepare(self.raw.document(), self.generation, &self.target, &self.cancel))
+        Ok(match &self.source {
+            ImageSource::Local(target) => {
+                image_resource::prepare(self.raw.document(), self.generation, target, &self.cancel)
+            }
+            ImageSource::Embedded(span) => {
+                cancellable(&self.cancel, || self.raw.embedded_image(self.generation, span.clone(), &self.cancel))
+            }
+        })
     }
 
     fn resolve(&mut self, env: Env, output: Self::Output) -> Result<ImagePrepared> {
@@ -491,7 +504,7 @@ impl Task for PrepareImage {
             if self.cancel.load(Ordering::Relaxed) {
                 return Err(DocError::Cancelled);
             }
-            self.raw.document().check_local_source(self.generation)?;
+            self.raw.document().check_source(self.generation)?;
             self.pending.publish(image)
         });
         match output {
@@ -527,9 +540,9 @@ impl Task for ImageChunk {
     fn compute(&mut self) -> Result<Self::Output> {
         Ok(cancellable(&self.cancel, || {
             self.slot = Some(slot(Work::Page, &store::cancelled)?);
-            self.raw.document().check_local_source(self.generation)?;
+            self.raw.document().check_source(self.generation)?;
             let bytes = self.state.chunk(self.id, self.offset)?;
-            self.raw.document().check_local_source(self.generation)?;
+            self.raw.document().check_source(self.generation)?;
             Ok(bytes)
         }))
     }
@@ -539,7 +552,7 @@ impl Task for ImageChunk {
             if self.cancel.load(Ordering::Relaxed) || !self.state.contains(self.id) {
                 return Err(DocError::Cancelled);
             }
-            self.raw.document().check_local_source(self.generation)?;
+            self.raw.document().check_source(self.generation)?;
             Ok(bytes)
         });
         match output {
@@ -900,6 +913,34 @@ impl Doc {
                 "image target must be a decoded path of at most 32 KiB without controls",
             ));
         }
+        self.prepare(raw, generation, ImageSource::Local(target), cancel)
+    }
+
+    /// An embedded image at source bytes `start..end` of the Markdown build (`md.rs`'s `data-embedded`). The core checks
+    /// the span's bound, generation and contents itself (`image_resource::prepare_embedded`).
+    #[napi(ts_return_type = "Promise<ImagePrepared>")]
+    pub fn prepare_embedded_image(
+        &mut self,
+        generation: f64,
+        start: f64,
+        end: f64,
+        cancel: &Cancel,
+    ) -> std::result::Result<AsyncTask<PrepareImage>, Error<Code>> {
+        let (start, end) = (int("start", start)?, int("end", end)?);
+        let (raw, generation) = {
+            let (raw, generation) = self.local_source(generation)?;
+            (Arc::clone(raw), generation)
+        };
+        self.prepare(raw, generation, ImageSource::Embedded(start..end), cancel)
+    }
+
+    fn prepare(
+        &mut self,
+        raw: Arc<Raw>,
+        generation: u32,
+        source: ImageSource,
+        cancel: &Cancel,
+    ) -> std::result::Result<AsyncTask<PrepareImage>, Error<Code>> {
         let charge = Reservation::new(IMAGE_TASK_BYTES).map_err(|error| doc_error(DocError::Memory(error)))?;
         if self.images.is_none() {
             self.images = Some(Resources::new(generation).map_err(doc_error)?);
@@ -909,7 +950,7 @@ impl Doc {
         Ok(AsyncTask::new(PrepareImage {
             pending,
             raw,
-            target,
+            source,
             generation,
             cancel: Arc::clone(&cancel.flag),
             #[cfg(feature = "test-hooks")]

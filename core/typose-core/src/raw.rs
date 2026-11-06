@@ -146,6 +146,18 @@ impl Raw {
         md::build(&self.doc, encoding, generation, &cancelled)
     }
 
+    /// Generation `generation`'s embedded image at source bytes `span`, read in Raw's encoding as the Markdown build
+    /// read it (`image_resource::prepare_embedded`).
+    pub fn embedded_image(
+        &self,
+        generation: u32,
+        span: std::ops::Range<u64>,
+        cancel: &AtomicBool,
+    ) -> Result<crate::images::CanonicalImage, DocError> {
+        let encoding = self.index.read().unwrap().encoding;
+        crate::image_resource::prepare_embedded(&self.doc, encoding, generation, span, cancel)
+    }
+
     /// Brief §7.9's empty file: 0 bytes, or only whitespace. Judged on the first chunk, so only for a file that
     /// fits in it; a bigger one shows its blank lines.
     pub fn blank(&self) -> bool {

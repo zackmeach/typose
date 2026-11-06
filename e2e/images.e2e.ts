@@ -1,6 +1,7 @@
 import { type Page, expect } from '@playwright/test'
 import { writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
+import { crc32 } from 'node:zlib'
 import { type TestHooks, assertNetLog, debugStats, expectReleasedDocuments, finish, fixture, holdReply, launch, test, waitRendered } from './app'
 import { imageGif, imageJpeg, imagePng, imageWebp } from './image-fixtures'
 import { processMemory } from './memory'
@@ -39,6 +40,66 @@ test('three supported local formats render from canonical blobs; WebP, remote, u
   expect(l.pageErrors).toEqual([])
   await finish(l)
   expect(assertNetLog(log)).toContain('PASS')
+})
+
+/** A PNG whose header declares 4097 × 4097 pixels, over Z43's 16,777,216-pixel cap: refused before any pixel. */
+function overCapPng(): Buffer {
+  const png = imagePng()
+  png.writeUInt32BE(4097, 16)
+  png.writeUInt32BE(4097, 20)
+  png.writeUInt32BE(crc32(png.subarray(12, 29)), 29) // IHDR's type and data
+  return png
+}
+
+const dataUrl = (type: string, bytes: Buffer) => `data:${type};base64,${bytes.toString('base64')}`
+
+// Z43: no local capability is involved, so this runs on every platform.
+test('inline data: images render from canonical blobs; SVG, malformed and over-cap ones keep alt text and reason without network', async () => {
+  const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64"/></svg>')
+  const malformed = imagePng(16, 16).toString('base64').replace(/.$/, '*')
+  const urls: Record<string, string> = {
+    PNG: dataUrl('image/png', imagePng(160, 32)), GIF: dataUrl('image/gif', imageGif), JPEG: dataUrl('IMAGE/JPEG', imageJpeg(128, 32)),
+    WebP: dataUrl('image/webp', imageWebp), SVG: dataUrl('image/svg+xml', svg), Malformed: `data:image/png;base64,${malformed}`,
+    'Over cap': dataUrl('image/png', overCapPng()), reference: dataUrl('image/png', imagePng(48, 48))
+  }
+  const source = fixture('embedded-images.md', [
+    '# Embedded images', '',
+    ...['PNG', 'GIF', 'JPEG', 'WebP'].flatMap((name) => [`![${name}](${urls[name]})`, '']),
+    '![Reference PNG][png]', '',
+    ...['SVG', 'Malformed', 'Over cap'].flatMap((name) => [`![${name}](${urls[name]})`, '']),
+    `[png]: ${urls.reference}`, ''
+  ].join('\n'))
+  const log = test.info().outputPath('embedded-netlog.json')
+  const l = await launch({ hooks: true, file: source, netlog: log })
+  const { win } = l
+  await waitRendered(win)
+  for (const name of ['PNG', 'GIF', 'JPEG', 'Reference PNG']) {
+    const img = win.getByRole('img', { name, exact: true })
+    await expect(img).toBeVisible()
+    await expect(img).toHaveAttribute('src', /^blob:/)
+    expect(await img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0)).toBe(true)
+  }
+  for (const [name, reason] of [
+    ['WebP', 'WebP images are not supported yet'],
+    ['SVG', 'SVG images are not supported'],
+    ['Malformed', 'embedded image is not strict base64'],
+    ['Over cap', 'PNG dimensions exceed the image limit']
+  ]) await expect(win.locator('.tp-img').filter({ hasText: name })).toHaveText(`${name} · ${reason}`)
+  // Each placeholder names its URL's source bytes; no URL or payload reaches the DOM.
+  await expect(win.locator('.tp-img[data-embedded]')).toHaveCount(8)
+  await expect(win.locator('.tp-img[data-src]')).toHaveCount(0)
+  const html = await win.content()
+  for (const url of Object.values(urls)) expect(html).not.toContain(url.slice(url.indexOf(',') + 1, url.indexOf(',') + 17))
+  expect(html).not.toContain('data:image')
+  for (const colorScheme of ['light', 'dark'] as const) {
+    await win.emulateMedia({ colorScheme })
+    await win.screenshot({ path: test.info().outputPath(`embedded-${colorScheme}.png`) })
+  }
+  await win.locator('.file-pill[data-selected] .file-tab-close').click()
+  await expectReleasedDocuments(win)
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+  expect(assertNetLog(log, ['typose', 'blob'])).toContain('PASS') // no data: URL reached the network stack either
 })
 
 test('two image loads at most; hidden and resumed trees retain their blobs and confirmed allowances', async () => {

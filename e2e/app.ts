@@ -285,10 +285,10 @@ export async function recordClipboard(app: ElectronApplication): Promise<() => P
   return () => app.evaluate(() => (globalThis as { copied?: string[] }).copied ?? [])
 }
 
-/** Runs netlog-assert.mjs on a log, as CI does. */
-export function assertNetLog(log: string): string {
+/** Runs netlog-assert.mjs on a log, as CI does; `allow` narrows its default schemes (typose, data, blob). */
+export function assertNetLog(log: string, allow?: string[]): string {
   expect(statSync(log).size).toBeGreaterThan(0) // a NetLog always holds metadata; emptiness isn't the test
-  const run = spawnSync(process.execPath, [join(__dirname, 'netlog-assert.mjs'), log], { encoding: 'utf8' })
+  const run = spawnSync(process.execPath, [join(__dirname, 'netlog-assert.mjs'), log, ...(allow ? ['--allow', allow.join(',')] : [])], { encoding: 'utf8' })
   expect(run.status, run.stdout + run.stderr).toBe(0)
   return run.stdout
 }

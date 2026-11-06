@@ -429,6 +429,12 @@ impl Document {
         self.checked_local_file(generation).map(drop)
     }
 
+    /// An image resource's source check: the held local route, as `check_local_source`, when there is one; otherwise
+    /// the identity check every read makes (`verified`). Only an embedded image can come from a source without one.
+    pub fn check_source(&self, generation: u32) -> Result<(), DocError> {
+        if self.local.is_some() { self.check_local_source(generation) } else { self.verified(generation, |_| Ok(())) }
+    }
+
     /// A fresh index handle must retain the derived document's local-only policy too.
     pub(crate) fn index_file(&self) -> Result<File, DocError> {
         if self.local_only || self.folder_scope().is_some() {

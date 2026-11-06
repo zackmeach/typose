@@ -100,6 +100,8 @@ const ADDON_CODES = new Set<string>(['InvalidParams', 'NotFound', 'NotDirectory'
 
 /** A canonical UUID v4, as `randomUUID` makes them. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+/** `image_resource::MAX_EMBEDDED`: 8 MiB as padded base64, plus 64 bytes of `data:` header and JSON quotes. */
+const MAX_EMBEDDED = Math.ceil((8 << 20) / 3) * 4 + 64
 type Params = Record<string, unknown>
 const codeOf = (e: unknown): unknown => (e as { code?: unknown } | null)?.code
 
@@ -1395,14 +1397,27 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     },
     prepareImage: (p, req): Promise<PreparedImage> => {
       const [id, gen] = [int(p, 'doc'), int(p, 'gen')]
-      if (!boundedLink(p.src))
-        throw new Refusal('InvalidParams', 'src must be a string of at most 32 KiB without controls', 'src')
-      const target = localTarget(p.src)
-      if (target === null) throw new Refusal('Refused', 'only supported local image paths can be opened')
+      if (Object.hasOwn(p, 'src') === Object.hasOwn(p, 'span'))
+        throw new Refusal('InvalidParams', 'prepareImage takes exactly one of src and span', Object.hasOwn(p, 'src') ? 'span' : 'src')
+      let prepare: (doc: Doc, cancel: Cancel) => ReturnType<Doc['prepareImage']>
+      if (Object.hasOwn(p, 'span')) {
+        // An embedded image's source span, which the core reads and checks again (`image_resource::prepare_embedded`).
+        if (!isRecord(p.span)) throw new Refusal('InvalidParams', 'span must be { start, end }', 'span')
+        const [start, end] = [int(p.span, 'start', 'span.start'), int(p.span, 'end', 'span.end')]
+        if (start >= end) throw new Refusal('InvalidParams', 'span must end after it starts', 'span')
+        if (end - start > MAX_EMBEDDED) throw new Refusal('Refused', 'embedded image exceeds 8 MiB')
+        prepare = (doc, cancel) => doc.prepareEmbeddedImage(gen, start, end, cancel)
+      } else {
+        if (!boundedLink(p.src))
+          throw new Refusal('InvalidParams', 'src must be a string of at most 32 KiB without controls', 'src')
+        const target = localTarget(p.src)
+        if (target === null) throw new Refusal('Refused', 'only supported local image paths can be opened')
+        prepare = (doc, cancel) => doc.prepareImage(gen, target, cancel)
+      }
       const doc = getDoc(id)
       if (doc.generation !== gen) throw new Refusal('Stale', 'the image source generation was replaced')
       return read(req, id, async (cancel) => {
-        const image = await doc.prepareImage(gen, target, cancel)
+        const image = await prepare(doc, cancel)
         if (docs.get(id) !== doc || doc.generation !== gen) {
           doc.releaseImage(gen, image.id)
           throw new Refusal('Stale', 'the image source generation was replaced while decoding')

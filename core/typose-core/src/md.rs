@@ -272,7 +272,7 @@ fn source_len(text: &str, encoding: &'static Encoding) -> usize {
 
 /// Plan C1: the read's own temporaries, reserved before it: the file's bytes, its decode (`max_utf8_buffer_length`,
 /// `None` past `usize`), a chunk read on its way into the cache, and the identity check's copies of the path.
-fn read_temp(len: u64, decoded: Option<usize>) -> u64 {
+pub(crate) fn read_temp(len: u64, decoded: Option<usize>) -> u64 {
     let decoded = decoded.map_or(u64::MAX / 2, |d| d as u64);
     len + decoded + (CHUNK + 16 * MAX_PATH_BYTES + (64 << 10)) as u64
 }
@@ -643,7 +643,48 @@ impl<'a, I: Iterator<Item = (Event<'a>, Range<usize>)>> Events<'_, '_, 'a, I> {
         Ok(())
     }
 
+    /// The source bytes of an inline or reference image's `data:` URL, when pulldown-cmark kept the URL as a slice of
+    /// the source (it had no escape or entity to decode): exactly the bytes the core reads back. Never in a transcript's
+    /// fragment, whose bytes aren't the document's.
+    fn embedded(&self, link_type: LinkType, url: &str) -> Option<(u64, u64)> {
+        let image =
+            matches!(link_type, LinkType::Inline | LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut);
+        if self.literal_html || !image || !url.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("data:")) {
+            return None;
+        }
+        let at = (url.as_ptr() as usize).checked_sub(self.source.as_ptr() as usize)?;
+        let end = at.checked_add(url.len()).filter(|&end| end <= self.source.len())?;
+        Some((self.source_bytes[at], self.source_bytes[end]))
+    }
+
+    /// An embedded image's placeholder, through its end: the URL's source span, never the URL, and the alt text
+    /// pulldown-cmark's writer gives any image (its `alt` value, written for an image without a source).
+    fn embedded_image(&mut self, link_type: LinkType, (start, end): (u64, u64)) -> Result<Event<'a>, DocError> {
+        let level = self.depth;
+        let empty = || pulldown_cmark::CowStr::Borrowed("");
+        let mut image = vec![Event::Start(Tag::Image { link_type, dest_url: empty(), title: empty(), id: empty() })];
+        while self.depth >= level {
+            let Some((event, _)) = self.first.take().or_else(|| self.parser.next()) else { break };
+            self.step(&event)?;
+            if self.depth > MAX_DEPTH {
+                self.deep = true;
+                break;
+            }
+            image.push(event);
+        }
+        let mut img = String::new();
+        html::push_html(&mut img, image.into_iter());
+        let alt = img.strip_prefix("<img src=\"\" alt=\"").and_then(|s| s.strip_suffix("\" />")).unwrap_or_default();
+        let span = format!("<span class=\"tp-img\" data-embedded=\"{start},{end}\" data-alt=\"{alt}\"></span>");
+        Ok(Event::InlineHtml(span.into()))
+    }
+
     fn rewrite(&mut self, event: Event<'a>, range: Range<usize>) -> Result<Event<'a>, DocError> {
+        if let Event::Start(Tag::Image { link_type, dest_url, .. }) = &event
+            && let Some(span) = self.embedded(*link_type, dest_url)
+        {
+            return self.embedded_image(*link_type, span);
+        }
         match &event {
             Event::Start(Tag::HtmlBlock) => self.raw = Some(String::new()),
             Event::Start(Tag::Image { .. }) => self.alt = Some(self.depth),
@@ -1366,6 +1407,44 @@ mod tests {
         }
     }
 
+    /// Z43: an inline or reference `data:` image carries its URL's source span, never the URL or its payload. A URL
+    /// pulldown-cmark had to decode has no exact span, so it keeps the existing refusal, as do raw HTML and a
+    /// transcript's fragment, whose bytes aren't the document's.
+    #[test]
+    fn a_data_image_carries_its_urls_source_span_and_never_its_payload() {
+        let payload = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB+/==";
+        let url = format!("data:image/PNG;base64,{payload}");
+        for md in [
+            format!("é ![alt *b*]({url} \"t\")"),
+            format!("é ![alt *b*](<{url}>)"),
+            format!("é ![alt *b*][r]\n\n[r]: {url}"),
+            format!("é ![alt *b*][]\n\n[alt *b*]: <{url}> \"t\""),
+            format!("é ![alt *b*]\n\n[ALT *B*]: {url}"),
+        ] {
+            let r = render(&md);
+            let html: String = r.items().iter().map(|i| i.html.to_string()).collect();
+            assert!(!html.contains(payload) && !html.contains("base64"), "{html}");
+            let at = md.find(&url).unwrap();
+            let span = format!("data-embedded=\"{at},{}\"", at + url.len());
+            let want = format!("<p>é <span class=\"tp-img\" {span} data-alt=\"alt b\"></span></p>\n");
+            assert_eq!(htmls(&md), [want], "{md:?}");
+            check_items(&r).unwrap();
+        }
+        for md in [
+            format!("![e](data:image/png;base64,ab\\+c{payload})"),
+            format!("![e](data:image/png;base64,ab&#43;c{payload})"),
+            format!("<img src=\"{url}\" alt=\"raw\">"),
+            "<img data-embedded=\"0,4\" src=\"x.png\">".into(),
+        ] {
+            let html = htmls(&md).concat();
+            assert!(html.contains("tp-img") && !html.contains("data-embedded") && !html.contains("base64"), "{html}");
+        }
+        let raw_span = "<span class=\"tp-img\" data-embedded=\"0,4\">s</span>";
+        assert_eq!(htmls(raw_span), [format!("<p>{}</p>\n", raw_span.replace('<', "&lt;").replace('>', "&gt;"))]);
+        let html = fragment_htmls(&format!("![f]({url})")).concat();
+        assert_eq!(html, "<p><span class=\"tp-img\" data-alt=\"f\"></span></p>\n");
+    }
+
     #[test]
     fn image_summary_pays_for_generated_alt_reason_and_replacement_image_node() {
         let r = render("![界 & text](next.png)\n");
@@ -1480,12 +1559,13 @@ mod tests {
     /// one change: every link is `<a href="#">`, and no other `href` exists. Only the tags below, and on each only its
     /// attributes: no `on*`, no `style`, no resource-loading attribute, no `link`, `meta`, `base`, `style`, `script`,
     /// `iframe`, `object`, `svg`, `math` or `img` element. A `data-href` is never javascript, vbscript or data; a
-    /// `data-src` is http, https or a relative path that isn't a network path. Sanitizing again changes nothing.
+    /// `data-src` is http, https or a relative path that isn't a network path, and a `data-embedded` two runs of digits
+    /// (`start,end`). Sanitizing again changes nothing.
     fn check_output(html: &str) -> Result<(), String> {
         const TAGS: &str = "b i em strong code kbd sub sup br hr details summary a table thead tbody tr th td p h1 h2 h3 \
                             h4 h5 h6 blockquote ul ol li pre del span div input";
         const FORBIDDEN: &str = "link meta base style script iframe object svg math img";
-        const ATTRS: [(&str, &str); 14] = [
+        const ATTRS: [(&str, &str); 15] = [
             ("a", "href"),
             ("a", "data-href"),
             ("ol", "start"),
@@ -1497,6 +1577,7 @@ mod tests {
             ("span", "data-alt"),
             ("span", "data-source-map"),
             ("span", "data-display"),
+            ("span", "data-embedded"),
             ("blockquote", "data-callout"),
             ("pre", "data-frontmatter"),
             ("code", "class"),
@@ -1543,6 +1624,9 @@ mod tests {
                     }
                     "data-source-map" => !value.bytes().all(|b| b.is_ascii_digit() || b"LSRp*:,".contains(&b)),
                     "data-display" | "data-frontmatter" => !matches!(value.as_str(), "0" | "1"),
+                    "data-embedded" => !value.split_once(',').is_some_and(|(start, end)| {
+                        [start, end].iter().all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                    }),
                     _ => false,
                 };
                 if bad {
@@ -1817,6 +1901,7 @@ mod tests {
             ";",
             "javascript:",
             "data:",
+            "![e](data:image/png;base64,AAAA)",
             "//evil/",
             "\\\\evil\\",
             "=",

@@ -32,8 +32,9 @@ static AMMONIA: LazyLock<ammonia::Builder<'static>> = LazyLock::new(|| {
         // pulldown-cmark's attributes sit only on its own tags, so raw HTML can't smuggle them onto RAW_TAGS.
         ("ol", &["start"]),
         ("input", &["type", "checked", "disabled"]),
-        // The placeholder `sanitize` makes, kept when it runs again.
-        ("span", &["data-src", "data-alt", "data-source-map", "data-display"]),
+        // The placeholder `sanitize` makes, kept when it runs again; an embedded image's (md.rs) carries its URL's
+        // source span instead of a URL.
+        ("span", &["data-src", "data-alt", "data-source-map", "data-display", "data-embedded"]),
         ("blockquote", &["data-callout"]),
         ("pre", &["data-frontmatter"]),
     ];
@@ -67,9 +68,17 @@ static AMMONIA: LazyLock<ammonia::Builder<'static>> = LazyLock::new(|| {
         )
         .generic_attributes(HashSet::new()) // ammonia's default allows `lang` and `title` everywhere
         .url_schemes(["http", "https", "mailto"].into())
-        .link_rel(None);
+        .link_rel(None)
+        .attribute_filter(|_, attr, value| (attr != "data-embedded" || is_span(value)).then(|| value.into()));
     b
 });
+
+/// `start,end`: two runs of 1 to 16 ASCII digits, the only `data-embedded` value kept.
+fn is_span(value: &str) -> bool {
+    value.split_once(',').is_some_and(|(start, end)| {
+        [start, end].iter().all(|n| (1..=16).contains(&n.len()) && n.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
 
 const WS: [u8; 5] = [b'\t', b'\n', 0x0C, b'\r', b' '];
 
@@ -390,6 +399,18 @@ mod tests {
         let start = std::time::Instant::now();
         let _ = sanitize(&hostile);
         assert!(start.elapsed().as_secs() < 2);
+    }
+
+    #[test]
+    fn an_embedded_images_span_is_kept_only_as_digits_comma_digits() {
+        let kept = r#"<span class="tp-img" data-embedded="0,9007199254740991" data-alt="a"></span>"#;
+        assert_eq!(sanitize(kept), kept);
+        for value in ["1", ",2", "1,", "1,2,3", "1, 2", "-1,2", "1.5,2", "0x1,2", "12345678901234567,1", "data:x"] {
+            let html = sanitize(&format!(r#"<span class="tp-img" data-embedded="{value}" data-alt="a"></span>"#));
+            assert_eq!(html, r#"<span class="tp-img" data-alt="a"></span>"#, "{value}");
+        }
+        // Only the placeholder's span carries it: a raw image's is dropped with every other unlisted attribute.
+        assert_eq!(sanitize(r#"<img data-embedded="1,2" alt="a">"#), r#"<span class="tp-img" data-alt="a"></span>"#);
     }
 
     #[test]
