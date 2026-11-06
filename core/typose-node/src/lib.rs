@@ -469,7 +469,7 @@ pub struct ImagePrepared {
     pub pixel_bytes: u32,
 }
 
-/// A local image's decoded target, or an embedded image's source span in its Markdown (`md.rs`).
+/// A local image's decoded target, or an embedded image's source span in its document's own bytes.
 enum ImageSource {
     Local(String),
     Embedded(std::ops::Range<u64>),
@@ -885,7 +885,8 @@ impl Doc {
         Ok(raw.document().path().to_string_lossy().into_owned())
     }
 
-    /// The local-link source must still be live and rendered in this generation. The target is already decoded.
+    /// The local-link source must still be live and rendered in this generation. The target is already decoded. This
+    /// guards only what reaches a local file (links, local images, `open_local`); an embedded image reads none.
     fn local_source(&self, generation: f64) -> std::result::Result<(&Arc<Raw>, u32), Error<Code>> {
         let (raw, generation) = self.at_generation(generation)?;
         if !md::is_markdown(raw.document().path()) {
@@ -919,8 +920,9 @@ impl Doc {
         self.prepare(raw, generation, ImageSource::Local(target), cancel)
     }
 
-    /// An embedded image at source bytes `start..end` of the Markdown build (`md.rs`'s `data-embedded`). The core checks
-    /// the span's bound, generation and contents itself (`image_resource::prepare_embedded`).
+    /// An embedded image at source bytes `start..end` of any open document, in its own bytes: a Markdown build's
+    /// `data-embedded` (`md.rs`), or a Transcript's JSON string. It reads no local file, so it needs no Markdown
+    /// source. The core checks the span's bound, generation and contents itself (`image_resource::prepare_embedded`).
     #[napi(ts_return_type = "Promise<ImagePrepared>")]
     pub fn prepare_embedded_image(
         &mut self,
@@ -931,7 +933,7 @@ impl Doc {
     ) -> std::result::Result<AsyncTask<PrepareImage>, Error<Code>> {
         let (start, end) = (int("start", start)?, int("end", end)?);
         let (raw, generation) = {
-            let (raw, generation) = self.local_source(generation)?;
+            let (raw, generation) = self.at_generation(generation)?;
             (Arc::clone(raw), generation)
         };
         self.prepare(raw, generation, ImageSource::Embedded(start..end), cancel)
@@ -962,6 +964,8 @@ impl Doc {
         }))
     }
 
+    /// A chunk of a prepared image. It serves only ids a successful prepare registered for this generation, so it needs
+    /// no source check of its own beyond the generation: a local image's prepare already took `local_source`.
     #[napi(ts_return_type = "Promise<Uint8Array>")]
     pub fn image_chunk(
         &self,
@@ -975,7 +979,7 @@ impl Doc {
         if offset > typose_core::images::MAX_CANONICAL as u64 || !offset.is_multiple_of(image_resource::CHUNK as u64) {
             return Err(Error::new(Code::InvalidParams, "image offset must be aligned to 256 KiB within 8 MiB"));
         }
-        let (raw, generation) = self.local_source(generation)?;
+        let (raw, generation) = self.at_generation(generation)?;
         let state = self
             .images
             .as_ref()

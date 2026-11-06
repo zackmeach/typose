@@ -25,10 +25,11 @@ interface ImageSlot {
 const imageCharge = (image: Pick<PreparedImage, 'encodedBytes' | 'pixelBytes'>): number =>
   5 * image.encodedBytes + 2 * image.pixelBytes
 
-/** A generation's images. Loaded blobs and their allowance stay with its retained Rendered tree. */
+/** A generation's images in Rendered, or one Transcript page's. Loaded blobs and their allowance stay with its retained
+ *  Rendered tree, or with its page. */
 export class RenderedImages {
   private readonly slots = new Map<HTMLElement, ImageSlot>()
-  private readonly active = new Set<AbortController>()
+  private readonly active = new Map<AbortController, Promise<void>>()
   private readonly observer: IntersectionObserver
   private paused = false
   private stopped = false
@@ -38,7 +39,9 @@ export class RenderedImages {
     private readonly core: CoreClient,
     private readonly opened: Opened,
     private readonly budget: LensBudget | undefined,
-    private readonly onFrozen: (why: string) => void
+    private readonly onFrozen: (why: string) => void,
+    /** Where a loaded image's allowance is charged: the generation's Rendered share, or a Transcript page's. */
+    private readonly grow = (bytes: number): Promise<boolean> => budget?.growRendered(opened.gen, bytes) ?? Promise.resolve(false)
   ) {
     this.observer = new IntersectionObserver((entries) => {
       for (const entry of entries) {
@@ -77,16 +80,19 @@ export class RenderedImages {
     this.pump()
   }
 
-  dispose(): void {
+  /** Settles once every load it started has. A load settles only after the core's reply and its image's release, so
+   *  the document's two core image slots are free again by then. */
+  dispose(): Promise<unknown> {
     this.stopped = true
     this.observer.disconnect()
-    for (const abort of this.active) abort.abort()
+    for (const abort of this.active.keys()) abort.abort()
     for (const slot of this.slots.values()) {
       slot.image?.removeAttribute('src')
       if (slot.url) URL.revokeObjectURL(slot.url)
       slot.image?.remove()
     }
     this.slots.clear()
+    return Promise.allSettled(this.active.values())
   }
 
   private label(slot: ImageSlot, reason: string): void {
@@ -107,11 +113,10 @@ export class RenderedImages {
       slot.status = 'loading'
       this.observer.unobserve(slot.node)
       const abort = new AbortController()
-      this.active.add(abort)
-      void this.load(slot, abort).finally(() => {
+      this.active.set(abort, this.load(slot, abort).finally(() => {
         this.active.delete(abort)
         this.pump()
-      })
+      }))
     }
   }
 
@@ -139,7 +144,7 @@ export class RenderedImages {
       if (this.stopped) return
       if (!this.valid(image)) throw new Error('Invalid image resource')
       const charge = imageCharge(image)
-      if (!this.budget || !await this.budget.growRendered(this.opened.gen, Math.max(0, charge - slot.reserved)))
+      if (!this.budget || !await this.grow(Math.max(0, charge - slot.reserved)))
         throw new Error('Memory budget is full')
       slot.reserved = Math.max(slot.reserved, charge)
       if (this.stopped) return

@@ -1,5 +1,6 @@
 import { expect } from '@playwright/test'
-import { debugStats, fixture, launch, recordClipboard, runCommand, stubOpenDialog, test, type TestHooks } from './app'
+import { assertNetLog, debugStats, expectReleasedDocuments, finish, fixture, launch, recordClipboard, runCommand, stubOpenDialog, test, type TestHooks } from './app'
+import { imageJpeg, imagePng, imageWebp } from './image-fixtures'
 
 async function expectDistinctRows(card: import('@playwright/test').Locator, selector: string): Promise<void> {
   const boxes = await card.locator(selector).evaluateAll(elements => elements.map(element => element.getBoundingClientRect()).filter(box => box.width > 0 && box.height > 0).map(box => ({ top: box.top, bottom: box.bottom })))
@@ -529,23 +530,257 @@ test('Transcript shows HTML-like tags in message text as literal text, never int
   expect(live.pageErrors).toEqual([])
 })
 
-test('Transcript shows every image as a placeholder, embedded or remote, until the bounded image path (Z43) lands', async () => {
-  // A 1×1 PNG, small enough for a node's 4 KiB preview: embedded as a block, and as a data URL.
-  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+const base64 = (bytes: Buffer) => bytes.toString('base64')
+/** A Claude image block, as every one in a real session is: a base64 `source`. */
+const claudeImage = (mediaType: string, data: string) => ({ type: 'image', source: { type: 'base64', media_type: mediaType, data } })
+const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64"/></svg>')
+const remote = 'Remote image · not loaded · inspect the source in Message metadata'
+/** Each loaded image's Blob URL, alt text and decoded width. */
+const shown = (scope: import('@playwright/test').Locator) => scope.locator('.transcript-image[data-loaded] > img').evaluateAll(images =>
+  images.map(image => [image.getAttribute('src')?.startsWith('blob:'), (image as HTMLImageElement).alt, (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth]))
+
+// Z43: no local capability is involved, so these run on every platform.
+test('Transcript shows a session’s embedded images, in tool results too; refused and remote ones keep their reason, without network', async () => {
+  const payloads = {
+    png: base64(imagePng(160, 32)), jpeg: base64(imageJpeg(128, 32)), tool: base64(imagePng(48, 48)), webp: base64(imageWebp), svg: base64(svg),
+    malformed: base64(imagePng(16, 16)).replace(/.$/, '*')
+  }
   const file = fixture('transcript-images.jsonl', claudeSession([
-    { role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: png } }] },
-    { role: 'assistant', content: [{ type: 'image_url', image_url: { url: `data:image/png;base64,${png}` } }] },
-    { role: 'user', content: [{ type: 'image_url', image_url: { url: 'https://example.invalid/remote.png' } }] },
-    // A URL that isn't http(s) isn't a remote image.
-    { role: 'assistant', content: [{ type: 'image_url', image_url: { url: 'javascript:alert(1)' } }] },
+    { role: 'user', content: [{ type: 'text', text: 'Pasted screenshots' }, claudeImage('image/png', payloads.png), claudeImage('image/jpeg', payloads.jpeg)] },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'shot', name: 'screenshot', input: {} }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'shot', content: [{ type: 'text', text: 'Captured' }, claudeImage('image/png', payloads.tool)] }] },
+    { role: 'user', content: [claudeImage('image/webp', payloads.webp), claudeImage('image/svg+xml', payloads.svg), claudeImage('image/png', payloads.malformed),
+      { type: 'image', source: { type: 'url', url: 'https://example.invalid/remote.png' } }] },
     { role: 'assistant', content: 'Images fixture' }
   ]))
-  const live = await launch({ hooks: true, file })
+  const log = test.info().outputPath('transcript-images-netlog.json')
+  const live = await launch({ hooks: true, file, netlog: log })
   const card = live.win.getByRole('region', { name: 'Reader card 1' })
   await expect(card.getByText('Images fixture', { exact: true })).toBeVisible({ timeout: 30_000 })
-  const embedded = 'Image preview unavailable · inspect embedded data in Message metadata'
-  await expect(card.locator('.transcript-image-placeholder')).toHaveText([embedded, embedded, 'Remote image · not loaded · inspect the source in Message metadata', embedded])
-  await expect(card.getByRole('img', { name: 'Embedded image' })).toHaveCount(0)
+  await card.locator('.transcript-tool[data-tool-id="shot"] > summary').click()
+  await expect(card.locator('.transcript-tool-result .transcript-image[data-loaded]')).toHaveCount(1)
+  await expect(card.getByRole('img', { name: 'Image', exact: true })).toHaveCount(3)
+  expect(await shown(card)).toEqual([[true, 'Image', 160], [true, 'Image', 128], [true, 'Image', 48]])
+  await expect(card.locator('.transcript-image:not([data-loaded])')).toHaveText([
+    'Image · WebP images are not supported yet', 'Image · image/svg+xml · unsupported image format', 'Image · Embedded image is not strict base64'
+  ])
+  await expect(card.locator('.transcript-image-placeholder')).toHaveText([remote])
+  // Each names its JSON string's source bytes, which the core reads; no payload reaches the DOM.
+  await expect(card.locator('.transcript-image[data-embedded]')).toHaveCount(6)
+  const html = await live.win.content()
+  for (const payload of Object.values(payloads)) for (const part of [payload.slice(0, 16), payload.slice(-16)]) expect(html).not.toContain(part)
+  // Light and dark, at the top (the loaded images) and at the end (the refusals and the remote placeholder).
+  for (const [at, top] of [['top', 0], ['end', 1e6]] as const) {
+    await card.locator('.structured-view').evaluate((view, top) => { view.scrollTop = top }, top)
+    for (const colorScheme of ['light', 'dark'] as const) {
+      await live.win.emulateMedia({ colorScheme })
+      await live.win.screenshot({ path: test.info().outputPath(`transcript-images-${at}-${colorScheme}.png`) })
+    }
+  }
+  expect(live.pageErrors).toEqual([])
+  await finish(live)
+  expect(assertNetLog(log, ['typose', 'blob'])).toContain('PASS')
+})
+
+test('an OpenAI chat’s data: image URLs show through the same path; SVG keeps its reason and an http(s) URL its placeholder', async () => {
+  const lines = [
+    { role: 'user', content: [{ type: 'text', text: 'OpenAI images fixture' }, { type: 'image_url', image_url: { url: `data:image/png;base64,${base64(imagePng(96, 24))}`, detail: 'high' } }] },
+    { role: 'assistant', content: 'Seen fixture' },
+    { role: 'user', content: [{ type: 'input_image', image_url: `data:image/jpeg;base64,${base64(imageJpeg(64, 16))}` },
+      { type: 'image_url', image_url: { url: `data:image/svg+xml;base64,${base64(svg)}` } }, { type: 'image_url', image_url: { url: 'https://example.invalid/remote.png' } },
+      // A URL that isn't http(s) or data: isn't an image to load.
+      { type: 'image_url', image_url: { url: 'javascript:alert(1)' } }] },
+    { role: 'assistant', content: 'Done fixture' }
+  ]
+  const log = test.info().outputPath('transcript-openai-images-netlog.json')
+  const live = await launch({ hooks: true, file: fixture('transcript-openai-images.jsonl', lines.map(line => JSON.stringify(line)).join('\n') + '\n'), netlog: log })
+  const card = live.win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.getByText('Done fixture', { exact: true })).toBeVisible({ timeout: 30_000 })
+  await expect(card.getByRole('img', { name: 'Image', exact: true })).toHaveCount(2)
+  expect(await shown(card)).toEqual([[true, 'Image', 96], [true, 'Image', 64]])
+  await expect(card.locator('.transcript-image:not([data-loaded])')).toHaveText(['Image · SVG images are not supported'])
+  await expect(card.locator('.transcript-image-placeholder')).toHaveText([remote, 'Image preview unavailable · inspect embedded data in Message metadata'])
+  expect(await live.win.content()).not.toContain('data:image')
+  expect(live.pageErrors).toEqual([])
+  await finish(live)
+  expect(assertNetLog(log, ['typose', 'blob'])).toContain('PASS')
+})
+
+test('a Transcript page’s images are charged to it and released when it’s replaced, and the lens’s charge returns to 0 on close', async () => {
+  // Page 1 holds the image and a tool call whose result is opened later; page 2 holds neither.
+  const file = fixture('transcript-image-pages.jsonl', claudeSession([
+    { role: 'user', content: [{ type: 'text', text: 'Memory fixture' }, claudeImage('image/png', base64(imagePng(256, 256, true)))] },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'later', name: 'read', input: {} }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'later', content: [{ type: 'text', text: 'Later result '.repeat(40) }] }] },
+    ...Array.from({ length: 24 }, (_, i) => ({ role: i % 2 ? 'user' as const : 'assistant' as const, content: `Turn ${i + 1}` }))
+  ]))
+  const live = await launch({ hooks: true })
+  const { win } = live
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
+  // Every image reply recorded, the first held; and every Blob URL made and not yet revoked.
+  await win.evaluate(() => {
+    const state = window as unknown as { typoseTest: { core: { call(method: string, params: object, signal?: AbortSignal): Promise<unknown> } }; prepared: unknown[]; release?: () => void; blobs: Set<string> }
+    const core = state.typoseTest.core, call = core.call.bind(core)
+    state.prepared = []
+    core.call = async (method, params, signal) => {
+      const reply = await call(method, params, signal)
+      if (method === 'prepareImage' && state.prepared.push(reply) === 1) await new Promise<void>(done => { state.release = done })
+      return reply
+    }
+    const create = URL.createObjectURL, revoke = URL.revokeObjectURL
+    state.blobs = new Set()
+    URL.createObjectURL = object => { const url = create(object); state.blobs.add(url); return url }
+    URL.revokeObjectURL = url => { state.blobs.delete(url); revoke(url) }
+  })
+  await live.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), file)
+  const card = win.getByRole('region', { name: 'Reader card 1' }), image = card.locator('.transcript-image[data-loaded] > img')
+  // What the renderer holds reserved for its one document's view, and its live Blob URLs.
+  const held = async () => (await debugStats(win)).surfaces!.bytes
+  const blobs = () => win.evaluate(() => (window as unknown as { blobs: Set<string> }).blobs.size)
+  await expect(card.getByText(/^1–20 of /)).toBeVisible({ timeout: 30_000 })
+  await expect.poll(() => win.evaluate(() => typeof (window as unknown as { release?: () => void }).release)).toBe('function')
+  const page = await held()
+  // What the tool result's text adds to the page, opened while the image is held.
+  const tool = card.locator('.transcript-tool[data-tool-id="later"] > summary'), result = card.locator('.transcript-tool-result')
+  await tool.click()
+  await expect(result).toBeVisible()
+  const text = await held() - page
+  expect(text).toBeGreaterThan(0)
+  await win.evaluate(() => (window as unknown as { release: () => void }).release())
+  await expect(image).toBeVisible()
+  // The image's allowance (RenderedImages' 5 × encoded + 2 × pixels) is its page's.
+  const { encodedBytes, pixelBytes } = await win.evaluate(() => (window as unknown as { prepared: { encodedBytes: number; pixelBytes: number }[] }).prepared[0]!)
+  expect(pixelBytes).toBe(4 * 256 * 256)
+  const loaded = page + 5 * encodedBytes + 2 * pixelBytes
+  expect(await held()).toBe(loaded + text)
+  expect(await blobs()).toBe(1)
+  // Page 2 replaces it: its image is gone and its Blob URL revoked. Back on page 1, it holds what it did, no more.
+  await card.getByRole('button', { name: 'Next turns', exact: true }).click()
+  await expect(card.getByText(/^21–/)).toBeVisible()
+  await expect(card.locator('.transcript-image')).toHaveCount(0)
+  expect(await blobs()).toBe(0)
+  await card.getByRole('button', { name: 'Previous turns', exact: true }).click()
+  await expect(image).toBeVisible()
+  await expect.poll(held).toBe(loaded)
+  expect(await blobs()).toBe(1)
+  // A later reserve on the same page keeps the image's charge: the page sets its share, and the image is in it.
+  await tool.click()
+  await expect(result).toBeVisible()
+  await expect.poll(held).toBe(loaded + text)
+  // Rows closes the lens and revokes its Blob URL. A new Transcript holds exactly what the first did, so the closed
+  // lens left nothing charged; closing that one gives back the same.
+  await card.getByRole('tab', { name: 'Rows', exact: true }).click()
+  await expect(card.locator('[data-lens="rows"]')).toBeVisible()
+  expect(await blobs()).toBe(0)
+  const rows = await held()
+  expect(rows).toBeLessThan(page)
+  await card.getByRole('tab', { name: 'Transcript', exact: true }).click()
+  await expect(image).toBeVisible()
+  await expect.poll(held).toBe(loaded)
+  await card.getByRole('tab', { name: 'Rows', exact: true }).click()
+  await expect(card.locator('[data-lens="rows"]')).toBeVisible()
+  await expect.poll(held).toBe(rows)
+  expect(await blobs()).toBe(0)
+  await win.locator('.file-pill[data-selected] .file-tab-close').click()
+  await expectReleasedDocuments(win)
+  expect(live.pageErrors).toEqual([])
+})
+
+test('a page shown while the page it replaced still holds the core’s two image slots loads its images after them', async () => {
+  // Two images on page 1, two on page 2. Page 1's two prepares are answered and their replies held, so both of the
+  // document's core image slots stay taken until they're released.
+  const file = fixture('transcript-image-slots.jsonl', claudeSession([
+    { role: 'user', content: [{ type: 'text', text: 'Page one images' }, claudeImage('image/png', base64(imagePng(256, 256, true))), claudeImage('image/png', base64(imagePng(200, 100, true)))] },
+    ...Array.from({ length: 19 }, (_, i) => ({ role: i % 2 ? 'user' as const : 'assistant' as const, content: `Turn ${i + 1}` })),
+    { role: 'assistant', content: [{ type: 'text', text: 'Page two images' }, claudeImage('image/png', base64(imagePng(64, 64))), claudeImage('image/png', base64(imagePng(96, 32)))] }
+  ]))
+  const live = await launch({ hooks: true })
+  const { win } = live
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
+  await win.evaluate(() => {
+    const state = window as unknown as { typoseTest: { core: { call(method: string, params: object, signal?: AbortSignal): Promise<unknown> } }; prepares: number; held: (() => void)[] }
+    const core = state.typoseTest.core, call = core.call.bind(core)
+    state.prepares = 0
+    state.held = []
+    core.call = async (method, params, signal) => {
+      const prepare = method === 'prepareImage' ? ++state.prepares : 0
+      const reply = await call(method, params, signal)
+      if (prepare && prepare <= 2) await new Promise<void>(done => state.held.push(done))
+      return reply
+    }
+  })
+  const prepares = () => win.evaluate(() => (window as unknown as { prepares: number }).prepares)
+  await live.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), file)
+  const card = win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.getByText('1–20 of 21', { exact: true })).toBeVisible({ timeout: 30_000 })
+  await expect.poll(() => win.evaluate(() => (window as unknown as { held: unknown[] }).held.length)).toBe(2)
+  await card.getByRole('button', { name: 'Next turns', exact: true }).click()
+  await expect(card.getByText('21–21 of 21', { exact: true })).toBeVisible()
+  await expect(card.locator('.transcript-image')).toHaveCount(2)
+  // Two frames: page 2's images are laid out and seen by its observer, which starts a load it's free to.
+  await win.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))))
+  // Page 2 waits for page 1's loads, which hold both slots; then all of its images load, and none is refused.
+  expect(await prepares()).toBe(2)
+  await win.evaluate(() => (window as unknown as { held: (() => void)[] }).held.splice(0).forEach(release => release()))
+  await expect(card.locator('.transcript-image[data-loaded]')).toHaveCount(2)
+  expect(await shown(card)).toEqual([[true, 'Image', 64], [true, 'Image', 96]])
+  expect(await prepares()).toBe(4)
+  await win.locator('.file-pill[data-selected] .file-tab-close').click()
+  await expectReleasedDocuments(win)
+  expect(live.pageErrors).toEqual([])
+})
+
+test('a page shown again after another tab waits for the loads it left holding the core’s two image slots', async () => {
+  const other = fixture('transcript-tab-other.jsonl', claudeSession([{ role: 'user', content: 'Other tab fixture' }]))
+  const file = fixture('transcript-tab-images.jsonl', claudeSession([
+    { role: 'user', content: [{ type: 'text', text: 'Tab images' }, claudeImage('image/png', base64(imagePng(64, 64))), claudeImage('image/png', base64(imagePng(96, 32)))] },
+    ...Array.from({ length: 5 }, (_, i) => ({ role: i % 2 ? 'user' as const : 'assistant' as const, content: `Tab turn ${i + 1}` }))
+  ]))
+  const live = await launch({ hooks: true })
+  const { win } = live
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
+  // The document's two prepares are answered and their replies held, so both of its core image slots stay taken.
+  await win.evaluate(() => {
+    const state = window as unknown as { typoseTest: { core: { call(method: string, params: object, signal?: AbortSignal): Promise<unknown> } }; prepares: number; held: (() => void)[] }
+    const core = state.typoseTest.core, call = core.call.bind(core)
+    state.prepares = 0
+    state.held = []
+    core.call = async (method, params, signal) => {
+      const prepare = method === 'prepareImage' ? ++state.prepares : 0
+      const reply = await call(method, params, signal)
+      if (prepare && prepare <= 2) await new Promise<void>(done => state.held.push(done))
+      return reply
+    }
+  })
+  const prepares = () => win.evaluate(() => (window as unknown as { prepares: number }).prepares)
+  const open = (path: string) => live.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), path)
+  const tab = (name: string) => win.locator('.file-pill', { has: win.locator('.file-tab-name', { hasText: name }) })
+  const card = win.getByRole('region', { name: 'Reader card 1' })
+  await open(other)
+  await expect(tab('transcript-tab-other.jsonl')).toHaveAttribute('data-selected', 'true')
+  await open(file)
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  await expect.poll(() => win.evaluate(() => (window as unknown as { held: unknown[] }).held.length)).toBe(2)
+  // Another tab and back: the card shows the same core document again, through a new activation (a new `Opened`).
+  await tab('transcript-tab-other.jsonl').locator('.file-tab').click()
+  await expect(tab('transcript-tab-other.jsonl')).toHaveAttribute('data-selected', 'true')
+  await tab('transcript-tab-images.jsonl').locator('.file-tab').click()
+  await expect(tab('transcript-tab-images.jsonl')).toHaveAttribute('data-selected', 'true')
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  await expect(card.locator('.transcript-image')).toHaveCount(2)
+  // Two frames: its images are laid out and seen by its observer, which starts a load it's free to.
+  await win.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))))
+  // They wait for the loads the tab left, which hold both slots; then both load, and none is refused.
+  expect(await prepares()).toBe(2)
+  await win.evaluate(() => (window as unknown as { held: (() => void)[] }).held.splice(0).forEach(release => release()))
+  await expect(card.locator('.transcript-image[data-loaded]')).toHaveCount(2)
+  expect(await shown(card)).toEqual([[true, 'Image', 64], [true, 'Image', 96]])
+  expect(await prepares()).toBe(4)
+  for (const name of ['transcript-tab-images.jsonl', 'transcript-tab-other.jsonl']) {
+    await tab(name).hover()
+    await tab(name).locator('.file-tab-close').click()
+  }
+  await expectReleasedDocuments(win)
   expect(live.pageErrors).toEqual([])
 })
 
