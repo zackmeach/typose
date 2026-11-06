@@ -21,7 +21,7 @@ use typose_core::budget::{self, Reservation, Work};
 use typose_core::doc::{DocError, STRUCT_BYTES};
 use typose_core::images::{self, ImageError};
 use typose_core::jsonl;
-use typose_core::md::MAX_SOURCE;
+use typose_core::md::{MAX_SOURCE, Note};
 use typose_core::pages::MAX_ITEMS;
 use typose_core::raw::Raw;
 use typose_core::store::CHUNK;
@@ -924,6 +924,33 @@ fn embedded_checks(dir: &Path) {
     }
 }
 
+/// A big block's footnote numbers are given back, and their charge with them, so its charge after the block is what it
+/// was before. Two builds of files the same length, in the same blocks: 40 big blocks that reference 2,000 footnotes,
+/// defined at the end. In the first, a small block numbers them first, so the big blocks number nothing. In the
+/// second, the small block is plain text, so each big block numbers the footnotes itself, then gives them back. The
+/// second's peak may not pass the first's: a charge left behind would add up, about 340 KB a block.
+fn footnote_checks(dir: &Path) {
+    let refs: String = (0..2000).map(|i| format!("[^f{i}]")).collect();
+    let defs: String = (0..2000).map(|i| format!("[^f{i}]: d\n\n")).collect(); // a reference needs one
+    let big = format!("{}\n\n", refs.repeat(5)); // over 64 KiB: a note, written until it's judged one
+    assert!(refs.len() < 64 << 10 && big.len() > 64 << 10);
+    let mut peaks = Vec::new();
+    for (name, first) in [("numbered first", refs.clone()), ("numbered by each big block", "x".repeat(refs.len()))] {
+        let path = dir.join("footnotes.md");
+        fs::write(&path, format!("{first}\n\n{}{defs}", big.repeat(40))).unwrap();
+        let raw = Raw::open(&path).unwrap();
+        let before = budget::totals().used;
+        budget::reset_high();
+        let built = raw.render(1).unwrap();
+        assert_eq!(built.items().iter().filter(|i| i.note == Some(Note::Big)).count(), 40, "{name}");
+        peaks.push(budget::totals().high - before);
+        drop(built);
+        drop(raw);
+        println!("{name:>30}: build peak {} bytes", peaks.last().unwrap());
+    }
+    assert!(peaks[1] <= peaks[0] + (1 << 20), "big blocks left their footnotes charged: {peaks:?}");
+}
+
 fn main() {
     assert!(size_of::<Raw>() as u64 + 16 <= STRUCT_BYTES, "a Raw ({} bytes) outgrew its metadata", size_of::<Raw>());
     let dir = std::env::temp_dir().join(format!("typose-ledger-{}", std::process::id()));
@@ -1134,5 +1161,6 @@ fn main() {
     assert!(checks > 10_000 && skipped * 100 < checks, "too few checks ran: the test proves nothing");
     image_checks();
     embedded_checks(&dir);
+    footnote_checks(&dir);
     println!("ok");
 }

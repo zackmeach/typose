@@ -1057,8 +1057,20 @@ fn blocks_mapped(
         events.drain()?;
         let heading = events.heading.take();
         if big {
-            // A note's footnote references number nothing, as when a big block was never written.
-            build.numbers.retain(|_, n| *n <= numbered);
+            // A note's footnote references number nothing, as when a big block was never written, and their charge
+            // goes with them: what `number` grew for each, and the table the block may have grown (`shrink_to_fit`).
+            let mut freed = 0;
+            build.numbers.retain(|label, n| {
+                let keep = *n <= numbered;
+                if !keep {
+                    freed += map_entry::<String, u32>() + label.len() as u64;
+                }
+                keep
+            });
+            if freed > 0 {
+                build.numbers.shrink_to_fit();
+                build.charge.shrink(freed);
+            }
         }
         let slug = match (&heading, &written) {
             (Some(text), Ok(())) => Some(build.slug(text).map_err(DocError::Memory)?),
