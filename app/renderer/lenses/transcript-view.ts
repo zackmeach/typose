@@ -54,9 +54,10 @@ interface Pane {
 /** The snapshot's allowance for one character of mounted HTML: its DOM nodes, its text and the HTML string. Literal
  *  text is one text node: Rendered's allowance for a unit of text (`RENDERED_PER_UNIT`). */
 const CHAR_BYTES = 1280
-/** Per document generation: the image loads of its Transcript pages replaced or closed, until they settle. The core
- *  holds two image slots per document, and those loads keep theirs until then; a page shown next loads after them. */
-const draining = new WeakMap<Opened, Promise<unknown>>()
+/** Per core document generation (`doc:gen`): the image loads of its Transcript pages replaced or closed, until they
+ *  settle. The core holds two image slots per document generation, and those loads keep theirs until then; a page shown
+ *  next loads after them, whichever lens, tab activation or card shows it. A settled entry is deleted. */
+const draining = new Map<string, Promise<void>>()
 /** Native graph descriptors own ordering and links; this view only presents bounded pages. */
 export class TranscriptView {
   private serial = 0
@@ -90,10 +91,17 @@ export class TranscriptView {
       }
     // Its images wait until it's shown and the pages before it have let go of the core's image slots (`build`).
     pane.images.pause()
+    const key = `${this.opened.doc}:${this.opened.gen}`
     // A page replaced or superseded stops its image loads and revokes their Blob URLs; its charge goes with the page.
     abort.signal.addEventListener(
       'abort',
-      () => draining.set(this.opened, Promise.all([draining.get(this.opened), pane.images.dispose()])),
+      () => {
+        const drained = Promise.all([draining.get(key), pane.images.dispose()]).then(() => undefined)
+        draining.set(key, drained)
+        void drained.finally(() => {
+          if (draining.get(key) === drained) draining.delete(key)
+        })
+      },
       { once: true }
     )
     // A build this one supersedes stops, its group, tool and text queries with it.
@@ -199,7 +207,7 @@ export class TranscriptView {
     this.host.replaceChildren(body)
     if (commit) this.host.parentElement!.scrollTop = 0
     this.shown = pane
-    void (draining.get(this.opened) ?? Promise.resolve()).then(() => pane.images.resume())
+    void (draining.get(`${this.opened.doc}:${this.opened.gen}`) ?? Promise.resolve()).then(() => pane.images.resume())
   }
   /** One item, or why it couldn't be shown: one item's failure never fails its page. */
   private async item(item: TranscriptItem, pane: Pane): Promise<HTMLElement> {

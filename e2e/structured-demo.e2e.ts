@@ -730,6 +730,60 @@ test('a page shown while the page it replaced still holds the core’s two image
   expect(live.pageErrors).toEqual([])
 })
 
+test('a page shown again after another tab waits for the loads it left holding the core’s two image slots', async () => {
+  const other = fixture('transcript-tab-other.jsonl', claudeSession([{ role: 'user', content: 'Other tab fixture' }]))
+  const file = fixture('transcript-tab-images.jsonl', claudeSession([
+    { role: 'user', content: [{ type: 'text', text: 'Tab images' }, claudeImage('image/png', base64(imagePng(64, 64))), claudeImage('image/png', base64(imagePng(96, 32)))] },
+    ...Array.from({ length: 5 }, (_, i) => ({ role: i % 2 ? 'user' as const : 'assistant' as const, content: `Tab turn ${i + 1}` }))
+  ]))
+  const live = await launch({ hooks: true })
+  const { win } = live
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
+  // The document's two prepares are answered and their replies held, so both of its core image slots stay taken.
+  await win.evaluate(() => {
+    const state = window as unknown as { typoseTest: { core: { call(method: string, params: object, signal?: AbortSignal): Promise<unknown> } }; prepares: number; held: (() => void)[] }
+    const core = state.typoseTest.core, call = core.call.bind(core)
+    state.prepares = 0
+    state.held = []
+    core.call = async (method, params, signal) => {
+      const prepare = method === 'prepareImage' ? ++state.prepares : 0
+      const reply = await call(method, params, signal)
+      if (prepare && prepare <= 2) await new Promise<void>(done => state.held.push(done))
+      return reply
+    }
+  })
+  const prepares = () => win.evaluate(() => (window as unknown as { prepares: number }).prepares)
+  const open = (path: string) => live.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), path)
+  const tab = (name: string) => win.locator('.file-pill', { has: win.locator('.file-tab-name', { hasText: name }) })
+  const card = win.getByRole('region', { name: 'Reader card 1' })
+  await open(other)
+  await expect(tab('transcript-tab-other.jsonl')).toHaveAttribute('data-selected', 'true')
+  await open(file)
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  await expect.poll(() => win.evaluate(() => (window as unknown as { held: unknown[] }).held.length)).toBe(2)
+  // Another tab and back: the card shows the same core document again, through a new activation (a new `Opened`).
+  await tab('transcript-tab-other.jsonl').locator('.file-tab').click()
+  await expect(tab('transcript-tab-other.jsonl')).toHaveAttribute('data-selected', 'true')
+  await tab('transcript-tab-images.jsonl').locator('.file-tab').click()
+  await expect(tab('transcript-tab-images.jsonl')).toHaveAttribute('data-selected', 'true')
+  await expect(card.locator('[data-lens="transcript"]')).toBeVisible({ timeout: 30_000 })
+  await expect(card.locator('.transcript-image')).toHaveCount(2)
+  // Two frames: its images are laid out and seen by its observer, which starts a load it's free to.
+  await win.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))))
+  // They wait for the loads the tab left, which hold both slots; then both load, and none is refused.
+  expect(await prepares()).toBe(2)
+  await win.evaluate(() => (window as unknown as { held: (() => void)[] }).held.splice(0).forEach(release => release()))
+  await expect(card.locator('.transcript-image[data-loaded]')).toHaveCount(2)
+  expect(await shown(card)).toEqual([[true, 'Image', 64], [true, 'Image', 96]])
+  expect(await prepares()).toBe(4)
+  for (const name of ['transcript-tab-images.jsonl', 'transcript-tab-other.jsonl']) {
+    await tab(name).hover()
+    await tab(name).locator('.file-tab-close').click()
+  }
+  await expectReleasedDocuments(win)
+  expect(live.pageErrors).toEqual([])
+})
+
 test('a Transcript graph that is off says why, where a disabled structured lens does', async () => {
   // A parent cycle (the core's own fixture) turns the graph off; Rows remains.
   const file = fixture('transcript-cycle.jsonl', [
