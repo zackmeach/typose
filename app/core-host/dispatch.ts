@@ -100,8 +100,6 @@ const ADDON_CODES = new Set<string>(['InvalidParams', 'NotFound', 'NotDirectory'
 
 /** A canonical UUID v4, as `randomUUID` makes them. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
-/** `image_resource::MAX_EMBEDDED`: 8 MiB as padded base64, plus 64 bytes of `data:` header and JSON quotes. */
-const MAX_EMBEDDED = Math.ceil((8 << 20) / 3) * 4 + 64
 type Params = Record<string, unknown>
 const codeOf = (e: unknown): unknown => (e as { code?: unknown } | null)?.code
 
@@ -1405,7 +1403,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         if (!isRecord(p.span)) throw new Refusal('InvalidParams', 'span must be { start, end }', 'span')
         const [start, end] = [int(p.span, 'start', 'span.start'), int(p.span, 'end', 'span.end')]
         if (start >= end) throw new Refusal('InvalidParams', 'span must end after it starts', 'span')
-        if (end - start > MAX_EMBEDDED) throw new Refusal('Refused', 'Embedded image exceeds 8 MiB')
+        if (end - start > limits.maxEmbedded) throw new Refusal('Refused', 'Embedded image exceeds 8 MiB')
         prepare = (doc, cancel) => doc.prepareEmbeddedImage(gen, start, end, cancel)
       } else {
         if (!boundedLink(p.src))

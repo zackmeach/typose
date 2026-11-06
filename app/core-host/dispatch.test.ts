@@ -468,7 +468,7 @@ describe('local image resources', () => {
 })
 
 describe('embedded image resources (Z43)', () => {
-  const MAX_EMBEDDED = Math.ceil((8 << 20) / 3) * 4 + 64
+  const MAX_EMBEDDED = limits().maxEmbedded // the core's own bound, as the host reads it
 
   it('forwards a span, never a URL, and stamps the same path-free reference', async () => {
     expect(await call('prepareImage', { doc: 1, gen: 1, span: { start: 5, end: 9 } })).toMatchObject({

@@ -160,6 +160,8 @@ pub struct Limits {
     pub page_wire_max: u32,
     /// Plan C1: an open's temporaries in Rust.
     pub open_temp: u32,
+    /// Z43: the most source bytes an embedded image's span may cover (`image_resource::MAX_EMBEDDED`).
+    pub max_embedded: u32,
     pub ranges: Vec<Range>,
 }
 
@@ -172,6 +174,7 @@ pub fn limits() -> Limits {
         item_wire_fixed: pages::ITEM_WIRE_FIXED as u32,
         page_wire_max: pages::PAGE_WIRE_MAX as u32,
         open_temp: typose_core::raw::OPEN_TEMP as u32,
+        max_embedded: image_resource::MAX_EMBEDDED as u32,
         ranges: RANGES
             .iter()
             .map(|&(field, min, max)| Range { field: field.into(), min: min as f64, max: max as f64 })
