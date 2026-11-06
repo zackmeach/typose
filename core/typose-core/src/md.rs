@@ -506,10 +506,11 @@ struct Events<'p, 'b, 'a, I> {
 /// writing it. Since only the write finds which URLs it carries as spans, a block over 64 KiB is now measured as it's
 /// written, before each event is processed (`Events::within_budget`). The write stops where the block, less its
 /// embedded URLs, passes 64 KiB, so no event past the limit is processed: `Capped` bounds the output, not each event's
-/// own work (`mapped_text`, an HTML block gathered whole, a link's URL). One exception: an image that isn't embedded
-/// goes through unmeasured at its start, so the writer streams its URL into `Capped`, bounded by `HTML_MAX`, before its
-/// end measures it. A reference definition inside the block that comes before every image using it counts until the
-/// first of them, so text in between can make the block big early.
+/// own work (`mapped_text`, an HTML block gathered whole, a link's URL). Two exceptions go through unmeasured at their
+/// start, bounded only by `Capped` (`HTML_MAX`): an image that isn't embedded, whose URL the writer streams before its
+/// end measures it, and a fenced code block, whose info string the writer puts in its `class`. A reference definition
+/// inside the block that comes before every image using it counts until the first of them, so text in between can make
+/// the block big early.
 struct Budget {
     /// The block, as offsets into `Events::source`.
     block: Range<usize>,
@@ -686,9 +687,9 @@ impl<'a, I: Iterator<Item = (Event<'a>, Range<usize>)>> Events<'_, '_, 'a, I> {
     }
 
     /// Whether the block, measured to where `event` ends, stays within 64 KiB without its embedded URLs (`Budget`).
-    /// A container's start isn't measured, since it processes nothing of its own; a link's is, to where it starts plus
-    /// its URL, which it processes. An embedded image is measured whole, its URL excluded first: its alt text is
-    /// processed with it.
+    /// A container's start isn't measured, since it processes nothing of its own but a fenced code block's info string,
+    /// which `Capped` bounds (`Budget`); a link's is, to where it starts plus its URL, which it processes. An embedded
+    /// image is measured whole, its URL excluded first: its alt text is processed with it.
     fn within_budget(&mut self, event: &Event, range: &Range<usize>) -> bool {
         if self.budget.is_none() {
             return true;
@@ -1060,7 +1061,8 @@ fn blocks_mapped(
         let heading = events.heading.take();
         if big {
             // A note's footnote references number nothing, as when a big block was never written, and their charge
-            // goes with them: what `number` grew for each, and the table the block may have grown (`shrink_to_fit`).
+            // goes with them: what `number` grew for each. The table is rebuilt, not shrunk in place, so the slots
+            // `retain` deleted can't make it grow early past what `map_entry` charges for the entries left.
             let mut freed = 0;
             build.numbers.retain(|label, n| {
                 let keep = *n <= numbered;
@@ -1070,7 +1072,7 @@ fn blocks_mapped(
                 keep
             });
             if freed > 0 {
-                build.numbers.shrink_to_fit();
+                build.numbers = build.numbers.drain().collect();
                 build.charge.shrink(freed);
             }
         }
