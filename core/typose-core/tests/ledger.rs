@@ -835,8 +835,8 @@ fn image_checks() {
 /// Z43: an embedded image's read, its decode and a JSON string's unescaped copy stay within their charges, and the
 /// ledger and heap return to where they stood after success, a refusal after the read, and a cancel inside the codec.
 /// Each document is opened and read once first, so its cache is already filled (that's the document's to keep). The
-/// image is 3 MiB of noise, so its payload outgrows the read's fixed allowances: no term of the charge can go missing
-/// unseen.
+/// image is 3 MiB of noise, so its payload outgrows the read's fixed allowances: a charge without its payload term fails
+/// here, in the JSON case.
 fn embedded_checks(dir: &Path) {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut state = 0x9e37_79b9_u32;
