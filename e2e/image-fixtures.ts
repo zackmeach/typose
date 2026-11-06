@@ -35,6 +35,13 @@ export function imagePng(width = 1, height = 1, noise = false): Buffer {
   return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header), chunk('IDAT', deflateSync(pixels)), chunk('IEND', Buffer.alloc(0))])
 }
 
+/** `imagePng` with a 72 dpi pHYs chunk after IHDR, as screenshots carry. */
+export function imagePngPhys(width = 1, height = 1): Buffer {
+  const png = imagePng(width, height)
+  const phys = Buffer.from([0, 0, 0x0b, 0x13, 0, 0, 0x0b, 0x13, 1])
+  return Buffer.concat([png.subarray(0, 33), chunk('pHYs', phys), png.subarray(33)])
+}
+
 export const imageGif = Buffer.from('47494638396101000100800000000000ffffff2c00000000010001000002024401003b', 'hex')
 
 export function imageJpeg(width = 1, height = 1): Buffer {
@@ -45,6 +52,15 @@ export function imageJpeg(width = 1, height = 1): Buffer {
   for (let at = 0; at < bits; at += 8) data.push(at + 8 <= bits ? 0 : (1 << (8 - (bits % 8))) - 1)
   data.push(255, 217)
   return Buffer.from(data)
+}
+
+/** `imageJpeg` with one APP2 ICC_PROFILE segment after SOI, as camera photos carry: a dummy 536-byte profile. */
+export function imageJpegIcc(width = 1, height = 1): Buffer {
+  const jpeg = imageJpeg(width, height)
+  const profile = Array.from({ length: 536 }, (_, at) => at % 256)
+  const length = 2 + 14 + profile.length
+  const segment = Buffer.from([255, 226, length >>> 8, length & 255, ...Buffer.from('ICC_PROFILE\0'), 1, 1, ...profile])
+  return Buffer.concat([jpeg.subarray(0, 2), segment, jpeg.subarray(2)])
 }
 
 // image-webp 0.2.4's decoder.rs decode_2x2_single_color_image, also used by the native regression.

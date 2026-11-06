@@ -6,9 +6,10 @@ Images use the Markdown document’s existing local capability. A target cannot 
 
 ## Supported profiles
 
-- PNG: noninterlaced 8-bit gray, gray-alpha, RGB, RGBA or indexed. Animation, 16-bit/sub-byte samples and unsupported metadata chunks are refused.
+- PNG: noninterlaced 8-bit gray, gray-alpha, RGB, RGBA or indexed. At most one each of `pHYs` (9 bytes), `sRGB` (1 byte) and `gAMA` (4 bytes) is accepted and ignored, after IHDR and before IDAT; `sRGB` and `gAMA` also before PLTE. Animation, 16-bit/sub-byte samples, `iCCP`, `cHRM`, text and every other metadata chunk are refused.
 - GIF: one full-canvas frame, with a valid palette and complete LZW stream. Animation, application extensions, excess pixels and missing end codes are refused.
-- JPEG: baseline SOF0, one scan, gray or ordinary three-component 4:4:4, 4:2:2 or 4:2:0 sampling. Progressive/multiple scans, CMYK and Exif/ICC/gainmap metadata are refused. A bounded JFIF header is allowed.
+- JPEG: baseline SOF0, one scan, gray or ordinary three-component 4:4:4, 4:2:2 or 4:2:0 sampling. A bounded JFIF header is allowed. An ICC profile in APP2 `ICC_PROFILE` segments before the scan is accepted and ignored: at most 16 segments and 256 KiB of profile, with consistent counts and every sequence number exactly once. The input wrapper removes those segments, so the decoder never parses them. Progressive/multiple scans, CMYK, Exif/XMP (APP1), other APP2 data such as MPF and gain maps, and APP13/APP14 are refused.
+- Colour is not managed. Embedded profiles, gamma and rendering intent are discarded, and the samples are treated as sRGB, so a wide-gamut or non-sRGB image can look less saturated or shifted.
 
 These are deliberate supported subsets, not a promise to decode every file with one of these extensions. The byte signature selects the decoder. Missing, malformed, unsupported or over-budget images preserve the reader.
 

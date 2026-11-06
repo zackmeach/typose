@@ -761,6 +761,37 @@ fn ledger_jpeg(width: u16, height: u16, sampling: u8) -> Vec<u8> {
     source
 }
 
+/// pHYs, sRGB and gAMA after IHDR: accepted and ignored.
+fn with_png_metadata(png: &[u8]) -> Vec<u8> {
+    let mut source = png[..33].to_vec();
+    for (kind, data) in
+        [(b"pHYs", &[0, 0, 0x0b, 0x13, 0, 0, 0x0b, 0x13, 1][..]), (b"sRGB", &[0]), (b"gAMA", &[0, 0, 0xb1, 0x8f])]
+    {
+        source.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        let start = source.len();
+        source.extend_from_slice(kind);
+        source.extend_from_slice(data);
+        let crc = crc32fast::hash(&source[start..]);
+        source.extend_from_slice(&crc.to_be_bytes());
+    }
+    source.extend_from_slice(&png[33..]);
+    source
+}
+
+/// An ICC profile at both caps after SOI: 16 APP2 segments of 16 KiB, 256 KiB in all. They never reach the codec.
+fn with_icc_at_cap(jpeg: &[u8]) -> Vec<u8> {
+    let mut source = jpeg[..2].to_vec();
+    for sequence in 1..=16 {
+        source.extend_from_slice(&[0xff, 0xe2]);
+        source.extend_from_slice(&(16 + 16_384_u16).to_be_bytes());
+        source.extend_from_slice(b"ICC_PROFILE\0");
+        source.extend_from_slice(&[sequence, 16]);
+        source.extend((0..16_384).map(|at| at as u8));
+    }
+    source.extend_from_slice(&jpeg[2..]);
+    source
+}
+
 fn corrupt_png_adler(source: &[u8]) -> Vec<u8> {
     let mut source = source.to_vec();
     let mut at = 8;
@@ -785,6 +816,8 @@ fn image_checks() {
     let gif = ledger_gif();
     let jpeg_h = ledger_jpeg(65_535, 1, 0x21);
     let jpeg_hv = ledger_jpeg(257, 257, 0x22);
+    let png_metadata = with_png_metadata(&png);
+    let jpeg_icc = with_icc_at_cap(&jpeg_hv);
     let webp = vec![
         0x52, 0x49, 0x46, 0x46, 0x3c, 0, 0, 0, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x20, 0x30, 0, 0, 0, 0xd0, 1,
         0, 0x9d, 1, 0x2a, 2, 0, 2, 0, 2, 0, 0x34, 0x25, 0xa0, 2, 0x74, 0xba, 1, 0xf8, 0, 3, 0xb0, 0, 0xfe, 0xf0, 0xc4,
@@ -796,6 +829,8 @@ fn image_checks() {
         ("GIF dictionary growth", &gif),
         ("JPEG H wide rows", &jpeg_h),
         ("JPEG HV partial MCU", &jpeg_hv),
+        ("PNG pHYs sRGB gAMA", &png_metadata),
+        ("JPEG ICC at both caps", &jpeg_icc),
     ] {
         image_case(name, source, ImageExpected::Ready, ImageControl::Positive, None);
     }
