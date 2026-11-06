@@ -6,11 +6,13 @@
 
 Both go through the bounded image path that local images already use. This follows M5 (`2026-11-04-transcripts.md`).
 
+PNG, JPEG and GIF are shown. WebP keeps its existing refusal, "WebP images are not supported yet". That is Zack's 2026-10-28 decision (`docs/qualification/local-images.md:3`; `2026-10-31-typose-reader-to-workspace.md:30`): a noisy VP8 file delayed cancellation by 445 ms, so the decoder was deferred.
+
 **Baseline:** main `f904797`.
 
 ## What exists (verified on main)
 - **`images.rs`.**
-  - `decode()` identifies PNG, JPEG, GIF and WebP by their magic bytes.
+  - `decode()` identifies PNG, JPEG, GIF and WebP by their magic bytes. It decodes the first three, and refuses WebP.
   - Its caps are `MAX_SOURCE` (8 MiB), `MAX_PIXELS` (16,777,216) and `MAX_PIXEL_BUFFERS` (64 MiB).
   - It emits a canonical PNG of at most 8 MiB.
 - **`image_resource.rs`.**
@@ -28,6 +30,7 @@ Both go through the bounded image path that local images already use. This follo
 Structure only, from 3,004 Claude Code session files on this PC:
 - **Count:** 2,958 image blocks in 120 files. All are `source.type: "base64"`.
 - **Media types:** JPEG 1,742, PNG 1,032, WebP 184.
+- **WebP:** the 184 WebP images will show as refused until the WebP decision is reopened.
 - **Where they sit:** 2,266 in `message`, 688 in `toolUseResult`, 4 in an attachment.
 - **Size:** the largest decodes to 511,818 bytes, so every one is under the caps.
 - **Encoding:** no `data:` URLs, and no escaped base64.
@@ -40,6 +43,7 @@ Structure only, from 3,004 Claude Code session files on this PC:
 - **Decoding:**
   - The base64 is strict.
   - The image format comes from its magic bytes in `images::decode`, never from a declared type.
+  - WebP keeps its existing refusal. A `data:image/webp` passes the header check, and then the codec refuses it.
   - A declared SVG, or any other declared type, is refused with its reason.
 - **Bounds before any read:**
   - the span is at most `ceil(MAX_SOURCE / 3) × 4` plus 64 header bytes;
@@ -54,7 +58,7 @@ Structure only, from 3,004 Claude Code session files on this PC:
 
 | # | PR | Scope | Size | Review |
 |---|---|---|---|---|
-| 1 | **Embedded images in Rendered** | **Core:** an embedded source for `image_resource` (span → base64 → `decode`). **napi and core host:** `prepareImage` takes a validated `span` as the alternative to `src`. **`md.rs`:** an inline or reference `data:` image emits its URL's span, never the URL. **Renderer:** `RenderedImages` loads it. **Tests:** core units (strict base64, header types, SVG refused, an over-bound span refused before any read, decoded size over the cap, charge back to 0); fragment tests showing no payload in the HTML; a host Vitest; e2e (PNG, JPEG, GIF and WebP shown; SVG, malformed and over-cap refused with their alt text and reason; no network effect). This plan lands here. | decent–large | Opus, 2 rounds (untrusted input, ledger) |
+| 1 | **Embedded images in Rendered** | **Core:** an embedded source for `image_resource` (span → base64 → `decode`). **napi and core host:** `prepareImage` takes a validated `span` as the alternative to `src`. **`md.rs`:** an inline or reference `data:` image emits its URL's span, never the URL. The bytes of a URL it emits don't count toward its block's 64 KiB: D17 bounds what a mounted block holds, and those bytes never reach the DOM. **Renderer:** `RenderedImages` loads it. **Tests:** core units (strict base64, header types, SVG refused, an over-bound span refused before any read, decoded size over the cap, charge back to 0, a 300 KB image rendering); fragment tests showing no payload in the HTML; a host Vitest; e2e (PNG, JPEG, GIF and a 300 KB image shown; WebP keeping its refusal; SVG, malformed and over-cap refused with their alt text and reason; no network effect). This plan lands here. | decent–large | Opus, 2 rounds (untrusted input, ledger) |
 | 2 | **Embedded images in Transcript** | Claude `source` base64 blocks (the span of `source.data`) and OpenAI `image_url` data URLs load through the same path, in message content and in tool results. Each page's charge is released on page swap. Remote URLs keep their placeholder. **Tests:** e2e, plus the installed-build check on real sessions with images. | decent | Opus, 2 rounds (memory) |
 | 3 | **Install** | Package, install, then open real sessions with images | small | PM |
 
@@ -66,7 +70,7 @@ Structure only, from 3,004 Claude Code session files on this PC:
 
 ## Done when
 PRs 1–3 have landed. On the installed build:
-- Rendered shows a Markdown file's `data:` images within the caps;
+- Rendered shows a Markdown file's PNG, JPEG and GIF `data:` images within the caps, and WebP keeps its refusal;
 - a refused image keeps its alt text and reason;
-- Transcript shows the pasted screenshots in real sessions;
+- Transcript shows the pasted screenshots in real sessions, except WebP ones, which keep their refusal;
 - nothing touches the network, and the lens's memory returns to 0 on close.
