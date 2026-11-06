@@ -10,7 +10,8 @@ function chunk(kind: string, data: Buffer): Buffer {
   return Buffer.concat([size, body, crc])
 }
 
-export function imagePng(width = 1, height = 1): Buffer {
+/** `noise`: incompressible pixels, so the file takes about 3 × width × height bytes, as a screenshot does. */
+export function imagePng(width = 1, height = 1, noise = false): Buffer {
   const header = Buffer.alloc(13)
   header.writeUInt32BE(width)
   header.writeUInt32BE(height, 4)
@@ -24,6 +25,12 @@ export function imagePng(width = 1, height = 1): Buffer {
       pixels[start + 2 + 3 * x] = 80
       pixels[start + 3 + 3 * x] = 160
     }
+  }
+  for (let i = 0, state = 0x9e3779b9; noise && i < pixels.length; i++) {
+    state ^= state << 13
+    state ^= state >>> 17
+    state ^= state << 5
+    if (i % (3 * width + 1)) pixels[i] = state // its low byte; each row's filter byte stays 0
   }
   return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header), chunk('IDAT', deflateSync(pixels)), chunk('IEND', Buffer.alloc(0))])
 }

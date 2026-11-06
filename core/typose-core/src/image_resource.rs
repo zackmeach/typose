@@ -806,4 +806,53 @@ mod tests {
             assert_eq!((image.width, image.height), (1, 1), "{name}");
         }
     }
+
+    /// Z43, D17: a screenshot-sized image (real ones reach 512 KB decoded) renders from a paragraph, its URL left out
+    /// of the block's 64 KiB, inline and by reference, the definition at the top level or inside the block. Each form
+    /// that doesn't is listed.
+    #[test]
+    fn a_300_kb_image_renders_inline_and_by_reference() {
+        let mut state = 0x9e37_79b9_u32;
+        let mut noise = || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        };
+        let pixels: Vec<u8> = (0..320 * 320 * 3).map(|_| noise()).collect();
+        let mut png = Vec::new();
+        let mut encoder = png::Encoder::new(&mut png, 320, 320);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_deflate_compression(png::DeflateCompression::NoCompression);
+        encoder.write_header().unwrap().write_image_data(&pixels).unwrap();
+        assert!((300_000..320_000).contains(&png.len()), "{}", png.len());
+        let url = format!("data:image/png;base64,{}", b64(&png));
+        let mut failed = Vec::new();
+        for (i, (form, md)) in [
+            ("inline", format!("# Shot\n\nA screenshot: ![shot]({url})\n")),
+            ("reference", format!("# Shot\n\nA screenshot: ![shot][s]\n\n[s]: {url}\n")),
+            ("reference in its block", format!("# Shot\n\n- A screenshot: ![shot][s]\n\n  [s]: {url}\n")),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = crate::store::testutil::temp_file(&format!("embedded-300k-{i}.md"), md.as_bytes());
+            let raw = crate::raw::Raw::open(&path).unwrap();
+            let rendered = raw.render(1).unwrap();
+            let item = &rendered.items()[1];
+            let span = item.html.split_once("data-embedded=\"").and_then(|(_, rest)| rest.split_once('"'));
+            let span = span
+                .and_then(|(span, _)| span.split_once(','))
+                .map(|(start, end)| start.parse::<u64>().unwrap()..end.parse::<u64>().unwrap());
+            let shown = item.note.is_none() && !item.html.contains(&url[22..64]);
+            match span.filter(|_| shown) {
+                Some(span) => {
+                    let image = raw.embedded_image(1, span, &AtomicBool::new(false)).unwrap();
+                    assert_eq!((image.width, image.height), (320, 320), "{form}");
+                }
+                None => failed.push((form, item.note)),
+            }
+        }
+        assert_eq!(failed, [], "not shown");
+    }
 }
