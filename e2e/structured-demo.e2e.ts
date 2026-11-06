@@ -569,9 +569,13 @@ test('Transcript shows a session’s embedded images, in tool results too; refus
   await expect(card.locator('.transcript-image[data-embedded]')).toHaveCount(6)
   const html = await live.win.content()
   for (const payload of Object.values(payloads)) for (const part of [payload.slice(0, 16), payload.slice(-16)]) expect(html).not.toContain(part)
-  for (const colorScheme of ['light', 'dark'] as const) {
-    await live.win.emulateMedia({ colorScheme })
-    await live.win.screenshot({ path: test.info().outputPath(`transcript-images-${colorScheme}.png`) })
+  // Light and dark, at the top (the loaded images) and at the end (the refusals and the remote placeholder).
+  for (const [at, top] of [['top', 0], ['end', 1e6]] as const) {
+    await card.locator('.structured-view').evaluate((view, top) => { view.scrollTop = top }, top)
+    for (const colorScheme of ['light', 'dark'] as const) {
+      await live.win.emulateMedia({ colorScheme })
+      await live.win.screenshot({ path: test.info().outputPath(`transcript-images-${at}-${colorScheme}.png`) })
+    }
   }
   expect(live.pageErrors).toEqual([])
   await finish(live)
