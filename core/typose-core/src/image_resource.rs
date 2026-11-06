@@ -373,7 +373,7 @@ impl Resources {
             return Err(DocError::Cancelled);
         }
         let slot = entries.slots.iter().position(Option::is_none).ok_or_else(|| {
-            DocError::Refused("release a local image before preparing another (two slots per document)".into())
+            DocError::Refused("release an image before preparing another (two slots per document)".into())
         })?;
         let id = entries.next;
         if id > MAX_SAFE {

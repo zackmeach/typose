@@ -592,7 +592,8 @@ test('an OpenAI chat’s data: image URLs show through the same path; SVG keeps 
       { type: 'image_url', image_url: { url: 'javascript:alert(1)' } }] },
     { role: 'assistant', content: 'Done fixture' }
   ]
-  const live = await launch({ hooks: true, file: fixture('transcript-openai-images.jsonl', lines.map(line => JSON.stringify(line)).join('\n') + '\n') })
+  const log = test.info().outputPath('transcript-openai-images-netlog.json')
+  const live = await launch({ hooks: true, file: fixture('transcript-openai-images.jsonl', lines.map(line => JSON.stringify(line)).join('\n') + '\n'), netlog: log })
   const card = live.win.getByRole('region', { name: 'Reader card 1' })
   await expect(card.getByText('Done fixture', { exact: true })).toBeVisible({ timeout: 30_000 })
   await expect(card.getByRole('img', { name: 'Image', exact: true })).toHaveCount(2)
@@ -601,12 +602,16 @@ test('an OpenAI chat’s data: image URLs show through the same path; SVG keeps 
   await expect(card.locator('.transcript-image-placeholder')).toHaveText([remote, 'Image preview unavailable · inspect embedded data in Message metadata'])
   expect(await live.win.content()).not.toContain('data:image')
   expect(live.pageErrors).toEqual([])
+  await finish(live)
+  expect(assertNetLog(log, ['typose', 'blob'])).toContain('PASS')
 })
 
 test('a Transcript page’s images are charged to it and released when it’s replaced, and the lens’s charge returns to 0 on close', async () => {
-  // 25 turns: page 1 holds the image, page 2 none.
+  // Page 1 holds the image and a tool call whose result is opened later; page 2 holds neither.
   const file = fixture('transcript-image-pages.jsonl', claudeSession([
     { role: 'user', content: [{ type: 'text', text: 'Memory fixture' }, claudeImage('image/png', base64(imagePng(256, 256, true)))] },
+    { role: 'assistant', content: [{ type: 'tool_use', id: 'later', name: 'read', input: {} }] },
+    { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'later', content: [{ type: 'text', text: 'Later result '.repeat(40) }] }] },
     ...Array.from({ length: 24 }, (_, i) => ({ role: i % 2 ? 'user' as const : 'assistant' as const, content: `Turn ${i + 1}` }))
   ]))
   const live = await launch({ hooks: true })
@@ -632,26 +637,36 @@ test('a Transcript page’s images are charged to it and released when it’s re
   // What the renderer holds reserved for its one document's view, and its live Blob URLs.
   const held = async () => (await debugStats(win)).surfaces!.bytes
   const blobs = () => win.evaluate(() => (window as unknown as { blobs: Set<string> }).blobs.size)
-  await expect(card.getByText('1–20 of 25', { exact: true })).toBeVisible({ timeout: 30_000 })
+  await expect(card.getByText(/^1–20 of /)).toBeVisible({ timeout: 30_000 })
   await expect.poll(() => win.evaluate(() => typeof (window as unknown as { release?: () => void }).release)).toBe('function')
   const page = await held()
+  // What the tool result's text adds to the page, opened while the image is held.
+  const tool = card.locator('.transcript-tool[data-tool-id="later"] > summary'), result = card.locator('.transcript-tool-result')
+  await tool.click()
+  await expect(result).toBeVisible()
+  const text = await held() - page
+  expect(text).toBeGreaterThan(0)
   await win.evaluate(() => (window as unknown as { release: () => void }).release())
   await expect(image).toBeVisible()
   // The image's allowance (RenderedImages' 5 × encoded + 2 × pixels) is its page's.
   const { encodedBytes, pixelBytes } = await win.evaluate(() => (window as unknown as { prepared: { encodedBytes: number; pixelBytes: number }[] }).prepared[0]!)
   expect(pixelBytes).toBe(4 * 256 * 256)
-  const loaded = await held()
-  expect(loaded - page).toBe(5 * encodedBytes + 2 * pixelBytes)
+  const loaded = page + 5 * encodedBytes + 2 * pixelBytes
+  expect(await held()).toBe(loaded + text)
   expect(await blobs()).toBe(1)
   // Page 2 replaces it: its image is gone and its Blob URL revoked. Back on page 1, it holds what it did, no more.
   await card.getByRole('button', { name: 'Next turns', exact: true }).click()
-  await expect(card.getByText('21–25 of 25', { exact: true })).toBeVisible()
+  await expect(card.getByText(/^21–/)).toBeVisible()
   await expect(card.locator('.transcript-image')).toHaveCount(0)
   expect(await blobs()).toBe(0)
   await card.getByRole('button', { name: 'Previous turns', exact: true }).click()
   await expect(image).toBeVisible()
   await expect.poll(held).toBe(loaded)
   expect(await blobs()).toBe(1)
+  // A later reserve on the same page keeps the image's charge: the page sets its share, and the image is in it.
+  await tool.click()
+  await expect(result).toBeVisible()
+  await expect.poll(held).toBe(loaded + text)
   // Rows closes the lens and revokes its Blob URL. A new Transcript holds exactly what the first did, so the closed
   // lens left nothing charged; closing that one gives back the same.
   await card.getByRole('tab', { name: 'Rows', exact: true }).click()
@@ -666,6 +681,50 @@ test('a Transcript page’s images are charged to it and released when it’s re
   await expect(card.locator('[data-lens="rows"]')).toBeVisible()
   await expect.poll(held).toBe(rows)
   expect(await blobs()).toBe(0)
+  await win.locator('.file-pill[data-selected] .file-tab-close').click()
+  await expectReleasedDocuments(win)
+  expect(live.pageErrors).toEqual([])
+})
+
+test('a page shown while the page it replaced still holds the core’s two image slots loads its images after them', async () => {
+  // Two images on page 1, two on page 2. Page 1's two prepares are answered and their replies held, so both of the
+  // document's core image slots stay taken until they're released.
+  const file = fixture('transcript-image-slots.jsonl', claudeSession([
+    { role: 'user', content: [{ type: 'text', text: 'Page one images' }, claudeImage('image/png', base64(imagePng(256, 256, true))), claudeImage('image/png', base64(imagePng(200, 100, true)))] },
+    ...Array.from({ length: 19 }, (_, i) => ({ role: i % 2 ? 'user' as const : 'assistant' as const, content: `Turn ${i + 1}` })),
+    { role: 'assistant', content: [{ type: 'text', text: 'Page two images' }, claudeImage('image/png', base64(imagePng(64, 64))), claudeImage('image/png', base64(imagePng(96, 32)))] }
+  ]))
+  const live = await launch({ hooks: true })
+  const { win } = live
+  await expect(win.getByRole('button', { name: /^Open file…/ })).toBeVisible()
+  await win.evaluate(() => {
+    const state = window as unknown as { typoseTest: { core: { call(method: string, params: object, signal?: AbortSignal): Promise<unknown> } }; prepares: number; held: (() => void)[] }
+    const core = state.typoseTest.core, call = core.call.bind(core)
+    state.prepares = 0
+    state.held = []
+    core.call = async (method, params, signal) => {
+      const prepare = method === 'prepareImage' ? ++state.prepares : 0
+      const reply = await call(method, params, signal)
+      if (prepare && prepare <= 2) await new Promise<void>(done => state.held.push(done))
+      return reply
+    }
+  })
+  const prepares = () => win.evaluate(() => (window as unknown as { prepares: number }).prepares)
+  await live.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), file)
+  const card = win.getByRole('region', { name: 'Reader card 1' })
+  await expect(card.getByText('1–20 of 21', { exact: true })).toBeVisible({ timeout: 30_000 })
+  await expect.poll(() => win.evaluate(() => (window as unknown as { held: unknown[] }).held.length)).toBe(2)
+  await card.getByRole('button', { name: 'Next turns', exact: true }).click()
+  await expect(card.getByText('21–21 of 21', { exact: true })).toBeVisible()
+  await expect(card.locator('.transcript-image')).toHaveCount(2)
+  // Two frames: page 2's images are laid out and seen by its observer, which starts a load it's free to.
+  await win.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))))
+  // Page 2 waits for page 1's loads, which hold both slots; then all of its images load, and none is refused.
+  expect(await prepares()).toBe(2)
+  await win.evaluate(() => (window as unknown as { held: (() => void)[] }).held.splice(0).forEach(release => release()))
+  await expect(card.locator('.transcript-image[data-loaded]')).toHaveCount(2)
+  expect(await shown(card)).toEqual([[true, 'Image', 64], [true, 'Image', 96]])
+  expect(await prepares()).toBe(4)
   await win.locator('.file-pill[data-selected] .file-tab-close').click()
   await expectReleasedDocuments(win)
   expect(live.pageErrors).toEqual([])

@@ -205,8 +205,9 @@ export interface Methods {
   openChild: { params: { surface?: SurfaceRef; entry: FolderRef; count: number; bytes: number }; result: Opened }
   /** Detach browsing authority; already-open documents and saved locations retain their exact scope. */
   removeRoot: { params: { root: string; session: number }; result: boolean }
-  /** Decode a local image from this generation's held Markdown, or an embedded one from the source span its build gave
-   *  (`data-embedded`). Ref carries no path, URL or payload. */
+  /** Decode a local image from this generation's held Markdown, or an embedded one from its source span in the
+   *  document's own bytes (Rendered's `data-embedded`, a Transcript's JSON string). Ref carries no path, URL or
+   *  payload. */
   prepareImage: { params: { doc: number; gen: number; src: string } | { doc: number; gen: number; span: { start: number; end: number } }; result: PreparedImage }
   /** A fixed aligned chunk of canonical PNG bytes, at most 256 KiB. No count. */
   imageChunk: { params: { doc: number; gen: number; ref: ImageRef; offset: number }; result: Uint8Array }

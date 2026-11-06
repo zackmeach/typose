@@ -469,7 +469,7 @@ pub struct ImagePrepared {
     pub pixel_bytes: u32,
 }
 
-/// A local image's decoded target, or an embedded image's source span in its Markdown (`md.rs`).
+/// A local image's decoded target, or an embedded image's source span in its document's own bytes.
 enum ImageSource {
     Local(String),
     Embedded(std::ops::Range<u64>),
