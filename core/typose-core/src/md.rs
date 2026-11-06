@@ -506,8 +506,10 @@ struct Events<'p, 'b, 'a, I> {
 /// writing it. Since only the write finds which URLs it carries as spans, a block over 64 KiB is now measured as it's
 /// written, before each event is processed (`Events::within_budget`). The write stops where the block, less its
 /// embedded URLs, passes 64 KiB, so no event past the limit is processed: `Capped` bounds the output, not each event's
-/// own work (`mapped_text`, an HTML block gathered whole, a link's URL). A reference definition inside the block that
-/// comes before every image using it counts until the first of them, so text in between can make the block big early.
+/// own work (`mapped_text`, an HTML block gathered whole, a link's URL). One exception: an image that isn't embedded
+/// goes through unmeasured at its start, so the writer streams its URL into `Capped`, bounded by `HTML_MAX`, before its
+/// end measures it. A reference definition inside the block that comes before every image using it counts until the
+/// first of them, so text in between can make the block big early.
 struct Budget {
     /// The block, as offsets into `Events::source`.
     block: Range<usize>,
