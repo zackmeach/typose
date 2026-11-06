@@ -1405,7 +1405,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         if (!isRecord(p.span)) throw new Refusal('InvalidParams', 'span must be { start, end }', 'span')
         const [start, end] = [int(p.span, 'start', 'span.start'), int(p.span, 'end', 'span.end')]
         if (start >= end) throw new Refusal('InvalidParams', 'span must end after it starts', 'span')
-        if (end - start > MAX_EMBEDDED) throw new Refusal('Refused', 'embedded image exceeds 8 MiB')
+        if (end - start > MAX_EMBEDDED) throw new Refusal('Refused', 'Embedded image exceeds 8 MiB')
         prepare = (doc, cancel) => doc.prepareEmbeddedImage(gen, start, end, cancel)
       } else {
         if (!boundedLink(p.src))

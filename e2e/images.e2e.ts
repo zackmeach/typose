@@ -82,7 +82,7 @@ test('inline data: images render from canonical blobs; SVG, malformed and over-c
   for (const [name, reason] of [
     ['WebP', 'WebP images are not supported yet'],
     ['SVG', 'SVG images are not supported'],
-    ['Malformed', 'embedded image is not strict base64'],
+    ['Malformed', 'Embedded image is not strict base64'],
     ['Over cap', 'PNG dimensions exceed the image limit']
   ]) await expect(win.locator('.tp-img').filter({ hasText: name })).toHaveText(`${name} · ${reason}`)
   // Each placeholder names its URL's source bytes; no URL or payload reaches the DOM.

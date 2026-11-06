@@ -20,8 +20,8 @@ pub const CHUNK: usize = 256 << 10;
 /// The most source bytes an embedded image's span may cover: `MAX_SOURCE` as padded base64, plus 64 bytes for a
 /// `data:` header and a JSON string's quotes.
 pub const MAX_EMBEDDED: u64 = (MAX_SOURCE as u64).div_ceil(3) * 4 + 64;
-const TOO_BIG: &str = "embedded image exceeds 8 MiB";
-const NOT_BASE64: &str = "embedded image is not strict base64";
+const TOO_BIG: &str = "Embedded image exceeds 8 MiB";
+const NOT_BASE64: &str = "Embedded image is not strict base64";
 const STATE_BYTES: u64 = 4096; // fixed two-slot state, Mutex, Arc and allocator overhead
 static CODEC_BUSY: AtomicBool = AtomicBool::new(false);
 
@@ -159,19 +159,19 @@ fn base64_payload(text: &[u8]) -> Result<&[u8], DocError> {
     if !text.get(..5).is_some_and(|scheme| scheme.eq_ignore_ascii_case(b"data:")) {
         return Ok(text);
     }
-    let comma = memchr::memchr(b',', &text[..text.len().min(64)]).ok_or_else(|| refused("malformed data: URL"))?;
+    let comma = memchr::memchr(b',', &text[..text.len().min(64)]).ok_or_else(|| refused("Malformed data: URL"))?;
     let header = &text[5..comma];
     let base64 = header.len().checked_sub(7).filter(|&at| header[at..].eq_ignore_ascii_case(b";base64"));
     let Some(mime) = base64.map(|at| header[..at].to_ascii_lowercase()) else {
-        return Err(refused("data: images must be base64"));
+        return Err(refused("A data: image must be base64"));
     };
     match mime.as_slice() {
         b"image/png" | b"image/jpeg" | b"image/gif" | b"image/webp" => Ok(&text[comma + 1..]),
         b"image/svg+xml" => Err(refused("SVG images are not supported")),
         other if !other.is_empty() && other.iter().all(u8::is_ascii_graphic) => {
-            Err(DocError::Refused(format!("{} images are not supported", String::from_utf8_lossy(other))))
+            Err(DocError::Refused(format!("Unsupported image type {}", String::from_utf8_lossy(other))))
         }
-        _ => Err(refused("unsupported data: image type")),
+        _ => Err(refused("Unsupported data: image type")),
     }
 }
 
@@ -266,14 +266,14 @@ impl Embedded {
             } else {
                 encoding.decode_without_bom_handling_and_without_replacement(&bytes)
             };
-            let text = text.ok_or_else(|| refused("embedded image is not text"))?;
+            let text = text.ok_or_else(|| refused("Embedded image is not text"))?;
             let unescaped;
             let text = match text.as_bytes() {
                 [b'"', inner @ .., b'"'] if inner.iter().rev().take_while(|&&b| b == b'\\').count() % 2 == 0 => {
                     unescaped = crate::json::unescape(text.as_bytes());
                     &unescaped[..]
                 }
-                [b'"', ..] => return Err(refused("embedded image is not a JSON string")),
+                [b'"', ..] => return Err(refused("Embedded image is not a JSON string")),
                 text => text,
             };
             strict_base64(base64_payload(text)?, cancel)?
@@ -298,7 +298,7 @@ pub fn prepare_embedded(
     cancel: &AtomicBool,
 ) -> Result<CanonicalImage, DocError> {
     if span.start >= span.end {
-        return Err(DocError::Invalid("image span must be non-empty".into()));
+        return Err(DocError::Invalid("Image span must be non-empty".into()));
     }
     if span.end - span.start > MAX_EMBEDDED {
         return Err(refused(TOO_BIG));
@@ -307,7 +307,7 @@ pub fn prepare_embedded(
         return Err(DocError::Stale { current: source.generation(), asked: generation });
     }
     if span.end > source.len() {
-        return Err(DocError::Invalid("image span is outside the document".into()));
+        return Err(DocError::Invalid("Image span is outside the document".into()));
     }
     let permit = CodecPermit::take(cancel)?;
     let payload = Embedded::read(source, encoding, generation, span, cancel)?;
@@ -681,11 +681,11 @@ mod tests {
         for (text, why) in [
             ("data:image/svg+xml;base64,PHN2Zy8+", "SVG images are not supported"),
             ("data:IMAGE/SVG+XML;base64,PHN2Zy8+", "SVG images are not supported"),
-            ("data:text/html;base64,PGI+", "text/html images are not supported"),
-            ("data:image/bmp;base64,Qk0=", "image/bmp images are not supported"),
-            ("data:;base64,TWFu", "unsupported data: image type"),
-            ("data:image/png,TWFu", "data: images must be base64"),
-            ("data:image/png;base64TWFu", "malformed data: URL"),
+            ("data:text/html;base64,PGI+", "Unsupported image type text/html"),
+            ("data:image/bmp;base64,Qk0=", "Unsupported image type image/bmp"),
+            ("data:;base64,TWFu", "Unsupported data: image type"),
+            ("data:image/png,TWFu", "A data: image must be base64"),
+            ("data:image/png;base64TWFu", "Malformed data: URL"),
         ] {
             assert!(matches!(base64_payload(text.as_bytes()), Err(DocError::Refused(got)) if got == why), "{text}");
         }
@@ -719,11 +719,11 @@ mod tests {
                 format!("data:image/svg+xml;base64,{}", b64(b"<svg/>")),
                 "SVG images are not supported",
             ),
-            ("embedded-html.txt", format!("data:text/html;base64,{png}"), "text/html images are not supported"),
+            ("embedded-html.txt", format!("data:text/html;base64,{png}"), "Unsupported image type text/html"),
             ("embedded-space.txt", format!("{png} "), NOT_BASE64),
             ("embedded-line.txt", format!("{}\r\n{}", &png[..8], &png[8..]), NOT_BASE64),
-            ("embedded-open.txt", format!("\"{png}"), "embedded image is not a JSON string"),
-            ("embedded-escaped.txt", format!("\"{png}\\\""), "embedded image is not a JSON string"),
+            ("embedded-open.txt", format!("\"{png}"), "Embedded image is not a JSON string"),
+            ("embedded-escaped.txt", format!("\"{png}\\\""), "Embedded image is not a JSON string"),
             ("embedded-nested.txt", format!("\"\\\"{png}\\\"\""), NOT_BASE64),
             ("embedded-text.txt", format!("data:image/png;base64,{}", b64(b"hello")), "unsupported image format"),
             (
@@ -736,7 +736,7 @@ mod tests {
             assert_eq!(refusal(embedded(&doc, 0..text.len() as u64)), why, "{name}");
         }
         let (_path, doc) = open("embedded-latin.txt", b"\xff\xfe");
-        assert_eq!(refusal(embedded(&doc, 0..2)), "embedded image is not text");
+        assert_eq!(refusal(embedded(&doc, 0..2)), "Embedded image is not text");
     }
 
     #[test]

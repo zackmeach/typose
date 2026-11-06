@@ -501,7 +501,7 @@ describe('embedded image resources (Z43)', () => {
 
   it('refuses a span past the embedded bound, and admits one at it', async () => {
     expect(await call('prepareImage', { doc: 1, gen: 1, span: { start: 7, end: 8 + MAX_EMBEDDED } }))
-      .toMatchObject({ error: { code: 'Refused', message: 'embedded image exceeds 8 MiB' } })
+      .toMatchObject({ error: { code: 'Refused', message: 'Embedded image exceeds 8 MiB' } })
     expect(prepareEmbeddedImage).not.toHaveBeenCalled()
     expect(await call('prepareImage', { doc: 1, gen: 1, span: { start: 7, end: 7 + MAX_EMBEDDED } })).toHaveProperty('result')
     expect(prepareEmbeddedImage).toHaveBeenCalledWith(1, 7, 7 + MAX_EMBEDDED, expect.anything())
