@@ -4,8 +4,8 @@
 //! **Each block, in three steps.** pulldown-cmark's events go to its own HTML writer (`html::write_html_fmt`), rewritten
 //! on the way (`Events`): raw `Html` and `InlineHtml` through `sanitize::escape_raw`, links to `<a data-href>`, and
 //! footnotes numbered across the file. Then `sanitize` cleans what it wrote, until a pass changes nothing (`clean`). A
-//! block over 64 KiB of source, nested deeper than `MAX_DEPTH` or writing more than `HTML_MAX` is never rendered: it's a
-//! note (brief §5.2's fallback).
+//! block over 64 KiB of source, not counting the URLs of the embedded images it carries as spans (`Budget`), nested
+//! deeper than `MAX_DEPTH` or writing more than `HTML_MAX` is never rendered: it's a note (brief §5.2's fallback).
 //!
 //! **Memory (plan C1, Z34 🔒).** The read and its decode are reserved before the read, and the parse's temporaries
 //! before the parse (`parse_temp`). The items grow their own reservation as each is made. A refusal ends the build with
@@ -77,7 +77,7 @@ pub fn is_markdown(path: &Path) -> bool {
 /// Why a block shows as a note, with "Show in Raw at line N", instead of its HTML (brief §5.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Note {
-    /// Over 64 KiB of source (`PIECE_BYTES`).
+    /// Over 64 KiB of source (`PIECE_BYTES`), less the URLs of its embedded images (`Budget`).
     Big,
     /// Nested deeper than `MAX_DEPTH`.
     Deep,
@@ -272,7 +272,7 @@ fn source_len(text: &str, encoding: &'static Encoding) -> usize {
 
 /// Plan C1: the read's own temporaries, reserved before it: the file's bytes, its decode (`max_utf8_buffer_length`,
 /// `None` past `usize`), a chunk read on its way into the cache, and the identity check's copies of the path.
-fn read_temp(len: u64, decoded: Option<usize>) -> u64 {
+pub(crate) fn read_temp(len: u64, decoded: Option<usize>) -> u64 {
     let decoded = decoded.map_or(u64::MAX / 2, |d| d as u64);
     len + decoded + (CHUNK + 16 * MAX_PATH_BYTES + (64 << 10)) as u64
 }
@@ -493,6 +493,35 @@ struct Events<'p, 'b, 'a, I> {
     literal_html: bool,
     /// A top-level heading's text, for its slug.
     heading: Option<String>,
+    /// The file's, to measure its source (`source_len`).
+    encoding: &'static Encoding,
+    /// Only for a block over 64 KiB of source, which may still render if embedded image URLs make up the excess.
+    budget: Option<Budget>,
+    /// The block measured over 64 KiB without its embedded URLs (`within_budget`): it's `Note::Big`.
+    big: bool,
+}
+
+/// D17 (spec §3.4) bounds what a mounted block holds, so a block over 64 KiB of source is a note. An embedded image's
+/// URL never reaches the DOM (`Events::embedded`), so its bytes don't count. The old rule judged the whole block before
+/// writing it. Since only the write finds which URLs it carries as spans, a block over 64 KiB is now measured as it's
+/// written, before each event is processed (`Events::within_budget`). The write stops where the block, less its
+/// embedded URLs, passes 64 KiB, so no event past the limit is processed: `Capped` bounds the output, not each event's
+/// own work (`mapped_text`, an HTML block gathered whole, a link's URL). Two exceptions go through unmeasured at their
+/// start, bounded only by `Capped` (`HTML_MAX`): an image that isn't embedded, whose URL the writer streams before its
+/// end measures it, and a fenced code block, whose info string the writer puts in its `class`. A reference definition
+/// inside the block that comes before every image using it counts until the first of them, so text in between can make
+/// the block big early.
+struct Budget {
+    /// The block, as offsets into `Events::source`.
+    block: Range<usize>,
+    /// The source measured, in bytes (`source_len`), up to offset `to`, less the embedded URLs that end by then.
+    to: usize,
+    measured: usize,
+    /// Every embedded URL inside the block, counted once, in bytes.
+    excluded: usize,
+    /// The definitions' URLs among them, so each counts once; and those not yet measured, past `to`.
+    urls: Vec<Range<usize>>,
+    ahead: Vec<Range<usize>>,
 }
 
 fn escaped_text(text: &str) -> String {
@@ -643,7 +672,104 @@ impl<'a, I: Iterator<Item = (Event<'a>, Range<usize>)>> Events<'_, '_, 'a, I> {
         Ok(())
     }
 
+    /// Where an inline or reference image's `data:` URL sits in `source`, when pulldown-cmark kept the URL as a slice of
+    /// the source (it had no escape or entity to decode): its source bytes are exactly what the core reads back. Never
+    /// in a transcript's fragment, whose bytes aren't the document's.
+    fn embedded(&self, link_type: LinkType, url: &str) -> Option<Range<usize>> {
+        let image =
+            matches!(link_type, LinkType::Inline | LinkType::Reference | LinkType::Collapsed | LinkType::Shortcut);
+        if self.literal_html || !image || !url.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("data:")) {
+            return None;
+        }
+        let at = (url.as_ptr() as usize).checked_sub(self.source.as_ptr() as usize)?;
+        let end = at.checked_add(url.len()).filter(|&end| end <= self.source.len())?;
+        Some(at..end)
+    }
+
+    /// Whether the block, measured to where `event` ends, stays within 64 KiB without its embedded URLs (`Budget`).
+    /// A container's start isn't measured, since it processes nothing of its own but a fenced code block's info string,
+    /// which `Capped` bounds (`Budget`); a link's is, to where it starts plus its URL, which it processes. An embedded
+    /// image is measured whole, its URL excluded first: its alt text is processed with it.
+    fn within_budget(&mut self, event: &Event, range: &Range<usize>) -> bool {
+        if self.budget.is_none() {
+            return true;
+        }
+        // Inside alt text an image is only text, never a span (`next`).
+        let embedded = match event {
+            Event::Start(Tag::Image { link_type, dest_url, .. }) if self.alt.is_none() => {
+                self.embedded(*link_type, dest_url)
+            }
+            _ => None,
+        };
+        let (to, extra) = match event {
+            Event::Start(Tag::Image { .. }) if embedded.is_none() => return true, // its end measures its URL
+            Event::Start(Tag::Image { .. }) => (range.end, 0),
+            Event::Start(Tag::Link { dest_url, .. }) => (range.start, source_len(dest_url, self.encoding)),
+            Event::Start(_) => return true,
+            _ => (range.end, 0),
+        };
+        let (source, encoding) = (self.source, self.encoding);
+        let len = |r: &Range<usize>| source_len(&source[r.clone()], encoding);
+        let budget = self.budget.as_mut().expect("checked above");
+        if let Some(url) = embedded.filter(|u| budget.block.start <= u.start && u.end <= budget.block.end) {
+            // An inline URL sits inside its own image, once. A reference's definition may serve several: it counts once.
+            let reference = url.start < range.start || url.end > range.end;
+            if !reference || !budget.urls.contains(&url) {
+                budget.excluded += len(&url);
+                if url.end <= budget.to {
+                    budget.measured -= len(&url);
+                } else {
+                    budget.ahead.push(url.clone());
+                }
+                if reference {
+                    budget.urls.push(url);
+                }
+            }
+        }
+        if to > budget.to {
+            budget.measured += len(&(budget.to..to));
+            budget.to = to;
+            let mut passed = 0;
+            budget.ahead.retain(|url| {
+                let ahead = url.end > to;
+                if !ahead {
+                    passed += len(url);
+                }
+                ahead
+            });
+            budget.measured -= passed;
+        }
+        budget.measured + extra <= PIECE_BYTES
+    }
+
+    /// An embedded image's placeholder, through its end: the URL's source span, never the URL, and the alt text
+    /// pulldown-cmark's writer gives any image (its `alt` value, written for an image without a source).
+    fn embedded_image(&mut self, link_type: LinkType, (start, end): (u64, u64)) -> Result<Event<'a>, DocError> {
+        let level = self.depth;
+        let empty = || pulldown_cmark::CowStr::Borrowed("");
+        let mut image = vec![Event::Start(Tag::Image { link_type, dest_url: empty(), title: empty(), id: empty() })];
+        while self.depth >= level {
+            let Some((event, _)) = self.first.take().or_else(|| self.parser.next()) else { break };
+            self.step(&event)?;
+            if self.depth > MAX_DEPTH {
+                self.deep = true;
+                break;
+            }
+            image.push(event);
+        }
+        let mut img = String::new();
+        html::push_html(&mut img, image.into_iter());
+        let alt = img.strip_prefix("<img src=\"\" alt=\"").and_then(|s| s.strip_suffix("\" />")).unwrap_or_default();
+        let span = format!("<span class=\"tp-img\" data-embedded=\"{start},{end}\" data-alt=\"{alt}\"></span>");
+        Ok(Event::InlineHtml(span.into()))
+    }
+
     fn rewrite(&mut self, event: Event<'a>, range: Range<usize>) -> Result<Event<'a>, DocError> {
+        if let Event::Start(Tag::Image { link_type, dest_url, .. }) = &event
+            && let Some(url) = self.embedded(*link_type, dest_url)
+        {
+            return self.embedded_image(*link_type, (self.source_bytes[url.start], self.source_bytes[url.end]));
+        }
         match &event {
             Event::Start(Tag::HtmlBlock) => self.raw = Some(String::new()),
             Event::Start(Tag::Image { .. }) => self.alt = Some(self.depth),
@@ -718,7 +844,7 @@ impl<'a, I: Iterator<Item = (Event<'a>, Range<usize>)>> Iterator for Events<'_, 
             if let Some(e) = self.pending.take() {
                 return Some(e);
             }
-            if self.done || self.deep || self.stop.is_some() {
+            if self.done || self.deep || self.big || self.stop.is_some() {
                 return None;
             }
             let (event, range) = self.first.take().or_else(|| self.parser.next())?;
@@ -728,6 +854,10 @@ impl<'a, I: Iterator<Item = (Event<'a>, Range<usize>)>> Iterator for Events<'_, 
             }
             if self.depth > MAX_DEPTH {
                 self.deep = true;
+                return None;
+            }
+            if !self.within_budget(&event, &range) {
+                self.big = true;
                 return None;
             }
             if let Some(level) = self.alt {
@@ -884,6 +1014,16 @@ fn blocks_mapped(
             Event::Start(Tag::FootnoteDefinition(label)) => Some(Box::from(&**label)),
             _ => None,
         };
+        let len = source_len(&text[span.clone()], encoding);
+        let budget = (len > PIECE_BYTES).then(|| Budget {
+            block: r.clone(),
+            to: r.start,
+            measured: 0,
+            excluded: 0,
+            urls: Vec::new(),
+            ahead: Vec::new(),
+        });
+        let numbered = build.numbers.len() as u32;
         let mut events = Events {
             parser: &mut parser,
             build: &mut build,
@@ -899,22 +1039,43 @@ fn blocks_mapped(
             raw: None,
             literal_html,
             heading: None,
+            encoding,
+            budget,
+            big: false,
         };
         buf.clear();
-        let written = if source_len(&text[span.clone()], encoding) > PIECE_BYTES {
+        let wrote = html::write_html_fmt(Capped(&mut buf), &mut events);
+        // Big is judged after the write, which it may have stopped (`Budget`); as before, ahead of Deep and Large. A
+        // write stopped early by those still leaves the block whole, less the embedded URLs it did find.
+        let big = events.budget.as_ref().is_some_and(|b| events.big || len - b.excluded > PIECE_BYTES);
+        let written = if big {
             Err(Note::Big)
+        } else if events.deep {
+            Err(Note::Deep)
+        } else if wrote.is_err() && events.stop.is_none() {
+            Err(Note::Large)
         } else {
-            let wrote = html::write_html_fmt(Capped(&mut buf), &mut events);
-            if events.deep {
-                Err(Note::Deep)
-            } else if wrote.is_err() && events.stop.is_none() {
-                Err(Note::Large)
-            } else {
-                Ok(()) // or stopped, which `drain` returns
-            }
+            Ok(()) // or stopped, which `drain` returns
         };
         events.drain()?;
         let heading = events.heading.take();
+        if big {
+            // A note's footnote references number nothing, as when a big block was never written, and their charge
+            // goes with them: what `number` grew for each. The table is rebuilt, not shrunk in place, so the slots
+            // `retain` deleted can't make it grow early past what `map_entry` charges for the entries left.
+            let mut freed = 0;
+            build.numbers.retain(|label, n| {
+                let keep = *n <= numbered;
+                if !keep {
+                    freed += map_entry::<String, u32>() + label.len() as u64;
+                }
+                keep
+            });
+            if freed > 0 {
+                build.numbers = build.numbers.drain().collect();
+                build.charge.shrink(freed);
+            }
+        }
         let slug = match (&heading, &written) {
             (Some(text), Ok(())) => Some(build.slug(text).map_err(DocError::Memory)?),
             _ => None,
@@ -1325,6 +1486,30 @@ mod tests {
         assert_eq!(Note::Big.text(), "This block is over 64 KiB");
     }
 
+    /// Z43: an embedded image's URL never reaches the DOM, so it's left out of its block's 64 KiB (`Budget`). Everything
+    /// else still counts: the text beside it, a URL that falls back to "Unsupported image target", and a definition's
+    /// URL, once however many images use it. A block that turns out big numbers no footnote.
+    #[test]
+    fn only_an_embedded_images_url_is_left_out_of_a_blocks_64_kib() {
+        let url = |len: usize| format!("data:image/png;base64,{}", "A".repeat(len));
+        let (large, over) = (url(400 << 10), "x".repeat((64 << 10) + 1));
+        let note = |md: &str| render(md).items()[0].note;
+        let spans = |md: &str| render(md).items()[0].html.matches("data-embedded=").count();
+        let near = "x".repeat(63 << 10);
+        assert_eq!((note(&format!("{near} ![l]({large})")), spans(&format!("{near} ![l]({large})"))), (None, 1));
+        assert_eq!(note(&format!("{over} ![s]({})", url(8))), Some(Note::Big));
+        assert_eq!(note(&format!("![s]({}) {over}", url(8))), Some(Note::Big));
+        assert_eq!(note(&format!("![e]({}\\+)", url(70 << 10))), Some(Note::Big)); // an escape: it falls back
+        assert_eq!(note(&format!("<img src=\"{}\">", url(70 << 10))), Some(Note::Big));
+        let shared = format!("- ![a][r] ![b][r]\n\n  [r]: {large}\n");
+        assert_eq!((note(&shared), spans(&shared)), (None, 2));
+        assert_eq!(note(&format!("{shared}\n  {over}\n")), Some(Note::Big));
+        // A footnote referenced before the block measures big takes no number: the next one is still 1.
+        let r = render(&format!("[^a] {over}\n\nx[^b]\n\n[^b]: B\n"));
+        assert_eq!(r.items()[0].note, Some(Note::Big));
+        assert!(r.items()[1].html.contains(">1</a></sup>"), "{}", r.items()[1].html);
+    }
+
     #[test]
     fn final_html_nodes_include_empty_elements_and_single_entity_text_runs() {
         for (html, nodes) in [
@@ -1364,6 +1549,44 @@ mod tests {
                 assert_eq!((r.units(), r.html_bytes(), r.nodes()), (0, 0, 3));
             }
         }
+    }
+
+    /// Z43: an inline or reference `data:` image carries its URL's source span, never the URL or its payload. A URL
+    /// pulldown-cmark had to decode has no exact span, so it keeps the existing refusal, as do raw HTML and a
+    /// transcript's fragment, whose bytes aren't the document's.
+    #[test]
+    fn a_data_image_carries_its_urls_source_span_and_never_its_payload() {
+        let payload = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB+/==";
+        let url = format!("data:image/PNG;base64,{payload}");
+        for md in [
+            format!("é ![alt *b*]({url} \"t\")"),
+            format!("é ![alt *b*](<{url}>)"),
+            format!("é ![alt *b*][r]\n\n[r]: {url}"),
+            format!("é ![alt *b*][]\n\n[alt *b*]: <{url}> \"t\""),
+            format!("é ![alt *b*]\n\n[ALT *B*]: {url}"),
+        ] {
+            let r = render(&md);
+            let html: String = r.items().iter().map(|i| i.html.to_string()).collect();
+            assert!(!html.contains(payload) && !html.contains("base64"), "{html}");
+            let at = md.find(&url).unwrap();
+            let span = format!("data-embedded=\"{at},{}\"", at + url.len());
+            let want = format!("<p>é <span class=\"tp-img\" {span} data-alt=\"alt b\"></span></p>\n");
+            assert_eq!(htmls(&md), [want], "{md:?}");
+            check_items(&r).unwrap();
+        }
+        for md in [
+            format!("![e](data:image/png;base64,ab\\+c{payload})"),
+            format!("![e](data:image/png;base64,ab&#43;c{payload})"),
+            format!("<img src=\"{url}\" alt=\"raw\">"),
+            "<img data-embedded=\"0,4\" src=\"x.png\">".into(),
+        ] {
+            let html = htmls(&md).concat();
+            assert!(html.contains("tp-img") && !html.contains("data-embedded") && !html.contains("base64"), "{html}");
+        }
+        let raw_span = "<span class=\"tp-img\" data-embedded=\"0,4\">s</span>";
+        assert_eq!(htmls(raw_span), [format!("<p>{}</p>\n", raw_span.replace('<', "&lt;").replace('>', "&gt;"))]);
+        let html = fragment_htmls(&format!("![f]({url})")).concat();
+        assert_eq!(html, "<p><span class=\"tp-img\" data-alt=\"f\"></span></p>\n");
     }
 
     #[test]
@@ -1480,12 +1703,13 @@ mod tests {
     /// one change: every link is `<a href="#">`, and no other `href` exists. Only the tags below, and on each only its
     /// attributes: no `on*`, no `style`, no resource-loading attribute, no `link`, `meta`, `base`, `style`, `script`,
     /// `iframe`, `object`, `svg`, `math` or `img` element. A `data-href` is never javascript, vbscript or data; a
-    /// `data-src` is http, https or a relative path that isn't a network path. Sanitizing again changes nothing.
+    /// `data-src` is http, https or a relative path that isn't a network path, and a `data-embedded` two runs of digits
+    /// (`start,end`). Sanitizing again changes nothing.
     fn check_output(html: &str) -> Result<(), String> {
         const TAGS: &str = "b i em strong code kbd sub sup br hr details summary a table thead tbody tr th td p h1 h2 h3 \
                             h4 h5 h6 blockquote ul ol li pre del span div input";
         const FORBIDDEN: &str = "link meta base style script iframe object svg math img";
-        const ATTRS: [(&str, &str); 14] = [
+        const ATTRS: [(&str, &str); 15] = [
             ("a", "href"),
             ("a", "data-href"),
             ("ol", "start"),
@@ -1497,6 +1721,7 @@ mod tests {
             ("span", "data-alt"),
             ("span", "data-source-map"),
             ("span", "data-display"),
+            ("span", "data-embedded"),
             ("blockquote", "data-callout"),
             ("pre", "data-frontmatter"),
             ("code", "class"),
@@ -1543,6 +1768,9 @@ mod tests {
                     }
                     "data-source-map" => !value.bytes().all(|b| b.is_ascii_digit() || b"LSRp*:,".contains(&b)),
                     "data-display" | "data-frontmatter" => !matches!(value.as_str(), "0" | "1"),
+                    "data-embedded" => !value.split_once(',').is_some_and(|(start, end)| {
+                        [start, end].iter().all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+                    }),
                     _ => false,
                 };
                 if bad {
@@ -1817,6 +2045,7 @@ mod tests {
             ";",
             "javascript:",
             "data:",
+            "![e](data:image/png;base64,AAAA)",
             "//evil/",
             "\\\\evil\\",
             "=",

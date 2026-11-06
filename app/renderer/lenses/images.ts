@@ -11,6 +11,8 @@ const REASON_UNITS = 256
 interface ImageSlot {
   node: HTMLElement
   src: string
+  /** An embedded image's source span (`data-embedded`), which the core reads instead of a URL. */
+  span?: { start: number; end: number }
   alt: string
   near: boolean
   status: 'waiting' | 'loading' | 'shown' | 'refused'
@@ -50,9 +52,12 @@ export class RenderedImages {
   add(node: HTMLElement): void {
     const src = node.getAttribute('data-src') ?? ''
     const alt = node.getAttribute('data-alt') ?? ''
-    const slot: ImageSlot = { node, src, alt, near: false, status: 'waiting', reserved: 0 }
+    const [start, end] = (/^(\d+),(\d+)$/.exec(node.getAttribute('data-embedded') ?? '') ?? []).slice(1).map(Number)
+    const span = Number.isSafeInteger(start) && Number.isSafeInteger(end) ? { start, end } : undefined
+    const slot: ImageSlot = { node, src, span, alt, near: false, status: 'waiting', reserved: 0 }
     this.slots.set(node, slot)
     this.label(slot, 'Image not loaded')
+    if (span) return this.observer.observe(node)
     if (!src) return this.refuse(slot, 'Unsupported image target')
     if (/^https?:/i.test(src.trim())) return this.refuse(slot, 'Remote image not loaded')
     this.observer.observe(node)
@@ -128,7 +133,8 @@ export class RenderedImages {
   private async load(slot: ImageSlot, abort: AbortController): Promise<void> {
     let ref: ImageRef | undefined
     try {
-      const image = await this.core.call('prepareImage', { doc: this.opened.doc, gen: this.opened.gen, src: slot.src }, abort.signal)
+      const { doc, gen } = this.opened
+      const image = await this.core.call('prepareImage', slot.span ? { doc, gen, span: slot.span } : { doc, gen, src: slot.src }, abort.signal)
       ref = image.ref
       if (this.stopped) return
       if (!this.valid(image)) throw new Error('Invalid image resource')

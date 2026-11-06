@@ -21,7 +21,7 @@ use typose_core::budget::{self, Reservation, Work};
 use typose_core::doc::{DocError, STRUCT_BYTES};
 use typose_core::images::{self, ImageError};
 use typose_core::jsonl;
-use typose_core::md::MAX_SOURCE;
+use typose_core::md::{MAX_SOURCE, Note};
 use typose_core::pages::MAX_ITEMS;
 use typose_core::raw::Raw;
 use typose_core::store::CHUNK;
@@ -832,6 +832,125 @@ fn image_checks() {
     println!("WebP explicit refusal: zero codec/resource allocations or charges");
 }
 
+/// Z43: an embedded image's read, its decode and a JSON string's unescaped copy stay within their charges, and the
+/// ledger and heap return to where they stood after success, a refusal after the read, and a cancel inside the codec.
+/// Each document is opened and read once first, so its cache is already filled (that's the document's to keep). The
+/// image is 3 MiB of noise, so its payload outgrows the read's fixed allowances: a charge without its payload term fails
+/// here, in the JSON case.
+fn embedded_checks(dir: &Path) {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut state = 0x9e37_79b9_u32;
+    let noise: Vec<u8> = (0..3 << 20)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect();
+    let mut png = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png, 1024, 1024);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_deflate_compression(png::DeflateCompression::NoCompression);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&noise).unwrap();
+        writer.finish().unwrap();
+    }
+    let mut base64 = String::new();
+    for c in png.chunks(3) {
+        let v = c.iter().fold(0u32, |v, &b| v << 8 | u32::from(b)) << (8 * (3 - c.len()));
+        for i in 0..4 {
+            base64.push(if i <= c.len() { ALPHABET[(v >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    let url = format!("data:image/png;base64,{base64}");
+    let json = format!("\"data:image\\/png;base64,{}\"", base64.replace('/', "\\/"));
+    let bad = format!("{}*", &url[..url.len() - 1]);
+    for (name, text, expected, cancel) in [
+        ("embedded data: URL", &url, ImageExpected::Ready, false),
+        ("embedded JSON string", &json, ImageExpected::Ready, false),
+        ("embedded bad base64", &bad, ImageExpected::Refused, false),
+        ("embedded cancel in codec", &url, ImageExpected::Cancelled, true),
+    ] {
+        let path = dir.join("embedded.txt");
+        fs::write(&path, format!("![x]({text})\n")).unwrap();
+        let raw = Raw::open(&path).unwrap();
+        let span = 5..5 + text.len() as u64;
+        drop(raw.embedded_image(1, span.clone(), &AtomicBool::new(false)));
+        let before = budget::totals().used;
+        BASELINE.store(LIVE.load(SeqCst), SeqCst);
+        RESERVED_BASELINE.store(budget::in_use().0, SeqCst);
+        CHECKS.store(0, SeqCst);
+        SKIPPED.store(0, SeqCst);
+        OVER.store(0, SeqCst);
+        for slot in &WORST {
+            slot.store(0, SeqCst);
+        }
+        IMAGE_CANCEL.store(false, SeqCst);
+        CANCEL_IMAGE_OUTPUT.store(cancel, SeqCst);
+        ARMED.store(true, SeqCst);
+        let result = raw.embedded_image(1, span, &IMAGE_CANCEL);
+        let expected_result = matches!(
+            (&result, expected),
+            (Ok(_), ImageExpected::Ready)
+                | (Err(DocError::Refused(_)), ImageExpected::Refused)
+                | (Err(DocError::Cancelled), ImageExpected::Cancelled)
+        );
+        // Only the canonical resource outlives the call: the input, its copies and the payload are gone with it.
+        let canonical_only = match &result {
+            Ok(image) => {
+                budget::totals().used - before == image.charged()
+                    && LIVE.load(SeqCst) - BASELINE.load(SeqCst) == image.charged()
+            }
+            Err(_) => true,
+        };
+        drop(result);
+        ARMED.store(false, SeqCst);
+        CANCEL_IMAGE_OUTPUT.store(false, SeqCst);
+        RESERVED_BASELINE.store(0, SeqCst);
+        let (checks, skipped, over) = (CHECKS.load(SeqCst), SKIPPED.load(SeqCst), OVER.load(SeqCst));
+        let leaked = LIVE.load(SeqCst) as i64 - BASELINE.load(SeqCst) as i64;
+        let [live, reserved, size] = WORST.each_ref().map(|w| w.load(SeqCst));
+        assert!(expected_result, "{name}: unexpected result");
+        assert!(canonical_only, "{name}: the input's charge or heap outlived the decode");
+        assert_eq!(budget::totals().used, before, "{name}: reservations survived completion/drop");
+        assert_eq!(leaked, 0, "{name}: heap survived completion/drop");
+        assert!(checks > 0 && skipped == 0, "{name}: {checks} checks, {skipped} skipped");
+        assert_eq!(over, 0, "{name}: {live} live > {reserved} reserved at allocation {size}");
+        drop(raw);
+        println!("{name:>30}: {checks} checked, 0 violations, heap/ledger restored");
+    }
+}
+
+/// A big block's footnote numbers are given back, and their charge with them, so its charge after the block is what it
+/// was before. Two builds of files the same length, in the same blocks: 40 big blocks that reference 2,000 footnotes,
+/// defined at the end. In the first, a small block numbers them first, so the big blocks number nothing. In the
+/// second, the small block is plain text, so each big block numbers the footnotes itself, then gives them back. The
+/// second's peak may not pass the first's: a charge left behind would add up, about 340 KB a block.
+fn footnote_checks(dir: &Path) {
+    let refs: String = (0..2000).map(|i| format!("[^f{i}]")).collect();
+    let defs: String = (0..2000).map(|i| format!("[^f{i}]: d\n\n")).collect(); // a reference needs one
+    let big = format!("{}\n\n", refs.repeat(5)); // over 64 KiB: a note, written until it's judged one
+    assert!(refs.len() < 64 << 10 && big.len() > 64 << 10);
+    let mut peaks = Vec::new();
+    for (name, first) in [("numbered first", refs.clone()), ("numbered by each big block", "x".repeat(refs.len()))] {
+        let path = dir.join("footnotes.md");
+        fs::write(&path, format!("{first}\n\n{}{defs}", big.repeat(40))).unwrap();
+        let raw = Raw::open(&path).unwrap();
+        let before = budget::totals().used;
+        budget::reset_high();
+        let built = raw.render(1).unwrap();
+        assert_eq!(built.items().iter().filter(|i| i.note == Some(Note::Big)).count(), 40, "{name}");
+        peaks.push(budget::totals().high - before);
+        drop(built);
+        drop(raw);
+        println!("{name:>30}: build peak {} bytes", peaks.last().unwrap());
+    }
+    assert!(peaks[1] <= peaks[0] + (1 << 20), "big blocks left their footnotes charged: {peaks:?}");
+}
+
 fn main() {
     assert!(size_of::<Raw>() as u64 + 16 <= STRUCT_BYTES, "a Raw ({} bytes) outgrew its metadata", size_of::<Raw>());
     let dir = std::env::temp_dir().join(format!("typose-ledger-{}", std::process::id()));
@@ -1041,5 +1160,7 @@ fn main() {
     );
     assert!(checks > 10_000 && skipped * 100 < checks, "too few checks ran: the test proves nothing");
     image_checks();
+    embedded_checks(&dir);
+    footnote_checks(&dir);
     println!("ok");
 }
