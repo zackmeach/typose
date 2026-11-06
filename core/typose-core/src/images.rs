@@ -296,6 +296,7 @@ fn image_png_preflight(source: &[u8], cancel: &AtomicBool) -> Result<PngPrefligh
     let mut transparency = false;
     let mut idat = false;
     let mut idat_bytes = 0_u64;
+    let mut metadata_seen = [false; 3];
     while position < source.len() {
         check_cancel(cancel)?;
         let header_end = position.checked_add(8).ok_or(ImageError::Refused("invalid PNG framing"))?;
@@ -360,6 +361,20 @@ fn image_png_preflight(source: &[u8], cancel: &AtomicBool) -> Result<PngPrefligh
                     return Err(ImageError::Refused("unsupported PNG transparency"));
                 }
                 transparency = true;
+            }
+            b"pHYs" | b"sRGB" | b"gAMA" => {
+                // Ignored: no gamma, rendering-intent or colour transform; the samples are treated as sRGB. Pinned
+                // png buffers each in the chunk Vec charged below for PLTE and parses it into an inline Info field.
+                // Spec ordering: pHYs before IDAT; sRGB and gAMA also before PLTE.
+                let (slot, size, before_plte) = match kind {
+                    b"pHYs" => (0, 9, false),
+                    b"sRGB" => (1, 1, true),
+                    _ => (2, 4, true),
+                };
+                if idat || (before_plte && palette_entries.is_some()) || metadata_seen[slot] || length != size {
+                    return Err(ImageError::Refused("misplaced, repeated or mis-sized PNG pHYs, sRGB or gAMA"));
+                }
+                metadata_seen[slot] = true;
             }
             b"IDAT" => {
                 if dimensions.unwrap().2 == 3 && palette_entries.is_none() {
@@ -989,10 +1004,74 @@ mod png_gif_tests {
         assert_eq!((decoded.width, decoded.height), (4096, 4096));
         assert_eq!(decoded.data, data);
     }
+
+    const PHYS: (&[u8; 4], &[u8]) = (b"pHYs", &[0, 0, 0x0b, 0x13, 0, 0, 0x0b, 0x13, 1]);
+    const SRGB: (&[u8; 4], &[u8]) = (b"sRGB", &[0]);
+    const GAMA: (&[u8; 4], &[u8]) = (b"gAMA", &[0, 0, 0xb1, 0x8f]);
+
+    /// `png_one_pixel` with `chunks` inserted at `at`; 33 is after IHDR, 60 after IDAT.
+    fn png_with(at: usize, chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+        let mut inserted = Vec::new();
+        for (kind, data) in chunks {
+            png_append_chunk(&mut inserted, kind, data);
+        }
+        let mut png = png_one_pixel();
+        png.splice(at..at, inserted);
+        png
+    }
+
+    #[test]
+    fn png_phys_srgb_and_gama_are_ignored() {
+        let cancel = AtomicBool::new(false);
+        let expected = decode(&png_one_pixel(), &cancel).unwrap();
+        let palette: (&[u8; 4], &[u8]) = (b"PLTE", &[1, 2, 3]); // a suggested palette, allowed for RGB
+        for chunks in [&[PHYS][..], &[SRGB], &[GAMA], &[GAMA, SRGB, PHYS], &[SRGB, palette, PHYS]] {
+            assert_eq!(decode(&png_with(33, chunks), &cancel).unwrap().bytes(), expected.bytes());
+        }
+    }
+
+    #[test]
+    fn png_refuses_repeated_mis_sized_or_misplaced_metadata_and_other_chunks() {
+        let cancel = AtomicBool::new(false);
+        let refusal = |png: &[u8]| match decode(png, &cancel) {
+            Err(ImageError::Refused(why)) => why,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+        let palette: (&[u8; 4], &[u8]) = (b"PLTE", &[1, 2, 3]);
+        let misplaced = "misplaced, repeated or mis-sized PNG pHYs, sRGB or gAMA";
+        for (at, chunks) in [
+            (33, &[PHYS, PHYS][..]),
+            (33, &[GAMA, SRGB, GAMA]),
+            (33, &[(b"pHYs", &PHYS.1[..8])]),
+            (33, &[(b"sRGB", &[0, 0][..])]),
+            (33, &[(b"gAMA", &[0, 0, 0xb1, 0x8f, 0][..])]),
+            (60, &[PHYS]),
+            (33, &[palette, SRGB]),
+            (33, &[palette, GAMA]),
+        ] {
+            assert_eq!(refusal(&png_with(at, chunks)), misplaced);
+        }
+        let mut bad_crc = png_with(33, &[PHYS]);
+        bad_crc[33 + 12 + 9 - 1] ^= 1;
+        assert_eq!(refusal(&bad_crc), "invalid PNG checksum");
+        for kind in [b"iCCP", b"cHRM", b"tEXt"] {
+            assert_eq!(
+                refusal(&png_with(33, &[(kind, &[0; 32][..])])),
+                "PNG contains unsupported metadata, animation, or chunks"
+            );
+        }
+    }
 }
 
 // Reviewed against zune-jpeg =0.5.15 and zune-core =0.5.3.
 // The checks below are allocation-free and run before either codec constructor.
+
+/// ICC profile caps. Profiles embedded in real session images are 472 or 536 bytes; common RGB and gray profiles
+/// fit one 65,519-byte segment. 256 KiB is four full segments, and 16 segments allow producers that split smaller.
+/// Accepted segments never reach zune, so the caps bound only preflight work and the inline elision table, not
+/// codec memory.
+const MAX_ICC_SEGMENTS: usize = 16;
+const MAX_ICC_BYTES: usize = 256 << 10;
 
 #[derive(Clone, Copy)]
 struct JpegPreflight {
@@ -1001,6 +1080,9 @@ struct JpegPreflight {
     components: u8,
     horizontal: u8,
     vertical: u8,
+    /// Source ranges of accepted ICC APP2 segments, ascending, each from its marker's first 0xff to segment end.
+    elided: [(usize, usize); MAX_ICC_SEGMENTS],
+    elided_len: usize,
 }
 
 fn jpeg_u16(bytes: &[u8]) -> u16 {
@@ -1021,17 +1103,23 @@ fn preflight_jpeg(source: &[u8], cancel: &std::sync::atomic::AtomicBool) -> Resu
     let mut jfif_seen = false;
     let mut restart_interval = 0_u16;
     let mut dri_seen = false;
+    let mut elided = [(0, 0); MAX_ICC_SEGMENTS];
+    let mut elided_len = 0;
+    let mut icc_count = None;
+    let mut icc_seen = 0_u32;
+    let mut icc_bytes = 0_usize;
     loop {
         check_cancel(cancel)?;
         if source.get(at) != Some(&0xff) {
             return Err(ImageError::Refused("invalid JPEG marker framing"));
         }
+        let marker_at = at;
         while source.get(at) == Some(&0xff) {
             at += 1;
         }
         let marker = *source.get(at).ok_or(ImageError::Refused("truncated JPEG marker"))?;
         at += 1;
-        if !matches!(marker, 0xc0 | 0xc4 | 0xdb | 0xdd | 0xda | 0xe0) {
+        if !matches!(marker, 0xc0 | 0xc4 | 0xdb | 0xdd | 0xda | 0xe0 | 0xe2) {
             return Err(ImageError::Refused("unsupported JPEG marker or metadata"));
         }
         let length_bytes = source.get(at..at + 2).ok_or(ImageError::Refused("truncated JPEG segment"))?;
@@ -1057,6 +1145,35 @@ fn preflight_jpeg(source: &[u8], cancel: &std::sync::atomic::AtomicBool) -> Resu
                     return Err(ImageError::Refused("unsupported JPEG APP0"));
                 }
                 jfif_seen = true;
+            }
+            0xe2 => {
+                // ICC.1 Annex B.4: "ICC_PROFILE\0", a 1-based sequence number, the segment count, profile bytes.
+                // Segments may arrive in any order before SOS, as libjpeg's reader accepts. Every other APP2
+                // (MPF, gain maps) stays refused. JpegReader elides accepted segments, so zune's APP2 branches
+                // and their Vec allocations stay unreachable; the profile is ignored.
+                if !segment.starts_with(b"ICC_PROFILE\0") {
+                    return Err(ImageError::Refused("unsupported JPEG APP2 metadata"));
+                }
+                if segment.len() < 14 {
+                    return Err(ImageError::Refused("malformed JPEG ICC profile segment"));
+                }
+                let (sequence, count) = (segment[12], segment[13]);
+                icc_bytes += segment.len() - 14;
+                if usize::from(count) > MAX_ICC_SEGMENTS || icc_bytes > MAX_ICC_BYTES {
+                    return Err(ImageError::Refused("JPEG ICC profile exceeds 16 segments or 256 KiB"));
+                }
+                if sequence == 0
+                    || sequence > count
+                    || icc_count.is_some_and(|known| known != count)
+                    || icc_seen & (1 << (sequence - 1)) != 0
+                {
+                    return Err(ImageError::Refused("malformed JPEG ICC profile segment"));
+                }
+                icc_count = Some(count);
+                icc_seen |= 1 << (sequence - 1);
+                // Distinct sequence numbers <= count <= MAX_ICC_SEGMENTS bound this index.
+                elided[elided_len] = (marker_at, end);
+                elided_len += 1;
             }
             0xc0 => {
                 if frame.is_some() || segment.len() < 6 || segment[0] != 8 {
@@ -1092,6 +1209,8 @@ fn preflight_jpeg(source: &[u8], cancel: &std::sync::atomic::AtomicBool) -> Resu
                     components: count,
                     horizontal: sampling >> 4,
                     vertical: sampling & 15,
+                    elided: [(0, 0); MAX_ICC_SEGMENTS],
+                    elided_len: 0,
                 });
             }
             0xdb => {
@@ -1158,6 +1277,9 @@ fn preflight_jpeg(source: &[u8], cancel: &std::sync::atomic::AtomicBool) -> Resu
             }
             0xda => {
                 let info = frame.ok_or(ImageError::Refused("JPEG scan precedes frame"))?;
+                if icc_count.is_some_and(|count| icc_seen != (1 << count) - 1) {
+                    return Err(ImageError::Refused("incomplete JPEG ICC profile"));
+                }
                 let count = usize::from(info.components);
                 if segment.len() != 4 + 2 * count
                     || segment[0] != info.components
@@ -1202,7 +1324,7 @@ fn preflight_jpeg(source: &[u8], cancel: &std::sync::atomic::AtomicBool) -> Resu
                             restart_number = (restart_number + 1) & 7;
                         }
                         0xd9 if at == source.len() && marker_start > entropy_start => {
-                            return Ok(info);
+                            return Ok(JpegPreflight { elided, elided_len, ..info });
                         }
                         _ => {
                             return Err(ImageError::Refused("unsupported or malformed JPEG scan tail"));
@@ -1219,43 +1341,92 @@ fn preflight_jpeg(source: &[u8], cancel: &std::sync::atomic::AtomicBool) -> Resu
 /// zune-core's maintained BufRead+Seek adapter propagates checked reads/fill_buf/seek errors. Its JPEG refill
 /// retries a failed four-byte read bytewise, then queries eof via fill_buf, so cancellation also escapes that path.
 /// The borrowed source/cancel pointer adds no heap allocation or decoder callback.
+///
+/// It behaves as a Cursor over `source` with the `elided` ranges (accepted ICC segments) removed: positions, seeks
+/// and lengths are in that stream, `read` fills across a removed range, and `fill_buf` stops at the next one.
 struct JpegReader<'a> {
-    inner: std::io::Cursor<&'a [u8]>,
+    source: &'a [u8],
+    elided: &'a [(usize, usize)],
+    position: u64,
     cancel: &'a AtomicBool,
+    #[cfg(test)]
+    cancel_at: Option<u64>,
 }
 
 impl<'a> JpegReader<'a> {
-    fn new(source: &'a [u8], cancel: &'a AtomicBool) -> Self {
-        Self { inner: std::io::Cursor::new(source), cancel }
+    fn new(source: &'a [u8], elided: &'a [(usize, usize)], cancel: &'a AtomicBool) -> Self {
+        Self {
+            source,
+            elided,
+            position: 0,
+            cancel,
+            #[cfg(test)]
+            cancel_at: None,
+        }
     }
 
     fn check(&self) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self.cancel_at.is_some_and(|at| self.position >= at) {
+            self.cancel.store(true, Ordering::Relaxed);
+        }
         if self.cancel.load(Ordering::Relaxed) { Err(std::io::ErrorKind::Interrupted.into()) } else { Ok(()) }
+    }
+
+    fn len(&self) -> u64 {
+        (self.source.len() - self.elided.iter().map(|(start, end)| end - start).sum::<usize>()) as u64
+    }
+
+    /// Source bytes from the current position up to the next elided range; empty only at or past the end.
+    fn run(&self) -> &'a [u8] {
+        let mut at = self.position;
+        for &(start, end) in self.elided {
+            if at < start as u64 {
+                return &self.source[at as usize..start];
+            }
+            at = at.saturating_add((end - start) as u64);
+        }
+        usize::try_from(at).ok().and_then(|at| self.source.get(at..)).unwrap_or(&[])
     }
 }
 
 impl std::io::Read for JpegReader<'_> {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
         self.check()?;
-        std::io::Read::read(&mut self.inner, bytes)
+        let mut filled = 0;
+        while filled < bytes.len() {
+            let run = self.run();
+            if run.is_empty() {
+                break;
+            }
+            let count = run.len().min(bytes.len() - filled);
+            bytes[filled..filled + count].copy_from_slice(&run[..count]);
+            self.position += count as u64;
+            filled += count;
+        }
+        Ok(filled)
     }
 
     fn read_exact(&mut self, bytes: &mut [u8]) -> std::io::Result<()> {
         // Do not use Read's default helper, which retries Interrupted indefinitely for a sticky cancel flag.
-        self.check()?;
-        std::io::Read::read_exact(&mut self.inner, bytes)
+        if self.read(bytes)? == bytes.len() {
+            Ok(())
+        } else {
+            self.position = self.len(); // as Cursor's failed read_exact leaves it
+            Err(std::io::ErrorKind::UnexpectedEof.into())
+        }
     }
 }
 
 impl std::io::BufRead for JpegReader<'_> {
     fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
         self.check()?;
-        std::io::BufRead::fill_buf(&mut self.inner)
+        Ok(self.run())
     }
 
     fn consume(&mut self, amount: usize) {
         if !self.cancel.load(Ordering::Relaxed) {
-            std::io::BufRead::consume(&mut self.inner, amount);
+            self.position = self.position.saturating_add(amount as u64);
         }
     }
 }
@@ -1263,7 +1434,14 @@ impl std::io::BufRead for JpegReader<'_> {
 impl std::io::Seek for JpegReader<'_> {
     fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
         self.check()?;
-        std::io::Seek::seek(&mut self.inner, position)
+        // Cursor's arithmetic, over the elided stream. ErrorKind conversion keeps the error allocation-free.
+        let target = match position {
+            std::io::SeekFrom::Start(offset) => Some(offset),
+            std::io::SeekFrom::End(offset) => self.len().checked_add_signed(offset),
+            std::io::SeekFrom::Current(offset) => self.position.checked_add_signed(offset),
+        };
+        self.position = target.ok_or(std::io::ErrorKind::InvalidInput)?;
+        Ok(self.position)
     }
 }
 
@@ -1314,6 +1492,14 @@ fn jpeg_codec_work(info: JpegPreflight) -> (u64, u64) {
 }
 
 fn decode_jpeg(source: &[u8], cancel: &std::sync::atomic::AtomicBool) -> Result<Pixels, ImageError> {
+    decode_jpeg_with(source, cancel, |_| {})
+}
+
+fn decode_jpeg_with(
+    source: &[u8],
+    cancel: &AtomicBool,
+    configure: impl FnOnce(&mut JpegReader<'_>),
+) -> Result<Pixels, ImageError> {
     let info = preflight_jpeg(source, cancel)?;
     let color = if info.components == 1 { png::ColorType::Grayscale } else { png::ColorType::Rgb };
     let channels = u64::from(if info.components == 1 { 1_u8 } else { 3_u8 });
@@ -1331,7 +1517,9 @@ fn decode_jpeg(source: &[u8], cancel: &std::sync::atomic::AtomicBool) -> Result<
             zune_core::colorspace::ColorSpace::RGB
         });
     check_cancel(cancel)?;
-    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(JpegReader::new(source, cancel), options);
+    let mut reader = JpegReader::new(source, &info.elided[..info.elided_len], cancel);
+    configure(&mut reader);
+    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(reader, options);
     decoder.decode_headers().map_err(|_| jpeg_error(cancel, "JPEG headers rejected"))?;
     check_cancel(cancel)?;
     if decoder.dimensions() != Some((info.width as usize, info.height as usize)) {
@@ -1355,7 +1543,7 @@ mod jpeg_adapter_tests {
     #[test]
     fn jpeg_reader_cancellation_interrupts_every_io_entry_without_advancing() {
         let cancel = AtomicBool::new(false);
-        let mut reader = JpegReader::new(&[1, 2, 3], &cancel);
+        let mut reader = JpegReader::new(&[1, 9, 2, 3], &[(1, 2)], &cancel); // stops at an elided range
         let mut byte = [0];
         std::io::Read::read_exact(&mut reader, &mut byte).unwrap();
         assert_eq!(byte, [1]);
@@ -1371,13 +1559,40 @@ mod jpeg_adapter_tests {
             std::io::ErrorKind::Interrupted
         );
         std::io::BufRead::consume(&mut reader, 1);
-        assert_eq!(reader.inner.position(), 1);
+        assert_eq!(reader.position, 1);
+    }
+
+    #[test]
+    fn jpeg_reader_is_a_cursor_over_the_source_without_its_elided_ranges() {
+        use std::io::{BufRead, ErrorKind, Read, Seek, SeekFrom};
+        let cancel = AtomicBool::new(false);
+        let source: Vec<u8> = (0..10).collect();
+        // Adjacent ranges and one at the end: the stream is [0, 1, 5, 6, 7].
+        let mut reader = JpegReader::new(&source, &[(2, 4), (4, 5), (8, 10)], &cancel);
+        let mut bytes = [0; 6];
+        assert_eq!(reader.read(&mut bytes).unwrap(), 5);
+        assert_eq!(bytes[..5], [0, 1, 5, 6, 7]);
+        assert_eq!(reader.fill_buf().unwrap(), []);
+        assert_eq!(reader.seek(SeekFrom::End(-3)).unwrap(), 2);
+        assert_eq!(reader.fill_buf().unwrap(), [5, 6, 7]);
+        reader.consume(1);
+        assert_eq!(reader.seek(SeekFrom::Current(-2)).unwrap(), 1);
+        assert_eq!(reader.fill_buf().unwrap(), [1]); // a buffered run ends at the next elided range
+        let mut pair = [0; 2];
+        reader.read_exact(&mut pair).unwrap();
+        assert_eq!(pair, [1, 5]); // a read continues across it
+        assert_eq!(reader.seek(SeekFrom::Current(-4)).unwrap_err().kind(), ErrorKind::InvalidInput);
+        assert_eq!(reader.stream_position().unwrap(), 3);
+        assert_eq!(reader.seek(SeekFrom::Start(9)).unwrap(), 9); // past the end, as Cursor allows
+        assert_eq!(reader.read(&mut pair).unwrap(), 0);
+        assert_eq!(reader.read_exact(&mut pair).unwrap_err().kind(), ErrorKind::UnexpectedEof);
+        assert_eq!(reader.position, 5);
     }
 
     #[test]
     fn zune_reader_propagates_cancel_even_after_its_byte_error_fallback() {
         let cancel = AtomicBool::new(true);
-        let mut reader = zune_core::bytestream::ZReader::new(JpegReader::new(&[1, 2, 3, 4], &cancel));
+        let mut reader = zune_core::bytestream::ZReader::new(JpegReader::new(&[1, 2, 3, 4], &[], &cancel));
         assert!(reader.read_fixed_bytes_or_error::<4>().is_err());
         assert_eq!(reader.read_u8(), 0); // maintained zune adapter intentionally ignores a single-byte read error
         assert!(reader.eof().is_err()); // refill's following eof query must propagate the cancellation
@@ -1385,16 +1600,29 @@ mod jpeg_adapter_tests {
     }
 
     fn gray_jpeg() -> Vec<u8> {
-        // One baseline 8-bit grayscale block: DC=0, AC=EOB, pad bits=1.
+        gray_jpeg_sized(1, 1)
+    }
+
+    fn gray_jpeg_sized(width: u16, height: u16) -> Vec<u8> {
+        // Baseline 8-bit grayscale blocks: DC=0, AC=EOB, pad bits=1.
         let mut data = vec![0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43, 0x00];
         data.extend_from_slice(&[1; 64]);
-        data.extend_from_slice(&[0xff, 0xc0, 0x00, 0x0b, 8, 0, 1, 0, 1, 1, 1, 0x11, 0]);
+        data.extend_from_slice(&[0xff, 0xc0, 0x00, 0x0b, 8]);
+        data.extend_from_slice(&height.to_be_bytes());
+        data.extend_from_slice(&width.to_be_bytes());
+        data.extend_from_slice(&[1, 1, 0x11, 0]);
         for class in [0x00, 0x10] {
             data.extend_from_slice(&[0xff, 0xc4, 0, 20, class, 1]);
             data.extend_from_slice(&[0; 15]);
             data.push(0);
         }
-        data.extend_from_slice(&[0xff, 0xda, 0, 8, 1, 1, 0, 0, 63, 0, 0x3f, 0xff, 0xd9]);
+        data.extend_from_slice(&[0xff, 0xda, 0, 8, 1, 1, 0, 0, 63, 0]);
+        let bits = 2 * usize::from(width).div_ceil(8) * usize::from(height).div_ceil(8);
+        data.resize(data.len() + bits / 8, 0);
+        if bits % 8 != 0 {
+            data.push((1 << (8 - bits % 8)) - 1);
+        }
+        data.extend_from_slice(&[0xff, 0xd9]);
         data
     }
 
@@ -1445,6 +1673,101 @@ mod jpeg_adapter_tests {
         let cancel = std::sync::atomic::AtomicBool::new(true);
         assert!(matches!(decode_jpeg(&gray_jpeg(), &cancel), Err(ImageError::Cancelled)));
         assert!(matches!(decode(RED_WEBP, &cancel), Err(ImageError::Cancelled)));
+    }
+
+    /// An APP2 ICC_PROFILE segment with a dummy profile body; the body's 0xff bytes test length-based skipping.
+    fn icc_segment(sequence: u8, count: u8, profile: usize) -> Vec<u8> {
+        let mut segment = vec![0xff, 0xe2];
+        segment.extend_from_slice(&u16::try_from(16 + profile).unwrap().to_be_bytes());
+        segment.extend_from_slice(b"ICC_PROFILE\0");
+        segment.extend_from_slice(&[sequence, count]);
+        segment.extend((0..profile).map(|at| at as u8));
+        segment
+    }
+
+    #[test]
+    fn icc_profile_jpeg_decodes_to_the_same_canonical_png_as_without_it() {
+        let cancel = AtomicBool::new(false);
+        let plain = gray_jpeg_sized(17, 9);
+        let mut icc = plain.clone();
+        icc.splice(2..2, icc_segment(1, 1, 536)); // the size of a real Display P3 profile
+        assert_eq!(decode(&icc, &cancel).unwrap().bytes(), decode(&plain, &cancel).unwrap().bytes());
+    }
+
+    #[test]
+    fn multi_segment_icc_profiles_within_the_cap_decode() {
+        let cancel = AtomicBool::new(false);
+        let plain = gray_jpeg_sized(17, 9);
+        let expected = decode(&plain, &cancel).unwrap();
+        // Out of order, adjacent, a full 65,519-byte segment, and one after SOF.
+        let after_sof = plain.windows(2).position(|v| v == [0xff, 0xc0]).unwrap() + 13;
+        let mut split = plain.clone();
+        split.splice(after_sof..after_sof, icc_segment(1, 3, 1));
+        split.splice(2..2, [icc_segment(3, 3, 65_519), icc_segment(2, 3, 0)].concat());
+        assert_eq!(decode(&split, &cancel).unwrap().bytes(), expected.bytes());
+        // Exactly 16 segments and 256 KiB.
+        let mut capped = plain.clone();
+        capped.splice(2..2, (1..=16).rev().flat_map(|sequence| icc_segment(sequence, 16, 16_384)));
+        assert_eq!(decode(&capped, &cancel).unwrap().bytes(), expected.bytes());
+    }
+
+    #[test]
+    fn jpeg_refuses_other_app2_malformed_or_oversized_icc_exif_and_progressive() {
+        let cancel = AtomicBool::new(false);
+        let refusal = |jpeg: &[u8]| match decode(jpeg, &cancel) {
+            Err(ImageError::Refused(why)) => why,
+            other => panic!("expected a refusal, got {other:?}"),
+        };
+        let with = |segments: Vec<u8>| {
+            let mut jpeg = gray_jpeg();
+            jpeg.splice(2..2, segments);
+            refusal(&jpeg)
+        };
+        let app = |marker: u8, payload: &[u8]| {
+            let mut segment = vec![0xff, marker];
+            segment.extend_from_slice(&u16::try_from(2 + payload.len()).unwrap().to_be_bytes());
+            segment.extend_from_slice(payload);
+            segment
+        };
+        for payload in [&b"MPF\0II*\0\x08\0\0\0"[..], b"urn:iso:std:iso:ts:21496:-1\0\0\0\0\0", b"FPXR\0\0\0\0"] {
+            assert_eq!(with(app(0xe2, payload)), "unsupported JPEG APP2 metadata");
+        }
+        for segments in [
+            app(0xe2, b"ICC_PROFILE\0\x01"),
+            icc_segment(0, 1, 8),
+            icc_segment(2, 1, 8),
+            [icc_segment(1, 2, 8), icc_segment(2, 3, 8)].concat(),
+            [icc_segment(1, 2, 8), icc_segment(1, 2, 8)].concat(),
+        ] {
+            assert_eq!(with(segments), "malformed JPEG ICC profile segment");
+        }
+        assert_eq!(with(icc_segment(1, 2, 8)), "incomplete JPEG ICC profile");
+        assert_eq!(with(icc_segment(1, 17, 8)), "JPEG ICC profile exceeds 16 segments or 256 KiB");
+        let over = (1..=16).flat_map(|sequence| icc_segment(sequence, 16, 16_384 + usize::from(sequence == 16)));
+        assert_eq!(with(over.collect()), "JPEG ICC profile exceeds 16 segments or 256 KiB");
+        assert_eq!(with(app(0xe1, b"Exif\0\0MM\0*")), "unsupported JPEG marker or metadata");
+        assert_eq!(with(app(0xee, b"Adobe\0\x64\0\0\0\0\x01")), "unsupported JPEG marker or metadata");
+        let mut progressive = gray_jpeg();
+        let sof = progressive.windows(2).position(|v| v == [0xff, 0xc0]).unwrap();
+        progressive[sof + 1] = 0xc2;
+        assert_eq!(refusal(&progressive), "unsupported JPEG marker or metadata");
+        let mut after_scan = gray_jpeg();
+        let eoi = after_scan.len() - 2;
+        after_scan.splice(eoi..eoi, icc_segment(1, 1, 8));
+        assert_eq!(refusal(&after_scan), "unsupported or malformed JPEG scan tail");
+    }
+
+    #[test]
+    fn icc_jpeg_cancels_inside_the_codec() {
+        let cancel = AtomicBool::new(false);
+        let mut jpeg = gray_jpeg_sized(1024, 1024);
+        let segment = icc_segment(1, 1, 536);
+        jpeg.splice(2..2, segment.iter().copied());
+        // Halfway through the elided stream: inside the entropy-coded data, past the removed segment.
+        let midpoint = (jpeg.len() - segment.len()) as u64 / 2;
+        let result = decode_jpeg_with(&jpeg, &cancel, |reader| reader.cancel_at = Some(midpoint));
+        assert!(cancel.load(Ordering::Relaxed), "the codec never read to the cancel point");
+        assert!(matches!(result, Err(ImageError::Cancelled)));
     }
 }
 

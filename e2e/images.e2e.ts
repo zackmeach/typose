@@ -3,7 +3,7 @@ import { writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { crc32 } from 'node:zlib'
 import { type TestHooks, assertNetLog, debugStats, expectReleasedDocuments, finish, fixture, holdReply, launch, test, waitRendered } from './app'
-import { imageGif, imageJpeg, imagePng, imageWebp } from './image-fixtures'
+import { imageGif, imageJpeg, imageJpegIcc, imagePng, imagePngPhys, imageWebp } from './image-fixtures'
 import { processMemory } from './memory'
 
 const open = (l: Awaited<ReturnType<typeof launch>>, path: string) => l.app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), path)
@@ -103,6 +103,26 @@ test('inline data: images render from canonical blobs; SVG, malformed and over-c
   expect(l.pageErrors).toEqual([])
   await finish(l)
   expect(assertNetLog(log, ['typose', 'blob'])).toContain('PASS') // no data: URL reached the network stack either
+})
+
+// A camera JPEG's ICC profile and a screenshot PNG's pHYs are ignored, not refused. Inline, so every platform runs it.
+test('a JPEG with an ICC profile and a PNG with pHYs both load', async () => {
+  const source = fixture('image-metadata.md', [
+    '# Image metadata', '',
+    `![ICC JPEG](${dataUrl('image/jpeg', imageJpegIcc(128, 32))})`, '',
+    `![pHYs PNG](${dataUrl('image/png', imagePngPhys(160, 32))})`, ''
+  ].join('\n'))
+  const l = await launch({ file: source })
+  const { win } = l
+  await waitRendered(win)
+  for (const name of ['ICC JPEG', 'pHYs PNG']) {
+    const img = win.getByRole('img', { name, exact: true })
+    await expect(img).toBeVisible()
+    await expect(img).toHaveAttribute('src', /^blob:/)
+    expect(await img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0)).toBe(true)
+  }
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
 })
 
 test('two image loads at most; hidden and resumed trees retain their blobs and confirmed allowances', async () => {
