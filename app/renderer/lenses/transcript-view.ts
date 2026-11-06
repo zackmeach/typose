@@ -3,6 +3,7 @@ import { CoreCallError, type CoreClient } from '../core'
 import type { LocalGesture } from '../reader-window'
 import type { StructuredSource } from './structured-source'
 import { RENDERED_PER_UNIT } from './rendered-charge'
+import type { RenderedImages } from './images'
 
 const make = (tag: string, text?: string, className?: string): HTMLElement => {
   const element = document.createElement(tag)
@@ -39,13 +40,16 @@ interface Options {
   frozen(error: unknown): void
   openLocal?(target: string, path: string, gesture: LocalGesture): Promise<boolean>
   reserve(bytes: number): Promise<boolean>
+  /** A page's embedded images, each loaded image's allowance charged by `grow`. */
+  images(grow: (bytes: number) => Promise<boolean>): RenderedImages
 }
-/** One page's DOM, shown or being built: what its HTML and literal text are charged, and the signal its queries take,
- *  aborted once another page replaces it or supersedes its build. */
+/** One page's DOM, shown or being built: what its HTML, literal text and images are charged, and the signal its
+ *  queries take, aborted once another page replaces it or supersedes its build. */
 interface Pane {
   bytes: number
   abort: AbortController
   signal: AbortSignal
+  images: RenderedImages
 }
 /** The snapshot's allowance for one character of mounted HTML: its DOM nodes, its text and the HTML string. Literal
  *  text is one text node: Rendered's allowance for a unit of text (`RENDERED_PER_UNIT`). */
@@ -72,7 +76,17 @@ export class TranscriptView {
   async show(start = this.start, commit?: () => void): Promise<void> {
     const epoch = ++this.serial,
       abort = new AbortController(),
-      pane: Pane = { bytes: 0, abort, signal: AbortSignal.any([this.signal, abort.signal]) }
+      pane: Pane = {
+        bytes: 0,
+        abort,
+        signal: AbortSignal.any([this.signal, abort.signal]),
+        // An image's allowance is its page's. A frozen or closed lens reserves nothing more (`charge`), so it loads none.
+        images: this.options.images((bytes) =>
+          this.signal.aborted ? Promise.resolve(false) : this.charge(pane, bytes).then(() => true, () => false)
+        )
+      }
+    // A page replaced or superseded stops its image loads and revokes their Blob URLs; its charge goes with the page.
+    abort.signal.addEventListener('abort', () => pane.images.dispose(), { once: true })
     // A build this one supersedes stops, its group, tool and text queries with it.
     this.building?.abort.abort()
     this.building = pane
@@ -85,6 +99,11 @@ export class TranscriptView {
       if (this.building === pane) this.building = undefined
       if (!this.signal.aborted) void this.options.reserve(this.held())
     }
+  }
+  /** The lens is gone: its pages' image loads stop and their Blob URLs are revoked. A freeze keeps what's shown. */
+  dispose(): void {
+    this.shown?.abort.abort()
+    this.building?.abort.abort()
   }
   /** A page's later load failed: it says so, unless the page was replaced or superseded, which aborted it. */
   private lost(pane: Pane): (error: unknown) => void {
@@ -461,7 +480,7 @@ export class TranscriptView {
           continue
         }
         if (type === 'image' || type === 'image_url' || type === 'input_image') {
-          await this.image(parent, fields, record)
+          await this.image(parent, fields, record, pane)
           continue
         }
         const extra = document.createElement('details')
@@ -485,12 +504,30 @@ export class TranscriptView {
     }
     await blocks(0)
   }
-  /** Every image is a placeholder until the bounded `data:` path with its pixel caps (Z43) and the remote-image gate
-   *  (§4.6) land: an http(s) URL is a remote image, and anything else isn't one to load. */
-  private async image(parent: HTMLElement, fields: StructuredNode[], record: number): Promise<void> {
+  /** Claude's base64 `source.data`, or an OpenAI `data:` URL, loads through the bounded image path (Z43): its node
+   *  carries the JSON string's source span, never the payload, which the core reads. Anything else is a placeholder
+   *  until the remote-image gate (§4.6) lands: an http(s) URL is a remote image, and the rest isn't one to load. */
+  private async image(parent: HTMLElement, fields: StructuredNode[], record: number, pane: Pane): Promise<void> {
     const image = fields.find((field) => field.key === 'image_url' || field.key === 'source')
-    let url = image?.kind === 'string' ? string(image) : ''
-    if (image?.container !== undefined) url = string((await this.fields(image, record)).find((value) => value.key === 'url'))
+    const inner = image?.container !== undefined ? await this.fields(image, record) : []
+    const field = (key: string) => inner.find((value) => value.key === key)
+    const link = image?.kind === 'string' ? image : field('url'),
+      url = string(link)
+    // A `source` of another type (`url`) isn't embedded, whatever its URL.
+    const data =
+      image?.key === 'source'
+        ? string(field('type')) === 'base64' ? field('data') : undefined
+        : /^data:/i.test(url) ? link : undefined
+    if (data?.kind === 'string' && !data.scope) {
+      const node = make('p', undefined, 'transcript-image')
+      node.dataset.embedded = `${data.span.start},${data.span.end}`
+      // The declared type, where the core's reason wouldn't name it: the core goes by the bytes, never by this.
+      const type = string(field('media_type')).slice(0, 64)
+      node.dataset.alt = !type || /^image\/(png|jpeg|gif|webp)$/i.test(type) ? 'Image' : `Image · ${type}`
+      parent.append(node)
+      pane.images.add(node)
+      return
+    }
     parent.append(
       make(
         'p',

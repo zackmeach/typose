@@ -38,7 +38,9 @@ export class RenderedImages {
     private readonly core: CoreClient,
     private readonly opened: Opened,
     private readonly budget: LensBudget | undefined,
-    private readonly onFrozen: (why: string) => void
+    private readonly onFrozen: (why: string) => void,
+    /** Where a loaded image's allowance is charged: the generation's Rendered share, or a Transcript page's. */
+    private readonly grow = (bytes: number): Promise<boolean> => budget?.growRendered(opened.gen, bytes) ?? Promise.resolve(false)
   ) {
     this.observer = new IntersectionObserver((entries) => {
       for (const entry of entries) {
@@ -139,7 +141,7 @@ export class RenderedImages {
       if (this.stopped) return
       if (!this.valid(image)) throw new Error('Invalid image resource')
       const charge = imageCharge(image)
-      if (!this.budget || !await this.budget.growRendered(this.opened.gen, Math.max(0, charge - slot.reserved)))
+      if (!this.budget || !await this.grow(Math.max(0, charge - slot.reserved)))
         throw new Error('Memory budget is full')
       slot.reserved = Math.max(slot.reserved, charge)
       if (this.stopped) return

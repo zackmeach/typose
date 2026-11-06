@@ -63,4 +63,5 @@
 .transcript-markdown a { color:var(--accent); text-decoration:underline; cursor:pointer; }
 .transcript-tool { margin:8px 0; padding:4px 0; }
 .transcript-tool-result, .transcript-group { margin:8px 0 8px 16px; border-left:1px solid var(--guide,#434348); padding-left:12px; }
-.transcript-image-placeholder { color:var(--text2); }
+.transcript-image-placeholder,.transcript-image { color:var(--text2); }
+.transcript-image > img { display:block; max-width:100%; height:auto; }
