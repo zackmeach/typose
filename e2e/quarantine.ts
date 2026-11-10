@@ -19,5 +19,10 @@ export const quarantine: { title: string; os?: NodeJS.Platform; reason: string; 
   {
     title: 'reading Rows by keyboard while the graph indexes keeps Rows when the Transcript becomes ready',
     os: 'linux', reason: 'under xvfb the command palette never opens after this launch; cause unknown', expires: '2026-12-10'
+  },
+  // Flaky in two runs, 42869369349 and 42889988308: the focus never arrives on the first try.
+  {
+    title: 'the keyboard reaches ☰ and Raw, ☰ runs its commands from the keyboard, and the focus ring shows',
+    os: 'linux', reason: 'flaky twice: ☰ is not focused on the first try', expires: '2026-12-10'
   }
 ]
