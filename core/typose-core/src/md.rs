@@ -1348,6 +1348,15 @@ mod tests {
         check_items(&r).unwrap();
     }
 
+    /// RUSTSEC-2026-0414: before pulldown-cmark 0.13.5, each `[[a|]]` roughly doubled the events for the rest of the
+    /// document (327,676 for these 112 bytes; 65 since).
+    #[test]
+    fn piped_wikilinks_dont_multiply_parser_events() {
+        let src = "[[a|]] ".repeat(16);
+        let events = Parser::new_ext(&src, OPTIONS).count();
+        assert!(events < 256, "{events} events for {} bytes", src.len());
+    }
+
     /// Mixed byte widths keep the map near the text's size: the base rendered these, and a per-unit map made one `·` in
     /// a 25 KB code block a "renders too large" note.
     #[test]

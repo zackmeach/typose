@@ -16,7 +16,7 @@ fdeflate = "=0.3.7"
 gif = { version = "=0.14.2", default-features = false, features = ["std"] }
 memchr = "=2.8.3"
 png = "=0.18.1"
-pulldown-cmark = { version = "=0.13.4", default-features = false, features = ["html"] }
+pulldown-cmark = { version = "=0.13.6", default-features = false, features = ["html"] }
 weezl = "=0.1.10"
 xxhash-rust = { version = "=0.8.19", features = ["xxh3"] }
 zune-core = { version = "=0.5.3", default-features = false, features = ["std"] }
