@@ -1,0 +1,27 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      # Electron carries Chromium, so its bumps are the security-relevant ones. They get their own PR.
+      electron:
+        patterns: ['electron']
+      npm:
+        patterns: ['*']
+        exclude-patterns: ['electron']
+  - package-ecosystem: cargo
+    directory: /core
+    schedule:
+      interval: monthly
+    groups:
+      cargo:
+        patterns: ['*']
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ['*']

@@ -73,6 +73,12 @@ jobs:
         if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
         run: cargo clippy --all-targets --locked --features typose-node/test-hooks -- -D warnings
         working-directory: core
+      - name: cargo deny (advisories, sources and bans for the Rust dependencies; core/deny.toml)
+        if: ${{ !cancelled() }}
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: core/Cargo.toml
+          command: check advisories sources bans
       - name: oxlint (app, e2e and .github/scripts)
         if: ${{ !cancelled() && steps.deps.outcome == 'success' }}
         run: npm run lint -- .github/scripts
