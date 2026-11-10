@@ -34,5 +34,10 @@ export const quarantine: { title: string; os?: NodeJS.Platform; reason: string; 
   {
     title: "1 GiB on one line: the first piece shows before the scan passes the line's end, and more loads on demand",
     os: 'darwin', reason: "flaky twice on a hosted runner: the first screen waited for the line's end (Z37's gate)", expires: '2026-12-10'
+  },
+  // Flaky in two runs, 42893493529 and 42905869650.
+  {
+    title: 'math bombs, oversized formulas and hostile sanitizer input stay bounded and keep the reader responsive',
+    os: 'darwin', reason: 'flaky twice on a hosted runner: a 264 ms and a 273 ms renderer task against the 250 ms bound', expires: '2026-12-10'
   }
 ]
