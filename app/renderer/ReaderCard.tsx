@@ -190,6 +190,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   }
   function closePrint(): void {
     printAbort.current?.abort()
+    printAbort.current = null
     setPrintBusy(false)
     setPrintPlan(null)
     requestAnimationFrame(() => lens.current?.focus())
@@ -236,7 +237,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       closePrint()
     } finally {
       try { await payload?.release() }
-      finally { printAbort.current = null; setPrintBusy(false) }
+      finally { if (printAbort.current === controller) { printAbort.current = null; setPrintBusy(false) } }
     }
   }
   const picked = useRef<LensName | null>(null)

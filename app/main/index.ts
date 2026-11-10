@@ -428,9 +428,10 @@ void app.whenReady().then(() => {
       webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, spellcheck: false }
     })
     printTarget = target
-    target.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-    target.webContents.on('will-navigate', e => e.preventDefault())
+    let spooled: Promise<unknown> = Promise.resolve()
     try {
+      target.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+      target.webContents.on('will-navigate', e => e.preventDefault())
       await target.loadURL('about:blank')
       const title64 = Buffer.from(checked.title, 'utf8').toString('base64')
       const blocks64 = Buffer.from(checked.json, 'utf8').toString('base64')
@@ -479,11 +480,14 @@ void app.whenReady().then(() => {
           message: `Print ${physicalPages.toLocaleString()} pages?`, detail: 'Large print jobs can take a long time.' })
         if (answer.response !== 0) return { kind: 'cancelled' } satisfies PrintDocumentResult
       }
-      return await printWithDialog(target.webContents, physicalPages, process.platform === 'win32')
+      const job = await printWithDialog(target.webContents, physicalPages, process.platform === 'win32')
+      spooled = job.spooled
+      return await job.result
     } catch {
       return { kind: 'refused', reason: 'The print document could not be prepared' } satisfies PrintDocumentResult
     } finally {
-      if (!target.isDestroyed()) target.close()
+      // A dialog-closed result can come while the job still spools, and closing the window then would cancel it.
+      void spooled.then(() => { if (!target.isDestroyed()) target.close() })
       if (printTarget === target) printTarget = undefined
     }
   })

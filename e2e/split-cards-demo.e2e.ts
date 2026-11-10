@@ -1,10 +1,10 @@
 // Focused split-surface workflow smoke. Native IDs are checked in the hooks build; the production package
 // confirms that the visible Raw/Rendered split and card merge work without test hooks.
 import { expect } from '@playwright/test'
-import { fixture, launch, debugStats, stubOpenDialog, test, waitIndexed, waitOpen, waitRendered } from './app'
+import { fixture, launch, debugStats, runCommand, stubOpenDialog, test, waitIndexed, waitOpen, waitRendered } from './app'
 import { closeCleanly, launchPackaged } from './packaged'
 
-/** By its shortcut, as Reload and Open file… are below: macOS has the native menu, not the ☰. */
+/** By its shortcut, as Reload is below: macOS has the native menu, not the ☰. */
 async function splitRight(win: Awaited<ReturnType<typeof launch>>['win']): Promise<void> {
   await win.keyboard.press('ControlOrMeta+\\')
 }
@@ -79,8 +79,7 @@ test('split clones the source place, opens into the focused card, and preserves 
   await expect(left.getByText('Split source anchor stays visible', { exact: true })).toBeInViewport()
 
   await stubOpenDialog(live.app, b)
-  await win.keyboard.press('ControlOrMeta+O')
-  await win.getByRole('button', { name: 'Browse…', exact: true }).click()
+  await runCommand(win, 'Browse…')
   await expect(right.locator('.card-name')).toHaveText('split-destination-b.md')
   await waitIndexed(right)
   await expect(right.locator('.md-scroller, .vl-row .text').first()).toBeAttached({ timeout: 30_000 })
