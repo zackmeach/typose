@@ -6,13 +6,14 @@ const active = process.env.CI ? quarantine.filter((q) => !q.os || q.os === proce
 for (const q of active) {
   if (q.title.trim().length < 20) throw new Error(`e2e quarantine title too short to be specific: "${q.title}"`)
   if (!(Date.now() <= Date.parse(q.expires))) throw new Error(`e2e quarantine expired or bad date ${q.expires}: "${q.title}" (${q.reason})`)
-  console.log(`e2e quarantine: skipping "${q.title}" (${q.reason}; expires ${q.expires})`)
+  if (!process.env.TEST_WORKER_INDEX) console.log(`e2e quarantine: skipping "${q.title}" (${q.reason}; expires ${q.expires})`)
 }
 
 export default defineConfig({
   testDir: '.',
   testMatch: '*.e2e.ts',
-  // rendered-memory passes on a hosted Linux runner but alone outlasts a macOS step; CI runs it on Linux only.
+  // rendered-memory is known to pass on a hosted Linux runner and alone outlasts a macOS step; hosted Windows is untried.
+  // CI runs it on Linux only.
   testIgnore: process.env.CI && process.platform !== 'linux' ? 'rendered-memory.e2e.ts' : undefined,
   grepInvert: active.length ? new RegExp(active.map((q) => q.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$').join('|')) : undefined,
   retries: process.env.CI ? 1 : 0,
@@ -21,6 +22,6 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   timeout: 5 * 60_000,
   workers: 1,
-  reporter: 'list',
+  reporter: process.env.CI ? [['list'], ['github']] : 'list', // github: failures and the run summary show on the PR
   outputDir: '../test-results'
 })

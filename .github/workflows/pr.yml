@@ -1,8 +1,8 @@
 # The full e2e suite on Windows, Linux and macOS for every non-draft PR and every push to main; drafts never run. Green CI
-# is the merge bar. The
-# repo is public, so hosted minutes are free: each OS splits the suite into four shards that run in parallel. Caches are
-# keyed per lockfile and OS, docs-only PRs are skipped, a newer push cancels the older run, fmt and lint run on Linux
-# only, every job is time-boxed, and bounded evidence is kept only on failure. `workflow_dispatch` runs it on a branch
+# is the merge bar. The repo is public, so hosted minutes are free: each OS splits the suite into four shards that run
+# in parallel. Caches are keyed per lockfile and OS, docs-only changes are skipped, a newer push to a PR cancels its
+# older run, fmt and lint run on Linux only, every job is time-boxed, and bounded evidence is kept only on failure.
+# `workflow_dispatch` runs it on a branch
 # without a PR (`gh workflow run pr.yml --ref <branch>`), optionally only the e2e tests it names, so a platform fix can
 # be checked cheaply.
 name: pr
@@ -29,8 +29,8 @@ on:
         default: ''
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'push' }} # a push to main is never cancelled by the next merge
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }} # so a dispatch on main never displaces a push's run
+  cancel-in-progress: ${{ github.event_name != 'push' }} # a running push to main finishes; one still waiting gives way to a newer merge
 
 permissions:
   contents: read
@@ -91,9 +91,9 @@ jobs:
       # shard 7.7, and setup to the start of e2e 1.5 to 3.5. rendered-memory runs on Linux and adds about 11 minutes to
       # one shard there. Shards are uneven because Playwright splits by test file, and a retry re-runs a failed test.
       job-timeout: 50 # the e2e step's 30 after the setup and unit layers, with room for the evidence upload
-      e2e-timeout: 30 # twice the quarter-suite estimate; past the longest test's own limit (10 min, large and long-line; the config's is 5)
+      e2e-timeout: 30 # the longest measured e2e step is 12.3 minutes; past the longest test's own limit (10 min, large and long-line; the config's is 5)
       e2e-script: e2e
-      e2e-label: full suite, shard ${{ matrix.shard }}/4
+      e2e-label: ${{ inputs.grep && 'named tests' || format('full suite, shard {0}/4', matrix.shard) }}
       shard: ${{ !inputs.grep && matrix.shard || '' }} # a dispatch that names tests runs them unsharded, so a grep that matches nothing fails
       shard-count: '4'
       unit-tests: ${{ matrix.shard == 1 }} # the unit layers, and a grep dispatch's e2e, run once per OS
