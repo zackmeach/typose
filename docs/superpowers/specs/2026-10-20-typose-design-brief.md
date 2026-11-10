@@ -836,3 +836,142 @@ See §7.10.
 
 ## 13. Open questions (not blocking Claude Design)
 1. ~~The cold-start budget (§8.1): is 400ms right, and on what reference hardware?~~ Resolved in revision 4: shell visible in < 400ms and first restored content in < 1s, on the reference machines in Z29.
+
+## 14. v1 status audit (2026-11-10, commit 9c09e1c)
+
+This section audits the v1 table in §2 and all of §4 against the source at commit `9c09e1c`. Each row is one checkable promise, judged from code read at that commit; nothing was built, run or tested. A status is `true`, `partly` (the note says which part holds and which doesn't), `unmet`, or `unverified` (the note says what would settle it). Folder roots, local links and local images are compiled for Windows only (`core/typose-core/src/local/folder.rs:39-43`, `core/typose-core/src/local.rs:115-118`), so every row that depends on them is at best `partly`, and its note says "Windows only"; on macOS and Linux those behaviours are absent.
+
+§2, the v1 table:
+
+| Promise | Status | Evidence | Note |
+|---|---|---|---|
+| The ten v1 extensions open in their lenses | true | `core/typose-node/src/lib.rs:852-861`, `core/typose-node/src/structured.rs:8-15`, `core/typose-node/src/csv.rs:6-10` | Manual open, launch and drop classify all ten. |
+| Every entry point accepts all ten | partly | `core/typose-core/src/local/folder.rs:204-212`, `app/renderer/workspace-search.ts:40`, `core/typose-core/src/doc.rs:413-421` | The sidebar and quick open treat `.jsonc` and `.ndjson` as unsupported. Links reach only md, markdown, txt, csv and tsv. |
+| Files are only read, never written | true | `core/typose-core/src/store.rs:392`, `core/typose-core/src/store.rs:401` | Documents open read-only on every system. |
+| Full v1 on Windows, macOS and Linux | partly | `core/typose-core/src/local/folder.rs:39-43`, `core/typose-core/src/local.rs:115-118`, `app/package.json:12` | Windows has every feature; macOS and Linux lack folder roots, local links and local images. Packaging makes an unpacked `--dir` build only. |
+| Linux is built and smoke-tested | true | `.github/workflows/pr.yml:70`, `.github/workflows/pr.yml:76`, `.github/workflows/weekly-linux.yml:26` | Smoke e2e on every PR, the full suite weekly. |
+| Accessibility and 60fps gates hold on Windows and macOS | unverified | `package.json:20`, `.github/workflows/pr.yml:1-2` | No workflow runs `npm run perf`, and the full Windows e2e is a local gate. Settled by perf and full e2e results on Windows and macOS at this commit. |
+| Drag-and-drop opens files and adds folders | partly | `app/renderer/App.tsx:347-350` | Files open on every system; folders become roots on Windows only. |
+| `typose <path>…` opens files and folders | partly | `app/main/launch.ts:15-20`, `app/bin/typose.cmd:19`, `app/package.json:45-47` | The launchers ship in `resources/bin`, but nothing puts them on PATH. Files open everywhere; folders become roots on Windows only. |
+| OS "Open with" opens the file | partly | `app/main/index.ts:89-92`, `app/main/index.ts:352-355`, `app/package.json:28-64` | Paths from argv and macOS `open-file` open. Typose isn't registered as a handler: the build block has no file associations. |
+| Ctrl+O opens files | true | `app/renderer/App.tsx:359`, `app/main/index.ts:371-376` | It shows quick open, whose Browse… opens the OS dialog (§4.2). Cmd+O on macOS. |
+| The menu has Open file… and Open folder… | partly | `app/renderer/menu.tsx:20`, `app/main/index.ts:248`, `app/renderer/App.tsx:898` | Both items are in ☰ and the macOS File menu. Open folder… adds a root on Windows only. |
+| Folders become sidebar roots, several allowed | partly | `app/core-host/dispatch.ts:1053`, `core/typose-core/src/local/folder.rs:39-43` | Windows only, up to 16 roots. |
+| Files from anywhere open as tabs | true | `app/renderer/ReaderCard.tsx:695-700`, `app/renderer/ReaderCard.tsx:718` | Any regular local file, on every system. |
+| Roots are restored on launch | partly | `app/renderer/App.tsx:182-201` | Windows only. A network root waits for Reconnect; a changed root asks for Locate…. |
+| Cards are restored | true | `app/renderer/App.tsx:175-180` | Card count and widths. |
+| Tabs are restored | partly | `app/renderer/ReaderCard.tsx:1469-1472`, `app/renderer/ReaderCard.tsx:1490-1492` | Manual and folder tabs reopen. A tab reached by a link from a manually opened file returns unopened, asking for its source to be selected again. |
+| Each tab's lens is restored | true | `app/renderer/ReaderCard.tsx:1409`, `app/renderer/ReaderCard.tsx:1476-1479` | |
+| Scroll positions are restored | true | `app/renderer/ReaderCard.tsx:1408`, `app/renderer/ReaderCard.tsx:1470` | Kept as the top source line. |
+| Files are not watched | true | `core/typose-core/src/doc.rs:326-331`, `app/renderer/App.tsx:312` | No watcher in `app/` or `core/`. A change is caught when a read fails its check; window focus re-lists expanded folders. |
+| Ctrl+R reloads | true | `app/renderer/App.tsx:376`, `app/renderer/App.tsx:901` | |
+| Search is in-file only | true | `app/shared/commands.ts:22`, `app/renderer/WorkspaceOverlay.tsx:37` | Quick open matches file paths, not contents. |
+| Transcript is the only shape-aware lens | true | `app/renderer/ReaderCard.tsx:1516` | |
+| One instance; later launches go to its window | true | `app/main/index.ts:27`, `app/main/index.ts:352-358` | Every system; macOS also through `open-file`. |
+| One window | true | `app/main/index.ts:213`, `app/main/index.ts:274`, `app/main/index.ts:499` | |
+| A launch by another user or from an elevated context can't reach the window | unverified | `app/main/index.ts:27` | The lock is per profile, and no code handles elevation. Settled by a Windows test of elevated and non-elevated launches in both directions, and one from a second account. |
+
+§4.1, opening:
+
+| Promise | Status | Evidence | Note |
+|---|---|---|---|
+| A file dropped on a card opens as a tab in that card | partly | `app/renderer/App.tsx:341-349` | It opens in the focused card, whichever card it was dropped on. Every system. |
+| A folder dropped anywhere becomes a root | partly | `app/renderer/App.tsx:350`, `core/typose-core/src/local/folder.rs:39-43` | Windows only. |
+| CLI paths open in the running window | partly | `app/main/index.ts:352-355`, `app/renderer/ReaderCard.tsx:735-744` | Files open as tabs everywhere; folders become roots on Windows only. |
+| "Open with" opens a tab in the focused card | partly | `app/main/index.ts:89-92`, `app/renderer/App.tsx:341-345`, `app/package.json:28-64` | Works when the OS passes the path; Typose isn't registered with Explorer, Finder or file managers. |
+| A sidebar click opens a tab in the focused card, or focuses its tab | partly | `app/renderer/App.tsx:929`, `app/renderer/ReaderCard.tsx:1084-1086` | Windows only. |
+
+§4.2, quick open:
+
+| Promise | Status | Evidence | Note |
+|---|---|---|---|
+| Ctrl+O opens a centred overlay | true | `app/renderer/App.tsx:359`, `app/renderer/settings.css:1` | Cmd+O on macOS. |
+| Recent files come first, then fuzzy matches across roots | partly | `app/renderer/WorkspaceOverlay.tsx:18-19`, `app/renderer/WorkspaceOverlay.tsx:34-37` | Recents lead only for an empty query; with a query, the section holding the best match leads. Root matches are Windows only. |
+| Rows show a format badge, the filename and a dimmed path | true | `app/renderer/WorkspaceOverlay.tsx:66`, `app/renderer/settings.css:8` | Badges cover the ten formats; folders get DIR. |
+| Browse… is pinned in the footer and opens the OS dialog | true | `app/renderer/WorkspaceOverlay.tsx:73`, `app/main/index.ts:371-376` | |
+| The footer shows the key hints, and Shift+↵ opens to the side | true | `app/renderer/WorkspaceOverlay.tsx:56`, `app/renderer/WorkspaceOverlay.tsx:73`, `app/renderer/App.tsx:853` | |
+| The listed folders are excluded from the index | partly | `app/shared/settings.ts:1`, `app/renderer/workspace-search.ts:37` | Windows only. The default list matches the brief's. |
+| Hidden files are excluded unless enabled | partly | `app/renderer/App.tsx:293`, `core/typose-core/src/local/folder.rs:387-390` | Windows only. |
+| Symlinks and junctions are not followed | partly | `core/typose-core/src/local/folder.rs:392-399`, `app/renderer/workspace-search.ts:39` | Windows only. Reparse points list as unsupported and are never walked. |
+| The index holds 50,000 entries per root | unmet | `app/renderer/workspace-search.ts:7-9`, `app/renderer/workspace-search.ts:42`, `core/typose-core/src/local/folder.rs:14` | The walk stops at 3,500 entries (1,500 when it shares the sidebar's root); the core holds 4,096 nodes per root. |
+| The overlay says when a root's index is capped | partly | `app/renderer/workspace-search.ts:23`, `app/renderer/WorkspaceOverlay.tsx:72` | Windows only. It reads "Quick open shows the first 3,500 entries of" the root. |
+
+§4.3, command palette:
+
+| Promise | Status | Evidence | Note |
+|---|---|---|---|
+| Ctrl+K opens the same overlay, listing commands | true | `app/renderer/App.tsx:359`, `app/renderer/WorkspaceOverlay.tsx:29-34` | Cmd+K on macOS. |
+| Each command shows its shortcut on a chip | partly | `app/renderer/WorkspaceOverlay.tsx:33`, `app/renderer/WorkspaceOverlay.tsx:66`, `app/renderer/settings.css:8` | The shortcut shows as dimmed text, not a chip; the chip shows a setting's state. |
+| The palette offers the listed commands | true | `app/shared/commands.ts:42-46`, `app/renderer/App.tsx:486-488` | All are present. Refresh folders re-lists every expanded root, not one folder. |
+
+§4.4, links:
+
+| Promise | Status | Evidence | Note |
+|---|---|---|---|
+| A click opens a peek | partly | `app/renderer/lenses/rendered.ts:392-393`, `app/renderer/App.tsx:525-543` | Windows only. |
+| Ctrl+click (Cmd+click on macOS) opens a tab in the same card | partly | `app/renderer/lenses/rendered.ts:393`, `app/renderer/App.tsx:544-549` | Windows only. |
+| Ctrl+click focuses the tab if it's already open | unmet | `app/renderer/ReaderCard.tsx:868-869`, `app/core-host/dispatch.ts:708` | The tab key carries the new document's id, so every open adds a tab. |
+| Shift+click reuses the right neighbour, else the left, and splits only from one card | partly | `app/renderer/App.tsx:705-710` | Windows only. |
+| A relative path resolves against the file's folder | partly | `core/typose-core/src/local.rs:322-327`, `core/typose-core/src/local.rs:225-226` | Windows only. Other drives are refused. |
+| A leading `/` resolves against the file's root | partly | `core/typose-core/src/local.rs:222-223`, `app/core-host/dispatch.ts:1477` | Windows only, for files in a root. |
+| Outside a root, a leading `/` resolves against the file's folder | unmet | `app/core-host/local-target.ts:12`, `app/core-host/dispatch.ts:1301-1302` | The link is refused and goes inert. |
+| Paths are percent-decoded and take either separator | partly | `app/core-host/local-target.ts:16`, `app/core-host/local-target.ts:30`, `core/typose-core/src/local.rs:304` | Windows only. |
+| `file://` URLs are treated as local paths | partly | `app/core-host/local-target.ts:27`, `core/typose-core/src/local.rs:310-311` | Windows only, and only the `file:///C:/…` form on the source's drive; host and POSIX forms are inert. |
+| A case-insensitive match is used when there's no exact one | partly | `core/typose-core/src/local.rs:490` | Windows only, where the native open is case-insensitive. |
+| Hovering shows "Case differs" | unmet | `app/renderer/lenses/rendered.ts:21-24` | No such text exists in `app/`. |
+| A `#heading` scrolls within the same file, without a peek | true | `app/core-host/dispatch.ts:1466-1475`, `app/renderer/lenses/rendered.ts:411-416` | Every system. |
+| `other.md#heading` peeks and scrolls to the heading | unmet | `app/core-host/local-target.ts:26`, `app/core-host/dispatch.ts:1489-1493` | A local href with `#` isn't a local target, so it goes inert. |
+| Slugs follow GitHub's algorithm | partly | `core/typose-core/src/md.rs:447-456`, `core/typose-core/src/md.rs:776` | A github-slugger port for top-level headings; nested headings get no slug, and combining marks are dropped. |
+| Wikilinks resolve by filename | unmet | `core/typose-core/src/md.rs:798-799`, `app/renderer/lenses/rendered.ts:399`, `app/renderer/lenses/rendered.ts:566` | Parsed, always marked unresolved, and a click does nothing. |
+| `![[…]]` embeds render as a link chip | unmet | `core/typose-core/src/md.rs:775` | pulldown-cmark parses it as an image, so it gets an image placeholder. Nothing is transcluded. |
+| Unresolvable links show a dashed underline and "Not found" | partly | `app/renderer/lenses/rendered.ts:21-24`, `app/renderer/lenses/rendered.ts:424-425` | Marked only after a click fails, and file targets only on Windows. Wikilinks and missing fragments are marked too. |
+
+§4.5, peek card:
+
+| Promise | Status | Evidence | Note |
+|---|---|---|---|
+| The peek covers the right of the current card, `max(45%, 420px)` wide, within the window less 32px | partly | `app/renderer/App.tsx:535-537`, `app/renderer/App.tsx:962` | Windows only. |
+| The peek slides in | unmet | `app/renderer/link-preview.css:1-10` | No transition or animation is defined; it appears at once. |
+| The `scrim` token covers the underlying card | partly | `app/renderer/link-preview.css:1` | Windows only. A fixed 48% black layer covers the whole canvas; no `scrim` token exists. |
+| A file's peek header is the card header plus Open as tab, Open to side and ✕ | partly | `app/renderer/ReaderCard.tsx:1234-1306` | Windows only. |
+| Below 560px the actions become icons with tooltips | partly | `app/renderer/link-preview.css:10`, `app/renderer/style.css:184`, `app/renderer/ReaderCard.tsx:1303-1305` | Windows only. |
+| Links in the peek replace its content, with ← back history | partly | `app/renderer/App.tsx:526-528`, `app/renderer/ReaderCard.tsx:807-808`, `app/renderer/App.tsx:586` | Windows only. History is bounded only by the memory budget and is released on close. ← is always shown, disabled until there's history. |
+| Esc, ✕ or a click on the scrim closes the peek | partly | `app/renderer/App.tsx:961`, `app/renderer/ReaderCard.tsx:1305` | Windows only. |
+| Focus stays in the peek; Ctrl+F searches it and Ctrl+W closes it | partly | `app/renderer/App.tsx:863`, `app/renderer/App.tsx:885-890` | Windows only. |
+
+§4.6, untrusted content:
+
+| Promise | Status | Evidence | Note |
+|---|---|---|---|
+| A link to a supported regular file opens inside Typose | partly | `core/typose-core/src/doc.rs:413-421`, `core/typose-core/src/local.rs:567-570` | Windows only. md, markdown, csv and tsv open (and txt); JSON, JSONC, JSONL, NDJSON and YAML targets are refused. |
+| Nothing else opens inside Typose from a link | true | `core/typose-core/src/doc.rs:420-421`, `core/typose-core/src/local.rs:567-570` | Every system; off Windows no link opens at all. |
+| Any other local link target shows the hand-off sheet | unmet | `app/core-host/dispatch.ts:1482`, `app/renderer/lenses/rendered.ts:421-426` | The core refuses it and only the link's tooltip changes. A pending, unmerged change adds a banner for links with no supported destination. |
+| The hand-off sheet shows the full path and type, with Open with default app or Cancel | partly | `app/renderer/ReaderCard.tsx:1622-1636`, `app/shared/handoff.ts:24-31` | Windows only, reached from unsupported sidebar entries and linked programs. Open with default app is offered only for allowlisted extensions. |
+| Programs, scripts, installers and shortcuts are never handed off | partly | `app/main/handoff.ts:80-82`, `app/shared/handoff.ts:4-14`, `app/shared/handoff.ts:24-29` | Open with default app takes only an allowlist, and the Windows list is covered. The executable bit isn't checked, so on macOS and Linux a +x file with an allowed extension is handed off. |
+| A linked program offers only Show in folder | partly | `app/core-host/dispatch.ts:1481`, `app/renderer/ReaderCard.tsx:1625-1636` | Windows only. |
+| http, https and mailto open in the OS handler directly | true | `app/core-host/dispatch.ts:1489-1492`, `app/main/external.ts:41`, `app/main/index.ts:388` | Every system. |
+| Any other scheme shows a confirm sheet with the full URL | unmet | `app/core-host/dispatch.ts:1491`, `app/renderer/lenses/rendered.ts:417-419` | It resolves to inert and only the tooltip changes. |
+| UNC paths and `smb://` URLs are never touched without a click | true | `app/core-host/local-target.ts:12`, `core/typose-core/src/sanitize.rs:220-221`, `app/renderer/App.tsx:184-189`, `app/renderer/ReaderCard.tsx:1456`, `app/main/launch.ts:50` | Links and images never reach them; restore leaves network roots and tabs unopened; drops refuse them. |
+| Device and special files are refused | true | `core/typose-core/src/store.rs:112-123`, `core/typose-core/src/local.rs:545-547` | Every system. |
+| Images from local files render inline | partly | `core/typose-core/src/image_resource.rs:62`, `core/typose-core/src/images.rs:129-138` | Windows only. PNG, JPEG and GIF decode; WebP is refused. |
+| Inline `data:` images (PNG, JPEG, GIF, WebP; not SVG) render within caps | partly | `core/typose-core/src/image_resource.rs:169-170`, `core/typose-core/src/images.rs:135-136`, `app/renderer/lenses/images.ts:6-7` | PNG, JPEG and GIF render on every system within 8 MiB and 16,777,216 pixels. WebP is refused; SVG is refused as promised. |
+| A refused or over-cap image keeps its alt text and says why | true | `app/renderer/lenses/images.ts:98-106` | Every system. |
+| Remote images wait behind a once-per-file "Load remote images" bar | unmet | `app/renderer/lenses/images.ts:65` | Remote images are refused outright; no bar exists. |
+| Rendering makes no network request | true | `app/renderer/lenses/images.ts:65`, `app/main/index.ts:74-75`, `app/main/index.ts:108-110` | The page's CSP and the request guard block it too. |
+| UNC and `smb` images never load | true | `core/typose-core/src/sanitize.rs:235-248`, `app/renderer/lenses/images.ts:64` | Every system. |
+| Raw HTML may use only the listed tags | true | `core/typose-core/src/sanitize.rs:17-20` | The list matches the brief's. |
+| Every other attribute is stripped, `style` included | true | `core/typose-core/src/sanitize.rs:29-40`, `core/typose-core/src/sanitize.rs:69` | `href` becomes inert `data-href` and `src` an image placeholder. |
+| Any other markup renders as literal text | true | `core/typose-core/src/sanitize.rs:155-158` | |
+| Mermaid draws in a sandboxed iframe, with no click handlers or HTML labels | true | `app/renderer/mermaid/diagram.ts:24-26`, `app/renderer/mermaid/diagram.ts:36-43` | The iframe's sandbox is emptied, so diagram links are dead. |
+| KaTeX runs with `trust: false` and expansion and size limits | true | `app/renderer/math/tex.ts:11` | |
+| A render error shows the source with a problem marker | true | `app/renderer/mermaid/diagram.ts:44-46`, `app/renderer/math/math.ts:66-67` | A KaTeX refusal (caps, budget, timeout) keeps the source with a tooltip and no marker (`app/renderer/math/math.ts:57-60`). |
+
+### Proposed strikes
+
+These are proposals. Nothing is struck until Zack approves it.
+
+- §4.6, the "Load remote images" bar: strike it and keep refusing remote images, because it's the only outbound request the brief plans, and without it the no-request rule and its NetLog gate need no exception.
+- §4.6, the confirm sheet for other URL schemes: strike it and keep those links inert, because a one-click sheet still lets an untrusted file launch any registered protocol handler (`ms-settings:`, `vscode:` and the like).
+- §4.6, the executable-bit rule on macOS and Linux: strike it, because Open with default app already accepts only an allowlist of document and media types, and the bit would mostly refuse documents that carry it by accident, as files from zips and FAT drives often do.
+- §4.4, a leading `/` outside a root resolving against the file's own folder: strike it and keep the refusal, because with no root the GitHub meaning doesn't exist, and the fallback would make links that work in Typose and break on GitHub.
+- §4.4, marking unresolvable file links before they're clicked: strike that reading and keep marking on a failed click, because marking early needs a filesystem probe per link on the render path, the cost §0.3 gave for removing JSON and YAML links.
