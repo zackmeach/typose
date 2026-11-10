@@ -6,7 +6,8 @@ import type { PrintDocumentResult } from '../shared/protocol'
  * window this long after `dialog-closed`. */
 const SPOOL_CEILING = 10 * 60_000
 /** At most this many windows wait only on their spool after `dialog-closed`, each holding its laid-out document outside
- * the memory budget. Two, because with one the next job's `dialog-closed` would cut a spool that is still running. */
+ * the memory budget. Two, because with one the next job's `dialog-closed` would cut a spool that is still running. A
+ * third `dialog-closed` while two wait closes the oldest, which cancels that job if it is still spooling. */
 const SPOOL_WINDOWS = 2
 
 /** Resolves to `value` after `ms` unless `signal` aborts first. Global timers, so tests can fake them. */
