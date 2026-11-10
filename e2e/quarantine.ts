@@ -31,11 +31,11 @@ export const quarantine: { title: string; os?: NodeJS.Platform; reason: string; 
     title: "1 GiB on one line: the first piece shows before the scan passes the line's end, and more loads on demand",
     os: 'darwin', reason: "flaky twice on a hosted runner: the first screen waited for the line's end (Z37's gate)", expires: '2026-12-10'
   },
-  // Flaky in two runs, 42893493529 and 42905869650.
-  {
+  // macOS: flaky in two runs, 42893493529 and 42905869650. Windows: failed its try and its retry in run 42911389323.
+  ...(['darwin', 'win32'] as const).map(os => ({
     title: 'math bombs, oversized formulas and hostile sanitizer input stay bounded and keep the reader responsive',
-    os: 'darwin', reason: 'flaky twice on a hosted runner: a 264 ms and a 273 ms renderer task against the 250 ms bound', expires: '2026-12-10'
-  },
+    os, reason: 'hosted runner: a renderer task or a page timer of 264 to 273 ms against the 250 ms bounds', expires: '2026-12-10'
+  })),
   // Flaky in both attempts of run 42906673250 (and once on Linux, in 42873445753).
   {
     title: 'a Reload the ledger refuses keeps Raw at its generation, with a banner, and Retry reloads once there is room',
