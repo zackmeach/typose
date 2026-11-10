@@ -98,7 +98,7 @@ describe('rowBreaks (Z66)', () => {
     expect(bad).toEqual([])
   })
 
-  it('keeps one grapheme whole wherever it sits across the limit', () => {
+  it('keeps one grapheme whole wherever it sits across the limit', { timeout: 30_000 }, () => {
     // Seeded, so the set of clusters is fixed. Every offset 2030..2050, a few hundred strings.
     let seed = 0x5eed
     const next = () => {

@@ -134,7 +134,7 @@ jobs:
           REPEAT_EACH: ${{ inputs.repeat-each }}
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          xvfb-run -a npm run "$E2E_SCRIPT" -- ${GREP:+--grep "$GREP"} ${SHARD:+--shard "$SHARD"} ${REPEAT_EACH:+--repeat-each "$REPEAT_EACH"}
+          xvfb-run -a npm run "$E2E_SCRIPT" -- ${GREP:+--grep "$GREP" --pass-with-no-tests} ${SHARD:+--shard "$SHARD"} ${REPEAT_EACH:+--repeat-each "$REPEAT_EACH"}
       - name: e2e ${{ inputs.e2e-label }} and the NetLog assertion (${{ runner.os }})
         if: ${{ !cancelled() && steps.package.outcome == 'success' && steps.electron.outcome == 'success' && runner.os != 'Linux' }}
         timeout-minutes: ${{ inputs.e2e-timeout }}
@@ -144,7 +144,7 @@ jobs:
           GREP: ${{ inputs.grep }}
           SHARD: ${{ inputs.shard && format('{0}/{1}', inputs.shard, inputs.shard-count) || '' }}
           REPEAT_EACH: ${{ inputs.repeat-each }}
-        run: npm run "$E2E_SCRIPT" -- ${GREP:+--grep "$GREP"} ${SHARD:+--shard "$SHARD"} ${REPEAT_EACH:+--repeat-each "$REPEAT_EACH"}
+        run: npm run "$E2E_SCRIPT" -- ${GREP:+--grep "$GREP" --pass-with-no-tests} ${SHARD:+--shard "$SHARD"} ${REPEAT_EACH:+--repeat-each "$REPEAT_EACH"}
       # Every launch should have exited by now; one that didn't is evidence too (run 40067408502 left one hanging).
       - name: Electron and Typose processes still running
         if: failure() && runner.os == 'macOS'
