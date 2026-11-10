@@ -1357,6 +1357,19 @@ mod tests {
         assert!(events < 256, "{events} events for {} bytes", src.len());
     }
 
+    /// RUSTSEC-2026-0433: before pulldown-cmark 0.13.6 every enclosing `![[` resolved in turn and rescanned its body
+    /// (quadratic in the nesting depth); since, only the innermost resolves. Before, this was one image to `![[a]]`.
+    #[test]
+    fn nested_image_wikilinks_resolve_only_the_innermost() {
+        let dests: Vec<String> = Parser::new_ext("![[![[a]]]]", OPTIONS)
+            .filter_map(|event| match event {
+                Event::Start(Tag::Image { dest_url, .. }) => Some(dest_url.into_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dests, ["a"]);
+    }
+
     /// Mixed byte widths keep the map near the text's size: the base rendered these, and a per-unit map made one `·` in
     /// a 25 KB code block a "renders too large" note.
     #[test]
