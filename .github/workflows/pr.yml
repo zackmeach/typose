@@ -1,4 +1,5 @@
-# The full e2e suite on Windows, Linux and macOS for every non-draft PR; drafts never run. Green CI is the merge bar. The
+# The full e2e suite on Windows, Linux and macOS for every non-draft PR and every push to main; drafts never run. Green CI
+# is the merge bar. The
 # repo is public, so hosted minutes are free: each OS splits the suite into four shards that run in parallel. Caches are
 # keyed per lockfile and OS, docs-only PRs are skipped, a newer push cancels the older run, fmt and lint run on Linux
 # only, every job is time-boxed, and bounded evidence is kept only on failure. `workflow_dispatch` runs it on a branch
@@ -13,6 +14,9 @@ on:
     # GitHub judges a PR's whole diff against its base, not the latest push: a docs-only push to a PR that changes
     # code still runs. `*.md` is the root's own (README and the like); Markdown under app/, core/ and e2e/ is test input.
     paths-ignore: ['docs/**', '*.md']
+  push:
+    branches: [main]
+    paths-ignore: ['docs/**', '*.md']
   workflow_dispatch:
     inputs:
       grep:
@@ -26,7 +30,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'push' }} # a push to main is never cancelled by the next merge
 
 permissions:
   contents: read
@@ -35,7 +39,7 @@ jobs:
   # Platform-independent checks, on Linux only. Each check runs even when an earlier check failed, so one run reports
   # them all; a failed setup step still skips everything after it.
   lint:
-    if: ${{ !github.event.pull_request.draft }} # a dispatch has no pull_request, so its draft is null
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -74,25 +78,25 @@ jobs:
         run: npm run lint -- .github/scripts
 
   test:
-    if: ${{ !github.event.pull_request.draft }} # a dispatch has no pull_request, so its draft is null
+    if: github.event.pull_request.draft == false
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4] # shard-count and the label below must change with this list
     uses: ./.github/workflows/test.yml
     with:
       os: ${{ matrix.os }}
-      # Assumes a quarter of the full suite is at most about 15 minutes on the slowest OS (macOS), shards being uneven
-      # because Playwright splits by test file; the whole suite is about 45 minutes serial on Linux. Setup and build
-      # take about 10 minutes, and shard 1 adds the unit layers. A retry (config: one under CI) re-runs a failed test.
+      # Measured on the first full runs: Linux e2e is 1.2 to 3.9 minutes a shard (about 10 in total), the longest macOS
+      # shard 7.7, and setup to the start of e2e 1.5 to 3.5. rendered-memory runs on Linux and adds about 11 minutes to
+      # one shard there. Shards are uneven because Playwright splits by test file, and a retry re-runs a failed test.
       job-timeout: 50 # the e2e step's 30 after the setup and unit layers, with room for the evidence upload
       e2e-timeout: 30 # twice the quarter-suite estimate; past the longest test's own limit (10 min, large and long-line; the config's is 5)
       e2e-script: e2e
       e2e-label: full suite, shard ${{ matrix.shard }}/4
-      shard: ${{ matrix.shard }}
+      shard: ${{ !inputs.grep && matrix.shard || '' }} # a dispatch that names tests runs them unsharded, so a grep that matches nothing fails
       shard-count: '4'
-      unit-tests: ${{ matrix.shard == 1 }} # the unit layers run once per OS
+      unit-tests: ${{ matrix.shard == 1 }} # the unit layers, and a grep dispatch's e2e, run once per OS
       package-name: ${{ matrix.os == 'macos-latest' && 'Package the fused --dir build, the arm64 .app (packaged.e2e.ts drives it)' || 'Package the fused --dir build (packaged.e2e.ts drives it)' }}
       grep: ${{ inputs.grep }}
       repeat-each: ${{ inputs.repeat-each }}

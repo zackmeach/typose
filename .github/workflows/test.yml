@@ -18,11 +18,11 @@ on:
         type: number
         required: true
       e2e-script:
-        description: The npm script that runs the e2e tests (e2e:smoke, or e2e for the full suite)
+        description: The npm script that runs the e2e tests (e2e for the full suite)
         type: string
         required: true
       e2e-label:
-        description: Names the e2e step (smoke, full suite)
+        description: Names the e2e step (full suite, shard n/4)
         type: string
         default: ''
       electron-cache-path:
@@ -53,7 +53,7 @@ on:
         type: string
         default: ''
       unit-tests:
-        description: Run the unit layers (cargo test, the vendored JPEG tests, npm run check, test:hooks); the shards of one OS need run them once
+        description: Run the unit layers (cargo test, the vendored JPEG tests, npm run check, test:hooks). A run that sets grep runs its e2e only when this is true, so the shards of one OS run the named tests once
         type: boolean
         default: true
 
@@ -125,7 +125,7 @@ jobs:
         run: npm run package
       # Inputs reach the script through the environment, never pasted into it.
       - name: e2e ${{ inputs.e2e-label }} and the NetLog assertion (Linux, under xvfb, with the sandbox on)
-        if: ${{ !cancelled() && steps.package.outcome == 'success' && steps.electron.outcome == 'success' && runner.os == 'Linux' }}
+        if: ${{ !cancelled() && steps.package.outcome == 'success' && steps.electron.outcome == 'success' && (!inputs.grep || inputs.unit-tests) && runner.os == 'Linux' }}
         timeout-minutes: ${{ inputs.e2e-timeout }}
         env:
           E2E_SCRIPT: ${{ inputs.e2e-script }}
@@ -134,9 +134,9 @@ jobs:
           REPEAT_EACH: ${{ inputs.repeat-each }}
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          xvfb-run -a npm run "$E2E_SCRIPT" -- ${GREP:+--grep "$GREP" --pass-with-no-tests} ${SHARD:+--shard "$SHARD"} ${REPEAT_EACH:+--repeat-each "$REPEAT_EACH"}
+          xvfb-run -a npm run "$E2E_SCRIPT" -- ${GREP:+--grep "$GREP"} ${SHARD:+--shard "$SHARD"} ${REPEAT_EACH:+--repeat-each "$REPEAT_EACH"}
       - name: e2e ${{ inputs.e2e-label }} and the NetLog assertion (${{ runner.os }})
-        if: ${{ !cancelled() && steps.package.outcome == 'success' && steps.electron.outcome == 'success' && runner.os != 'Linux' }}
+        if: ${{ !cancelled() && steps.package.outcome == 'success' && steps.electron.outcome == 'success' && (!inputs.grep || inputs.unit-tests) && runner.os != 'Linux' }}
         timeout-minutes: ${{ inputs.e2e-timeout }}
         shell: bash # the expansions below are bash; Windows runners default to pwsh
         env: # through the environment, never pasted into the script
@@ -144,7 +144,7 @@ jobs:
           GREP: ${{ inputs.grep }}
           SHARD: ${{ inputs.shard && format('{0}/{1}', inputs.shard, inputs.shard-count) || '' }}
           REPEAT_EACH: ${{ inputs.repeat-each }}
-        run: npm run "$E2E_SCRIPT" -- ${GREP:+--grep "$GREP" --pass-with-no-tests} ${SHARD:+--shard "$SHARD"} ${REPEAT_EACH:+--repeat-each "$REPEAT_EACH"}
+        run: npm run "$E2E_SCRIPT" -- ${GREP:+--grep "$GREP"} ${SHARD:+--shard "$SHARD"} ${REPEAT_EACH:+--repeat-each "$REPEAT_EACH"}
       # Every launch should have exited by now; one that didn't is evidence too (run 40067408502 left one hanging).
       - name: Electron and Typose processes still running
         if: failure() && runner.os == 'macOS'
