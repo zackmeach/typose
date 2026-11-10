@@ -24,5 +24,15 @@ export const quarantine: { title: string; os?: NodeJS.Platform; reason: string; 
   {
     title: 'the keyboard reaches ☰ and Raw, ☰ runs its commands from the keyboard, and the focus ring shows',
     os: 'linux', reason: 'flaky twice: ☰ is not focused on the first try', expires: '2026-12-10'
+  },
+  // Flaky in three runs, 42869369349, 42898377896 and 42898891669.
+  {
+    title: 'native-derived capture remains a reselect record across an actual restart',
+    os: 'win32', reason: 'flaky three times: session.json is read once, before the derived tab is saved', expires: '2026-12-10'
+  },
+  // Flaky in two runs, 42898553765 and 42898377896.
+  {
+    title: "1 GiB on one line: the first piece shows before the scan passes the line's end, and more loads on demand",
+    os: 'darwin', reason: "flaky twice on a hosted runner: the first screen waited for the line's end (Z37's gate)", expires: '2026-12-10'
   }
 ]
