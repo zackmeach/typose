@@ -133,7 +133,7 @@ test('a second death during a Reopen keeps its line: once 60 s have passed, the 
   await finish(l)
 })
 
-test('Open file… while the core is stopped acknowledges the queued file and opens a new tab after restart', async () => {
+test('Browse… while the core is stopped acknowledges the queued file and opens a new tab after restart', async () => {
   test.skip(process.platform === 'darwin', 'macOS has the native menu bar instead of ☰')
   test.setTimeout(3 * 60_000)
   const l = await launch({ hooks: true, file: fixture('core-death-first.txt', lines(50)) })

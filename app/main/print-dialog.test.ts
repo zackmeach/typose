@@ -1,6 +1,6 @@
 import type { WebContents } from 'electron'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { printWithDialog } from './print-dialog'
+import { printWithDialog, spoolKeeper } from './print-dialog'
 
 beforeEach(() => { vi.useFakeTimers() })
 afterEach(() => { vi.useRealTimers() })
@@ -27,6 +27,8 @@ it('settles 500 ms after afterprint fires without an Electron callback', async (
   const { result } = await printWithDialog(contents, 3, true)
   expect(contents.print).toHaveBeenCalledOnce()
   const settled = watch(result)
+  await vi.advanceTimersByTimeAsync(60_000)
+  expect(settled.settled).toBe(false)
   closeDialog()
   await vi.advanceTimersByTimeAsync(499)
   expect(settled.settled).toBe(false)
@@ -70,16 +72,66 @@ it('keeps the print window past dialog-closed until the Electron callback arrive
   expect(closable.settled).toBe(true)
 })
 
-it('settles after five minutes when nothing reports back, and frees the window ten minutes after that', async () => {
-  const { contents } = nativePrint()
-  const { result, spooled } = await printWithDialog(contents, 3, false)
-  const settled = watch(result), closable = watch(spooled)
-  await vi.advanceTimersByTimeAsync(5 * 60_000 - 1)
-  expect(settled.settled).toBe(false)
-  await vi.advanceTimersByTimeAsync(1)
-  expect(settled.value).toEqual({ kind: 'refused', reason: 'The OS print dialog did not complete' })
+it('frees the window ten minutes after dialog-closed when no callback comes', async () => {
+  const { contents, closeDialog } = nativePrint()
+  const { result, spooled } = await printWithDialog(contents, 3, true)
+  const closable = watch(spooled)
+  closeDialog()
+  await vi.advanceTimersByTimeAsync(500)
+  await expect(result).resolves.toEqual({ kind: 'dialog-closed' })
   await vi.advanceTimersByTimeAsync(10 * 60_000 - 1)
   expect(closable.settled).toBe(false)
   await vi.advanceTimersByTimeAsync(1)
   expect(closable.settled).toBe(true)
+})
+
+it.each([true, false])('stays pending while nothing reports back, since the dialog may still be open (afterprint watched: %s)', async watchAfterPrint => {
+  const { contents } = nativePrint()
+  const { result, spooled } = await printWithDialog(contents, 3, watchAfterPrint)
+  const settled = watch(result), closable = watch(spooled)
+  await vi.advanceTimersByTimeAsync(60 * 60_000)
+  expect(settled.settled).toBe(false)
+  expect(closable.settled).toBe(false)
+})
+
+it('settles refused and frees the window at once when print throws', async () => {
+  const { contents } = nativePrint()
+  contents.print.mockImplementation(() => { throw new Error('No printer') })
+  const { result, spooled } = await printWithDialog(contents, 3, true)
+  await expect(result).resolves.toEqual({ kind: 'refused', reason: 'The OS print dialog did not complete' })
+  await expect(spooled).resolves.toBeUndefined()
+})
+
+it('settles refused and frees the window at once when the afterprint watch rejects', async () => {
+  const executeJavaScript = vi.fn<WebContents['executeJavaScript']>().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('Window gone'))
+  const { result, spooled } = await printWithDialog({ executeJavaScript, print: vi.fn<WebContents['print']>() }, 3, true)
+  const closable = watch(spooled)
+  await expect(result).resolves.toEqual({ kind: 'refused', reason: 'The OS print dialog did not complete' })
+  await vi.advanceTimersByTimeAsync(0)
+  expect(closable.settled).toBe(true)
+})
+
+it('keeps at most two windows waiting on their spool, closing the oldest', () => {
+  const keep = spoolKeeper(), never = new Promise<void>(() => {})
+  const first = vi.fn(), second = vi.fn(), third = vi.fn()
+  keep(first, never)
+  keep(second, never)
+  expect(first).not.toHaveBeenCalled()
+  keep(third, never)
+  expect(first).toHaveBeenCalledOnce()
+  expect(second).not.toHaveBeenCalled()
+  expect(third).not.toHaveBeenCalled()
+})
+
+it('stops counting a window once its spool ends', async () => {
+  const keep = spoolKeeper(), never = new Promise<void>(() => {})
+  let finish!: () => void
+  const first = vi.fn(), second = vi.fn(), third = vi.fn()
+  keep(first, new Promise<void>(resolve => { finish = resolve }))
+  keep(second, never)
+  finish()
+  await vi.advanceTimersByTimeAsync(0)
+  keep(third, never)
+  expect(first).not.toHaveBeenCalled()
+  expect(second).not.toHaveBeenCalled()
 })
