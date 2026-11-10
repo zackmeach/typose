@@ -16,7 +16,7 @@ Green CI on Windows, Linux and macOS is the merge bar. You do not need to run th
 
 ## Flaky tests
 
-Under CI a test that fails and then passes on retry still fails its job. If a job is red only for a flaky test, re-run it once. If a test is flaky in two runs, add an entry to [`e2e/quarantine.ts`](e2e/quarantine.ts) that expires within 30 days, or fix the test.
+Under CI a test that fails and then passes on retry still fails its job. If a job is red only for flaky tests, each seen for the first time on that system, re-run the job and note the test and the run in the PR. If a test is flaky in two runs on one system, or fails its try and its retry in one run, add an entry to [`e2e/quarantine.ts`](e2e/quarantine.ts) that expires within 30 days, or fix the test.
 
 ## Tests that need a quiet machine
 
