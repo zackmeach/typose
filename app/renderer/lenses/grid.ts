@@ -59,7 +59,7 @@ export class GridLens {
   private sortColumn = -1
   private sortDirection: GridSort = 'none'
   private sortAbort: AbortController | undefined
-  private sortNavigation: Promise<void> = Promise.resolve()
+  private orderNavigation: Promise<void> = Promise.resolve()
   private findCell: { row: number; column: number } | undefined
   private readonly findSignal = new FindSignal()
   private findQuery: FindQuery = { text: '', matchCase: false }
@@ -204,10 +204,27 @@ export class GridLens {
   focus(): void { this.focusWanted = true; this.layout(); if (!this.mounted.has(cellKey(this.active.row, this.active.column))) this.element.focus() }
   goTo(rowNumber: number): void {
     if (!Number.isSafeInteger(rowNumber) || rowNumber < 1) return
-    this.atRow = rowNumber - 1
-    this.moved = true
-    if (this.rowCount > this.atRow || this.info.done) this.placeAtRow()
-    this.request()
+    this.orderNavigation = this.orderNavigation.then(async () => {
+      if (!this.valid()) return
+      const order = this.order
+      let row = rowNumber - 1
+      if (order?.id) {
+        if (!this.rowCount) return
+        // The gutter keeps its source numbering even when the visible rows are sorted.
+        const sourceRecord = Math.min(row, this.rowCount - 1) + (this.info.header ? 1 : 0)
+        const located = await this.core.call('csvOrderLocate', { order, sourceRecord }, this.abort.signal)
+        if (!this.valid(order.csv) || this.order !== order) return
+        row = located.dataRow
+      }
+      this.atLine = undefined
+      this.atRow = row
+      this.moved = true
+      if (this.rowCount > row || this.info.done) {
+        this.focusWanted ||= this.element.contains(document.activeElement)
+        this.placeAtRow()
+      }
+      this.request()
+    }).catch(error => { if (this.valid()) this.failed(error) })
   }
 
   printPlan(): PrintPlan {
@@ -432,8 +449,8 @@ export class GridLens {
   }
 
   private requestSort(column: number, direction?: GridSort): Promise<void> {
-    const queued = this.sortNavigation.then(() => this.valid() ? this.sortBy(column, direction) : undefined)
-    this.sortNavigation = queued.catch(() => {})
+    const queued = this.orderNavigation.then(() => this.valid() ? this.sortBy(column, direction) : undefined)
+    this.orderNavigation = queued.catch(() => {})
     return queued
   }
 

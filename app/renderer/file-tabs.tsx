@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { Button, Menu, MenuItem, MenuTrigger, Popover } from 'react-aria-components'
 import { fileName, parentName } from './card'
 import { FileIcon } from './file-icon'
@@ -16,17 +16,18 @@ export function FileTabs({ tabs, selected, onSelect, onClose, panelId = 'file-ca
 }) {
   const row = useRef<HTMLDivElement>(null)
   const [overflow, setOverflow] = useState(false)
-  useEffect(() => {
+  const hasSettings = settings !== undefined
+  useLayoutEffect(() => {
     const element = row.current!
     const measure = () => setOverflow(element.scrollWidth > element.clientWidth)
     const observer = new ResizeObserver(measure)
     observer.observe(element)
     measure()
     return () => observer.disconnect()
-  }, [tabs])
-  useEffect(() => {
-    row.current?.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
-  }, [selected])
+  }, [tabs, hasSettings])
+  useLayoutEffect(() => {
+    row.current?.querySelector<HTMLElement>('.file-pill[data-selected]')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }, [selected, settings?.active, overflow])
   const names = new Map<string, number>()
   for (const tab of tabs) names.set(fileName(tab.path), (names.get(fileName(tab.path)) ?? 0) + 1)
   const move = (event: KeyboardEvent, index: number) => {
@@ -46,7 +47,7 @@ export function FileTabs({ tabs, selected, onSelect, onClose, panelId = 'file-ca
       {tabs.length || settings ? <div className="file-tab-list" role="tablist" aria-label="Files" aria-owns={[...tabs.map(tab => `file-${tab.id}`), ...(settings ? ['settings-tab-' + panelId] : [])].join(' ')} /> : null}
       <div className="file-tab-scroll" ref={row}>
         {tabs.map((tab, index) => (
-          <div className="file-pill" data-selected={tab.id === selected || undefined} key={tab.id}>
+          <div className="file-pill" data-selected={!settings?.active && tab.id === selected || undefined} key={tab.id}>
             <button type="button" className="file-tab" role="tab" id={`file-${tab.id}`}
               aria-controls={tab.id === selected ? panelId : undefined} aria-labelledby={`file-label-${tab.id}`}
               aria-selected={!settings?.active && tab.id === selected} tabIndex={!settings?.active && tab.id === selected ? 0 : -1} title={tab.path}

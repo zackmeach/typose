@@ -28,6 +28,7 @@ export interface RenderedOptions {
   atLine?: number
   /** A page came back `Frozen`. Rendered keeps what it has; App raises the banner. */
   onFrozen(why: string): void
+  notice(message: string): void
   /** The note under an oversized block: show its source in Raw at this line. */
   onShowRaw(line: number): void
   /** Opens through this source document's local capability; false leaves the reader in place. */
@@ -417,6 +418,7 @@ export class RenderedLens {
       } else if (target.kind === 'inert') {
         if (href.startsWith('#')) unresolved(a, href) // no heading or footnote has this fragment
         else a.title = `Not opened: ${href}`
+        this.options.notice(href.startsWith('#') ? 'Heading or footnote not found in this file' : 'This link has no supported destination')
       }
     } catch (err) {
       if (this.stopped || this.paused || generation !== this.linkGeneration) return
@@ -424,6 +426,8 @@ export class RenderedLens {
       // The local target is missing. resolve only normalizes a path, so the failed open is the first that knows.
       if (err instanceof CoreCallError && err.code === 'NotFound') unresolved(a, href)
       else a.title = `Not opened: ${href}`
+      if (!(err instanceof CoreCallError && err.code === 'Frozen'))
+        this.options.notice(err instanceof CoreCallError ? `Cannot open link · ${err.message}` : 'Cannot open this link')
     }
   }
 

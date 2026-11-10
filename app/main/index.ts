@@ -16,6 +16,7 @@ import { ConfigStore, type TomlCodec } from './config-store'
 import { COMMANDS } from '../shared/commands'
 import { addonTarget } from '../shared/addon-target'
 import { MAX_PRINT_PDF_BYTES, physicalPageCount, validatePrintDocument } from './print-validation'
+import { printWithDialog } from './print-dialog'
 
 const mainStart = Date.now() // plan C8's first startup mark: read now, written once the hook is set up below
 
@@ -411,12 +412,14 @@ void app.whenReady().then(() => {
       : { ok: false, reason: 'refused' })
   ipcMain.handle('write-clipboard', (event: IpcMainInvokeEvent, ...args: unknown[]) =>
     writeClipboardText(win, event, args, (text) => clipboard.writeText(text)))
+  let printTarget: BrowserWindow | undefined
   ipcMain.handle('print-document', async (event: IpcMainInvokeEvent, ...args: unknown[]) => {
     if (!fromMainApp(win, event) || args.length !== 4) return { kind: 'refused', reason: 'Invalid print request' } satisfies PrintDocumentResult
     const [title, blocks, pages, confirmed] = args
     const checked = validatePrintDocument(title, blocks, pages)
     if (!checked.ok) return { kind: 'refused', reason: checked.reason } satisfies PrintDocumentResult
     if (typeof confirmed !== 'boolean') return { kind: 'refused', reason: 'Invalid print confirmation' } satisfies PrintDocumentResult
+    if (printTarget && !printTarget.isDestroyed()) return { kind: 'refused', reason: 'A print job is already open' } satisfies PrintDocumentResult
     const target = new BrowserWindow({
       show: false,
       width: 900,
@@ -424,6 +427,7 @@ void app.whenReady().then(() => {
       parent: win,
       webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, spellcheck: false }
     })
+    printTarget = target
     target.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
     target.webContents.on('will-navigate', e => e.preventDefault())
     try {
@@ -475,19 +479,12 @@ void app.whenReady().then(() => {
           message: `Print ${physicalPages.toLocaleString()} pages?`, detail: 'Large print jobs can take a long time.' })
         if (answer.response !== 0) return { kind: 'cancelled' } satisfies PrintDocumentResult
       }
-      return await new Promise<PrintDocumentResult>(resolve => {
-        try {
-          target.webContents.print({ silent: false, printBackground: true, pageSize: 'Letter', margins: { marginType: 'none' } }, success => {
-            resolve(success ? { kind: 'printed', pages: physicalPages } : { kind: 'cancelled' })
-          })
-        } catch {
-          resolve({ kind: 'refused', reason: 'The OS print dialog could not be opened' })
-        }
-      })
+      return await printWithDialog(target.webContents, physicalPages, process.platform === 'win32')
     } catch {
       return { kind: 'refused', reason: 'The print document could not be prepared' } satisfies PrintDocumentResult
     } finally {
       if (!target.isDestroyed()) target.close()
+      if (printTarget === target) printTarget = undefined
     }
   })
   const startupQuery = new URLSearchParams()

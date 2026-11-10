@@ -178,6 +178,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     return Promise.resolve(false)
   }
   function printAction(): void {
+    if (printAbort.current) { shared.notice('The previous print job is still finishing'); return }
     const plan = lens.current?.printPlan?.()
     if (!plan) { shared.notice('Print is unavailable in this view'); return }
     if (!plan.indexed) { shared.notice('Print is unavailable · wait for indexing to finish'); return }
@@ -189,7 +190,6 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   }
   function closePrint(): void {
     printAbort.current?.abort()
-    printAbort.current = null
     setPrintBusy(false)
     setPrintPlan(null)
     requestAnimationFrame(() => lens.current?.focus())
@@ -212,7 +212,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   async function submitPrint(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault()
     const plan = printPlan, active = lens.current
-    if (!plan || !active?.printRange || !plan.indexed || printBusy) return
+    if (!plan || !active?.printRange || !plan.indexed || printAbort.current) return
     const range = selectedPrintRange(plan)
     if (!range || range.pages > 50 && !printConfirmed) return
     const controller = new AbortController()
@@ -226,15 +226,17 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       if (!await payload.verify(controller.signal) || controller.signal.aborted || printAbort.current !== controller)
         throw new Error('The source changed while preparing the print job; reload before printing')
       const printed = await window.typose.printDocument(path ? fileName(path) : 'Typose', payload.blocks, payload.pages, printConfirmed)
-      if (!controller.signal.aborted) shared.notice(printed.kind === 'printed' ? 'Print job sent' : printed.kind === 'refused' ? printed.reason : 'Print cancelled')
+      if (controller.signal.aborted) return
+      shared.notice(printed.kind === 'printed' ? 'Print job sent' : printed.kind === 'refused' ? printed.reason :
+        printed.kind === 'dialog-closed' ? 'Print dialog closed' : 'Print cancelled')
       closePrint()
     } catch (error) {
-      if (!controller.signal.aborted) shared.notice(error instanceof Error ? `Print failed · ${error.message}` : 'Print failed')
+      if (controller.signal.aborted) return
+      shared.notice(error instanceof Error ? `Print failed · ${error.message}` : 'Print failed')
       closePrint()
     } finally {
-      await payload?.release()
-      if (printAbort.current === controller) printAbort.current = null
-      setPrintBusy(false)
+      try { await payload?.release() }
+      finally { printAbort.current = null; setPrintBusy(false) }
     }
   }
   const picked = useRef<LensName | null>(null)
@@ -1704,8 +1706,8 @@ interface LensHostProps {
 /** Mounts Raw or Rendered into the card body. A switch or Reload of this document keeps the previous lens's top line. */
 function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place, hadFocus, restoreFocus, atLine, opened, name, lines, indexed, limits, frozen, mode, build, csv, csvOptions, onCsvInfo, structured, onRows, onFrozen, notice, onShowRaw, onOpenLocal, onExecutable, onDisposed }: LensHostProps) {
   const host = useRef<HTMLDivElement>(null)
-  const handlers = useRef({ onFrozen, onShowRaw, onOpenLocal, onExecutable, onDisposed, onCsvInfo })
-  handlers.current = { onFrozen, onShowRaw, onOpenLocal, onExecutable, onDisposed, onCsvInfo }
+  const handlers = useRef({ onFrozen, onShowRaw, onOpenLocal, onExecutable, onDisposed, onCsvInfo, notice })
+  handlers.current = { onFrozen, onShowRaw, onOpenLocal, onExecutable, onDisposed, onCsvInfo, notice }
   useEffect(() => {
     // `place` outlives the document. Use it only for the document that saved it, so a second file opens at `atLine`
     // (or the top). Clear it only after that check: Reload is the same document, and its line has to survive.
@@ -1731,6 +1733,7 @@ function LensHost({ core, onFind, session, budget, retained, lens, jumpTo, place
         kept?.view.dispose()
         const made = new RenderedLens(host.current!, core, opened, build, limits, {
           onFrozen: onFrozenHere, atLine: at, onShowRaw: (line) => handlers.current.onShowRaw(line),
+          notice: message => handlers.current.notice(message),
           onOpenLocal: (target, path, gesture) => handlers.current.onOpenLocal(target, path, gesture), budget: budget ?? undefined,
           onExecutable: (href, path) => handlers.current.onExecutable?.(href, path)
         })

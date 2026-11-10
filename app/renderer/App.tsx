@@ -861,7 +861,12 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   function run(command: Command): void {
     if (!commandEnabled(command)) return
     const reader = previewRef.current ? handles.current.get(previewRef.current.id) : focusedReader()
-    if (command === 'palette' || command === 'open') { showOverlay(command === 'open' ? 'open' : 'palette'); return }
+    if (command === 'palette') { showOverlay('palette'); return }
+    if (command === 'open') {
+      if (folders.current.length || recentRef.current.length || previewRef.current) showOverlay('open')
+      else run('browse')
+      return
+    }
     if (command === 'settings' || command === 'shortcuts') {
       if (previewRef.current) { setWorkspaceNotice('Close the preview before opening Settings'); return }
       settingsTab(focusedRef.current, 'show', command === 'shortcuts' ? 'Shortcuts' : 'Appearance'); return
