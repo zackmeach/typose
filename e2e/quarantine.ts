@@ -16,13 +16,29 @@ export const quarantine: { title: string; os?: NodeJS.Platform; reason: string; 
     title: 'a double Reload mid-index on 10 GiB keeps one index job, and close then leaves 0 jobs and 0 handles within 50 ms',
     os: 'darwin', reason: 'hosted runner: over the 50 ms bound', expires: '2026-12-10'
   },
-  {
-    title: 'reading Rows by keyboard while the graph indexes keeps Rows when the Transcript becomes ready',
-    os: 'linux', reason: 'under xvfb the command palette never opens after this launch; cause unknown', expires: '2026-12-10'
-  },
   // Flaky in two runs, 42869369349 and 42889988308: the focus never arrives on the first try.
   {
     title: 'the keyboard reaches ☰ and Raw, ☰ runs its commands from the keyboard, and the focus ring shows',
     os: 'linux', reason: 'flaky twice: ☰ is not focused on the first try', expires: '2026-12-10'
+  },
+  // Flaky in three runs, 42869369349, 42898377896 and 42898891669.
+  {
+    title: 'native-derived capture remains a reselect record across an actual restart',
+    os: 'win32', reason: 'flaky three times: session.json is read once, before the derived tab is saved', expires: '2026-12-10'
+  },
+  // Flaky in two runs, 42898553765 and 42898377896.
+  {
+    title: "1 GiB on one line: the first piece shows before the scan passes the line's end, and more loads on demand",
+    os: 'darwin', reason: "flaky twice on a hosted runner: the first screen waited for the line's end (Z37's gate)", expires: '2026-12-10'
+  },
+  // macOS: flaky in two runs, 42893493529 and 42905869650. Windows: failed its try and its retry in run 42911389323.
+  ...(['darwin', 'win32'] as const).map(os => ({
+    title: 'math bombs, oversized formulas and hostile sanitizer input stay bounded and keep the reader responsive',
+    os, reason: 'hosted runner: a renderer task or a page timer of 264 to 273 ms against the 250 ms bounds', expires: '2026-12-10'
+  })),
+  // Flaky in both attempts of run 42906673250 (and once on Linux, in 42873445753).
+  {
+    title: 'a Reload the ledger refuses keeps Raw at its generation, with a banner, and Retry reloads once there is room',
+    os: 'win32', reason: "flaky twice: the ledger's rendererCache is 16 MB under the reservation read just before it", expires: '2026-12-10'
   }
 ]

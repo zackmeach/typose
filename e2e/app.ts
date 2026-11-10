@@ -252,8 +252,14 @@ export function fixturesGen(...args: string[]): void {
 
 /** Runs a command by its label through the palette, which every OS has (macOS has no ☰). */
 export async function runCommand(win: Page, label: string): Promise<void> {
-  await win.keyboard.press('ControlOrMeta+K')
-  await win.getByRole('combobox', { name: 'Search commands' }).fill(label)
+  const search = win.getByRole('combobox', { name: 'Search commands' })
+  // App adds its key handler in a mount effect, after `typoseTest` exists, so a press straight after launch can be
+  // lost. Pressing again is safe: Ctrl+K on an open palette changes nothing.
+  await expect(async () => {
+    await win.keyboard.press('ControlOrMeta+K')
+    await expect(search).toBeVisible({ timeout: 2_000 })
+  }).toPass({ timeout: 30_000 })
+  await search.fill(label)
   await win.keyboard.press('Enter')
 }
 
