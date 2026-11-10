@@ -1,8 +1,9 @@
-# Windows and Linux on every non-draft PR (Z60); drafts never run. The e2e step is a smoke subset (`npm run e2e:smoke`,
-# Z85): the merge bar is the full local Windows gate, and the full Linux suite runs weekly (weekly-linux.yml). Within
-# GitHub Free's included minutes and its 500 MB of artifact storage (Z61, plan PR 2): caches keyed per lockfile and OS,
-# docs-only PRs skipped, a newer push cancelling the older run, fmt and lint on Linux only, every job time-boxed, and
-# bounded evidence only on failure.
+# The full e2e suite on Windows, Linux and macOS for every non-draft PR; drafts never run. Green CI is the merge bar. The
+# repo is public, so hosted minutes are free: each OS splits the suite into four shards that run in parallel. Caches are
+# keyed per lockfile and OS, docs-only PRs are skipped, a newer push cancels the older run, fmt and lint run on Linux
+# only, every job is time-boxed, and bounded evidence is kept only on failure. `workflow_dispatch` runs it on a branch
+# without a PR (`gh workflow run pr.yml --ref <branch>`), optionally only the e2e tests it names, so a platform fix can
+# be checked cheaply.
 name: pr
 
 on:
@@ -12,6 +13,16 @@ on:
     # GitHub judges a PR's whole diff against its base, not the latest push: a docs-only push to a PR that changes
     # code still runs. `*.md` is the root's own (README and the like); Markdown under app/, core/ and e2e/ is test input.
     paths-ignore: ['docs/**', '*.md']
+  workflow_dispatch:
+    inputs:
+      grep:
+        description: Run only the e2e tests whose title matches this regular expression (Playwright --grep)
+        required: false
+        default: ''
+      repeat-each:
+        description: Run each of them this many times (Playwright --repeat-each)
+        required: false
+        default: ''
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -24,7 +35,7 @@ jobs:
   # Platform-independent checks, on Linux only. Each check runs even when an earlier check failed, so one run reports
   # them all; a failed setup step still skips everything after it.
   lint:
-    if: github.event.pull_request.draft == false
+    if: ${{ !github.event.pull_request.draft }} # a dispatch has no pull_request, so its draft is null
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -63,15 +74,25 @@ jobs:
         run: npm run lint -- .github/scripts
 
   test:
-    if: github.event.pull_request.draft == false
+    if: ${{ !github.event.pull_request.draft }} # a dispatch has no pull_request, so its draft is null
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        shard: [1, 2, 3, 4]
     uses: ./.github/workflows/test.yml
     with:
       os: ${{ matrix.os }}
-      job-timeout: 25 # the smoke e2e allows 8 minutes after setup, with room for the evidence upload
-      e2e-timeout: 8 # the smoke is about a minute and a half of tests; the rest is the hooks build
-      e2e-script: e2e:smoke
-      e2e-label: smoke
+      # Assumes a quarter of the full suite is at most about 15 minutes on the slowest OS (macOS), shards being uneven
+      # because Playwright splits by test file; the whole suite is about 45 minutes serial on Linux. Setup and build
+      # take about 10 minutes, and shard 1 adds the unit layers. A retry (config: one under CI) re-runs a failed test.
+      job-timeout: 50 # the e2e step's 30 after the setup and unit layers, with room for the evidence upload
+      e2e-timeout: 30 # twice the quarter-suite estimate; past the longest test's own limit (10 min, large and long-line; the config's is 5)
+      e2e-script: e2e
+      e2e-label: full suite, shard ${{ matrix.shard }}/4
+      shard: ${{ matrix.shard }}
+      shard-count: '4'
+      unit-tests: ${{ matrix.shard == 1 }} # the unit layers run once per OS
+      package-name: ${{ matrix.os == 'macos-latest' && 'Package the fused --dir build, the arm64 .app (packaged.e2e.ts drives it)' || 'Package the fused --dir build (packaged.e2e.ts drives it)' }}
+      grep: ${{ inputs.grep }}
+      repeat-each: ${{ inputs.repeat-each }}
