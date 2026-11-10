@@ -14,7 +14,7 @@ export default defineConfig({
   testMatch: '*.e2e.ts',
   // rendered-memory passes on a hosted Linux runner but alone outlasts a macOS step; CI runs it on Linux only.
   testIgnore: process.env.CI && process.platform !== 'linux' ? 'rendered-memory.e2e.ts' : undefined,
-  grepInvert: active.length ? new RegExp(active.map((q) => q.title.replace(/[.*+?^${}()|[\]\]/g, '\$&') + '$').join('|')) : undefined,
+  grepInvert: active.length ? new RegExp(active.map((q) => q.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$').join('|')) : undefined,
   retries: process.env.CI ? 1 : 0,
   // A failure that passes on retry is still a failure: a retry is for evidence, not for a green run.
   failOnFlakyTests: !!process.env.CI,
