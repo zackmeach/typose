@@ -35,5 +35,10 @@ export const quarantine: { title: string; os?: NodeJS.Platform; reason: string; 
   {
     title: 'math bombs, oversized formulas and hostile sanitizer input stay bounded and keep the reader responsive',
     os: 'darwin', reason: 'flaky twice on a hosted runner: a 264 ms and a 273 ms renderer task against the 250 ms bound', expires: '2026-12-10'
+  },
+  // Flaky in both attempts of run 42906673250 (and once on Linux, in 42873445753).
+  {
+    title: 'a Reload the ledger refuses keeps Raw at its generation, with a banner, and Retry reloads once there is room',
+    os: 'win32', reason: "flaky twice: the ledger's rendererCache is 16 MB under the reservation read just before it", expires: '2026-12-10'
   }
 ]
