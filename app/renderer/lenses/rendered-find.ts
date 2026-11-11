@@ -5,6 +5,8 @@ import type { LensBudget } from './lens-budget'
 // One bounded block projection, scalar-offset maps, current range and at most 128 visible ranges.
 const SEARCH_BYTES = 16 << 20
 const MAX_BLOCK_UNITS = 256 << 10
+/** The reader's own scrolling, which ends a reveal's follow (`reveal`), as it ends the lens's own placement. */
+const FOLLOW_STOPS = ['wheel', 'keydown', 'pointerdown'] as const
 interface Run { start: number; end: number; first: Text; firstOffset: number; last: Text; lastOffset: number; linear: boolean }
 interface Projection { text: string; runs: Run[] }
 interface Hit { block: HTMLElement; start: number; end: number }
@@ -207,12 +209,14 @@ export class RenderedFind implements FindController {
     hit.block.dataset.findCurrent = '1'
     hit.block.scrollIntoView({ block: 'center', inline: 'nearest' })
     // content-visibility: auto gives the skipped blocks near the hit their real height a frame or more after the jump,
-    // which can push the hit out of view (the lens's own reveal waits this out too). Look again while layout moves the
-    // hit, for up to 8 frames; a scroll doesn't move it, so the reader's own scrolling is never undone.
-    let top = -1
+    // which can push the hit out of view (the lens's own reveal waits this out too). Look again on each of the next 8
+    // frames while layout moves the hit, until the reader scrolls: as in the lens, input stops it.
+    let top = -1, moved = false
+    const input = () => { moved = true }
+    for (const type of FOLLOW_STOPS) this.scroller.addEventListener(type, input, { passive: true })
     const follow = (left: number) => requestAnimationFrame(() => {
-      if (epoch !== this.epoch || !hit.block.isConnected) return
-      if (hit.block.offsetTop !== top) {
+      const live = epoch === this.epoch && hit.block.isConnected
+      if (live && (top === -1 || !moved) && hit.block.offsetTop !== top) {
         top = hit.block.offsetTop
         this.range = rangeAt(projectRenderedBlock(hit.block), hit)
         if (this.range) {
@@ -221,7 +225,8 @@ export class RenderedFind implements FindController {
         }
         this.paintVisible()
       }
-      if (left > 0) follow(left - 1)
+      if (live && !moved && left > 1) follow(left - 1)
+      else for (const type of FOLLOW_STOPS) this.scroller.removeEventListener(type, input)
     })
     follow(8)
   }
