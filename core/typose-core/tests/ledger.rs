@@ -17,11 +17,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use pulldown_cmark::Parser;
 use typose_core::budget::{self, Reservation, Work};
 use typose_core::doc::{DocError, STRUCT_BYTES};
 use typose_core::images::{self, ImageError};
 use typose_core::jsonl;
-use typose_core::md::{MAX_SOURCE, Note};
+use typose_core::md::{self, MAX_SOURCE, Note};
 use typose_core::pages::MAX_ITEMS;
 use typose_core::raw::Raw;
 use typose_core::store::CHUNK;
@@ -987,6 +988,36 @@ fn footnote_checks(dir: &Path) {
     assert!(peaks[1] <= peaks[0] + (1 << 20), "big blocks left their footnotes charged: {peaks:?}");
 }
 
+/// md.rs's `PARSE_PER_NODE` covers pulldown-cmark's parse by itself. A build's other reservations (the read's, the
+/// decode's) hold more than they use while it parses, room enough to hide a parse about 40 bytes a byte over its charge
+/// (`md_shape` stayed green with the constant cut to 144), so the shapes with the highest peaks a byte are parsed alone
+/// here, as the build parses them, against that charge only.
+fn parse_checks(shapes: &[(&str, PathBuf)]) {
+    for (name, path) in shapes {
+        let text = fs::read_to_string(path).unwrap();
+        RESERVED_BASELINE.store(budget::in_use().0, SeqCst);
+        let charge = Reservation::new(md::PARSE_PER_NODE * text.len() as u64).unwrap();
+        BASELINE.store(LIVE.load(SeqCst), SeqCst);
+        CHECKS.store(0, SeqCst);
+        SKIPPED.store(0, SeqCst);
+        OVER.store(0, SeqCst);
+        for slot in &WORST {
+            slot.store(0, SeqCst);
+        }
+        ARMED.store(true, SeqCst);
+        for event in Parser::new_ext(&text, md::OPTIONS).into_offset_iter() {
+            drop(event);
+        }
+        ARMED.store(false, SeqCst);
+        RESERVED_BASELINE.store(0, SeqCst);
+        let (checks, skipped, over) = (CHECKS.load(SeqCst), SKIPPED.load(SeqCst), OVER.load(SeqCst));
+        let [live, reserved, size] = WORST.each_ref().map(|w| w.load(SeqCst));
+        assert!(checks > 0 && skipped == 0, "{name}: {checks} checks, {skipped} skipped");
+        assert_eq!(over, 0, "{name}: the parse alone, {live} live > {reserved} reserved at allocation {size}");
+        println!("{name:>30}: the parse alone within {} bytes, {checks} checked", charge.bytes());
+    }
+}
+
 fn main() {
     assert!(size_of::<Raw>() as u64 + 16 <= STRUCT_BYTES, "a Raw ({} bytes) outgrew its metadata", size_of::<Raw>());
     let dir = std::env::temp_dir().join(format!("typose-ledger-{}", std::process::id()));
@@ -1060,7 +1091,8 @@ fn main() {
             [0xFF, 0xFE].into_iter().chain(small.encode_utf16().flat_map(u16::to_le_bytes)).collect(),
         ),
         ("Markdown in windows-1252", at("w1252.md"), small.bytes().map(|b| if b == b'a' { 0xE9 } else { b }).collect()),
-        // pulldown-cmark's highest peaks a byte: nodes just past one a byte, and links just past 2^20 (`md.rs`).
+        // pulldown-cmark's highest peaks a byte: nodes just past one a byte, and links just past 2^20 (`md.rs`). Last, so
+        // `parse_checks` takes them.
         ("wiki images", at("wiki-images.md"), "![[a]]".repeat(1_049_284).into_bytes()),
         ("piped wikilinks", at("wikilinks.md"), "[[a|]]".repeat(1_049_284).into_bytes()),
         ("links and wikilinks", at("links.md"), "[]()[[a]]".repeat(524_996).into_bytes()),
@@ -1202,5 +1234,6 @@ fn main() {
     image_checks();
     embedded_checks(&dir);
     footnote_checks(&dir);
+    parse_checks(&markdown[markdown.len() - 3..]);
     println!("ok");
 }

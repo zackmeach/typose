@@ -40,7 +40,7 @@ const FOOTNOTE_PREFIX: &str = "typose-footnote:";
 /// CommonMark with GFM, math and wikilinks. Extras become inert native markers for the renderer.
 /// pulldown-cmark's metadata blocks stay off because it accepts them at any block start;
 /// `front_matter_end` enforces Z44's file-start-only rule.
-const OPTIONS: Options = Options::ENABLE_TABLES
+pub const OPTIONS: Options = Options::ENABLE_TABLES
     .union(Options::ENABLE_FOOTNOTES)
     .union(Options::ENABLE_STRIKETHROUGH)
     .union(Options::ENABLE_TASKLISTS)
@@ -281,11 +281,12 @@ pub(crate) fn read_temp(len: u64, decoded: Option<usize>) -> u64 {
 /// grows: past a node a byte, it peaks at 144 bytes a byte, its old and new buffers at its last move. Its first pass
 /// makes at most a node a byte outside tables, and its inline pass one more only for each wikilink or autolink (5 bytes
 /// at least). Beside the tree, each link takes 80 bytes in a `Vec` of its own, which doubles from 128. Measured on 0.13.6
-/// (scratch probe, every event read, a realloc's two buffers counted, 332 shapes up to 8 MiB): the tree never past 2
-/// nodes a byte; 1.5 bytes a byte on plain prose, 144 on `*_`, `[]` or `a\n`, 176 on `![[a]]` or `[[a|]]` at 6.3 MB, and
-/// at worst 183.1 on `[]()[[a]]` at 4.7 MB, whose tree moves as the inline pass ends, its 2^20 links' `Vec` just
-/// doubled. A node bound is charged this much, 4.9% to spare.
-const PARSE_PER_NODE: u64 = 192;
+/// (scratch probe, every event read, a realloc's two buffers counted, 346 shapes up to 8 MiB): the tree never past 2
+/// nodes a byte; 1.5 bytes a byte on plain prose, 144 on `*_`, `[]` or `a\n`, 160 on nested `>`, 176 on `![[a]]` or
+/// `[[a|]]` at 6.3 MB, and at worst 183.1 on `[]()[[a]]` at 4.7 MB, whose tree moves as the inline pass ends, its 2^20
+/// links' `Vec` just doubled. That's a search, not a bound: a node bound is charged this much, 4.9% over the worst found,
+/// and tests/ledger.rs checks the parse alone against it on those shapes.
+pub const PARSE_PER_NODE: u64 = 192;
 /// One block's working memory besides ammonia's: the writer's buffer (`HTML_MAX`); an HTML block's text gathered and
 /// escaped, at most 64 KiB of source, 192 KiB decoded, written 4 bytes a byte twice over by `escape_raw`'s replaces (a
 /// fragment's `escape_text`: once, at most 6 bytes a byte); a heading's text and its slug's copies; and the strings
