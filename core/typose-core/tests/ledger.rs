@@ -280,6 +280,7 @@ fn markdown_unit(i: usize) -> String {
         "# Heading\n\n## Heading {i}\n\nProse with *em*, **strong**, ~~del~~, `code`, [a link](other.md \"t\"), "
     );
     s.push_str("![an image](a.png), <https://x.y>, <kbd>K</kbd>, a footnote[^n] and &amp; an entity.\n\n");
+    s.push_str("A [[wikilink]], [[another|piped]] and an ![[embed.png]].\n\n");
     s.push_str(
         "- item\n  - nested\n- [ ] task\n- [x] done\n\n1. one\n2. two\n\n> a quote with **bold**\n> > nested\n\n",
     );
@@ -1046,7 +1047,7 @@ fn main() {
     write(&path, &[b"\xEF\xBB\xBF", &vec![0xFF; CHUNK - 5], b"\xE3\x80"], 1);
     shapes.push(Shape { name: "short malformed UTF-8", path, fill_cache: false });
     // Plan (Rendered Markdown slice) §3: Markdown at the ceiling, padded tables, the densest parse (a node a byte, `md.rs`),
-    // and UTF-16 and windows-1252 text.
+    // UTF-16 and windows-1252 text, and the parse's highest peaks a byte (`md.rs`).
     let mixed = mixed_markdown(MAX_SOURCE as usize);
     let small = mixed_markdown(1 << 20);
     let markdown = [
@@ -1059,6 +1060,10 @@ fn main() {
             [0xFF, 0xFE].into_iter().chain(small.encode_utf16().flat_map(u16::to_le_bytes)).collect(),
         ),
         ("Markdown in windows-1252", at("w1252.md"), small.bytes().map(|b| if b == b'a' { 0xE9 } else { b }).collect()),
+        // pulldown-cmark's highest peaks a byte: nodes just past one a byte, and links just past 2^20 (`md.rs`).
+        ("wiki images", at("wiki-images.md"), "![[a]]".repeat(1_049_284).into_bytes()),
+        ("piped wikilinks", at("wikilinks.md"), "[[a|]]".repeat(1_049_284).into_bytes()),
+        ("links and wikilinks", at("links.md"), "[]()[[a]]".repeat(524_996).into_bytes()),
     ];
     for (_, path, bytes) in &markdown {
         fs::write(path, bytes).unwrap();

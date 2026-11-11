@@ -32,7 +32,7 @@ const FRONT_MATTER: usize = 64 << 10;
 pub const MAX_DEPTH: usize = 64;
 /// The most HTML a block may write, and keep once sanitized: spec §3.4's 256 KiB page.
 pub const HTML_MAX: usize = PAGE_BYTES;
-/// The build checks its cancel flag this often, in parser events (plan §2.1).
+/// The build checks its cancel flag this often, in parser events, and after each block (plan §2.1).
 const CANCEL_EVERY: usize = 1024;
 /// A colon cannot occur in the generated heading slugs, so footnote targets never collide with them.
 const FOOTNOTE_PREFIX: &str = "typose-footnote:";
@@ -277,10 +277,14 @@ pub(crate) fn read_temp(len: u64, decoded: Option<usize>) -> u64 {
     len + decoded + (CHUNK + 16 * MAX_PATH_BYTES + (64 << 10)) as u64
 }
 
-/// pulldown-cmark's tree is a `Vec` of 48-byte nodes that doubles as it grows, so it peaks at 144 bytes a node, its old
-/// and new buffers at its last move. Measured on 0.13.4 (scratch probe, 1 MiB of each shape): at most a node per byte of
-/// text outside tables, 144 bytes a byte at worst (`*_`, `[]`, `a\n` just past a power of two), 18 on prose, plus at most
-/// 23 of other allocations (an autolink's own target). A node bound is charged this much, a third to spare.
+/// pulldown-cmark's tree is a `Vec` of 48-byte nodes, first sized at a node per 32 bytes of text, that doubles as it
+/// grows: past a node a byte, it peaks at 144 bytes a byte, its old and new buffers at its last move. Its first pass
+/// makes at most a node a byte outside tables, and its inline pass one more only for each wikilink or autolink (5 bytes
+/// at least). Beside the tree, each link takes 80 bytes in a `Vec` of its own, which doubles from 128. Measured on 0.13.6
+/// (scratch probe, every event read, a realloc's two buffers counted, 332 shapes up to 8 MiB): the tree never past 2
+/// nodes a byte; 1.5 bytes a byte on plain prose, 144 on `*_`, `[]` or `a\n`, 176 on `![[a]]` or `[[a|]]` at 6.3 MB, and
+/// at worst 183.1 on `[]()[[a]]` at 4.7 MB, whose tree moves as the inline pass ends, its 2^20 links' `Vec` just
+/// doubled. A node bound is charged this much, 4.9% to spare.
 const PARSE_PER_NODE: u64 = 192;
 /// One block's working memory besides ammonia's: the writer's buffer (`HTML_MAX`); an HTML block's text gathered and
 /// escaped, at most 64 KiB of source, 192 KiB decoded, written 4 bytes a byte twice over by `escape_raw`'s replaces (a
@@ -959,7 +963,8 @@ impl Lines {
 }
 
 /// The items of `text`, the decoded file whose first `front` bytes are its front matter (plan §2.1). `cancelled` is
-/// checked every `CANCEL_EVERY` events. `literal_html`: raw HTML is literal text (`Events::literal_html`).
+/// checked every `CANCEL_EVERY` events and after each block. `literal_html`: raw HTML is literal text
+/// (`Events::literal_html`).
 fn blocks(
     text: &str,
     front: usize,
@@ -1081,13 +1086,19 @@ fn blocks_mapped(
             _ => None,
         };
         item(&mut out, span, written.map(|()| buf.as_str()), slug, footnote)?;
+        // A block can be a few events and much sanitizing (raw HTML), so the event count alone can go seconds unchecked.
+        if (build.cancelled)() {
+            return Err(DocError::Cancelled);
+        }
     }
     Ok(out.finish())
 }
 
 /// The whole file of generation `generation` as items, from one verified read (plan §2.1). `encoding` is Raw's.
-/// `cancelled` is checked every `CANCEL_EVERY` events; the read checks the store's own flag (`store::cancellable`).
-/// pulldown-cmark's first pass, which builds the whole file's block tree before the first event, can't be cancelled.
+/// `cancelled` is checked every `CANCEL_EVERY` events and after each block; the read checks the store's own flag
+/// (`store::cancellable`). So a cancel is seen within 1,024 events or one block's sanitizing, unless pulldown-cmark is in
+/// its first pass, which builds the whole file's block tree before the first event, or in a leaf block's inline pass:
+/// neither can be cancelled.
 /// - Over `MAX_SOURCE`: `Refused`, with the reason.
 /// - A stale generation is `Stale`, a frozen document `Frozen`, before anything is read.
 /// - Plan C1: the read and decode are reserved first, then the parse's temporaries (`parse_temp`), and the items as
@@ -1671,6 +1682,20 @@ mod tests {
         assert_eq!(raw.render(1).unwrap().items().len(), 1);
     }
 
+    /// A cancel is seen after each block, however few events its blocks are: 64 raw HTML tables, of 3 events each and
+    /// 32 KiB to sanitize, stop after the first.
+    #[test]
+    fn a_cancel_ends_the_build_between_blocks() {
+        let md = format!("{}\n\n", "<table><td>".repeat(2_900)).repeat(64);
+        let checks = std::cell::Cell::new(0);
+        let cancelled = || {
+            checks.set(checks.get() + 1);
+            true
+        };
+        assert!(matches!(blocks(&md, 0, UTF_8, false, &cancelled), Err(DocError::Cancelled)));
+        assert_eq!(checks.get(), 1);
+    }
+
     /// A frozen document's build is `Frozen`; an old generation's is `Stale`.
     #[test]
     fn a_frozen_document_or_an_old_generation_is_refused() {
@@ -2055,6 +2080,10 @@ mod tests {
             "(",
             ")",
             "![",
+            "[[",
+            "]]",
+            "![[",
+            "|",
             "<",
             ">",
             "</",
