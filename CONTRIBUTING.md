@@ -46,6 +46,12 @@ CI does not fully run these. Run them locally before you tag a release.
   npm run e2e -- markdown-extras.e2e -g "math bombs"
   ```
 
+- The 50 ms release bounds in `e2e/close.e2e.ts`'s two 10 GiB tests: CI on macOS skips them and runs the rest of each test.
+
+  ```powershell
+  npm run e2e -- close.e2e -g "on 10 GiB"
+  ```
+
 ## New e2e tests
 
 A new e2e test must pass on Windows, Linux and macOS. Use `ControlOrMeta+` for shortcuts, not `Control+`. Guard a capability that works on Windows only, such as folder browsing, local links and local images, by platform.
