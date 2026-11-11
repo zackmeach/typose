@@ -40,6 +40,12 @@ CI does not fully run these. Run them locally before you tag a release.
   npm run test:hooks
   ```
 
+- The 250 ms renderer-task and page-timer bounds in `e2e/markdown-extras.e2e.ts`'s math-bombs test: CI on macOS and Windows skips them (`quiet` in `e2e/app.ts`) and runs the rest of the test.
+
+  ```powershell
+  npm run e2e -- markdown-extras.e2e -g "math bombs"
+  ```
+
 ## New e2e tests
 
 A new e2e test must pass on Windows, Linux and macOS. Use `ControlOrMeta+` for shortcuts, not `Control+`. Guard a capability that works on Windows only, such as folder browsing, local links and local images, by platform.
