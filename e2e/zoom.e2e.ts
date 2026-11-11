@@ -78,6 +78,24 @@ test('Raw Ctrl+wheel down to 50% grows its viewport only within the paid cache r
   await finish(l)
 })
 
+test('zoom steps one task apart all land', async () => {
+  const l = await launch({ file: fixture('zoom-steps.txt', ('x'.repeat(2048) + '\n').repeat(4000)) })
+  const { app, win } = l
+  await waitOpen(win)
+  // The browser's echo of a step can arrive between two. When the page stepped its own copy of the factor, the echo
+  // reset that copy, and a step was lost: 4 times in 4 (Windows), as zoom.e2e.ts's wheel test lost one on Linux.
+  await win.evaluate(async () => {
+    const { zoom } = (window as unknown as { typose: { zoom(action: 'out'): void } }).typose
+    for (let i = 0; i < 5; i++) {
+      zoom('out')
+      await new Promise((done) => setTimeout(done))
+    }
+  })
+  await expect.poll(() => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.getZoomFactor())).toBeCloseTo(1 / 1.1 ** 5, 5)
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
 test('packaged Ctrl+wheel clamps at 50–200% and zooming out reverses the maximum immediately', async () => {
   const l = await launchPackaged({ cdp: true, marks: false, file: fixture('zoom-packaged.md', '# Packaged zoom\n\n' + 'Readable text.\n\n'.repeat(100)) })
   const page = l.page!

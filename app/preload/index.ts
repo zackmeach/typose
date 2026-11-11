@@ -1,15 +1,16 @@
-import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { Command, DroppedPaths, MainMessage, TyposeApi } from '../shared/protocol'
 
 /** True only in the test-hooks build (`npm run build:hooks`); the shipped bundle has no hook code (plan §5). */
 declare const __TEST_HOOKS__: boolean
 
-// Brief §6.5: scale the whole view from 50–200%, before a lens can consume Ctrl+wheel as scrolling.
+// Brief §6.5: scale the whole view from 50–200%, before a lens can consume Ctrl+wheel as scrolling. Main steps the
+// browser's factor: webFrame's own copy is reset by the browser's echo of an earlier step, and a step taken from it
+// was lost.
 window.addEventListener('wheel', (event) => {
   if (!event.ctrlKey || event.deltaY === 0) return
   event.preventDefault()
-  const step = event.deltaY < 0 ? 1.1 : 1 / 1.1
-  webFrame.setZoomFactor(Math.max(0.5, Math.min(2, webFrame.getZoomFactor() * step)))
+  ipcRenderer.send('zoom', event.deltaY < 0 ? 'in' : 'out')
 }, { capture: true, passive: false })
 
 // The sandboxed page can't receive a MessagePort over contextBridge, so main's messages are forwarded with
@@ -102,7 +103,7 @@ const typose: TyposeApi = {
   changeSetting: (key, value, revision) => ipcRenderer.invoke('change-setting', key, value, revision),
   exportTheme: (name, tokens) => ipcRenderer.invoke('export-theme', name, tokens),
   setChromeTheme: (dark, canvas, text) => ipcRenderer.invoke('chrome-theme', dark, canvas, text),
-  zoom: action => webFrame.setZoomFactor(action === 'reset' ? 1 : Math.max(0.5, Math.min(2, webFrame.getZoomFactor() * (action === 'in' ? 1.1 : 1 / 1.1)))),
+  zoom: action => ipcRenderer.send('zoom', action),
   fullScreen: () => ipcRenderer.invoke('full-screen'),
   loadSession: () => ipcRenderer.invoke('load-session'),
   saveSession: (session) => ipcRenderer.invoke('save-session', session),
