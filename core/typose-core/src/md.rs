@@ -277,16 +277,19 @@ pub(crate) fn read_temp(len: u64, decoded: Option<usize>) -> u64 {
     len + decoded + (CHUNK + 16 * MAX_PATH_BYTES + (64 << 10)) as u64
 }
 
-/// pulldown-cmark's tree is a `Vec` of 48-byte nodes, first sized at a node per 32 bytes of text, that doubles as it
-/// grows: past a node a byte, it peaks at 144 bytes a byte, its old and new buffers at its last move. Its first pass
-/// makes at most a node a byte outside tables, and its inline pass one more only for each wikilink or autolink (5 bytes
-/// at least). Beside the tree, each link takes 80 bytes in a `Vec` of its own, which doubles from 128. Measured on 0.13.6
-/// (scratch probe, every event read, a realloc's two buffers counted, 346 shapes up to 8 MiB): the tree never past 2
-/// nodes a byte; 1.5 bytes a byte on plain prose, 144 on `*_`, `[]` or `a\n`, 160 on nested `>`, 176 on `![[a]]` or
-/// `[[a|]]` at 6.3 MB, and at worst 183.1 on `[]()[[a]]` at 4.7 MB, whose tree moves as the inline pass ends, its 2^20
-/// links' `Vec` just doubled. That's a search, not a bound: a node bound is charged this much, 4.9% over the worst found,
-/// and tests/ledger.rs checks the parse alone against it on those shapes.
-pub const PARSE_PER_NODE: u64 = 192;
+/// What pulldown-cmark 0.13.6's parse holds at its peak, a byte of text outside tables, derived from its source:
+/// - Its tree is a `Vec` of 48-byte nodes, first sized at a node per 32 bytes, that doubles: at its last move it holds
+///   the old and new buffers, 144 bytes a byte while it has under 2 nodes a byte. Its first pass makes at most a node a
+///   byte, and its inline pass one more for each wikilink or autolink, of 5 bytes at least.
+/// - What it keeps beside the tree is at most 64 bytes a byte: its link and wikilink stacks take 16 bytes each for a `[`
+///   (the second when another `[` follows), and keep their doubled capacity once cleared.
+///
+/// So 208, met by 4,194,306 `[` and then a paragraph of 5 wikilinks, whose nodes move the tree as the parse ends. That
+/// rests on two premises read from the source, not proven: the first pass's node a byte, and that nothing else it keeps
+/// grows faster. Measured (a realloc's two buffers counted): 208.0 on that shape; on 346 others up to 8 MiB, 1.5 on
+/// prose, 144 on `*_`, 176 on `![[a]]` at 6.3 MB, 183.1 on `[]()[[a]]` at 4.7 MB. 216 leaves 8 to spare, and
+/// tests/ledger.rs checks the parse alone against it on those shapes.
+pub const PARSE_PER_NODE: u64 = 216;
 /// One block's working memory besides ammonia's: the writer's buffer (`HTML_MAX`); an HTML block's text gathered and
 /// escaped, at most 64 KiB of source, 192 KiB decoded, written 4 bytes a byte twice over by `escape_raw`'s replaces (a
 /// fragment's `escape_text`: once, at most 6 bytes a byte); a heading's text and its slug's copies; and the strings
@@ -1012,6 +1015,9 @@ fn blocks_mapped(
         code.push_str("</code></pre>");
         let written = if code.len() <= HTML_MAX { Ok(code.as_str()) } else { Err(Note::Large) };
         item(&mut out, 0..front, written, None, None)?;
+        if (build.cancelled)() {
+            return Err(DocError::Cancelled); // before the parser's first pass, which can't be
+        }
     }
     let mut parser = Parser::new_ext(&text[front..], OPTIONS).into_offset_iter();
     while let Some((first, r)) = parser.next() {
@@ -1097,9 +1103,9 @@ fn blocks_mapped(
 
 /// The whole file of generation `generation` as items, from one verified read (plan §2.1). `encoding` is Raw's.
 /// `cancelled` is checked every `CANCEL_EVERY` events and after each block; the read checks the store's own flag
-/// (`store::cancellable`). So a cancel is seen within 1,024 events or one block's sanitizing, unless pulldown-cmark is in
-/// its first pass, which builds the whole file's block tree before the first event, or in a leaf block's inline pass:
-/// neither can be cancelled.
+/// (`store::cancellable`). So a cancel is seen within 1,024 events or one block's own work (its sanitizing, a heading's
+/// slug), unless pulldown-cmark is in its first pass, which builds the whole file's block tree before the first event, or
+/// in a leaf block's inline pass: neither can be cancelled.
 /// - Over `MAX_SOURCE`: `Refused`, with the reason.
 /// - A stale generation is `Stale`, a frozen document `Frozen`, before anything is read.
 /// - Plan C1: the read and decode are reserved first, then the parse's temporaries (`parse_temp`), and the items as
