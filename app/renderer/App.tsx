@@ -299,7 +299,13 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   }, [core, quickUsed, rootSignature, config.values.show_hidden, config.values.excludes.join('\n')])
   useEffect(() => {
     const off = groups.map(group => group.workspace.subscribe(scheduleSession))
-    const capture = window.typose.onSessionCapture(() => captureNow.current())
+    // A capture is refused when the workspace changes under it, as when a tab's Markdown build lands. At close there's
+    // no later capture to make up for it, and close kept the last save, without the tab just opened: try again, a few
+    // times, inside main's 1 s wait.
+    const capture = window.typose.onSessionCapture(async () => {
+      for (let tries = 0; tries < 5; tries++) if (await captureNow.current()) return true
+      return false
+    })
     window.addEventListener('scroll', scheduleSession, true)
     return () => { off.forEach(unsubscribe => unsubscribe()); capture(); window.removeEventListener('scroll', scheduleSession, true); clearTimeout(sessionTimer.current) }
   }, [groups])
