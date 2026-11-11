@@ -11,5 +11,5 @@
     "build:hooks": "napi build --platform --release --features test-hooks --output-dir hooks",
     "build:debug": "napi build --platform"
   },
-  "devDependencies": { "@napi-rs/cli": "3.10.8" }
+  "devDependencies": { "@napi-rs/cli": "3.10.12" }
 }
