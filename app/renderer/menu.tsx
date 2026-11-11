@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { Button, Menu, MenuItem, MenuTrigger, Popover } from 'react-aria-components'
 import type { Command } from '../shared/protocol'
 import { COMMANDS } from '../shared/commands'
@@ -10,8 +11,11 @@ export const SHOW_IN_FOLDER = navigator.platform.startsWith('Mac') ? 'Show in Fi
 
 /** Brief §3.2's ☰, on Windows and Linux, with M1's commands; the full command table is M2's. */
 export function AppMenu({ run, enabled = () => true }: { run: (command: Command) => void; enabled?: (command: Command) => boolean }) {
+  // Opening renders this again, so each item's state is read then: App doesn't render when a card's document opens,
+  // and without this ☰ showed Reload disabled for up to 300 ms after one had.
+  const [, setOpen] = useState(false)
   return (
-    <MenuTrigger>
+    <MenuTrigger onOpenChange={setOpen}>
       <Button className="menu-button" aria-label="Menu">
         ☰
       </Button>
