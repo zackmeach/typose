@@ -82,11 +82,14 @@ test('a delayed fragment response cannot override reading after the reader moves
   await win.getByRole('link', { name: 'Jump', exact: true }).click()
   await waitHeld(win)
   await win.locator('.md-scroller').focus()
-  await win.locator('.md-scroller').evaluate((el) => el.addEventListener('scrollend', () => { (el as HTMLElement).dataset.readerSettled = '1' }, { once: true }))
-  await win.keyboard.press('PageDown')
   const top = () => win.locator('.md-scroller').evaluate((el) => el.scrollTop)
-  await expect(win.locator('.md-scroller')).toHaveAttribute('data-reader-settled', '1')
-  expect(await top()).toBeGreaterThan(0)
+  // scrollend is no proof the reader moved: Chromium fires it for a key scroll that ends without moving, and macOS runs
+  // 42898553765 and 43082094415 read 0 after it. Press until the view has moved, then until it holds still.
+  await expect(async () => {
+    await win.keyboard.press('PageDown')
+    await expect.poll(top, { timeout: 2_000 }).toBeGreaterThan(0)
+  }).toPass({ timeout: 10_000 })
+  await expect.poll(async () => { const at = await top(); await frames(win); return at === await top() }).toBe(true)
   const before = await top()
   await release(win)
   await frames(win)
