@@ -17,6 +17,7 @@ test('external links hand off once, while unsafe and missing targets keep the re
     '[Mail](mailto:reader@example.invalid?subject=Notes)', '',
     '[Unsafe](javascript:alert(1))', '',
     '[Local](other.md)', '',
+    '[Config](link-config.toml)', '',
     '[Share](file://server/share/file.md)', ''
   ].join('\n')), netlog: log })
   const { win } = l
@@ -34,6 +35,10 @@ test('external links hand off once, while unsafe and missing targets keep the re
   for (const name of ['Unsafe', 'Local', 'Share']) await win.getByRole('link', { name, exact: true }).click()
   // Windows holds a local capability, so the missing target is known once its open fails; elsewhere local links are refused.
   await expect(win.getByRole('link', { name: 'Local', exact: true })).toHaveAttribute('title', process.platform === 'win32' ? 'Not found: other.md' : 'Not opened: other.md')
+  if (process.platform === 'win32') {
+    await win.getByRole('link', { name: 'Config', exact: true }).click()
+    await expect(win.locator('.banner')).toContainText('local links support only Markdown, TXT, CSV and TSV files')
+  }
   expect(await calls()).toHaveLength(3)
   await expect(win.locator('.card-name')).toHaveText('links.md')
   expect(l.pageErrors).toEqual([])

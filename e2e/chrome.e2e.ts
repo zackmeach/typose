@@ -2,6 +2,8 @@ import { SHOW, menuLabels } from './menu-fixture'
 // Plan PR 7's title bars and menus (brief §3.1, §3.2; spec §9): WCO on Windows, the traffic lights on macOS, ☰, and
 // Electron's default menu gone.
 import { expect } from '@playwright/test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { type Launched, finish, fixture, launch, lifecycle, osFocus, pressAsOS, recordClipboard, stubOpenDialog, test, waitOpen } from './app'
 import { HT, doubleClickMessage, hitTest, reaches, realMouse } from './win32'
 
@@ -224,8 +226,11 @@ test('☰ is a menu of Open file…, Reload and Exit, each wired to its command;
   await win.getByRole('menuitem', { name: 'Reload' }).click()
   await expect(win.getByRole('menu')).toHaveCount(0)
   await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '2')
+  // Open file… browses at once until something is recent. Wait for menu-first.txt to be one, so it offers Quick open.
+  await expect.poll(() => { try { return JSON.parse(readFileSync(join(l.userData, 'session.json'), 'utf8')).recents.length } catch { return 0 } }).toBe(1)
   await opened()
   await win.getByRole('menuitem', { name: 'Open file…' }).click()
+  await expect(win.getByRole('dialog', { name: 'Quick open' })).toBeVisible()
   await win.getByRole('button', { name: 'Browse…', exact: true }).click()
   await expect(win.locator('.card-name')).toHaveText('menu-second.txt')
   expect(await app.evaluate(() => (globalThis as { dialogCalls?: number }).dialogCalls)).toBe(1)

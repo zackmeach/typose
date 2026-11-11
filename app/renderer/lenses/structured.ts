@@ -323,6 +323,10 @@ export class StructuredLens {
     const fold = el('button', node.container !== undefined ? '›' : ' ', 'tree-fold')
     fold.type = 'button'; fold.disabled = node.container === undefined || depth >= 100
     fold.setAttribute('aria-label', `Expand ${node.key ?? path}`)
+    if (!fold.disabled) {
+      fold.setAttribute('aria-expanded', 'false')
+      row.setAttribute('aria-expanded', 'false')
+    }
     // A key with no source span (a parsed value's) has no Copy key to offer.
     if (node.key !== undefined) row.append(fold, el('span', node.key + (node.keyMore ? node.keySpan ? ' … (key preview; Copy key for full source)' : ' … (key preview)' : '') + ': ', 'tree-key text'))
     else row.append(fold)
@@ -348,7 +352,10 @@ export class StructuredLens {
     }
     const toggle = async () => {
       if (node.container === undefined || depth >= 100) return
-      expanded = !expanded; fold.textContent = expanded ? '⌄' : '›'; row.setAttribute('aria-expanded', String(expanded)); children.hidden = !expanded
+      expanded = !expanded; fold.textContent = expanded ? '⌄' : '›'; children.hidden = !expanded
+      fold.setAttribute('aria-label', `${expanded ? 'Collapse' : 'Expand'} ${node.key ?? path}`)
+      fold.setAttribute('aria-expanded', String(expanded))
+      row.setAttribute('aria-expanded', String(expanded))
       if (expanded && !loaded) { loaded = true; await load(0, automatic > 0) }
     }
     fold.onclick = event => { event.stopPropagation(); void toggle().catch(e => this.error(e)) }

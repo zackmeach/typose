@@ -16,6 +16,7 @@ import { ConfigStore, type TomlCodec } from './config-store'
 import { COMMANDS } from '../shared/commands'
 import { addonTarget } from '../shared/addon-target'
 import { MAX_PRINT_PDF_BYTES, physicalPageCount, validatePrintDocument } from './print-validation'
+import { printWithDialog, spoolKeeper } from './print-dialog'
 
 const mainStart = Date.now() // plan C8's first startup mark: read now, written once the hook is set up below
 
@@ -411,6 +412,7 @@ void app.whenReady().then(() => {
       : { ok: false, reason: 'refused' })
   ipcMain.handle('write-clipboard', (event: IpcMainInvokeEvent, ...args: unknown[]) =>
     writeClipboardText(win, event, args, (text) => clipboard.writeText(text)))
+  const keepSpooling = spoolKeeper()
   ipcMain.handle('print-document', async (event: IpcMainInvokeEvent, ...args: unknown[]) => {
     if (!fromMainApp(win, event) || args.length !== 4) return { kind: 'refused', reason: 'Invalid print request' } satisfies PrintDocumentResult
     const [title, blocks, pages, confirmed] = args
@@ -424,9 +426,10 @@ void app.whenReady().then(() => {
       parent: win,
       webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, spellcheck: false }
     })
-    target.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
-    target.webContents.on('will-navigate', e => e.preventDefault())
+    let spooled: Promise<unknown> = Promise.resolve()
     try {
+      target.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+      target.webContents.on('will-navigate', e => e.preventDefault())
       await target.loadURL('about:blank')
       const title64 = Buffer.from(checked.title, 'utf8').toString('base64')
       const blocks64 = Buffer.from(checked.json, 'utf8').toString('base64')
@@ -475,19 +478,16 @@ void app.whenReady().then(() => {
           message: `Print ${physicalPages.toLocaleString()} pages?`, detail: 'Large print jobs can take a long time.' })
         if (answer.response !== 0) return { kind: 'cancelled' } satisfies PrintDocumentResult
       }
-      return await new Promise<PrintDocumentResult>(resolve => {
-        try {
-          target.webContents.print({ silent: false, printBackground: true, pageSize: 'Letter', margins: { marginType: 'none' } }, success => {
-            resolve(success ? { kind: 'printed', pages: physicalPages } : { kind: 'cancelled' })
-          })
-        } catch {
-          resolve({ kind: 'refused', reason: 'The OS print dialog could not be opened' })
-        }
-      })
+      const job = await printWithDialog(target.webContents, physicalPages, process.platform === 'win32')
+      spooled = job.spooled
+      const result = await job.result
+      if (result.kind === 'dialog-closed') keepSpooling(() => { if (!target.isDestroyed()) target.close() }, spooled)
+      return result
     } catch {
       return { kind: 'refused', reason: 'The print document could not be prepared' } satisfies PrintDocumentResult
     } finally {
-      if (!target.isDestroyed()) target.close()
+      // A dialog-closed result can come while the job still spools, and closing the window then would cancel it.
+      void spooled.then(() => { if (!target.isDestroyed()) target.close() })
     }
   })
   const startupQuery = new URLSearchParams()

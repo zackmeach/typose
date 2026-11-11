@@ -28,7 +28,7 @@ export const LARGE_COPY_CONFIRM_BYTES = 10 << 20
 export const MAX_PRINT_BYTES = 32 << 20
 export const MAX_PRINT_PAGES = 1000
 export const MAX_PRINT_NODES = 100_000
-export type PrintDocumentResult = { kind: 'printed'; pages: number } | { kind: 'cancelled' } | { kind: 'refused'; reason: string }
+export type PrintDocumentResult = { kind: 'printed'; pages: number } | { kind: 'cancelled' | 'dialog-closed' } | { kind: 'refused'; reason: string }
 
 export type PrintTag = 'p' | 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6' | 'strong' | 'em' | 'del' | 'code' | 'pre' |
   'ul' | 'ol' | 'li' | 'blockquote' | 'table' | 'thead' | 'tbody' | 'tr' | 'th' | 'td' | 'a' | 'br' | 'hr' | 'span' | 'img' | 'math' | 'dl' | 'dt' | 'dd'
