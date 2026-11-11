@@ -1,0 +1,50 @@
+name: Bug report
+description: Something in Typose does not work as it should.
+body:
+  - type: markdown
+    attributes:
+      value: For a security vulnerability, do not use this form. Use the link on the issue chooser instead.
+  - type: input
+    id: version
+    attributes:
+      label: Commit or version
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+    validations:
+      required: true
+  - type: input
+    id: format
+    attributes:
+      label: File format
+      description: For example Markdown, CSV, JSONL.
+    validations:
+      required: true
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: checkboxes
+    id: synthetic
+    attributes:
+      label: Attached files
+      options:
+        - label: Any file I attach is synthetic or contains nothing private.
+          required: true

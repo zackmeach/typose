@@ -1,0 +1,13 @@
+# Checked by cargo-deny in CI (the lint job of .github/workflows/pr.yml).
+#
+# The two vendored, patched crates (vendor/zune-jpeg and vendor/csv-core) are path dependencies. The advisory
+# database matches crates by registry name and version, so it cannot see them. They are checked by hand at release.
+
+[advisories]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[bans]
