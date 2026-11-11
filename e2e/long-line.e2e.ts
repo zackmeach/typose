@@ -3,7 +3,7 @@
 import { expect } from '@playwright/test'
 import { closeSync, openSync, readSync, rmSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { FIXTURES, finish, fixturesGen, launch, test, waitIndexed, waitOpen } from './app'
+import { FIXTURES, finish, fixture, fixturesGen, launch, test, waitIndexed, waitOpen } from './app'
 import { FIRST_FRAME, MARKS, type Marks, outcome, scanGate, scanMarks, vetoControls } from './z37'
 
 const ONE_LINE = join(FIXTURES, '1gib-one-line.txt') // .txt: a .jsonl name would open in Rows, and this exercises Raw
@@ -74,6 +74,14 @@ test("1 GiB on one line: the first piece shows before the scan passes the line's
   const size = 1 << 30
   fixturesGen('jsonl-huge-first', '--out', ONE_LINE, '--first', String(size - 57), '--bytes', '0')
   expect(statSync(ONE_LINE).size).toBe(size)
+  // The judged launch is never the job's first. A hosted runner's first launch of Electron is cold: its first screen
+  // came 460 to 648 ms after the open while the scan of the line, just written and cached, ended in 336 to 646 ms (macOS
+  // and Windows, runs 42898377896, 42898553765 and 42911389323), and hosted Linux showed its window 10.7 s after the
+  // page loaded, too late for any mark (42898553765). The retries, each a second launch, came in 27 to 75 ms.
+  const warm = await launch({ file: fixture('long-line-warm.txt', 'warm\n') })
+  await waitOpen(warm.win)
+  await warm.win.evaluate(() => new Promise(requestAnimationFrame)) // a frame: the window is shown and painting
+  await finish(warm)
   const l = await launch({ file: ONE_LINE })
   const { win } = l
   // Every status text from here on: the scan is too quick to catch by polling.

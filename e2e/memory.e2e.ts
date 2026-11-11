@@ -6,7 +6,7 @@ import { rmSync, statSync, truncateSync } from 'node:fs'
 import { join } from 'node:path'
 import { GARBAGE_PER_UNIT, WRAP, capFor, rowCost, rowsFor } from '../app/renderer/lenses/page-cache'
 import type { Limits, Opened, Page as CorePage } from '../app/shared/protocol'
-import { FIXTURES, type Launched, type TestHooks, debugStats, expectReleasedDocuments, finish, fixture, fixturesGen, launch, sparseFixture, test, visibleRows, waitIndexed, waitOpen, workspaceHeld } from './app'
+import { FIXTURES, type Launched, type TestHooks, debugStats, expectReleasedDocuments, finish, fixture, fixturesGen, holdReply, launch, sparseFixture, test, visibleRows, waitIndexed, waitOpen, workspaceHeld } from './app'
 import { mib, processMemory, summed } from './memory'
 
 type CacheStats = { charged: number; cap: number; reserved: number }
@@ -101,9 +101,11 @@ async function layoutGate(s: (typeof SCRIPTS)[number]): Promise<void> {
     /** Raw at `gen` holds its reservation for its height, as the core does, and every mounted row has its text. */
     const settled = async (gen: string) => {
       await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', gen, { timeout: 30_000 })
-      const host = await win.evaluate(() => document.querySelector('.raw-host')!.clientHeight)
-      const reserved = capFor(L, 3 * Math.ceil(host / 20) + 1)
-      await expect.poll(async () => (await cacheStats(win))?.reserved, { timeout: 30_000 }).toBe(reserved)
+      // Raw's height read with the reservation, not once: after a Reload, macOS run 42898553765 read 342 px, while for
+      // the next 30 s the lens held the reservation for 58 rows, a host of 361 to 380 px.
+      const full = async () => capFor(L, 3 * Math.ceil((await win.evaluate(() => document.querySelector('.raw-host')!.clientHeight)) / 20) + 1)
+      await expect.poll(async () => (await cacheStats(win))?.reserved === await full(), { timeout: 30_000 }).toBe(true)
+      const reserved = await full()
       expect((await debugStats(win)).ledger.rendererCache).toBe(reserved + await workspaceHeld(win))
       await expect.poll(() => win.evaluate(() => {
         const rows = [...document.querySelectorAll('.vl-row')]
@@ -215,14 +217,29 @@ test('under a budget that holds only the viewport, Raw mounts only the viewport,
     const { win } = l
     await waitOpen(win)
     await viewportOnly(win, L, 'open')
-    // A reload precharges its new lease while the old viewport is still readable.
+    // A reload precharges its new lease while the old viewport is still readable. The budget is back as the Reload's
+    // reply reaches the card, sent ahead of the old view's release and the new lens's first reserve on the same port:
+    // left raised, it had room for the overscan once the old view was released, and the new lens reserved it whenever
+    // its first reserve reached the core after that release (run 42869369349). Not awaited: a reply held back past the
+    // new generation's progress events leaves the card indexing forever.
     const oldView = (await debugStats(win)).surfaces!.bytes
     await debugStats(win, { limit: budget + oldView })
+    await win.evaluate((budget) => {
+      const { core } = (window as unknown as { typoseTest: TestHooks }).typoseTest
+      const call = core.call.bind(core)
+      core.call = async (...args: Parameters<typeof call>) => {
+        const reply = await call(...args)
+        if (args[0] === 'reload') {
+          core.call = call
+          void call('debugStats', { limit: budget })
+        }
+        return reply
+      }
+    }, budget)
     await win.locator('.vl-scroller').focus()
     await win.keyboard.press('F5')
     await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '2')
     await viewportOnly(win, L, 'Reload')
-    await debugStats(win, { limit: budget })
     console.log(`window ${(await resize(l, 1280, 600)).content.join('×')} px`)
     await viewportOnly(win, L, 'resized down')
     console.log(`window ${(await resize(l, 1280, 800)).content.join('×')} px`)
@@ -276,7 +293,10 @@ test('a Reload the ledger refuses keeps Raw at its generation, with a banner, an
     expect(rows.every((r) => r.text === `line ${r.line - 1}`)).toBe(true) // still showing, gutter numbers from 1
     const s = (await cacheStats(win))!
     expect(s.charged).toBeLessThanOrEqual(s.reserved)
-    expect((await debugStats(win)).ledger.rendererCache).toBe(s.reserved + await workspaceHeld(win)) // given back to the lens that stayed
+    // Given back to the lens that stayed. Polled: the banner takes 6 rows of overscan from the lens, which shrinks its
+    // own reservation before the core's, so one read of each saw the lens before the shrink and the ledger after it,
+    // 15,974,448 bytes (6 rows) apart, in runs 42906673250 and 42926999513.
+    await expect.poll(() => holdsItsReservation(win)).toBe(true)
     await debugStats(win, { limit: ledger.limit })
     await win.locator('.banner-button').click()
     await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '2')
@@ -298,21 +318,23 @@ test('a second F5 while a Reload is under way starts no second Reload', async ()
     const l = await launch({ hooks: true, file: path })
     const { win } = l
     await waitOpen(win)
-    // Every `reload` the page sends is counted, and the first reaches the core 1 s late: the second F5 lands meanwhile.
+    // Every `reload` the page sends is counted, and the first one's reply is held until the second F5 has landed. A
+    // first Reload held 1 s instead had finished before the second F5 on a hosted runner (run 42911389323).
     await win.evaluate(() => {
       const w = window as unknown as { reloads: number }
       w.reloads = 0
       const post = MessagePort.prototype.postMessage
       MessagePort.prototype.postMessage = function (this: MessagePort, message: unknown, ...rest: never[]) {
-        if ((message as { method?: string })?.method !== 'reload') return post.call(this, message, ...rest)
-        if (w.reloads++ > 0) return post.call(this, message, ...rest)
-        setTimeout(() => post.call(this, message, ...rest), 1000)
+        if ((message as { method?: string })?.method === 'reload') w.reloads++
+        return post.call(this, message, ...rest)
       } as typeof post
     })
+    await holdReply(win, 'reload', 'finishReload', true)
     await win.locator('.vl-scroller').focus()
     await win.keyboard.press('F5')
-    await win.waitForTimeout(200)
+    await win.waitForFunction(() => typeof (window as unknown as { finishReload?: unknown }).finishReload === 'function')
     await win.keyboard.press('F5')
+    await win.evaluate(() => (window as unknown as { finishReload: () => void }).finishReload())
     await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', '2')
     expect(await win.evaluate(() => (window as unknown as { reloads: number }).reloads)).toBe(1)
     await expect.poll(() => holdsItsReservation(win)).toBe(true) // the new lens's
