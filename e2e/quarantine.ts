@@ -7,7 +7,7 @@ export const quarantine: { title: string; os?: NodeJS.Platform; reason: string; 
   // Flaky in two runs, 42869369349 and 42889988308.
   {
     title: 'the keyboard reaches ☰ and Raw, ☰ runs its commands from the keyboard, and the focus ring shows',
-    os: 'linux', reason: '☰ shows Reload disabled for up to 300 ms after a document opens, and the typeahead skips it', expires: '2026-12-10'
+    os: 'linux', reason: '☰ can show Reload disabled after a document opens, and the typeahead skips it', expires: '2026-12-10'
   },
   // Flaky in three runs, 42869369349, 42898377896 and 42898891669.
   {
