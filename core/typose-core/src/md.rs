@@ -285,10 +285,11 @@ pub(crate) fn read_temp(len: u64, decoded: Option<usize>) -> u64 {
 ///   (the second when another `[` follows), and keep their doubled capacity once cleared.
 ///
 /// So 208, met by 4,194,306 `[` and then a paragraph of 5 wikilinks, whose nodes move the tree as the parse ends. That
-/// rests on two premises read from the source, not proven: the first pass's node a byte, and that nothing else it keeps
-/// grows faster. Measured (a realloc's two buffers counted): 208.0 on that shape; on 346 others up to 8 MiB, 1.5 on
-/// prose, 144 on `*_`, 176 on `![[a]]` at 6.3 MB, 183.1 on `[]()[[a]]` at 4.7 MB. 216 leaves 8 to spare, and
-/// tests/ledger.rs checks the parse alone against it on those shapes.
+/// rests on two premises read from the source, not proven: the first pass's node a byte, and that no byte adds more than
+/// 64 beside the tree, counting all it keeps or holds live at the tree's last move. Measured (a realloc's two buffers
+/// counted): 208.0 on that shape; on 346 others up to 8 MiB, 1.5 on prose, 144 on `*_`, 176 on `![[a]]` at 6.3 MB,
+/// 183.1 on `[]()[[a]]` at 4.7 MB. 216 leaves 8 to spare, and tests/ledger.rs checks the parse alone against it on the
+/// four highest.
 pub const PARSE_PER_NODE: u64 = 216;
 /// One block's working memory besides ammonia's: the writer's buffer (`HTML_MAX`); an HTML block's text gathered and
 /// escaped, at most 64 KiB of source, 192 KiB decoded, written 4 bytes a byte twice over by `escape_raw`'s replaces (a

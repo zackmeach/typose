@@ -990,7 +990,7 @@ fn footnote_checks(dir: &Path) {
 
 /// md.rs's `PARSE_PER_NODE` covers pulldown-cmark's parse by itself. A build's other reservations (the read's, the
 /// decode's) hold more than they use while it parses, room enough to hide a parse about 40 bytes a byte over its charge
-/// (`md_shape` stayed green on `links and wikilinks` with the constant cut to 144), so the shapes with the highest peaks
+/// (`md_shape` stayed green on `[]()[[a]]` with the constant cut to 144), so the shapes with the highest peaks
 /// a byte are parsed alone here, as the build parses them, against that charge only.
 fn parse_checks(shapes: &[(&str, PathBuf)]) {
     for (name, path) in shapes {
@@ -1092,11 +1092,11 @@ fn main() {
         ),
         ("Markdown in windows-1252", at("w1252.md"), small.bytes().map(|b| if b == b'a' { 0xE9 } else { b }).collect()),
         // pulldown-cmark's highest peaks a byte (`md.rs`): nodes just past one a byte, with links just past 2^20 or the
-        // link stacks of 2^22 `[`. Last, so `parse_checks` takes them.
-        ("wiki images", at("wiki-images.md"), "![[a]]".repeat(1_049_284).into_bytes()),
-        ("piped wikilinks", at("wikilinks.md"), "[[a|]]".repeat(1_049_284).into_bytes()),
-        ("links and wikilinks", at("links.md"), "[]()[[a]]".repeat(524_996).into_bytes()),
-        ("link stacks", at("stacks.md"), ("[".repeat(4_194_306) + "\n\nxxx" + &"[[a]]".repeat(5)).into_bytes()),
+        // link stacks of 2^22 `[`. Named `peak: `, so `parse_checks` takes them.
+        ("peak: wiki images", at("wiki-images.md"), "![[a]]".repeat(1_049_284).into_bytes()),
+        ("peak: piped wikilinks", at("wikilinks.md"), "[[a|]]".repeat(1_049_284).into_bytes()),
+        ("peak: links and wikilinks", at("links.md"), "[]()[[a]]".repeat(524_996).into_bytes()),
+        ("peak: link stacks", at("stacks.md"), ("[".repeat(4_194_306) + "\n\nxxx" + &"[[a]]".repeat(5)).into_bytes()),
     ];
     for (_, path, bytes) in &markdown {
         fs::write(path, bytes).unwrap();
@@ -1180,7 +1180,7 @@ fn main() {
     assert!(refused, "a 32,000-byte path opened");
     assert_eq!(budget::totals().used, used);
     // Plan (Rendered Markdown slice) §2.1: each Markdown build, checked throughout. Then a budget with room for the
-    // read but not the parse refuses the build with `Memory`, and nothing stays charged.
+    // read but not the decode refuses the build with `Memory`, and nothing stays charged.
     for (k, (name, path)) in markdown.iter().enumerate() {
         md_shape(4 * shapes.len() + 2 + k, name, path);
     }
@@ -1189,7 +1189,7 @@ fn main() {
     let used = budget::totals().used;
     let raw = Raw::open(&markdown[0].1).unwrap();
     let (opened, limit, floor) = (budget::totals().used, budget::totals().limit, raw.charges().cache);
-    budget::set_limit(opened + (64 << 20)).unwrap(); // the read's 35 MiB, not the parse's 1.7 GiB
+    budget::set_limit(opened + (64 << 20)).unwrap(); // the read's 35 MiB, not the decode's 320 MiB
     let refused = raw.render(1);
     budget::set_limit(limit).unwrap();
     // Beside what the document holds: its read grew its chunk cache, which is the document's to keep (plan C1).
@@ -1235,6 +1235,7 @@ fn main() {
     image_checks();
     embedded_checks(&dir);
     footnote_checks(&dir);
-    parse_checks(&markdown[markdown.len() - 4..]);
+    let peaks: Vec<_> = markdown.iter().filter(|(name, _)| name.starts_with("peak: ")).cloned().collect();
+    parse_checks(&peaks);
     println!("ok");
 }
