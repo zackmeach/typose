@@ -206,15 +206,24 @@ export class RenderedFind implements FindController {
   private reveal(hit: Hit, epoch: number): void {
     hit.block.dataset.findCurrent = '1'
     hit.block.scrollIntoView({ block: 'center', inline: 'nearest' })
-    requestAnimationFrame(() => {
+    // content-visibility: auto gives the skipped blocks near the hit their real height a frame or more after the jump,
+    // which can push the hit out of view (the lens's own reveal waits this out too). Look again while layout moves the
+    // hit, for up to 8 frames; a scroll doesn't move it, so the reader's own scrolling is never undone.
+    let top = -1
+    const follow = (left: number) => requestAnimationFrame(() => {
       if (epoch !== this.epoch || !hit.block.isConnected) return
-      this.range = rangeAt(projectRenderedBlock(hit.block), hit)
-      if (this.range) {
-        const box = this.range.getBoundingClientRect(), viewport = this.scroller.getBoundingClientRect()
-        if (box.top < viewport.top || box.bottom > viewport.bottom) this.scroller.scrollTop += box.top - viewport.top - viewport.height / 2
+      if (hit.block.offsetTop !== top) {
+        top = hit.block.offsetTop
+        this.range = rangeAt(projectRenderedBlock(hit.block), hit)
+        if (this.range) {
+          const box = this.range.getBoundingClientRect(), viewport = this.scroller.getBoundingClientRect()
+          if (box.top < viewport.top || box.bottom > viewport.bottom) this.scroller.scrollTop += box.top - viewport.top - viewport.height / 2
+        }
+        this.paintVisible()
       }
-      this.paintVisible()
+      if (left > 0) follow(left - 1)
     })
+    follow(8)
   }
 
   private paintVisible(): void {
