@@ -16,7 +16,7 @@ import './structured.css'
 import { StructuredLens, type StructuredMode } from './lenses/structured'
 import { prepareStructured, type StructuredSource } from './lenses/structured-source'
 import { inputMark, markNow } from './perf'
-import { type SavedLocation, type SelectionTicket, type TabId, type WorkspaceStore, type WorkspaceTab } from './workspace'
+import { type SavedLocation, type SelectionTicket, type TabId, type WorkspaceStore, type WorkspaceTab, sameSession } from './workspace'
 import { FileTabs } from './file-tabs'
 import { entryView, folderNode, nodePath } from './folders'
 import type { LocalGesture, ReaderHandle, ReaderWindow } from './reader-window'
@@ -1126,6 +1126,9 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   async function pick(locate = false): Promise<void> {
     const chosen = await window.typose.openDialog()
     if (!chosen) return
+    // A path chosen before the window's startup charge settles waits for it, as a launch path does: `open` refused it
+    // with "Finish the current operation" (macOS run 43099969055, an e2e dialog stubbed to answer at once).
+    await shared.paid()
     const tab = workspace.getSnapshot().selected
     const c = latest.current.card
     // Recovery replaces the unusable slot but obtains new manual authority from the real dialog.
@@ -1414,7 +1417,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         // Z78: still marked while Open anyway runs, since its card changes only once that open succeeds.
         ...(location.kind === 'manual' && (tab.card.kind === 'crashed' || tab.card.kind === 'gone' && tab.card.crashed) ? { crashed: true } : {}) })
     }
-    if (workspace.getSnapshot() !== before) return null
+    if (!sameSession(workspace.getSnapshot(), before)) return null
     return { tabs, selected: before.tabs.findIndex(tab => tab.id === before.selected), weight: 1 }
   }
 

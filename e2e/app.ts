@@ -14,6 +14,12 @@ export const APP_DIR = resolve(__dirname, '../app')
 /** Generated fixtures; gitignored, and the big ones are deleted after their tests. */
 export const FIXTURES = resolve(__dirname, '../.fixtures')
 
+/**
+ * Whether a wall-clock bound set on a quiet machine is judged here: always, except under CI on `noisy` systems, whose
+ * hosted runners miss it. The test's other checks still run there (CONTRIBUTING.md, "Tests that need a quiet machine").
+ */
+export const quiet = (...noisy: NodeJS.Platform[]): boolean => !process.env.CI || !noisy.includes(process.platform)
+
 export interface Exit {
   code: number | null
   signal: NodeJS.Signals | null

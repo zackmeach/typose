@@ -40,7 +40,7 @@ test('packaged Rendered Find reaches visible text across markup and searches a l
   writeFileSync(file, ['# Source', '[Read the appendix](private-target.md)', ...filler, 'The north\n**pier** &amp; wharf.'].join('\n\n'))
   writeFileSync(join(directory, 'private-target.md'), '# Appendix\n\nA different **coastal** project.\n')
   try {
-    const live = await launchPackaged({ file, cdp: true })
+    const live = await launchPackaged({ file, cdp: true, args: ['--disable-renderer-accessibility'] })
     const page = live.page!
     const card = page.getByRole('region', { name: 'Reader card 1' })
     const destination = card.getByText('The north pier & wharf.', { exact: true })

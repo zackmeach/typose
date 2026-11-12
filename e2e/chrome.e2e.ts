@@ -218,6 +218,8 @@ test('☰ is a menu of Open file…, Reload and Exit, each wired to its command;
   }
   // Escape closes it and gives focus back to ☰.
   await opened()
+  // Read once, not polled: just after the open, ☰ still showed Reload disabled until App next rendered.
+  expect(await win.getByRole('menuitem', { name: 'Reload' }).getAttribute('aria-disabled')).toBeNull()
   await win.keyboard.press('Escape')
   await expect(win.getByRole('menu')).toHaveCount(0)
   await expect(trigger).toBeFocused()

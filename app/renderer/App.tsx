@@ -7,7 +7,7 @@ import { fileName } from './card'
 import { AppMenu, LINUX } from './menu'
 import { markPainted } from './perf'
 import { ReaderCard } from './ReaderCard'
-import { WorkspaceStore, WorkspaceMetadataQueue, type WorkspaceTab } from './workspace'
+import { WorkspaceStore, WorkspaceMetadataQueue, type WorkspaceTab, sameSession } from './workspace'
 import { WorkspaceBudget } from './workspace-budget'
 import { FolderSidebar } from './folder-sidebar'
 import { entryView, folderNode, foldersCharge, nodePath, rootView, updateFolder, type RootView } from './folders'
@@ -87,6 +87,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   const lastRecent = useRef('')
   const sessionReady = useRef(false)
   const sessionTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const sessionArm = useRef(0)
   const sessionSerial = useRef(Promise.resolve(true))
   const captureNow = useRef<() => Promise<boolean>>(async () => false)
   const workspace = { getSnapshot: () => ({ ready: !!hello.current, tabs: allGroups.current.flatMap(group => group.workspace.getSnapshot().tabs) }) }
@@ -141,7 +142,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
         if (!captured) return false
         cards.push({ ...captured, weight: group.weight })
       }
-      if (groupRef.current !== before || before.some((group, index) => group.workspace.getSnapshot() !== snapshots[index])) return false
+      if (groupRef.current !== before || before.some((group, index) => !sameSession(group.workspace.getSnapshot(), snapshots[index]))) return false
       const focused = Math.max(0, before.findIndex(group => group.id === focusedRef.current))
       const selected = cards[focused]?.tabs[cards[focused].selected]
       if (selected?.location.kind === 'manual' && snapshots[focused]?.tabs.find(tab => tab.id === snapshots[focused].selected)?.card.kind === 'open' && lastRecent.current !== selected.location.path) {
@@ -160,9 +161,17 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     sessionSerial.current = next
     return next
   }
-  function scheduleSession(): void {
+  function scheduleSession(): void { armSession(0) }
+  /** A change saves 300 ms later. A capture refused for a reason the store doesn't show (a navigation or a split under
+   *  way, a failed core call) is tried again 600 ms later, then 1.2, 2.4, 4.8 and 9.6 s: backing off keeps a long
+   *  refusal cheap, and stopping after 5 ends one that never clears, as when main refuses the session. A newer change
+   *  starts over. */
+  function armSession(retry: number): void {
+    const arm = ++sessionArm.current
     clearTimeout(sessionTimer.current)
-    sessionTimer.current = setTimeout(() => { void captureNow.current() }, 300)
+    sessionTimer.current = setTimeout(() => {
+      void captureNow.current().then(saved => { if (!saved && retry < 5 && arm === sessionArm.current) armSession(retry + 1) })
+    }, 300 * 2 ** retry)
   }
 
   async function restoreWindowSession(value: SessionWorkspace): Promise<void> {
@@ -298,12 +307,27 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     return () => controller.abort()
   }, [core, quickUsed, rootSignature, config.values.show_hidden, config.values.excludes.join('\n')])
   useEffect(() => {
-    const off = groups.map(group => group.workspace.subscribe(scheduleSession))
-    const capture = window.typose.onSessionCapture(() => captureNow.current())
+    const off = groups.map(group => {
+      let seen = group.workspace.getSnapshot()
+      return group.workspace.subscribe(() => {
+        const now = group.workspace.getSnapshot()
+        if (!sameSession(seen, now)) scheduleSession()
+        seen = now
+      })
+    })
+    // A capture is refused when what it saves changes under it (`sameSession`; index progress doesn't count), as when a
+    // tab's open completes or its Markdown build lands and switches it to Rendered. At close there's
+    // no later capture to make up for it, and close kept the last save, without the tab just opened: try again, up to
+    // 5 times. Main waits 1 s for them; past that, or when all 5 are refused, it closes with the last save.
+    const capture = window.typose.onSessionCapture(async () => {
+      for (let tries = 0; tries < 5; tries++) if (await captureNow.current()) return true
+      return false
+    })
     window.addEventListener('scroll', scheduleSession, true)
     return () => { off.forEach(unsubscribe => unsubscribe()); capture(); window.removeEventListener('scroll', scheduleSession, true); clearTimeout(sessionTimer.current) }
   }, [groups])
-  useEffect(() => { scheduleSession() }, [sidebarOpen, sidebarWidth, focused, folderRoots, recents])
+  // `groups`: a resize changes only the cards' weights, which no workspace store holds (index progress never changes it).
+  useEffect(() => { scheduleSession() }, [sidebarOpen, sidebarWidth, focused, folderRoots, recents, groups])
   useEffect(() => { refreshFolders() }, [config.values.show_hidden])
   useLayoutEffect(() => markPainted('titlebarPainted'), [])
   useEffect(() => {

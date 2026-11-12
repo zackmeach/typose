@@ -17,11 +17,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use pulldown_cmark::Parser;
 use typose_core::budget::{self, Reservation, Work};
 use typose_core::doc::{DocError, STRUCT_BYTES};
 use typose_core::images::{self, ImageError};
 use typose_core::jsonl;
-use typose_core::md::{MAX_SOURCE, Note};
+use typose_core::md::{self, MAX_SOURCE, Note};
 use typose_core::pages::MAX_ITEMS;
 use typose_core::raw::Raw;
 use typose_core::store::CHUNK;
@@ -280,6 +281,7 @@ fn markdown_unit(i: usize) -> String {
         "# Heading\n\n## Heading {i}\n\nProse with *em*, **strong**, ~~del~~, `code`, [a link](other.md \"t\"), "
     );
     s.push_str("![an image](a.png), <https://x.y>, <kbd>K</kbd>, a footnote[^n] and &amp; an entity.\n\n");
+    s.push_str("A [[wikilink]], [[another|piped]] and an ![[embed.png]].\n\n");
     s.push_str(
         "- item\n  - nested\n- [ ] task\n- [x] done\n\n1. one\n2. two\n\n> a quote with **bold**\n> > nested\n\n",
     );
@@ -986,6 +988,36 @@ fn footnote_checks(dir: &Path) {
     assert!(peaks[1] <= peaks[0] + (1 << 20), "big blocks left their footnotes charged: {peaks:?}");
 }
 
+/// md.rs's `PARSE_PER_NODE` covers pulldown-cmark's parse by itself. A build's other reservations (the read's, the
+/// decode's) hold more than they use while it parses, room enough to hide a parse about 40 bytes a byte over its charge
+/// (`md_shape` stayed green on `[]()[[a]]` with the constant cut to 144), so the shapes with the highest peaks
+/// a byte are parsed alone here, as the build parses them, against that charge only.
+fn parse_checks(shapes: &[(&str, PathBuf)]) {
+    for (name, path) in shapes {
+        let text = fs::read_to_string(path).unwrap();
+        RESERVED_BASELINE.store(budget::in_use().0, SeqCst);
+        let charge = Reservation::new(md::PARSE_PER_NODE * text.len() as u64).unwrap();
+        BASELINE.store(LIVE.load(SeqCst), SeqCst);
+        CHECKS.store(0, SeqCst);
+        SKIPPED.store(0, SeqCst);
+        OVER.store(0, SeqCst);
+        for slot in &WORST {
+            slot.store(0, SeqCst);
+        }
+        ARMED.store(true, SeqCst);
+        for event in Parser::new_ext(&text, md::OPTIONS).into_offset_iter() {
+            drop(event);
+        }
+        ARMED.store(false, SeqCst);
+        RESERVED_BASELINE.store(0, SeqCst);
+        let (checks, skipped, over) = (CHECKS.load(SeqCst), SKIPPED.load(SeqCst), OVER.load(SeqCst));
+        let [live, reserved, size] = WORST.each_ref().map(|w| w.load(SeqCst));
+        assert!(checks > 0 && skipped == 0, "{name}: {checks} checks, {skipped} skipped");
+        assert_eq!(over, 0, "{name}: the parse alone, {live} live > {reserved} reserved at allocation {size}");
+        println!("{name:>30}: the parse alone within {} bytes, {checks} checked", charge.bytes());
+    }
+}
+
 fn main() {
     assert!(size_of::<Raw>() as u64 + 16 <= STRUCT_BYTES, "a Raw ({} bytes) outgrew its metadata", size_of::<Raw>());
     let dir = std::env::temp_dir().join(format!("typose-ledger-{}", std::process::id()));
@@ -1046,7 +1078,7 @@ fn main() {
     write(&path, &[b"\xEF\xBB\xBF", &vec![0xFF; CHUNK - 5], b"\xE3\x80"], 1);
     shapes.push(Shape { name: "short malformed UTF-8", path, fill_cache: false });
     // Plan (Rendered Markdown slice) §3: Markdown at the ceiling, padded tables, the densest parse (a node a byte, `md.rs`),
-    // and UTF-16 and windows-1252 text.
+    // UTF-16 and windows-1252 text, and the parse's highest peaks a byte (`md.rs`).
     let mixed = mixed_markdown(MAX_SOURCE as usize);
     let small = mixed_markdown(1 << 20);
     let markdown = [
@@ -1059,6 +1091,12 @@ fn main() {
             [0xFF, 0xFE].into_iter().chain(small.encode_utf16().flat_map(u16::to_le_bytes)).collect(),
         ),
         ("Markdown in windows-1252", at("w1252.md"), small.bytes().map(|b| if b == b'a' { 0xE9 } else { b }).collect()),
+        // pulldown-cmark's highest peaks a byte (`md.rs`): nodes just past one a byte, with links just past 2^20 or the
+        // link stacks of 2^22 `[`. Named `peak: `, so `parse_checks` takes them.
+        ("peak: wiki images", at("wiki-images.md"), "![[a]]".repeat(1_049_284).into_bytes()),
+        ("peak: piped wikilinks", at("wikilinks.md"), "[[a|]]".repeat(1_049_284).into_bytes()),
+        ("peak: links and wikilinks", at("links.md"), "[]()[[a]]".repeat(524_996).into_bytes()),
+        ("peak: link stacks", at("stacks.md"), ("[".repeat(4_194_306) + "\n\nxxx" + &"[[a]]".repeat(5)).into_bytes()),
     ];
     for (_, path, bytes) in &markdown {
         fs::write(path, bytes).unwrap();
@@ -1142,7 +1180,7 @@ fn main() {
     assert!(refused, "a 32,000-byte path opened");
     assert_eq!(budget::totals().used, used);
     // Plan (Rendered Markdown slice) §2.1: each Markdown build, checked throughout. Then a budget with room for the
-    // read but not the parse refuses the build with `Memory`, and nothing stays charged.
+    // read but not the decode refuses the build with `Memory`, and nothing stays charged.
     for (k, (name, path)) in markdown.iter().enumerate() {
         md_shape(4 * shapes.len() + 2 + k, name, path);
     }
@@ -1151,7 +1189,7 @@ fn main() {
     let used = budget::totals().used;
     let raw = Raw::open(&markdown[0].1).unwrap();
     let (opened, limit, floor) = (budget::totals().used, budget::totals().limit, raw.charges().cache);
-    budget::set_limit(opened + (64 << 20)).unwrap(); // the read's 35 MiB, not the parse's 1.6 GiB
+    budget::set_limit(opened + (64 << 20)).unwrap(); // the read's 35 MiB, not the decode's 320 MiB
     let refused = raw.render(1);
     budget::set_limit(limit).unwrap();
     // Beside what the document holds: its read grew its chunk cache, which is the document's to keep (plan C1).
@@ -1197,5 +1235,7 @@ fn main() {
     image_checks();
     embedded_checks(&dir);
     footnote_checks(&dir);
+    let peaks: Vec<_> = markdown.iter().filter(|(name, _)| name.starts_with("peak: ")).cloned().collect();
+    parse_checks(&peaks);
     println!("ok");
 }

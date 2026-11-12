@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest'
 import type { Card } from './card'
 import type { Opened } from '../shared/protocol'
-import { WorkspaceMetadataQueue, WorkspaceStore, type TabTicket } from './workspace'
+import { WorkspaceMetadataQueue, WorkspaceStore, sameSession, type TabTicket } from './workspace'
 
 const opened = (doc: number, gen = 1, over: Partial<Opened> = {}): Opened => ({ doc, gen, format: 'markdown',
   size: 12, encoding: 'UTF-8', lines: 3, indexed: false, blank: false, reserved: 999,
@@ -159,6 +159,31 @@ it('routes inactive progress only by current session, document and generation', 
   expect(store.tab(a.tab)!.card).toMatchObject({ lines: 20, bytes: 100, indexed: true })
   const native = store.tab(a.tab)!.card
   expect(native.kind === 'open' && store.updateDocument(event, (c) => ({ ...c, opened: { ...c.opened, doc: 8 } }))).toBe(false)
+})
+
+it('index progress leaves what a session saves the same; a saved change to a tab, the order, the count or the selection does not', () => {
+  const store = ready()
+  const a = begin(store, 'a.md')
+  store.complete(a, 'a.md', card('a.md', opened(1)))
+  const before = store.getSnapshot()
+  store.progress({ event: 'progress', session: 1, doc: 1, gen: 1, lines: 20, bytes: 100, done: false })
+  store.updateDocument({ session: 1, doc: 1, gen: 1 }, c => ({ ...c, rendering: true }))
+  expect(store.getSnapshot()).not.toBe(before)
+  expect(sameSession(before, store.getSnapshot())).toBe(true)
+  const changed = (change: () => void) => { const at = store.getSnapshot(); change(); return !sameSession(at, store.getSnapshot()) }
+  expect(changed(() => store.updateDocument({ session: 1, doc: 1, gen: 1 }, c => ({ ...c, lens: 'rendered' })))).toBe(true)
+  expect(changed(() => store.updateDocument({ session: 1, doc: 1, gen: 1 }, c => ({ ...c, csvOptions: { delimiter: 'auto', header: true } })))).toBe(true)
+  expect(changed(() => store.remember(a.tab, 7, null))).toBe(true)
+  expect(changed(() => store.remember(a.tab, 7, 'raw'))).toBe(true)
+  const b = begin(store, 'b.md')
+  expect(changed(() => store.markSlow(b))).toBe(true)
+  expect(changed(() => store.complete(b, 'b.md', card('b.md', opened(2))))).toBe(true)
+  expect(changed(() => store.select(a.tab))).toBe(true)
+  store.select(b.tab)
+  expect(changed(() => store.adoptTabs(store.takeTabs([a.tab])))).toBe(true) // the order alone: b stays selected
+  const other = ready(), c = begin(other, 'c.md')
+  expect(changed(() => store.adoptTabs(other.takeTabs([c.tab])))).toBe(true) // the count alone: appended, b stays selected
+  expect(changed(() => store.coreGone(1))).toBe(true)
 })
 
 it('preserves per-tab explicit lens and source anchor on Reload but clears both on local replacement', () => {
