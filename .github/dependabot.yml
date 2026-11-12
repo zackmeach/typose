@@ -15,6 +15,12 @@ updates:
     directory: /core
     schedule:
       interval: monthly
+    ignore:
+      # gif 0.14 decodes with weezl 0.1, so 0.2 would put two weezls in the lock. And images.rs charges the GIF
+      # prepass's weezl decoder from 0.1's layout (`image_gif_workspace`); 0.2's pre-allocated tables outgrow it.
+      # Move with gif, and re-derive that charge.
+      - dependency-name: weezl
+        versions: ['>= 0.2.0']
     groups:
       cargo:
         patterns: ['*']
