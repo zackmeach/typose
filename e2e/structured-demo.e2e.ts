@@ -528,7 +528,9 @@ test('Transcript shows HTML-like tags in message text as literal text, never int
   // The HTML block keeps its lines, as a paragraph of its own.
   const block = markdown.nth(1).locator('.md-block > p')
   await expect(block.locator('br')).toHaveCount(3)
-  expect(await block.evaluate(paragraph => (paragraph as HTMLElement).innerText)).toBe('<details>\n<summary>open?</summary>\nhidden?\n</details>')
+  // Polled: until a frame lays it out, a block's content-visibility: auto skips it, and its innerText is empty (macOS run
+  // 42881392462). Linux keeps every block visible (its accessibility mode is always on), so only macOS and Windows wait.
+  await expect.poll(() => block.evaluate(paragraph => (paragraph as HTMLElement).innerText)).toBe('<details>\n<summary>open?</summary>\nhidden?\n</details>')
   await expect(markdown.nth(2)).toContainText('<b>surrogate</b> after a lone surrogate')
   await expect(markdown.nth(3)).toHaveText('See data-source-map="L:0:1:9999" then <b>mapped</b>')
   await expect(markdown.nth(4).locator('code')).toHaveText('<b>')
