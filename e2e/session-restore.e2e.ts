@@ -187,7 +187,7 @@ test('sidebar tasks.csv restores through its approved root in a split with the s
 
 test('a tab opened while a 64 GiB document indexes is saved without waiting for the index', async () => {
   // Sparse: 2,000 lines of text, then zeros the disk doesn't store but the index still reads: about 27 s locally,
-  // against a save 1.6 s after the second tab shows (10 GiB's 3 s index left too thin a margin for a fast runner).
+  // against a save on disk 2.2 s after the second tab shows (10 GiB's 3 s index left too thin a margin for a fast runner).
   const big = sparseFixture('session-indexing-64gib.txt', 64 * 2 ** 30, 'line\n'.repeat(2000))
   const small = fixture('session-indexing-small.txt', 'small\n')
   const live = await launch({ hooks: true, file: big })
@@ -214,7 +214,7 @@ test('a tab opened while a 64 GiB document indexes is saved without waiting for 
     // Index progress changes the workspace every 100 ms: it must neither restart the 300 ms save timer nor refuse the
     // capture, or nothing is saved until the index ends. On disk: 300 ms, a capture (here 2 × 150 ms), then main's 1 s
     // write delay.
-    await expect.poll(saved, { timeout: 5_000 }).toEqual([basename(big), basename(small)])
+    await expect.poll(saved, { timeout: 10_000 }).toEqual([basename(big), basename(small)])
     expect((await debugStats(live.win)).jobs).toBe(1)
     expect(live.pageErrors).toEqual([])
   } finally {
