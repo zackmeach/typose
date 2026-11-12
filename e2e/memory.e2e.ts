@@ -99,22 +99,27 @@ async function layoutGate(s: (typeof SCRIPTS)[number]): Promise<void> {
     // As a second launch would open it (spec §8.1): no dialog.
     await app.evaluate(({ BrowserWindow }, path) => BrowserWindow.getAllWindows()[0].webContents.send('open-path', path), path)
     /** Raw at `gen` holds its reservation for its height, as the core does, and every mounted row has its text. */
+    // Each wait in `settled` reads the page, and Raw lays every mounted row out again each time a fetch lands
+    // (VirtualList's `refresh`, then `measure`). With these rows, after a Reload on hosted macOS, that held the main
+    // thread for 39–56 s, 93–95% of it in `measure`, in single tasks of up to 26 s (diagnostic runs 43283443874 and
+    // 43298911549). A 30 s poll could end without one read landing, while Raw already held the right reservation.
+    // 120 s is over twice the longest of those; what each wait checks is unchanged.
+    const PAGE_WAIT = 120_000
     const settled = async (gen: string) => {
-      await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', gen, { timeout: 30_000 })
-      // Raw's height read with the reservation, not once: after a Reload, macOS run 42898553765 read 342 px, while for
-      // the next 30 s the lens held the reservation for 58 rows, a host of 361 to 380 px. A mismatch reports both.
+      await expect(win.locator('.raw-host')).toHaveAttribute('data-gen', gen, { timeout: PAGE_WAIT })
+      // Raw's height read with the reservation, not once. A mismatch reports both.
       const full = async () => capFor(L, 3 * Math.ceil((await win.evaluate(() => document.querySelector('.raw-host')!.clientHeight)) / 20) + 1)
       const fits = async () => {
         const [held, cap] = [(await cacheStats(win))?.reserved, await full()]
         return held === cap ? 'fits' : `reserved ${held} where the host's cap is ${cap}`
       }
-      await expect.poll(fits, { timeout: 30_000 }).toBe('fits')
+      await expect.poll(fits, { timeout: PAGE_WAIT }).toBe('fits')
       const reserved = await full()
       expect((await debugStats(win)).ledger.rendererCache).toBe(reserved + await workspaceHeld(win))
       await expect.poll(() => win.evaluate(() => {
         const rows = [...document.querySelectorAll('.vl-row')]
         return rows.length > 0 && rows.every((r) => r.querySelector('.text'))
-      }), { timeout: 60_000 }).toBe(true)
+      }), { timeout: PAGE_WAIT }).toBe(true)
       const c = (await cacheStats(win))!
       expect(c.charged, JSON.stringify(c)).toBeLessThanOrEqual(c.cap)
       return reserved
