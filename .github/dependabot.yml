@@ -4,6 +4,13 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    ignore:
+      # Typose runs on Node 24 (setup-node 24 in both workflows; Electron 44 embeds Node 24), so its types stay on 24.x.
+      # A newer major declares APIs Node 24 lacks (26.x has `node:ffi`, which throws ERR_UNKNOWN_BUILTIN_MODULE on 24),
+      # so the typecheck would stop catching them, and skipLibCheck hides the clash with Electron's nested 24.x copy.
+      # Move with the Node major.
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
     groups:
       # Electron carries Chromium, so its bumps are the security-relevant ones. They get their own PR.
       electron:
