@@ -270,7 +270,7 @@ fn encode_pixels_with(
     Ok(CanonicalImage { bytes: sink.bytes, width: pixels.width, height: pixels.height, resource: sink.resource })
 }
 
-// Reviewed against png =0.18.1, fdeflate =0.3.7, gif =0.14.2, weezl =0.1.10, crc32fast =1.5.3.
+// Reviewed against png =0.18.1, fdeflate =0.3.7, gif =0.14.2, weezl =0.1.10, crc32fast =1.5.4.
 // Caller owns and has charged `source`; no source copy is made here.
 
 struct PngPreflight {
@@ -1060,6 +1060,39 @@ mod png_gif_tests {
                 "PNG contains unsupported metadata, animation, or chunks"
             );
         }
+    }
+
+    /// A PNG's chunk checksums are crc32fast's: its SIMD paths (x86_64 PCLMULQDQ, aarch64 CRC) agree with the bitwise
+    /// CRC-32 at every length to 1 KiB from every alignment to 15, and on chunks of 64 KiB.
+    #[test]
+    fn crc32fast_agrees_with_the_bitwise_crc32() {
+        fn bitwise(bytes: &[u8]) -> u32 {
+            let mut crc = !0u32;
+            for &b in bytes {
+                crc ^= u32::from(b);
+                for _ in 0..8 {
+                    crc = (crc >> 1) ^ (0xEDB8_8320 & (crc & 1).wrapping_neg());
+                }
+            }
+            !crc
+        }
+        let mut x = 0x9E37_79B9_u32;
+        let data: Vec<u8> = (0..(64 << 10) + 16)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                x as u8
+            })
+            .collect();
+        for at in 0..16 {
+            for len in 0..=1024 {
+                let bytes = &data[at..at + len];
+                assert_eq!(crc32fast::hash(bytes), bitwise(bytes), "at {at}, {len} bytes");
+            }
+        }
+        assert_eq!(crc32fast::hash(&data[16..]), bitwise(&data[16..]));
+        assert_eq!(crc32fast::hash(b"123456789"), 0xCBF4_3926); // CRC-32's check value
     }
 }
 
