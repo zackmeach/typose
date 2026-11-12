@@ -10,16 +10,5 @@ export const quarantine: { title: string; os?: NodeJS.Platform; reason: string; 
   {
     title: "emoji: Raw's rows, once collected, raise the renderer's private bytes by no more than the reservation holds for them, and a Reload leaves no more garbage than it reserves (Z66)",
     os: 'darwin', reason: "after a Reload, Raw's reservation stopped following its host, and close then hung", expires: '2026-12-11'
-  },
-  // Both entries below are product bugs, fixed on branch fix/menu-and-close-capture, which drops them.
-  // Flaky in two runs, 42869369349 and 42889988308.
-  {
-    title: 'the keyboard reaches ☰ and Raw, ☰ runs its commands from the keyboard, and the focus ring shows',
-    os: 'linux', reason: '☰ can show Reload disabled after a document opens, and the typeahead skips it', expires: '2026-12-10'
-  },
-  // Flaky in three runs, 42869369349, 42898377896 and 42898891669.
-  {
-    title: 'native-derived capture remains a reselect record across an actual restart',
-    os: 'win32', reason: "close's session capture is refused when the new tab's Markdown build lands during it", expires: '2026-12-10'
   }
 ]

@@ -297,6 +297,13 @@ void app.whenReady().then(() => {
     if (!fromMainApp(win, event) || args.length) return false
     win.setFullScreen(!win.isFullScreen()); return true
   })
+  // View zoom has this one writer, which steps the browser's factor in the order the steps arrive (brief §6.5).
+  ipcMain.on('zoom', (event, ...args: unknown[]) => {
+    const [action] = args
+    if (!fromMainApp(win, event) || args.length !== 1 || action !== 'in' && action !== 'out' && action !== 'reset') return
+    const factor = action === 'reset' ? 1 : win.webContents.getZoomFactor() * (action === 'in' ? 1.1 : 1 / 1.1)
+    win.webContents.setZoomFactor(Math.max(0.5, Math.min(2, factor)))
+  })
   ipcMain.handle('save-session', (event, ...args: unknown[]) => {
     if (!fromMainApp(win, event) || args.length !== 1) return false
     return sessionStore.update(args[0])

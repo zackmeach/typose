@@ -1126,6 +1126,9 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
   async function pick(locate = false): Promise<void> {
     const chosen = await window.typose.openDialog()
     if (!chosen) return
+    // A path chosen before the window's startup charge settles waits for it, as a launch path does: `open` refused it
+    // with "Finish the current operation" (macOS run 43099969055, an e2e dialog stubbed to answer at once).
+    await shared.paid()
     const tab = workspace.getSnapshot().selected
     const c = latest.current.card
     // Recovery replaces the unusable slot but obtains new manual authority from the real dialog.
