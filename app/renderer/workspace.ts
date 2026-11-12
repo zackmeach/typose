@@ -101,8 +101,9 @@ function retain(card: FinishedCard): StoredCard {
   })
 }
 
-/** Equal in everything a saved session reads (ReaderCard's `captureSession`). Index progress changes only an open
- *  card's counts, every 100 ms while a document indexes: it must neither restart the save timer nor refuse a capture. */
+/** Equal in everything a saved session reads from this store (ReaderCard's `captureSession`). Index progress changes
+ *  only an open card's counts, every 100 ms while a document indexes: it must neither restart the save timer nor refuse
+ *  a capture. */
 export function sameSession(a: WorkspaceSnapshot, b: WorkspaceSnapshot): boolean {
   return a === b || a.session === b.session && a.ready === b.ready && a.selected === b.selected && a.tabs.length === b.tabs.length
     && a.tabs.every((tab, index) => {

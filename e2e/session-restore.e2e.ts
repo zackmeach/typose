@@ -203,7 +203,8 @@ test('a tab opened while a 64 GiB document indexes is saved without waiting for 
       }
     })
     await stubOpenDialog(live.app, small)
-    await runCommand(live.win, 'Open file…')
+    // Browse, not Open file: once the first save lists the big file in recents, Open file shows Quick open instead.
+    await runCommand(live.win, 'Browse…')
     await expect(live.win.locator('.vl-row .text').first()).toHaveText('small')
     const saved = () => {
       try {
@@ -212,8 +213,8 @@ test('a tab opened while a 64 GiB document indexes is saved without waiting for 
       } catch { return [] }
     }
     // Index progress changes the workspace every 100 ms: it must neither restart the 300 ms save timer nor refuse the
-    // capture, or nothing is saved until the index ends. On disk: 300 ms, a capture (here 2 × 150 ms), then main's 1 s
-    // write delay.
+    // capture, or nothing is saved until the index ends. On disk: 300 ms and a capture (here 2 × 150 ms); that save
+    // lists the new tab in recents, which schedules one more, and main writes 1 s after the last.
     await expect.poll(saved, { timeout: 10_000 }).toEqual([basename(big), basename(small)])
     expect((await debugStats(live.win)).jobs).toBe(1)
     expect(live.pageErrors).toEqual([])

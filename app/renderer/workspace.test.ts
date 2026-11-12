@@ -161,7 +161,7 @@ it('routes inactive progress only by current session, document and generation', 
   expect(native.kind === 'open' && store.updateDocument(event, (c) => ({ ...c, opened: { ...c.opened, doc: 8 } }))).toBe(false)
 })
 
-it('index progress leaves what a session saves the same; a lens, anchor, selection or open does not', () => {
+it('index progress leaves what a session saves the same; a change to anything it saves does not', () => {
   const store = ready()
   const a = begin(store, 'a.md')
   store.complete(a, 'a.md', card('a.md', opened(1)))
@@ -172,9 +172,16 @@ it('index progress leaves what a session saves the same; a lens, anchor, selecti
   expect(sameSession(before, store.getSnapshot())).toBe(true)
   const changed = (change: () => void) => { const at = store.getSnapshot(); change(); return !sameSession(at, store.getSnapshot()) }
   expect(changed(() => store.updateDocument({ session: 1, doc: 1, gen: 1 }, c => ({ ...c, lens: 'rendered' })))).toBe(true)
+  expect(changed(() => store.updateDocument({ session: 1, doc: 1, gen: 1 }, c => ({ ...c, csvOptions: { delimiter: 'auto', header: true } })))).toBe(true)
   expect(changed(() => store.remember(a.tab, 7, null))).toBe(true)
-  expect(changed(() => begin(store, 'b.md'))).toBe(true)
+  expect(changed(() => store.remember(a.tab, 7, 'raw'))).toBe(true)
+  const b = begin(store, 'b.md')
+  expect(changed(() => store.markSlow(b))).toBe(true)
+  expect(changed(() => store.complete(b, 'b.md', card('b.md', opened(2))))).toBe(true)
   expect(changed(() => store.select(a.tab))).toBe(true)
+  store.select(b.tab)
+  expect(changed(() => store.adoptTabs(store.takeTabs([a.tab])))).toBe(true) // the order alone: b stays selected
+  expect(changed(() => store.coreGone(1))).toBe(true)
 })
 
 it('preserves per-tab explicit lens and source anchor on Reload but clears both on local replacement', () => {
