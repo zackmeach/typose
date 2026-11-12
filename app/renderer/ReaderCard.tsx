@@ -16,7 +16,7 @@ import './structured.css'
 import { StructuredLens, type StructuredMode } from './lenses/structured'
 import { prepareStructured, type StructuredSource } from './lenses/structured-source'
 import { inputMark, markNow } from './perf'
-import { type SavedLocation, type SelectionTicket, type TabId, type WorkspaceStore, type WorkspaceTab } from './workspace'
+import { type SavedLocation, type SelectionTicket, type TabId, type WorkspaceStore, type WorkspaceTab, sameSession } from './workspace'
 import { FileTabs } from './file-tabs'
 import { entryView, folderNode, nodePath } from './folders'
 import type { LocalGesture, ReaderHandle, ReaderWindow } from './reader-window'
@@ -1417,7 +1417,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         // Z78: still marked while Open anyway runs, since its card changes only once that open succeeds.
         ...(location.kind === 'manual' && (tab.card.kind === 'crashed' || tab.card.kind === 'gone' && tab.card.crashed) ? { crashed: true } : {}) })
     }
-    if (workspace.getSnapshot() !== before) return null
+    if (!sameSession(workspace.getSnapshot(), before)) return null
     return { tabs, selected: before.tabs.findIndex(tab => tab.id === before.selected), weight: 1 }
   }
 
