@@ -23,14 +23,15 @@ updates:
         versions: ['>= 0.2.0']
       # napi 3.15 keeps a class borrowed until its async task settles (napi-rs#3584), so the Doc methods JS calls while
       # a task is pending (prepare_image, prepare_embedded_image, reload, reload_in_folder, close) fail with "The same
-      # native value cannot be borrowed mutably while another borrow is active". Patches only, until those methods
-      # take &self (owed after the first tag).
+      # native value cannot be borrowed mutably while another borrow is active". The change is in napi 3.15.0, and in
+      # napi-derive-backend 6.1.6, a patch, which napi-derive 3.6.13 requires. Hold until those methods take &self
+      # (owed after the first tag).
       - dependency-name: napi
         versions: ['>= 3.15.0']
       - dependency-name: napi-derive
-        versions: ['>= 3.7.0']
+        versions: ['>= 3.6.13']
       - dependency-name: napi-derive-backend
-        versions: ['>= 7.0.0']
+        versions: ['>= 6.1.6']
     groups:
       cargo:
         patterns: ['*']
