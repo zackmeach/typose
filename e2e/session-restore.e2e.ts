@@ -185,6 +185,40 @@ test('sidebar tasks.csv restores through its approved root in a split with the s
   rmSync(originalRoot, { recursive: true, force: true })
 })
 
+test('a save refused for a reason the workspace does not show is tried again without waiting for the next change', async () => {
+  const first = fixture('session-refused-first.txt', 'first\n'), second = fixture('session-refused-second.txt', 'second\n')
+  const live = await launch({ hooks: true, file: first })
+  try {
+    await waitOpen(live.win)
+    // The first capture that asks the core about two tabs fails, as one refused mid-navigation would: nothing in the
+    // workspace changes after it, so only a retry saves the second tab.
+    await live.win.evaluate(() => {
+      const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core, call = core.call.bind(core)
+      let failed = false
+      core.call = async (...args: Parameters<typeof call>) => {
+        if (args[0] === 'captureLocation' && !failed && document.querySelectorAll('[role="tab"]').length >= 2) {
+          failed = true
+          throw new Error('refused for the test')
+        }
+        return call(...args)
+      }
+    })
+    await stubOpenDialog(live.app, second)
+    await runCommand(live.win, 'Browse…')
+    await expect(live.win.locator('.vl-row .text').first()).toHaveText('second')
+    const saved = () => {
+      try {
+        return JSON.parse(readFileSync(join(live.userData, 'session.json'), 'utf8')).cards.flatMap((card: { tabs: { location: { path: string } }[] }) => card.tabs.map(tab => basename(tab.location.path)))
+      } catch { return [] }
+    }
+    // Refused 300 ms after the open, tried again 600 ms later; main writes 1 s after the last save.
+    await expect.poll(saved, { timeout: 10_000 }).toEqual([basename(first), basename(second)])
+    expect(live.pageErrors).toEqual([])
+  } finally {
+    await finish(live)
+  }
+})
+
 test('a card resized in a split is saved without waiting for close', async () => {
   const live = await launch({ file: fixture('session-weight.txt', 'weight\n') })
   try {

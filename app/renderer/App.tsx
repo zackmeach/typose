@@ -87,6 +87,7 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   const lastRecent = useRef('')
   const sessionReady = useRef(false)
   const sessionTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const sessionArm = useRef(0)
   const sessionSerial = useRef(Promise.resolve(true))
   const captureNow = useRef<() => Promise<boolean>>(async () => false)
   const workspace = { getSnapshot: () => ({ ready: !!hello.current, tabs: allGroups.current.flatMap(group => group.workspace.getSnapshot().tabs) }) }
@@ -160,9 +161,17 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     sessionSerial.current = next
     return next
   }
-  function scheduleSession(): void {
+  function scheduleSession(): void { armSession(0) }
+  /** A change saves 300 ms later. A capture refused for a reason the store doesn't show (a navigation or a split under
+   *  way, a failed core call) is tried again 600 ms later, then 1.2, 2.4, 4.8 and 9.6 s: backing off keeps a long
+   *  refusal cheap, and stopping after 5 ends one that never clears, as when main refuses the session. A newer change
+   *  starts over. */
+  function armSession(retry: number): void {
+    const arm = ++sessionArm.current
     clearTimeout(sessionTimer.current)
-    sessionTimer.current = setTimeout(() => { void captureNow.current() }, 300)
+    sessionTimer.current = setTimeout(() => {
+      void captureNow.current().then(saved => { if (!saved && retry < 5 && arm === sessionArm.current) armSession(retry + 1) })
+    }, 300 * 2 ** retry)
   }
 
   async function restoreWindowSession(value: SessionWorkspace): Promise<void> {
