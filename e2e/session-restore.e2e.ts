@@ -193,11 +193,10 @@ test('a save refused for a reason the workspace does not show is tried again wit
     // The first capture that asks the core about two tabs fails, as one refused mid-navigation would: nothing in the
     // workspace changes after it, so only a retry saves the second tab.
     await live.win.evaluate(() => {
-      const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core, call = core.call.bind(core)
-      let failed = false
+      const w = window as unknown as { typoseTest: TestHooks; refused?: boolean }, core = w.typoseTest.core, call = core.call.bind(core)
       core.call = async (...args: Parameters<typeof call>) => {
-        if (args[0] === 'captureLocation' && !failed && document.querySelectorAll('[role="tab"]').length >= 2) {
-          failed = true
+        if (args[0] === 'captureLocation' && !w.refused && document.querySelectorAll('.file-tab').length >= 2) {
+          w.refused = true
           throw new Error('refused for the test')
         }
         return call(...args)
@@ -213,6 +212,7 @@ test('a save refused for a reason the workspace does not show is tried again wit
     }
     // Refused 300 ms after the open, tried again 600 ms later; main writes 1 s after the last save.
     await expect.poll(saved, { timeout: 10_000 }).toEqual([basename(first), basename(second)])
+    expect(await live.win.evaluate(() => (window as unknown as { refused?: boolean }).refused)).toBe(true)
     expect(live.pageErrors).toEqual([])
   } finally {
     await finish(live)
