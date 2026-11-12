@@ -185,6 +185,26 @@ test('sidebar tasks.csv restores through its approved root in a split with the s
   rmSync(originalRoot, { recursive: true, force: true })
 })
 
+test('a card resized in a split is saved without waiting for close', async () => {
+  const live = await launch({ file: fixture('session-weight.txt', 'weight\n') })
+  try {
+    await waitOpen(live.win)
+    await runCommand(live.win, 'Split right')
+    const weights = (): number[] => {
+      try { return JSON.parse(readFileSync(join(live.userData, 'session.json'), 'utf8')).cards.map((card: { weight: number }) => card.weight) } catch { return [] }
+    }
+    await expect.poll(weights, { timeout: 10_000 }).toEqual([1, 1]) // the split's own save
+    const divider = live.win.getByRole('separator', { name: 'Card divider', exact: true })
+    await divider.focus()
+    for (let step = 0; step < 6; step++) await live.win.keyboard.press('ArrowRight')
+    // A resize changes only the cards' weights: 300 ms, one capture, then main's 1 s write.
+    await expect.poll(() => { const [left, right] = weights(); return left > right }, { timeout: 5_000 }).toBe(true)
+    expect(live.pageErrors).toEqual([])
+  } finally {
+    await finish(live)
+  }
+})
+
 test('a tab opened while a 64 GiB document indexes is saved without waiting for the index', async () => {
   // Sparse: 2,000 lines of text, then zeros the disk doesn't store but the index still reads: about 27 s locally,
   // against a save on disk 2.2 s after the second tab shows (10 GiB's 3 s index left too thin a margin for a fast runner).

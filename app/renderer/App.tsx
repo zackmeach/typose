@@ -317,7 +317,8 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
     window.addEventListener('scroll', scheduleSession, true)
     return () => { off.forEach(unsubscribe => unsubscribe()); capture(); window.removeEventListener('scroll', scheduleSession, true); clearTimeout(sessionTimer.current) }
   }, [groups])
-  useEffect(() => { scheduleSession() }, [sidebarOpen, sidebarWidth, focused, folderRoots, recents])
+  // `groups`: a resize changes only the cards' weights, which no workspace store holds (index progress never changes it).
+  useEffect(() => { scheduleSession() }, [sidebarOpen, sidebarWidth, focused, folderRoots, recents, groups])
   useEffect(() => { refreshFolders() }, [config.values.show_hidden])
   useLayoutEffect(() => markPainted('titlebarPainted'), [])
   useEffect(() => {
