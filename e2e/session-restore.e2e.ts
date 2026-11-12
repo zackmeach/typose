@@ -1,8 +1,8 @@
 import { expect } from '@playwright/test'
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { FIXTURES, finish, fixture, launch, runCommand, stubOpenDialog, test } from './app'
+import { basename, join } from 'node:path'
+import { FIXTURES, type TestHooks, debugStats, finish, fixture, launch, runCommand, sparseFixture, stubOpenDialog, test, waitOpen } from './app'
 import { emptySession } from '../app/shared/session'
 
 test('actual restart preserves cards, selected tabs, lenses and anchors, and keeps missing locations visible', async () => {
@@ -183,4 +183,63 @@ test('sidebar tasks.csv restores through its approved root in a split with the s
   expect(await finish(changed)).toEqual({ code: 0, signal: null })
   rmSync(root, { recursive: true, force: true })
   rmSync(originalRoot, { recursive: true, force: true })
+})
+
+test('a card resized in a split is saved without waiting for close', async () => {
+  const live = await launch({ file: fixture('session-weight.txt', 'weight\n') })
+  try {
+    await waitOpen(live.win)
+    await runCommand(live.win, 'Split right')
+    const weights = (): number[] => {
+      try { return JSON.parse(readFileSync(join(live.userData, 'session.json'), 'utf8')).cards.map((card: { weight: number }) => card.weight) } catch { return [] }
+    }
+    await expect.poll(weights, { timeout: 10_000 }).toEqual([1, 1]) // the split's own save
+    const divider = live.win.getByRole('separator', { name: 'Card divider', exact: true })
+    await divider.focus()
+    for (let step = 0; step < 6; step++) await live.win.keyboard.press('ArrowRight')
+    // A resize changes only the cards' weights: 300 ms, one capture, then main's 1 s write.
+    await expect.poll(() => { const [left, right] = weights(); return left > right }, { timeout: 5_000 }).toBe(true)
+    expect(live.pageErrors).toEqual([])
+  } finally {
+    await finish(live)
+  }
+})
+
+test('a tab opened while a 64 GiB document indexes is saved without waiting for the index', async () => {
+  // Sparse: 2,000 lines of text, then zeros the disk doesn't store but the index still reads: about 27 s locally,
+  // against a save on disk 2.2 s after the second tab shows (10 GiB's 3 s index left too thin a margin for a fast runner).
+  const big = sparseFixture('session-indexing-64gib.txt', 64 * 2 ** 30, 'line\n'.repeat(2000))
+  const small = fixture('session-indexing-small.txt', 'small\n')
+  const live = await launch({ hooks: true, file: big })
+  try {
+    await waitOpen(live.win)
+    await expect(live.win.locator('.card-status')).toHaveText(/^Indexing /)
+    // Each tab's location takes 150 ms here, as from a busy core, so every capture spans a progress tick.
+    await live.win.evaluate(() => {
+      const core = (window as unknown as { typoseTest: TestHooks }).typoseTest.core, call = core.call.bind(core)
+      core.call = async (...args: Parameters<typeof call>) => {
+        if (args[0] === 'captureLocation') await new Promise(done => setTimeout(done, 150))
+        return call(...args)
+      }
+    })
+    await stubOpenDialog(live.app, small)
+    // Browse, not Open file: once the first save lists the big file in recents, Open file shows Quick open instead.
+    await runCommand(live.win, 'Browse…')
+    await expect(live.win.locator('.vl-row .text').first()).toHaveText('small')
+    const saved = () => {
+      try {
+        const session = JSON.parse(readFileSync(join(live.userData, 'session.json'), 'utf8'))
+        return session.cards.flatMap((card: { tabs: { location: { path: string } }[] }) => card.tabs.map(tab => basename(tab.location.path)))
+      } catch { return [] }
+    }
+    // Index progress changes the workspace every 100 ms: it must neither restart the 300 ms save timer nor refuse the
+    // capture, or nothing is saved until the index ends. On disk: 300 ms and a capture (here 2 × 150 ms); that save
+    // lists the new tab in recents, which schedules one more, and main writes 1 s after the last.
+    await expect.poll(saved, { timeout: 10_000 }).toEqual([basename(big), basename(small)])
+    expect((await debugStats(live.win)).jobs).toBe(1)
+    expect(live.pageErrors).toEqual([])
+  } finally {
+    await finish(live)
+    rmSync(big, { force: true })
+  }
 })

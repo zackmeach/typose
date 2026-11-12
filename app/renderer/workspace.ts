@@ -101,6 +101,22 @@ function retain(card: FinishedCard): StoredCard {
   })
 }
 
+/** Equal in everything a saved session reads from this store (ReaderCard's `captureSession`). Index progress changes
+ *  only an open card's counts, every 100 ms while a document indexes: it must neither restart the save timer nor refuse
+ *  a capture. */
+export function sameSession(a: WorkspaceSnapshot, b: WorkspaceSnapshot): boolean {
+  return a === b || a.session === b.session && a.ready === b.ready && a.selected === b.selected && a.tabs.length === b.tabs.length
+    && a.tabs.every((tab, index) => {
+      const other = b.tabs[index]
+      if (tab === other) return true
+      if (tab.id !== other.id || tab.key !== other.key || tab.path !== other.path || tab.session !== other.session
+        || tab.anchor !== other.anchor || tab.preferredLens !== other.preferredLens) return false
+      const card = tab.card, next = other.card
+      if (card.kind !== 'open' || next.kind !== 'open') return card === next
+      return card.opened === next.opened && card.lens === next.lens && card.csvOptions === next.csvOptions
+    })
+}
+
 /** Pure workspace metadata. The controller owns every native call, lens, Blob and memory lease. */
 export class WorkspaceStore {
   private state: WorkspaceSnapshot = Object.freeze({ session: 0, ready: false, tabs: Object.freeze([]), selected: null })
