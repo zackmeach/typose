@@ -21,11 +21,11 @@ updates:
       # Move with gif, and re-derive that charge.
       - dependency-name: weezl
         versions: ['>= 0.2.0']
-      # napi 3.15 keeps a class borrowed until its async task settles (napi-rs#3584), so the Doc methods JS calls while
-      # a task is pending (prepare_image, prepare_embedded_image, reload, reload_in_folder, close) fail with "The same
-      # native value cannot be borrowed mutably while another borrow is active". The change is in napi 3.15.0, and in
-      # napi-derive-backend 6.1.6, a patch, which napi-derive 3.6.13 requires. Hold until those methods take &self
-      # (owed after the first tag).
+      # napi-rs#3584 keeps a class borrowed until its async task settles: Doc's `&mut self` methods then fail while one
+      # of its tasks is pending, and every Doc call fails while an image prepare (itself `&mut self`) is, with "The same
+      # native value cannot be borrowed mutably while another borrow is active". The backend's codegen (6.1.6, a patch,
+      # which napi-derive 3.6.13 requires) defers the borrow and napi 3.15.0 holds it, so un-ignore all three together,
+      # once Doc's methods take &self (owed after the first tag).
       - dependency-name: napi
         versions: ['>= 3.15.0']
       - dependency-name: napi-derive
