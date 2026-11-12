@@ -161,7 +161,7 @@ it('routes inactive progress only by current session, document and generation', 
   expect(native.kind === 'open' && store.updateDocument(event, (c) => ({ ...c, opened: { ...c.opened, doc: 8 } }))).toBe(false)
 })
 
-it('index progress leaves what a session saves the same; a change to anything it saves does not', () => {
+it('index progress leaves what a session saves the same; a saved change to a tab, the order, the count or the selection does not', () => {
   const store = ready()
   const a = begin(store, 'a.md')
   store.complete(a, 'a.md', card('a.md', opened(1)))
@@ -181,6 +181,8 @@ it('index progress leaves what a session saves the same; a change to anything it
   expect(changed(() => store.select(a.tab))).toBe(true)
   store.select(b.tab)
   expect(changed(() => store.adoptTabs(store.takeTabs([a.tab])))).toBe(true) // the order alone: b stays selected
+  const other = ready(), c = begin(other, 'c.md')
+  expect(changed(() => store.adoptTabs(other.takeTabs([c.tab])))).toBe(true) // the count alone: appended, b stays selected
   expect(changed(() => store.coreGone(1))).toBe(true)
 })
 
