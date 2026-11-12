@@ -1063,7 +1063,8 @@ mod png_gif_tests {
     }
 
     /// A PNG's chunk checksums are crc32fast's: its SIMD paths (x86_64 PCLMULQDQ, aarch64 CRC) agree with the bitwise
-    /// CRC-32 at every length to 1 KiB from every alignment to 15, and on chunks of 64 KiB.
+    /// CRC-32 at every length to 1 KiB from every alignment to 15, and either side of where aarch64's 3-way loops start
+    /// (3 × 512 and 3 × 32,768 aligned bytes), up to 256 KiB: a PNG's IDAT chunk is often over 96 KiB.
     #[test]
     fn crc32fast_agrees_with_the_bitwise_crc32() {
         fn bitwise(bytes: &[u8]) -> u32 {
@@ -1077,7 +1078,7 @@ mod png_gif_tests {
             !crc
         }
         let mut x = 0x9E37_79B9_u32;
-        let data: Vec<u8> = (0..(64 << 10) + 16)
+        let data: Vec<u8> = (0..(256 << 10) + 16)
             .map(|_| {
                 x ^= x << 13;
                 x ^= x >> 17;
@@ -1091,7 +1092,12 @@ mod png_gif_tests {
                 assert_eq!(crc32fast::hash(bytes), bitwise(bytes), "at {at}, {len} bytes");
             }
         }
-        assert_eq!(crc32fast::hash(&data[16..]), bitwise(&data[16..]));
+        for at in [0, 1, 7] {
+            for len in [3 << 9, (3 << 9) + 15, 3 << 15, (3 << 15) + 15, 256 << 10] {
+                let bytes = &data[at..at + len];
+                assert_eq!(crc32fast::hash(bytes), bitwise(bytes), "at {at}, {len} bytes");
+            }
+        }
         assert_eq!(crc32fast::hash(b"123456789"), 0xCBF4_3926); // CRC-32's check value
     }
 }
