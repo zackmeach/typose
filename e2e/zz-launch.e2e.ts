@@ -50,5 +50,6 @@ test('zz launch: the first window shows the app', async () => {
   const log = lifecycle(l.userData)
   const start = Date.parse(log.find((r) => r.event === 'start')?.t as string)
   const at = (event: string) => { const r = log.find((x) => x.event === event); return r ? Date.parse(r.t as string) - start : -1 }
+  if (log.some((r) => /^diag-(recover|globals|console-error)$/.test(r.event))) console.log(`ZZRECOVER ${JSON.stringify(log.filter((r) => /^diag-(recover|globals|console-error|fail-load|request-error)|^start$|^did-finish-load$/.test(r.event)))}`)
   console.log(`ZZOK load ${at('did-finish-load')} shown ${at('window-shown')} serves ${log.filter((r) => r.event === 'diag-serve').length} navs ${log.filter((r) => r.event === 'diag-start-navigation').length} console ${log.filter((r) => r.event === 'diag-console').length}`)
 })
