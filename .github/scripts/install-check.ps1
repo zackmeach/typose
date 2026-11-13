@@ -29,11 +29,12 @@ Add-Type -Namespace Win32 -Name Assoc -MemberDefinition @'
 public static extern int AssocQueryString(int flags, int str, string assoc, string extra, System.Text.StringBuilder outBuf, ref int outLen);
 '@
 # What opens a type when it's double-clicked, as the shell resolves it (the user's choice first). ASSOCF_INIT_IGNOREUNKNOWN
-# (0x400): a type nothing is associated with answers nothing, not the Open With dialog. ASSOCSTR_EXECUTABLE (2).
+# (0x400): a type nothing is associated with answers nothing, not the Open With dialog. ASSOCSTR_EXECUTABLE (2). The verb
+# is a real null, for the default verb: PowerShell passes $null to a string parameter as "", a verb nothing has.
 function DefaultApp([string]$ext) {
   $out = [Text.StringBuilder]::new(1024)
   $length = 1024
-  if ([Win32.Assoc]::AssocQueryString(0x400, 2, ".$ext", $null, $out, [ref]$length) -eq 0) { $out.ToString() } else { '(none)' }
+  if ([Win32.Assoc]::AssocQueryString(0x400, 2, ".$ext", [NullString]::Value, $out, [ref]$length) -eq 0) { $out.ToString() } else { '(none)' }
 }
 # A registered command line, as its executable and its arguments with %1 replaced.
 function Split-Command([string]$command, [string]$file) {
@@ -46,7 +47,8 @@ $run = Start-Process $Installer -ArgumentList '/S' -Wait -PassThru
 Check ($run.ExitCode -eq 0) "the silent install exits 0 (it exited $($run.ExitCode))"
 $entry = Entry
 if (-not $entry) { Write-Host 'FAIL: no uninstall entry names Typose after the install'; exit 1 }
-$dir = $entry.InstallLocation
+$uninstaller, $null = Split-Command $entry.UninstallString ''
+$dir = Split-Path -Parent $uninstaller # the entry has no InstallLocation
 Check ($entry.PSPath -like '*HKEY_CURRENT_USER*' -and $dir -like "$env:LOCALAPPDATA\*") "installed per user: uninstall entry $($entry.PSPath -replace '^.*::', ''), in $dir"
 
 # Registration

@@ -26,7 +26,7 @@
 !macroend
 
 !macro typoseOpenWith EXT
-  WriteRegStr HKCU "Software\Classes\.${EXT}\OpenWithProgids" "${TYPOSE_PROGID}" ""
+  WriteRegNone HKCU "Software\Classes\.${EXT}\OpenWithProgids" "${TYPOSE_PROGID}"
 !macroend
 
 ; Only the value Typose wrote: the extension's key, its default and other apps' entries stay as they were.
