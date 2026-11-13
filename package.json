@@ -3,7 +3,10 @@
   "version": "0.0.0",
   "private": true,
   "license": "MIT OR Apache-2.0",
-  "workspaces": ["core/typose-node", "app"],
+  "workspaces": [
+    "core/typose-node",
+    "app"
+  ],
   "scripts": {
     "build:addon": "npm run build --workspace typose-node",
     "build:addon:hooks": "npm run build:hooks --workspace typose-node",
@@ -27,7 +30,7 @@
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.1.2",
-    "electron": "45.2.3",
+    "electron": "45.3.2",
     "electron-builder": "26.15.3",
     "electron-vite": "6.0.0",
     "oxlint": "1.89.0",
