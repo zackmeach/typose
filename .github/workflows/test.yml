@@ -56,6 +56,10 @@ on:
         description: Run the unit layers (cargo test, the vendored JPEG tests, npm run check, test:hooks). A run that sets grep runs its e2e only when this is true, so the shards of one OS run the named tests once
         type: boolean
         default: true
+      installer:
+        description: On Windows, build the installer and zip from the packaged build, then install, check and uninstall it (.github/scripts/install-check.ps1)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -123,6 +127,15 @@ jobs:
         name: ${{ inputs.package-name }}
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: npm run package
+      # Before the e2e, which can leave a Typose running that the installer would find. The installer and zip wrap the
+      # build the step above packaged (electron-builder --prepackaged), so they ship what the e2e drives.
+      - id: installer
+        name: The Windows installer and zip, from that build
+        if: ${{ !cancelled() && steps.package.outcome == 'success' && inputs.installer }}
+        run: npm run installer --workspace typose
+      - name: Install, check the Open with registration, launch, uninstall
+        if: ${{ !cancelled() && steps.installer.outcome == 'success' }}
+        run: ./.github/scripts/install-check.ps1
       # Inputs reach the script through the environment, never pasted into it.
       - name: e2e ${{ inputs.e2e-label }} and the NetLog assertion (Linux, under xvfb, with the sandbox on)
         if: ${{ !cancelled() && steps.package.outcome == 'success' && steps.electron.outcome == 'success' && (!inputs.grep || inputs.unit-tests) && runner.os == 'Linux' }}
