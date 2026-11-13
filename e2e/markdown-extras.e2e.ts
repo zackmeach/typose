@@ -257,7 +257,11 @@ test('dense highlighting pays for its spans before inserting them, and never sta
   expect(grew).toBeLessThan(lit.extras)
   expect(lit.worstRoundTrip).toBeLessThan(1000)
   expect(lit.longestTask).toBeLessThan(250)
-  expect(lit.timerLate).toBeLessThan(250)
+  // On hosted macOS the page timer is late by more than any task explains: up to 104 ms in tries where no task reached
+  // 50 ms. Across 14 macOS runs it was 42–208 ms late in 15 passing tries, and 287 and 267 ms in two failing ones
+  // (runs 42924396443 and 43460904211), whose longest tasks were 134 and 93 ms. Hosted Linux stayed within 120 ms in
+  // 18 runs, and Windows within 109 in 17.
+  if (quiet('darwin')) expect(lit.timerLate).toBeLessThan(250)
 })
 
 test('blocks that cannot highlight pay nothing, so a formula after a thousand of them still renders', async () => {
