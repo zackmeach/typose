@@ -7,10 +7,11 @@ test('zz launch: the first window shows the app', async () => {
   test.skip(process.platform !== 'linux' && !process.env.ZZ_ANY, 'Linux only')
   test.setTimeout(60_000)
   const t0 = Date.now()
-  // Alternate arms on one VM: even repeats run the plain build, odd ones the recovery arm (ZZ_RECOVER=1).
-  const arm = test.info().repeatEachIndex % 2 ? 'recover' : 'plain'
+  // Alternate arms on one VM: even repeats run the plain build, odd ones load `performance` and undici first thing in
+  // main (ZZ_PRELOAD=1).
+  const arm = test.info().repeatEachIndex % 2 ? 'preload' : 'plain'
   console.log(`ZZSTART ${arm} ${test.info().repeatEachIndex} retry ${test.info().retry}`)
-  const l = await launch(arm === 'recover' ? { env: { ZZ_RECOVER: '1' } } : {})
+  const l = await launch(arm === 'preload' ? { env: { ZZ_PRELOAD: '1' } } : {})
   try {
     await expect(l.win.locator(process.env.ZZ_FAIL ? '.no-such-thing' : '.titlebar')).toBeVisible({ timeout: 10_000 })
   } catch (error) {
@@ -54,5 +55,7 @@ test('zz launch: the first window shows the app', async () => {
   const start = Date.parse(log.find((r) => r.event === 'start')?.t as string)
   const at = (event: string) => { const r = log.find((x) => x.event === event); return r ? Date.parse(r.t as string) - start : -1 }
   if (log.some((r) => /^diag-(recover|globals|console-error)$/.test(r.event))) console.log(`ZZRECOVER ${arm} ${JSON.stringify(log.filter((r) => /^diag-(recover|globals|console-error|fail-load|request-error)|^start$|^did-finish-load$/.test(r.event)))}`)
-  console.log(`ZZOK ${arm} load ${at('did-finish-load')} shown ${at('window-shown')} serves ${log.filter((r) => r.event === 'diag-serve').length} navs ${log.filter((r) => r.event === 'diag-start-navigation').length} console ${log.filter((r) => r.event === 'diag-console').length}`)
+  const pre = log.find((r) => r.event === 'diag-preload') as { performance?: string; headers?: string; performanceAfter?: string } | undefined
+  if (pre && (pre.performance !== 'object' || pre.headers !== 'ok')) console.log(`ZZPRE ${arm} ${JSON.stringify(pre)}`)
+  console.log(`ZZOK ${arm} pre ${pre ? `${pre.performance}/${pre.headers === 'ok' ? 'ok' : 'ERR'}` : '-'} load ${at('did-finish-load')} shown ${at('window-shown')} serves ${log.filter((r) => r.event === 'diag-serve').length} navs ${log.filter((r) => r.event === 'diag-start-navigation').length} console ${log.filter((r) => r.event === 'diag-console').length}`)
 })

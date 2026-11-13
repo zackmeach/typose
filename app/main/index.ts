@@ -18,6 +18,14 @@ import { addonTarget } from '../shared/addon-target'
 import { MAX_PRINT_PDF_BYTES, physicalPageCount, validatePrintDocument } from './print-validation'
 import { printWithDialog, spoolKeeper } from './print-dialog'
 
+// DIAG (scratch branch only): the A/B loop's preload arm (ZZ_PRELOAD=1) loads `performance` and the fetch globals
+// first thing in main, and records what it found: whether `performance` was already broken, and whether undici loads.
+const zzPreload = process.env.ZZ_PRELOAD === '1' ? (() => {
+  const found: Record<string, string> = { performance: typeof globalThis.performance }
+  try { new Headers(); found.headers = 'ok' } catch (e) { found.headers = String((e as Error)?.stack ?? e).slice(0, 600) }
+  found.performanceAfter = typeof globalThis.performance
+  return found
+})() : null
 const mainStart = Date.now() // plan C8's first startup mark: read now, written once the hook is set up below
 
 // Plan C9: armed before anything else. Minidumps stay on this machine (spec §7.3).
@@ -27,6 +35,7 @@ crashReporter.start({ uploadToServer: false })
 // `running` marker (C9). Before the message loop, app.exit ends the process at once; app.quit would still emit ready.
 if (!app.requestSingleInstanceLock({ argv: process.argv, cwd: process.cwd() })) app.exit(0)
 const log = startLifecycle()
+if (zzPreload) log('diag-preload', zzPreload)
 // DIAG (scratch branch only): the A/B loop's recovery arm (ZZ_RECOVER=1) also logs what Electron's protocol.handle
 // wrapper reports with console.error. The plain arm runs none of this; its stderr reaches the job log via pw:browser.
 const zzRecover = process.env.ZZ_RECOVER === '1'
