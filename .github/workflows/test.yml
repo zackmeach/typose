@@ -74,6 +74,8 @@ jobs:
           if [ -r /proc/cpuinfo ]; then echo "ZZVM cpu=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2-) processors=$(grep -c ^processor /proc/cpuinfo)"; fi
           echo "ZZVM nproc=$(nproc 2>/dev/null) kernel=$(uname -sr) product=$(cat /sys/devices/virtual/dmi/id/product_name 2>/dev/null)"
           free -m 2>/dev/null | sed 's/^/ZZVM /' || true
+          # DIAG: the three-arm loop needs the host type the failure was seen on.
+          if [ "$RUNNER_OS" = Linux ] && ! grep -q 'AMD EPYC' /proc/cpuinfo; then echo "ZZVM not an AMD EPYC host: stopping"; exit 1; fi
       - id: rust
         name: Rust (the toolchain rust-toolchain.toml pins)
         run: rustup toolchain install
@@ -140,6 +142,7 @@ jobs:
           GREP: ${{ inputs.grep }}
           SHARD: ${{ inputs.shard && format('{0}/{1}', inputs.shard, inputs.shard-count) || '' }}
           REPEAT_EACH: ${{ inputs.repeat-each }}
+          DEBUG: pw:browser # DIAG: the Playwright arm's app stderr in the job log
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           xvfb-run -a npm run "$E2E_SCRIPT" -- ${GREP:+--grep "$GREP"} ${SHARD:+--shard "$SHARD"} ${REPEAT_EACH:+--repeat-each "$REPEAT_EACH"}
