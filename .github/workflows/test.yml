@@ -158,7 +158,7 @@ jobs:
         env:
           PREPACKAGED: ${{ runner.os == 'macOS' && 'dist/mac-arm64/Typose.app' || 'dist/linux-unpacked' }}
           TARGET: ${{ runner.os == 'macOS' && '--mac zip' || '--linux tar.gz' }}
-        run: npx --no electron-builder --prepackaged "$PREPACKAGED" $TARGET --publish never
+        run: npx --no -- electron-builder --prepackaged "$PREPACKAGED" $TARGET --publish never
       # Inputs reach the script through the environment, never pasted into it.
       - name: e2e ${{ inputs.e2e-label }} and the NetLog assertion (Linux, under xvfb, with the sandbox on)
         if: ${{ !cancelled() && steps.package.outcome == 'success' && steps.electron.outcome == 'success' && (!inputs.grep || inputs.unit-tests) && runner.os == 'Linux' }}
