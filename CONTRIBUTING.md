@@ -46,6 +46,12 @@ CI does not fully run these. Run them locally before you tag a release.
   npm run e2e -- markdown-extras.e2e -g "math bombs"
   ```
 
+- The 250 ms page-timer bound in `e2e/markdown-extras.e2e.ts`'s dense-highlighting test: CI on macOS skips it and runs the rest of the test.
+
+  ```powershell
+  npm run e2e -- markdown-extras.e2e -g "dense highlighting"
+  ```
+
 - The 50 ms release bounds in `e2e/close.e2e.ts`'s two 10 GiB tests: CI on macOS skips them and runs the rest of each test.
 
   ```powershell
