@@ -2066,6 +2066,32 @@ mod tests {
         check_items(&render(md)).unwrap();
     }
 
+    /// RUSTSEC-2026-0533 (ammonia < 4.2.5): when ammonia drops the root that switched namespaces, a MathML text
+    /// integration point or SVG `foreignObject` can keep an element of the other namespace, and a raw-text element in
+    /// it re-parses into a live `<img>`. Typose allows no `math`, `svg` or raw-text element. So ammonia alone keeps none
+    /// of the gadget, whichever raw-text tag carries it, and the whole build shows it as text.
+    #[test]
+    fn a_namespace_switch_under_a_dropped_root_keeps_no_foreign_or_raw_text_element() {
+        const RAW_TEXT: [&str; 10] =
+            ["title", "textarea", "xmp", "iframe", "noembed", "noframes", "plaintext", "noscript", "style", "script"];
+        for t in RAW_TEXT {
+            for payload in [
+                format!("<math><mi><svg><{t}><!--</{t}><img src onerror=alert(1)>-->"),
+                format!("<svg><foreignObject><math><{t}><!--</{t}><img src onerror=alert(1)>-->"),
+            ] {
+                let html = sanitize(&payload); // ammonia alone, as if `escape_raw` had let the tags through
+                assert_eq!(html, "", "{payload:?}");
+                for md in contexts(&payload) {
+                    let r = render(&md);
+                    check_items(&r).unwrap_or_else(|e| panic!("{md:?}: {e}"));
+                    let html: String = r.items().iter().map(|i| &*i.html).collect();
+                    let name = first_disallowed(&payload).unwrap();
+                    assert!(html.contains(&format!("&lt;{name}")), "{md:?}: <{name} isn't literal text in {html:?}");
+                }
+            }
+        }
+    }
+
     /// Markdown and raw HTML atoms, the hostile corpus among them.
     fn atom() -> impl Strategy<Value = String> {
         let corpus: Vec<&str> = HOSTILE.iter().map(|h| h.0).chain(PLANTED).chain(NAV_PROBES).collect();
