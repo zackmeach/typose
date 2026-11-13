@@ -9,15 +9,15 @@ publish.workspace = true
 [dependencies]
 # Parser/sanitizer pins (Rendered Markdown slice §2.3) and image codec pins (images.rs allocation inventory).
 ammonia = "=4.2.5"
-crc32fast = "=1.5.3"
+crc32fast = "=1.5.5"
 csv-core = "=0.1.13"
-encoding_rs = "=0.8.42"
+encoding_rs = "=0.8.44"
 fdeflate = "=0.3.7"
 gif = { version = "=0.14.2", default-features = false, features = ["std"] }
 memchr = "=2.8.3"
 png = "=0.18.1"
 pulldown-cmark = { version = "=0.13.6", default-features = false, features = ["html"] }
-weezl = "=0.1.10"
+weezl = "=0.1.12"
 xxhash-rust = { version = "=0.8.19", features = ["xxh3"] }
 zune-core = { version = "=0.5.3", default-features = false, features = ["std"] }
 zune-jpeg = { version = "=0.5.15", default-features = false, features = ["std"] }
