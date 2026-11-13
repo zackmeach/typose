@@ -1,13 +1,15 @@
 # The Windows installer end to end, for CI's Windows runner (test.yml's installer step) only: it installs into the
 # current user's profile and registry. It installs silently, then checks that:
 #   - the install is per user;
-#   - Typose is under OpenWithProgids for exactly the types app/build/installer.nsh lists, and is no type's class, the
-#     part of a type's default an installer can write. The user's own choice (UserChoice) is hash-protected, so it keeps
-#     its app. For a type with no user choice, Windows itself may now open Typose (the only app registered, or the only
-#     one besides a perceived-type fallback) or ask which app to use: the check prints each type's app before and after.
+#   - Typose.exe's version resource names Typose, its version and its publisher;
+#   - Typose is under OpenWithProgids for exactly the types app/build/installer.nsh lists. It's no type's class, and the
+#     install writes no type's default value or user choice (UserChoice). For a type with no user choice, Windows itself
+#     may now open Typose (the only app registered, or the only one besides a perceived-type fallback) or ask which app
+#     to use: the check prints each type's app before the install and after it;
 #   - Electron's WER module is left out, and the third-party notices ship;
 #   - the open command the registration names launches Typose, which opens the .jsonl it names;
-#   - an uninstall removes the registration.
+#   - installing again over the install (the upgrade path: the old uninstaller runs first) leaves the same registration;
+#   - an uninstall removes the registration, and leaves each type's key exactly as it was before the install.
 # Every check prints ok or FAIL, and any FAIL exits 1. Keep this file ASCII: Windows PowerShell 5.1 reads it as ANSI.
 param([string]$Installer = (Resolve-Path "$PSScriptRoot/../../app/dist/Typose-*-setup.exe").Path)
 $ErrorActionPreference = 'Stop'
@@ -40,36 +42,58 @@ function DefaultApp([string]$ext) {
   $length = 1024
   if ([Win32.Assoc]::AssocQueryString(0x400, 2, ".$ext", [NullString]::Value, $out, [ref]$length) -eq 0) { $out.ToString() } else { '(none)' }
 }
-# The class the user chose for a type in Open with's "Always", or '' if they never chose. Installers can't write it.
+# The class the user chose for a type in Open with's "Always", or '' if they never chose.
 function UserChoice([string]$ext) {
   "$((Get-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.$ext\UserChoice" -ErrorAction SilentlyContinue).ProgId)"
 }
+# A registry key's values and subkeys, theirs too, as one string; '-' when there's no key.
+function Dump($key) {
+  if (-not $key) { return '-' }
+  $parts = @($key.GetValueNames() | Sort-Object | ForEach-Object { "$_=$($key.GetValueKind($_)):$($key.GetValue($_))" })
+  $parts += @($key.GetSubKeyNames() | Sort-Object | ForEach-Object { "$_{$(Dump $key.OpenSubKey($_))}" })
+  $parts -join ' '
+}
+$hkcu = [Microsoft.Win32.Registry]::CurrentUser
+function TypeKey([string]$ext) { Dump $hkcu.OpenSubKey("Software\Classes\.$ext") }
+function TypeDefault([string]$ext) { $found = $hkcu.OpenSubKey("Software\Classes\.$ext"); if ($found) { "$($found.GetValue(''))" } else { '' } }
 # A registered command line, as its executable and its arguments with %1 replaced.
 function Split-Command([string]$command, [string]$file) {
   if ($command -match '^"([^"]+)"\s*(.*)$') { $Matches[1], ($Matches[2] -replace '%1', $file) } else { $null, $null }
 }
 
 Check (-not (Entry) -and -not (Registered)) 'nothing is installed or registered before the install'
-$before = @{}
-foreach ($type in $types) { $before[$type] = DefaultApp $type }
-Write-Host "Installing $Installer"
-$run = Start-Process $Installer -ArgumentList '/S' -Wait -PassThru
-Check ($run.ExitCode -eq 0) "the silent install exits 0 (it exited $($run.ExitCode))"
+$app = @{}; $key = @{}; $default = @{}; $choice = @{} # each type before the install
+foreach ($type in $types) { $app[$type] = DefaultApp $type; $key[$type] = TypeKey $type; $default[$type] = TypeDefault $type; $choice[$type] = UserChoice $type }
+function Install([string]$what) {
+  Write-Host "$what`: $Installer"
+  $run = Start-Process $Installer -ArgumentList '/S' -Wait -PassThru
+  Check ($run.ExitCode -eq 0) "the silent $what exits 0 (it exited $($run.ExitCode))"
+}
+# Typose under OpenWithProgids for installer.nsh's types, and no type's class, default value or user choice.
+function Check-Registration([string]$when) {
+  $registered = @(Registered)
+  Check (($registered -join ' ') -eq (($types | Sort-Object) -join ' ')) "$when, Typose is under OpenWithProgids for exactly installer.nsh's types (found: $($registered -join ', '))"
+  foreach ($type in $types) {
+    $merged = [Microsoft.Win32.Registry]::ClassesRoot.OpenSubKey(".$type")
+    $class = if ($merged) { $merged.GetValue('') } else { $null }
+    $now = TypeDefault $type
+    $chosen = UserChoice $type
+    Check ($class -ne $progId -and $now -eq $default[$type] -and $chosen -eq $choice[$type]) ("$when, .$type`: its class isn't Typose's ('$class'), " +
+      "and its default value ('$now') and user choice ('$chosen') are as before; it opened with $($app[$type]) before the install, $(DefaultApp $type) now")
+  }
+}
+
+Install 'install'
 $entry = Entry
 if (-not $entry) { Write-Host 'FAIL: no uninstall entry names Typose after the install'; exit 1 }
 $uninstaller, $null = Split-Command $entry.UninstallString ''
 $dir = Split-Path -Parent $uninstaller # the entry has no InstallLocation
 Check ($entry.PSPath -like '*HKEY_CURRENT_USER*' -and $dir -like "$env:LOCALAPPDATA\*") "installed per user: uninstall entry $($entry.PSPath -replace '^.*::', ''), in $dir"
-
-# Registration
-$registered = @(Registered)
-Check (($registered -join ' ') -eq (($types | Sort-Object) -join ' ')) "Typose is under OpenWithProgids for exactly installer.nsh's types (found: $($registered -join ', '))"
-foreach ($type in $types) {
-  $app = DefaultApp $type
-  $key = [Microsoft.Win32.Registry]::ClassesRoot.OpenSubKey(".$type")
-  $class = if ($key) { $key.GetValue('') } else { $null }
-  Check ($class -ne $progId) ".$type`: its class isn't Typose's ('$class'; user choice '$(UserChoice $type)'); it opened with $($before[$type]) before the install, $app after"
-}
+$version = (Get-Content -Raw -LiteralPath "$PSScriptRoot/../../app/package.json" | ConvertFrom-Json).version
+$info = (Get-Item -LiteralPath "$dir\Typose.exe").VersionInfo
+Check ($info.ProductName -eq 'Typose' -and $info.FileDescription -eq 'Typose' -and $info.FileVersion -eq $version -and $info.CompanyName -eq 'Typose contributors') ("Typose.exe's version resource: " +
+  "ProductName '$($info.ProductName)', FileDescription '$($info.FileDescription)', FileVersion '$($info.FileVersion)', CompanyName '$($info.CompanyName)'")
+Check-Registration 'after the install'
 
 # What ships
 Check (-not (Test-Path -LiteralPath "$dir\electron_wer.dll")) 'electron_wer.dll is left out'
@@ -107,6 +131,10 @@ if ($exe) {
 }
 Check $opened "the installed app opens a .jsonl named on its command line within 60 s ($shown)"
 
+# Installing over an install runs the old version's uninstaller first, as an upgrade does.
+Install 'reinstall'
+Check-Registration 'after the reinstall'
+
 # Uninstall
 $exe, $arguments = Split-Command $entry.QuietUninstallString ''
 Start-Process $exe -ArgumentList $arguments -Wait
@@ -117,7 +145,11 @@ Check (-not (Entry)) 'the uninstall removes its uninstall entry'
 $left = @(Registered)
 Check ($left.Count -eq 0) "after the uninstall no type lists Typose under OpenWithProgids (left: $($left -join ', '))"
 Check (-not (Test-Path -LiteralPath "$classes\$progId")) "after the uninstall HKCU\Software\Classes\$progId is gone"
-Check (-not (Test-Path -LiteralPath $dir)) 'after the uninstall the install directory is gone'
+$changed = @($types | Where-Object { (TypeKey $_) -ne $key[$_] -or (UserChoice $_) -ne $choice[$_] } |
+  ForEach-Object { ".$_ was '$($key[$_])' (user choice '$($choice[$_])'), is '$(TypeKey $_)' (user choice '$(UserChoice $_)')" })
+Check ($changed.Count -eq 0) "after the uninstall each type's HKCU\Software\Classes key and user choice are exactly as before the install$(if ($changed) { ': ' + ($changed -join '; ') })"
+$leftover = if (Test-Path -LiteralPath $dir) { @(Get-ChildItem -LiteralPath $dir -Recurse -Name | Select-Object -First 10) -join ', ' }
+Check (-not (Test-Path -LiteralPath $dir)) "after the uninstall the install directory is gone$(if ($leftover) { " (left: $leftover)" })"
 
 if ($script:failed) { Write-Host "$($script:failed) check(s) failed"; exit 1 }
 Write-Host 'every check passed'
