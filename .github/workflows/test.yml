@@ -85,7 +85,7 @@ jobs:
       - id: deps
         run: npm ci
       # From here each step runs when what it needs succeeded, so one failure doesn't hide the others.
-      # Electron 44 installs no binary at `npm ci`; the first require('electron') fetches it. Fetch it here, from the
+      # Electron 45 installs no binary at `npm ci`; the first require('electron') fetches it. Fetch it here, from the
       # cache when warm, so the e2e step times only the e2e.
       - id: electron
         name: Electron binary
