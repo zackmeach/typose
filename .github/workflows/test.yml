@@ -57,7 +57,11 @@ on:
         type: boolean
         default: true
       installer:
-        description: On Windows, build the installer and zip from the packaged build, then install, check and uninstall it (.github/scripts/install-check.ps1)
+        description: Build the distributable packages from the packaged build. On Windows, the installer and zip, then install, check and uninstall it (.github/scripts/install-check.ps1); on macOS and Linux, an unpublished zip and tar.gz
+        type: boolean
+        default: false
+      upload-installer:
+        description: With installer, upload the installer and zip as the windows-release artifact, for release.yml
         type: boolean
         default: false
 
@@ -131,11 +135,30 @@ jobs:
       # build the step above packaged (electron-builder --prepackaged), so they ship what the e2e drives.
       - id: installer
         name: The Windows installer and zip, from that build
-        if: ${{ !cancelled() && steps.package.outcome == 'success' && inputs.installer }}
+        if: ${{ !cancelled() && steps.package.outcome == 'success' && inputs.installer && runner.os == 'Windows' }}
         run: npm run installer --workspace typose
       - name: Install, check the Open with registration, launch, uninstall
         if: ${{ !cancelled() && steps.installer.outcome == 'success' }}
         run: ./.github/scripts/install-check.ps1
+      - name: Upload the installer and zip for release.yml
+        if: ${{ !cancelled() && steps.installer.outcome == 'success' && inputs.upload-installer }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-release
+          path: |
+            app/dist/Typose-*-setup.exe
+            app/dist/Typose-*-win-x64.zip
+          retention-days: 1
+          compression-level: 0 # both are compressed already
+          if-no-files-found: error
+      # Mac and Linux packages aren't published until those systems can open folders; this keeps their packing working.
+      - name: The ${{ runner.os }} archive, from that build (unpublished)
+        if: ${{ !cancelled() && steps.package.outcome == 'success' && inputs.installer && runner.os != 'Windows' }}
+        working-directory: app
+        env:
+          PREPACKAGED: ${{ runner.os == 'macOS' && 'dist/mac-arm64/Typose.app' || 'dist/linux-unpacked' }}
+          TARGET: ${{ runner.os == 'macOS' && '--mac zip' || '--linux tar.gz' }}
+        run: npx --no electron-builder --prepackaged "$PREPACKAGED" $TARGET --publish never
       # Inputs reach the script through the environment, never pasted into it.
       - name: e2e ${{ inputs.e2e-label }} and the NetLog assertion (Linux, under xvfb, with the sandbox on)
         if: ${{ !cancelled() && steps.package.outcome == 'success' && steps.electron.outcome == 'success' && (!inputs.grep || inputs.unit-tests) && runner.os == 'Linux' }}
