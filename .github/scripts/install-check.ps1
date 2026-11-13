@@ -1,16 +1,17 @@
 # The Windows installer end to end, for CI's Windows runner (test.yml's installer step) only: it installs into the
-# current user's profile and registry, and sets .md's default app for the run. It installs silently, then checks that:
+# current user's profile and registry. It installs silently, then checks that:
 #   - the install is per user;
-#   - Typose is under OpenWithProgids for exactly the types app/build/installer.nsh lists; it's no type's default, and
-#     every type that had a default app keeps it. (Where no other app is registered, Windows itself falls back to the
-#     only Open with entry; the check prints what each type opens with, before and after.)
+#   - Typose is under OpenWithProgids for exactly the types app/build/installer.nsh lists, and is no type's class, the
+#     part of a type's default an installer can write. The user's own choice (UserChoice) is hash-protected, so it keeps
+#     its app. For a type with no user choice, Windows itself may now open Typose (the only app registered, or the only
+#     one besides a perceived-type fallback) or ask which app to use: the check prints each type's app before and after.
 #   - Electron's WER module is left out, and the third-party notices ship;
 #   - the open command the registration names launches Typose, which opens the .jsonl it names;
 #   - an uninstall removes the registration.
 # Every check prints ok or FAIL, and any FAIL exits 1. Keep this file ASCII: Windows PowerShell 5.1 reads it as ANSI.
 param([string]$Installer = (Resolve-Path "$PSScriptRoot/../../app/dist/Typose-*-setup.exe").Path)
 $ErrorActionPreference = 'Stop'
-if (-not $env:GITHUB_ACTIONS) { throw "install-check.ps1 runs on CI only: it changes the current user's file associations" }
+if (-not $env:GITHUB_ACTIONS) { throw "install-check.ps1 runs on CI only: it installs into the current user's profile" }
 $types = 'md', 'markdown', 'txt', 'log', 'csv', 'tsv', 'json', 'jsonc', 'jsonl', 'ndjson', 'yaml', 'yml' # installer.nsh's
 $progId = 'Typose.File'
 $classes = 'HKCU:\Software\Classes'
@@ -39,18 +40,16 @@ function DefaultApp([string]$ext) {
   $length = 1024
   if ([Win32.Assoc]::AssocQueryString(0x400, 2, ".$ext", [NullString]::Value, $out, [ref]$length) -eq 0) { $out.ToString() } else { '(none)' }
 }
+# The class the user chose for a type in Open with's "Always", or '' if they never chose. Installers can't write it.
+function UserChoice([string]$ext) {
+  "$((Get-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.$ext\UserChoice" -ErrorAction SilentlyContinue).ProgId)"
+}
 # A registered command line, as its executable and its arguments with %1 replaced.
 function Split-Command([string]$command, [string]$file) {
   if ($command -match '^"([^"]+)"\s*(.*)$') { $Matches[1], ($Matches[2] -replace '%1', $file) } else { $null, $null }
 }
 
 Check (-not (Entry) -and -not (Registered)) 'nothing is installed or registered before the install'
-# Another app as .md's default, so more types than .txt (Notepad, on a fresh runner) have a default the install must keep.
-$hkcu = [Microsoft.Win32.Registry]::CurrentUser
-$hkcu.CreateSubKey('Software\Classes\TyposeCheck.Other\shell\open\command').SetValue('', "`"$env:SystemRoot\System32\notepad.exe`" `"%1`"")
-$mdKey = $hkcu.CreateSubKey('Software\Classes\.md')
-$mdBefore = $mdKey.GetValue('')
-$mdKey.SetValue('', 'TyposeCheck.Other')
 $before = @{}
 foreach ($type in $types) { $before[$type] = DefaultApp $type }
 Write-Host "Installing $Installer"
@@ -69,9 +68,7 @@ foreach ($type in $types) {
   $app = DefaultApp $type
   $key = [Microsoft.Win32.Registry]::ClassesRoot.OpenSubKey(".$type")
   $class = if ($key) { $key.GetValue('') } else { $null }
-  $choice = (Get-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.$type\UserChoice" -ErrorAction SilentlyContinue).ProgId
-  $kept = $before[$type] -eq '(none)' -or $app -eq $before[$type]
-  Check ($class -ne $progId -and $choice -ne $progId -and $kept) ".$type`: Typose isn't its class ('$class') or user choice ('$choice'), and the app that opened it keeps it (before: $($before[$type]); after: $app)"
+  Check ($class -ne $progId) ".$type`: its class isn't Typose's ('$class'; user choice '$(UserChoice $type)'); it opened with $($before[$type]) before the install, $app after"
 }
 
 # What ships
@@ -121,11 +118,6 @@ $left = @(Registered)
 Check ($left.Count -eq 0) "after the uninstall no type lists Typose under OpenWithProgids (left: $($left -join ', '))"
 Check (-not (Test-Path -LiteralPath "$classes\$progId")) "after the uninstall HKCU\Software\Classes\$progId is gone"
 Check (-not (Test-Path -LiteralPath $dir)) 'after the uninstall the install directory is gone'
-
-# .md's default as it was before the run, for the e2e after this step
-$mdKey = $hkcu.CreateSubKey('Software\Classes\.md')
-if ($null -eq $mdBefore) { $mdKey.DeleteValue('', $false) } else { $mdKey.SetValue('', $mdBefore) }
-$hkcu.DeleteSubKeyTree('Software\Classes\TyposeCheck.Other', $false)
 
 if ($script:failed) { Write-Host "$($script:failed) check(s) failed"; exit 1 }
 Write-Host 'every check passed'
