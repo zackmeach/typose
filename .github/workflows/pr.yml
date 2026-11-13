@@ -103,6 +103,7 @@ jobs:
       shard: ${{ !inputs.grep && matrix.shard || '' }} # a dispatch that names tests runs them unsharded, so a grep that matches nothing fails
       shard-count: '4'
       unit-tests: ${{ matrix.shard == 1 }} # the unit layers, and a grep dispatch's e2e, run once per OS
+      installer: ${{ matrix.os == 'windows-latest' && matrix.shard == 2 }} # once, on a shard without the unit layers
       package-name: ${{ matrix.os == 'macos-latest' && 'Package the fused --dir build, the arm64 .app (packaged.e2e.ts drives it)' || 'Package the fused --dir build (packaged.e2e.ts drives it)' }}
       grep: ${{ inputs.grep }}
       repeat-each: ${{ inputs.repeat-each }}
