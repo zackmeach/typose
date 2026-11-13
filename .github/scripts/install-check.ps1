@@ -148,7 +148,8 @@ Check (-not (Test-Path -LiteralPath "$classes\$progId")) "after the uninstall HK
 $changed = @($types | Where-Object { (TypeKey $_) -ne $key[$_] -or (UserChoice $_) -ne $choice[$_] } |
   ForEach-Object { ".$_ was '$($key[$_])' (user choice '$($choice[$_])'), is '$(TypeKey $_)' (user choice '$(UserChoice $_)')" })
 Check ($changed.Count -eq 0) "after the uninstall each type's HKCU\Software\Classes key and user choice are exactly as before the install$(if ($changed) { ': ' + ($changed -join '; ') })"
-Check (-not (Test-Path -LiteralPath $dir)) 'after the uninstall the install directory is gone'
+$leftover = if (Test-Path -LiteralPath $dir) { @(Get-ChildItem -LiteralPath $dir -Recurse -Name | Select-Object -First 10) -join ', ' }
+Check (-not (Test-Path -LiteralPath $dir)) "after the uninstall the install directory is gone$(if ($leftover) { " (left: $leftover)" })"
 
 if ($script:failed) { Write-Host "$($script:failed) check(s) failed"; exit 1 }
 Write-Host 'every check passed'

@@ -61,9 +61,10 @@
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)' ; SHCNE_ASSOCCHANGED
 !macroend
 
-; Also runs, from the old version, when a newer one installs over it; the new installer then registers again.
+; Also runs, from the old version, when a newer one installs over it; the new installer then registers again. No
+; SHChangeNotify here: it runs before the app's files are removed, and electron-builder's uninstaller sends
+; SHCNE_ASSOCCHANGED itself once they are (templates/nsis/uninstaller.nsh, "refresh the desktop").
 !macro customUnInstall
   !insertmacro typoseTypes typoseNoOpenWith
   DeleteRegKey HKCU "Software\Classes\${TYPOSE_PROGID}"
-  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
 !macroend
