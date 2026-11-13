@@ -1,13 +1,16 @@
-# The Windows installer end to end, for CI's Windows runner (test.yml's installer step). Don't run it on a machine you
-# use: it installs into the current user's profile and registry. It installs silently, then checks that:
+# The Windows installer end to end, for CI's Windows runner (test.yml's installer step) only: it installs into the
+# current user's profile and registry, and sets .md's default app for the run. It installs silently, then checks that:
 #   - the install is per user;
-#   - Typose is under OpenWithProgids for exactly the types app/build/installer.nsh lists, and the default app for none;
+#   - Typose is under OpenWithProgids for exactly the types app/build/installer.nsh lists; it's no type's default, and
+#     every type that had a default app keeps it. (Where no other app is registered, Windows itself falls back to the
+#     only Open with entry; the check prints what each type opens with, before and after.)
 #   - Electron's WER module is left out, and the third-party notices ship;
 #   - the open command the registration names launches Typose, which opens the .jsonl it names;
 #   - an uninstall removes the registration.
 # Every check prints ok or FAIL, and any FAIL exits 1. Keep this file ASCII: Windows PowerShell 5.1 reads it as ANSI.
 param([string]$Installer = (Resolve-Path "$PSScriptRoot/../../app/dist/Typose-*-setup.exe").Path)
 $ErrorActionPreference = 'Stop'
+if (-not $env:GITHUB_ACTIONS) { throw "install-check.ps1 runs on CI only: it changes the current user's file associations" }
 $types = 'md', 'markdown', 'txt', 'log', 'csv', 'tsv', 'json', 'jsonc', 'jsonl', 'ndjson', 'yaml', 'yml' # installer.nsh's
 $progId = 'Typose.File'
 $classes = 'HKCU:\Software\Classes'
@@ -42,6 +45,14 @@ function Split-Command([string]$command, [string]$file) {
 }
 
 Check (-not (Entry) -and -not (Registered)) 'nothing is installed or registered before the install'
+# Another app as .md's default, so more types than .txt (Notepad, on a fresh runner) have a default the install must keep.
+$hkcu = [Microsoft.Win32.Registry]::CurrentUser
+$hkcu.CreateSubKey('Software\Classes\TyposeCheck.Other\shell\open\command').SetValue('', "`"$env:SystemRoot\System32\notepad.exe`" `"%1`"")
+$mdKey = $hkcu.CreateSubKey('Software\Classes\.md')
+$mdBefore = $mdKey.GetValue('')
+$mdKey.SetValue('', 'TyposeCheck.Other')
+$before = @{}
+foreach ($type in $types) { $before[$type] = DefaultApp $type }
 Write-Host "Installing $Installer"
 $run = Start-Process $Installer -ArgumentList '/S' -Wait -PassThru
 Check ($run.ExitCode -eq 0) "the silent install exits 0 (it exited $($run.ExitCode))"
@@ -58,7 +69,9 @@ foreach ($type in $types) {
   $app = DefaultApp $type
   $key = [Microsoft.Win32.Registry]::ClassesRoot.OpenSubKey(".$type")
   $class = if ($key) { $key.GetValue('') } else { $null }
-  Check ($app -notlike '*\Typose.exe' -and $class -ne $progId) ".$type's default app isn't Typose: it opens with $app, and its class is '$class'"
+  $choice = (Get-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.$type\UserChoice" -ErrorAction SilentlyContinue).ProgId
+  $kept = $before[$type] -eq '(none)' -or $app -eq $before[$type]
+  Check ($class -ne $progId -and $choice -ne $progId -and $kept) ".$type`: Typose isn't its class ('$class') or user choice ('$choice'), and the app that opened it keeps it (before: $($before[$type]); after: $app)"
 }
 
 # What ships
@@ -108,6 +121,11 @@ $left = @(Registered)
 Check ($left.Count -eq 0) "after the uninstall no type lists Typose under OpenWithProgids (left: $($left -join ', '))"
 Check (-not (Test-Path -LiteralPath "$classes\$progId")) "after the uninstall HKCU\Software\Classes\$progId is gone"
 Check (-not (Test-Path -LiteralPath $dir)) 'after the uninstall the install directory is gone'
+
+# .md's default as it was before the run, for the e2e after this step
+$mdKey = $hkcu.CreateSubKey('Software\Classes\.md')
+if ($null -eq $mdBefore) { $mdKey.DeleteValue('', $false) } else { $mdKey.SetValue('', $mdBefore) }
+$hkcu.DeleteSubKeyTree('Software\Classes\TyposeCheck.Other', $false)
 
 if ($script:failed) { Write-Host "$($script:failed) check(s) failed"; exit 1 }
 Write-Host 'every check passed'
