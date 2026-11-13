@@ -1,5 +1,5 @@
 import { BrowserWindow, Menu, MessageChannelMain, app, clipboard, crashReporter, dialog, ipcMain, protocol, screen, session, shell, systemPreferences, utilityProcess } from 'electron'
-import type { IpcMainInvokeEvent } from 'electron'
+import type { IpcMainInvokeEvent, WebContents } from 'electron'
 import { once } from 'node:events'
 import { readFile, stat } from 'node:fs/promises'
 import { extname, join, sep } from 'node:path'
@@ -134,7 +134,9 @@ function spawnCore(win: BrowserWindow, loaded: Promise<void>): void {
   core.postMessage(__TEST_HOOKS__ ? { session: id, readDelay, budget } : { session: id }, [port1])
   let exited = false
   void loaded.then(() => {
-    if (!exited && !win.isDestroyed()) win.webContents.postMessage('core-port', { session: id }, [port2])
+    // Only to the app page (C4's check): Chromium's error page can stand in its place in the main frame.
+    const frame = win.isDestroyed() ? null : win.webContents.mainFrame
+    if (!exited && frame && fromMainApp(win, { sender: win.webContents, senderFrame: frame })) frame.postMessage('core-port', { session: id }, [port2])
   })
   const asks = new Map<number, { ok(path: string): void; fail(e: Error): void }>()
   let nextAsk = 0
@@ -273,6 +275,15 @@ void app.whenReady().then(() => {
   session.defaultSession.setSpellCheckerEnabled(false)
   serveApp()
   const win = createWindow()
+  // Electron grants every permission unless a handler says otherwise. Typose refuses them all, in every window and
+  // frame, but the one its page uses: Copy path's navigator.clipboard.writeText, from the app page (C4's check). Main's
+  // own clipboard, dialogs, shell and full screen take no permission.
+  const allowed = (contents: WebContents | null, permission: string, mainFrame: boolean) => permission === 'clipboard-sanitized-write' &&
+    mainFrame && !!contents && !contents.isDestroyed() && fromMainApp(win, { sender: contents, senderFrame: contents.mainFrame })
+  session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details) => callback(allowed(contents, permission, details.isMainFrame)))
+  session.defaultSession.setPermissionCheckHandler((contents, permission, _origin, details) => allowed(contents, permission, details.isMainFrame))
+  session.defaultSession.setDevicePermissionHandler(() => false)
+  session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => callback(null))
   const codec = require(`typose-node/${__TEST_HOOKS__ ? 'hooks/' : ''}typose-node.${addonTarget(process.platform, process.arch)}.node`) as TomlCodec
   const configStore = new ConfigStore(app.getPath('userData'), codec)
   if (sessionStore.snapshot().window?.maximized) win.maximize()

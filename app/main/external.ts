@@ -1,6 +1,8 @@
 /** Main's trust boundary for the page: every IPC channel's sender check, and the one privileged link action, an allowed URL from that sender. */
 interface Frame {
   readonly url: string
+  /** "null" for an opaque origin: Chromium's error page in the app page's place keeps the app page's `url`. */
+  readonly origin: string
 }
 
 export interface AppWindow {
@@ -16,12 +18,13 @@ export interface Caller {
   readonly senderFrame: Frame | null
 }
 
-/** Every IPC channel's sender check (plan C4): this live window's app page, typose://app/index.html, in its main frame. */
+/** Every IPC channel's sender check (plan C4): this live window's app page, typose://app/index.html at its own origin, in
+ *  its main frame. */
 export function fromMainApp(win: AppWindow, event: Caller): boolean {
   try {
     if (win.isDestroyed() || win.webContents.isDestroyed() || event.sender !== win.webContents) return false
     const frame = event.senderFrame
-    if (!frame || frame !== win.webContents.mainFrame || !frame.url.startsWith('typose://app/')) return false
+    if (!frame || frame !== win.webContents.mainFrame || frame.origin !== 'typose://app' || !frame.url.startsWith('typose://app/')) return false
     const page = new URL(frame.url)
     return page.protocol === 'typose:' && page.host === 'app' && !page.username && !page.password && page.pathname === '/index.html'
   } catch {

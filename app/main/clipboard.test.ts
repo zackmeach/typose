@@ -3,7 +3,7 @@ import { MAX_CLIPBOARD_BYTES } from '../shared/protocol'
 import { writeClipboardText } from './clipboard'
 
 function caller() {
-  const frame = { url: 'typose://app/index.html' }
+  const frame = { url: 'typose://app/index.html', origin: 'typose://app' }
   const contents = { mainFrame: frame, isDestroyed: () => false }
   const win = { webContents: contents, isDestroyed: () => false }
   const event = { sender: contents, senderFrame: frame }
@@ -49,7 +49,7 @@ describe('renderer clipboard writes are app-main-frame, plain-text and byte boun
     event.sender = { ...contents }
     expect(await writeClipboardText(win, event, ['x'], write)).toBe(false)
     event.sender = contents
-    event.senderFrame = { url: frame.url }
+    event.senderFrame = { ...frame }
     expect(await writeClipboardText(win, event, ['x'], write)).toBe(false)
     event.senderFrame = frame
     frame.url = 'typose://app/other.html'
