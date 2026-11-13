@@ -66,6 +66,13 @@ jobs:
     timeout-minutes: ${{ inputs.job-timeout }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # DIAG (scratch branch only): what VM this job landed on, so a host-dependent failure can be checked across runs.
+      - name: The VM
+        shell: bash
+        run: |
+          echo "ZZVM runner=$RUNNER_NAME os=$RUNNER_OS arch=$RUNNER_ARCH image=$ImageOS/$ImageVersion"
+          if [ -r /proc/cpuinfo ]; then echo "ZZVM cpu=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2-) processors=$(grep -c ^processor /proc/cpuinfo) kernel=$(uname -sr)"; free -m | sed 's/^/ZZVM /'; fi
+          if [ "$RUNNER_OS" = macOS ]; then echo "ZZVM cpu=$(sysctl -n machdep.cpu.brand_string) ncpu=$(sysctl -n hw.ncpu) memBytes=$(sysctl -n hw.memsize) os=$(sw_vers -productVersion) kernel=$(uname -sr)"; fi
       - id: rust
         name: Rust (the toolchain rust-toolchain.toml pins)
         run: rustup toolchain install

@@ -1,5 +1,5 @@
 import { expect } from '@playwright/test'
-import { assertNetLog, debugStats, expectReleasedDocuments, finish, fixture, launch, recordClipboard, runCommand, stubOpenDialog, test, type TestHooks } from './app'
+import { assertNetLog, debugStats, expectReleasedDocuments, finish, fixture, launch, recordClipboard, stubOpenDialog, test, type TestHooks } from './app'
 import { imageJpeg, imagePng, imageWebp } from './image-fixtures'
 
 async function expectDistinctRows(card: import('@playwright/test').Locator, selector: string): Promise<void> {
@@ -865,10 +865,51 @@ test('reading Rows by keyboard while the graph indexes keeps Rows when the Trans
       return reply
     }
   })
-  await stubOpenDialog(live.app, file)
-  await runCommand(live.win, 'Open file…')
+  await stubOpenDialog(live.app, process.env.ZZ_EMPTY ? '' : file)
+  // DIAG (scratch branch only): what the page showed over time (notice, file tabs, palette, empty state), and the
+  // palette's state at Enter, to tell which step dropped "Open file…" when nothing opens.
+  await live.win.evaluate(() => {
+    const w = window as unknown as { zz: string[] }
+    w.zz = []
+    let last = ''
+    const snap = () => {
+      const notice = [...document.querySelectorAll('.banner[role="status"]')].map((e) => e.textContent).join(' | ')
+      const s = `notice=${JSON.stringify(notice)} fileTabs=${document.querySelectorAll('.file-tab').length} palette=${!!document.querySelector('[aria-label="Search commands"]')} empty=${!!document.querySelector('.workspace-empty-actions')} cards=${document.querySelectorAll('.reader-card').length}`
+      if (s !== last) { w.zz.push(`${Math.round(performance.now())} ${s}`); last = s }
+    }
+    snap()
+    new MutationObserver(snap).observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true })
+  })
+  const t0 = Date.now()
+  const search = live.win.getByRole('combobox', { name: 'Search commands' })
+  let presses = 0
+  await expect(async () => {
+    presses++
+    await live.win.keyboard.press('ControlOrMeta+K')
+    await expect(search).toBeVisible({ timeout: 2_000 })
+  }).toPass({ timeout: 30_000 })
+  await search.fill('Open file…')
+  const atEnter = await live.win.evaluate(() => {
+    const input = document.querySelector('[aria-label="Search commands"]') as HTMLInputElement | null
+    const id = input?.getAttribute('aria-activedescendant')
+    return { value: input?.value, active: id ? document.getElementById(id)?.textContent : null, options: [...document.querySelectorAll('[role="option"]')].slice(0, 3).map((o) => o.textContent), pageMs: Math.round(performance.now()) }
+  })
+  await live.win.keyboard.press('Enter')
   const card = live.win.getByRole('region', { name: 'Reader card 1' }), transcript = card.getByRole('tab', { name: 'Transcript', exact: true })
-  await expect(card.locator('[data-lens="rows"]')).toBeVisible({ timeout: 30_000 })
+  try {
+    await expect(card.locator('[data-lens="rows"]')).toBeVisible({ timeout: 30_000 })
+    console.log(`ZZSD ok presses ${presses} enterMs ${Date.now() - t0} active ${JSON.stringify(atEnter.active)}`)
+  } catch (error) {
+    const dialogCalls = await live.app.evaluate(() => (globalThis as { dialogCalls?: number }).dialogCalls ?? 0)
+    const zz = await live.win.evaluate(() => (window as unknown as { zz: string[] }).zz)
+    // A second try, through the empty state's own button: is the drop lasting, or was it a moment?
+    await card.getByRole('button', { name: /^Open file…/ }).click().catch(() => {})
+    const second = await expect(card.locator('.file-tab')).toHaveCount(1, { timeout: 10_000 }).then(() => 'opened', () => 'nothing')
+    const dialogCallsAfter = await live.app.evaluate(() => (globalThis as { dialogCalls?: number }).dialogCalls ?? 0)
+    const zzAfter = await live.win.evaluate(() => (window as unknown as { zz: string[] }).zz)
+    console.log(`ZZSD FAIL ${JSON.stringify({ presses, atEnter, dialogCalls, second, dialogCallsAfter, zz: zzAfter.length > zz.length ? zzAfter : zz })}`)
+    throw error
+  }
   await expect(transcript).toBeDisabled()
   await card.locator('.structured-view').focus()
   await live.win.keyboard.press('ArrowDown')
