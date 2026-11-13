@@ -4,6 +4,13 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    ignore:
+      # Typose runs on Node 24 (setup-node 24 in both workflows; Electron 44 embeds Node 24), so its types stay on 24.x.
+      # A newer major declares APIs Node 24 lacks (26.x has `node:ffi`, which throws ERR_UNKNOWN_BUILTIN_MODULE on 24),
+      # so the typecheck would stop catching them, and skipLibCheck hides the clash with Electron's nested 24.x copy.
+      # Move with the Node major.
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
     groups:
       # Electron carries Chromium, so its bumps are the security-relevant ones. They get their own PR.
       electron:
@@ -15,6 +22,23 @@ updates:
     directory: /core
     schedule:
       interval: monthly
+    ignore:
+      # gif 0.14 decodes with weezl 0.1, so 0.2 would put two weezls in the lock. And images.rs charges the GIF
+      # prepass's weezl decoder from 0.1's layout (`image_gif_workspace`); 0.2's pre-allocated tables outgrow it.
+      # Move with gif, and re-derive that charge.
+      - dependency-name: weezl
+        versions: ['>= 0.2.0']
+      # napi-rs#3584 keeps a class borrowed until its async task settles: Doc's `&mut self` methods then fail while one
+      # of its tasks is pending, and every Doc call fails while an image prepare (itself `&mut self`) is, with "The same
+      # native value cannot be borrowed mutably while another borrow is active". The backend's codegen (6.1.6, a patch,
+      # which napi-derive 3.6.13 requires) defers the borrow and napi 3.15.0 holds it, so un-ignore all three together,
+      # once Doc's methods take &self (owed after the first tag).
+      - dependency-name: napi
+        versions: ['>= 3.15.0']
+      - dependency-name: napi-derive
+        versions: ['>= 3.6.13']
+      - dependency-name: napi-derive-backend
+        versions: ['>= 6.1.6']
     groups:
       cargo:
         patterns: ['*']
