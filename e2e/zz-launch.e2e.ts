@@ -4,7 +4,7 @@ import { expect } from '@playwright/test'
 import { finish, launch, lifecycle, test } from './app'
 
 test('zz launch: the first window shows the app', async () => {
-  test.skip(process.platform !== 'linux' && !process.env.ZZ_ANY, 'Linux only')
+  test.skip(process.platform !== 'win32' && !process.env.ZZ_ANY, 'Windows only')
   test.setTimeout(60_000)
   const t0 = Date.now()
   const l = await launch()

@@ -96,8 +96,8 @@ jobs:
       # Measured on the first full runs: Linux e2e is 1.2 to 3.9 minutes a shard (about 10 in total), the longest macOS
       # shard 7.7, and setup to the start of e2e 1.5 to 3.5. rendered-memory runs on Linux and adds about 11 minutes to
       # one shard there. Shards are uneven because Playwright splits by test file, and a retry re-runs a failed test.
-      job-timeout: 50 # the e2e step's 30 after the setup and unit layers, with room for the evidence upload
-      e2e-timeout: 30 # the longest measured e2e step is 12.3 minutes; past the longest test's own limit (10 min, large and long-line; the config's is 5)
+      job-timeout: 120 # DIAG: 1,200 Windows launches; the e2e step's 30 after the setup and unit layers, with room for the evidence upload
+      e2e-timeout: 100 # DIAG; the longest measured e2e step is 12.3 minutes; past the longest test's own limit (10 min, large and long-line; the config's is 5)
       e2e-script: e2e
       e2e-label: ${{ inputs.grep && 'named tests' || format('full suite, shard {0}/4', matrix.shard) }}
       shard: ${{ !inputs.grep && matrix.shard || '' }} # a dispatch that names tests runs them unsharded, so a grep that matches nothing fails
