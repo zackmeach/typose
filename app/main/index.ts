@@ -96,16 +96,21 @@ function serveApp(): void {
   const rendererDir = join(__dirname, '../renderer')
   // Read with fs, not net.fetch: net.fetch(file:) would itself be cancelled by the network guard below.
   protocol.handle('typose', async (req) => {
+    const t0 = Date.now(), path = new URL(req.url).pathname // DIAG (scratch branch only): each request served
     const file = join(rendererDir, decodeURIComponent(new URL(req.url).pathname))
     if (!file.startsWith(rendererDir + sep)) return new Response('bad path', { status: 400 })
     try {
       const body = await readFile(file)
       const type = MIME[extname(file)] ?? 'application/octet-stream'
+      log('diag-serve', { path: path.slice(-48), status: 200, bytes: body.length, ms: Date.now() - t0 })
       return new Response(body, { headers: { 'content-type': type, 'content-security-policy': CSP } })
-    } catch {
+    } catch (error) {
+      log('diag-serve', { path: path.slice(-48), status: 404, err: String(error).slice(0, 120), ms: Date.now() - t0 })
       return new Response('not found', { status: 404 })
     }
   })
+  session.defaultSession.webRequest.onCompleted((d) => { if (d.statusCode >= 400 || (d.error && d.error !== 'net::OK')) log('diag-request-done', { url: d.url.slice(-60), status: d.statusCode, error: d.error }) })
+  session.defaultSession.webRequest.onErrorOccurred((d) => log('diag-request-error', { url: d.url.slice(-60), error: d.error }))
   session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
     callback({ cancel: !ALLOWED.test(details.url) })
   })
@@ -212,6 +217,21 @@ function createWindow(): BrowserWindow {
   })
   win.webContents.on('will-navigate', (e) => e.preventDefault())
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  // DIAG (scratch branch only): every navigation, load failure, renderer exit and console error, in the lifecycle log.
+  const wc = win.webContents
+  wc.on('did-start-navigation', (d) => log('diag-start-navigation', { url: d.url, main: d.isMainFrame, same: d.isSameDocument }))
+  wc.on('did-navigate', (_e, url, code) => log('diag-navigate', { url, code }))
+  wc.on('did-fail-load', (_e, code, desc, url, main) => log('diag-fail-load', { code, desc, url, main }))
+  wc.on('did-fail-provisional-load', (_e, code, desc, url, main) => log('diag-fail-provisional', { code, desc, url, main }))
+  wc.on('dom-ready', () => log('diag-dom-ready', { url: wc.getURL() }))
+  wc.on('render-process-gone', (_e, d) => log('diag-render-gone', { ...d }))
+  wc.on('preload-error', (_e, p, err) => log('diag-preload-error', { p, err: String(err) }))
+  wc.on('console-message', (e: unknown, ...args: unknown[]) => {
+    const ev = e as { level?: unknown; message?: unknown; sourceId?: unknown; lineNumber?: unknown }
+    const level = String(ev.level ?? args[0]), message = String(ev.message ?? args[1])
+    if (/error|warning|^[23]$/.test(level)) log('diag-console', { level, message: message.slice(0, 300), source: String(ev.sourceId ?? args[3] ?? '').slice(-60), line: ev.lineNumber ?? args[2] })
+  })
+  win.once('ready-to-show', () => log('diag-ready-to-show'))
   // View zoom belongs to this window rather than every page with the app's origin.
   win.webContents.setZoomMode('isolated')
   // Not once a quit has begun: the window would only flash up as it closes.
