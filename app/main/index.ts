@@ -38,6 +38,8 @@ const fontDelay = __TEST_HOOKS__ ? envWhole('TYPOSE_TEST_DELAY_FONTS', process.e
 const readDelay = __TEST_HOOKS__ ? envWhole('TYPOSE_TEST_READ_DELAY', process.env.TYPOSE_TEST_READ_DELAY, 'ms') : 0
 // Plan C1's budget override, for the test-hooks addon: the ledger's limit in bytes, in place of a quarter of RAM.
 const budget = __TEST_HOOKS__ ? envWhole('TYPOSE_TEST_BUDGET', process.env.TYPOSE_TEST_BUDGET, 'bytes') : 0
+// The start page's retry, for the test-hooks build: the network guard refuses the start page's first this-many loads.
+let failLoads = __TEST_HOOKS__ ? Number(process.env.TYPOSE_TEST_FAIL_LOADS ?? 0) : 0
 let titlebarPainted: () => void = () => {}
 
 // No proxy resolution at all: with Windows' "Automatically detect settings" on, Chromium otherwise runs WPAD
@@ -107,7 +109,8 @@ function serveApp(): void {
     }
   })
   session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
-    callback({ cancel: !ALLOWED.test(details.url) })
+    const failed = __TEST_HOOKS__ && details.resourceType === 'mainFrame' && details.url.startsWith(`${ORIGIN}/index.html`) && failLoads-- > 0
+    callback({ cancel: failed || !ALLOWED.test(details.url) })
   })
 }
 
@@ -349,12 +352,40 @@ void app.whenReady().then(() => {
     const painted = new Promise<void>((ok) => (titlebarPainted = ok))
     void Promise.all([once(win, 'ready-to-show'), painted]).then(() => setTimeout(() => quitting || win.show(), showDelay))
   }
-  const loaded = new Promise<void>((ok) =>
-    win.webContents.once('did-finish-load', () => {
-      log('did-finish-load')
-      ok()
-    })
-  )
+  const startupQuery = new URLSearchParams()
+  if (mountDelay) startupQuery.set('delayMount', String(mountDelay))
+  if (fontDelay) startupQuery.set('delayFonts', String(fontDelay))
+  const startUrl = `${ORIGIN}/index.html${startupQuery.size ? `?${startupQuery}` : ''}`
+  // Electron on Linux sometimes fails the start page's request before the protocol handler is called (ERR_UNEXPECTED,
+  // in 8 of 1,200 launches of run 43468533953), and Chromium's error page then finishes loading in its place. So a
+  // failed start page is loaded again, up to 3 times, and the core's port waits for a load that didn't fail. After the
+  // third retry fails too, Typose says so and quits, rather than leave a blank window.
+  let failure: { code: number; desc: string } | undefined
+  let retries = 0
+  const loaded = new Promise<void>((ok) => {
+    const failed = (_event: Electron.Event, code: number, desc: string, url: string, mainFrame: boolean) => {
+      if (mainFrame && url === startUrl) failure = { code, desc }
+    }
+    const finished = () => {
+      if (!failure) {
+        win.webContents.off('did-fail-load', failed).off('did-finish-load', finished)
+        log('did-finish-load')
+        return ok()
+      }
+      const { code, desc } = failure
+      failure = undefined
+      if (retries < 3) {
+        log('load-retry', { code, desc, retry: ++retries })
+        void win.loadURL(startUrl)
+        return
+      }
+      log('load-failed', { code, desc })
+      if (!__TEST_HOOKS__ || !process.env.TYPOSE_TEST_FAIL_LOADS)
+        dialog.showErrorBox("Typose couldn't start", `Its window failed to load 4 times (${desc}). Try starting Typose again.`)
+      app.quit()
+    }
+    win.webContents.on('did-fail-load', failed).on('did-finish-load', finished)
+  })
   spawnCore(win, loaded) // in parallel with the page load (spec §2.1)
   // Emitted only after ready. What a second instance sends is untrusted: anything of another shape or size names nothing.
   app.on('second-instance', (_event, _argv, _cwd, data) => {
@@ -497,10 +528,7 @@ void app.whenReady().then(() => {
       void spooled.then(() => { if (!target.isDestroyed()) target.close() })
     }
   })
-  const startupQuery = new URLSearchParams()
-  if (mountDelay) startupQuery.set('delayMount', String(mountDelay))
-  if (fontDelay) startupQuery.set('delayFonts', String(fontDelay))
-  void win.loadURL(`${ORIGIN}/index.html${startupQuery.size ? `?${startupQuery}` : ''}`)
+  void win.loadURL(startUrl)
 })
 
 app.on('window-all-closed', () => app.quit())
