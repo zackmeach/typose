@@ -27,6 +27,16 @@ crashReporter.start({ uploadToServer: false })
 // `running` marker (C9). Before the message loop, app.exit ends the process at once; app.quit would still emit ready.
 if (!app.requestSingleInstanceLock({ argv: process.argv, cwd: process.cwd() })) app.exit(0)
 const log = startLifecycle()
+// DIAG (scratch branch only): the A/B loop's recovery arm (ZZ_RECOVER=1) also logs what Electron's protocol.handle
+// wrapper reports with console.error. The plain arm runs none of this; its stderr reaches the job log via pw:browser.
+const zzRecover = process.env.ZZ_RECOVER === '1'
+if (zzRecover) {
+  const diagError = console.error
+  console.error = (...args: unknown[]) => {
+    log('diag-console-error', { text: args.map((a) => (a instanceof Error ? String(a.stack) : String(a))).join(' ').slice(0, 3000) })
+    diagError(...args)
+  }
+}
 const sessionStore = new SessionStore(join(app.getPath('userData'), 'session.json'))
 app.on('before-quit', () => { sessionStore.flush() })
 // Plan C8's startup controls, compiled only into the test-hooks build: show() a set delay after both
@@ -520,7 +530,42 @@ void app.whenReady().then(() => {
   const startupQuery = new URLSearchParams()
   if (mountDelay) startupQuery.set('delayMount', String(mountDelay))
   if (fontDelay) startupQuery.set('delayFonts', String(fontDelay))
-  void win.loadURL(`${ORIGIN}/index.html${startupQuery.size ? `?${startupQuery}` : ''}`)
+  const startUrl = `${ORIGIN}/index.html${startupQuery.size ? `?${startupQuery}` : ''}`
+  // DIAG (scratch branch only): on a failed start page, probe the fetch globals, then try each recovery in turn:
+  // a reload after 100 ms, 500 ms and 2 s in this window, then a new window. Each logs whether its load failed.
+  const ladder = [100, 500, 2000, -1]
+  let step = 0, pending = false
+  const probe = (at: string) => {
+    const r: Record<string, string> = { at }
+    for (const [name, make] of [['headers', () => new Headers({ a: 'b' })], ['request', () => new Request(startUrl, { headers: new Headers(), method: 'GET', referrer: '' })]] as const) {
+      try { make(); r[name] = 'ok' } catch (e) { r[name] = String((e as Error)?.stack ?? e).slice(0, 600) }
+    }
+    log('diag-globals', r)
+  }
+  const recover = (target: BrowserWindow) => {
+    target.webContents.on('did-fail-load', (_e, code, desc, url, main) => {
+      if (!main || !url.startsWith(`${ORIGIN}/index.html`)) return
+      probe(`fail step ${step}: ${code} ${desc}`)
+      pending = true
+    })
+    target.webContents.on('did-finish-load', () => {
+      if (!pending) { log('diag-recovered', { step, window: target === win ? 'first' : 'new' }); return }
+      pending = false
+      const wait = ladder[step++]
+      if (wait === undefined) { log('diag-recover-exhausted'); return }
+      if (wait >= 0) {
+        log('diag-recover', { step, how: `reload after ${wait} ms` })
+        setTimeout(() => void target.loadURL(startUrl), wait)
+      } else {
+        log('diag-recover', { step, how: 'new window' })
+        const fresh = new BrowserWindow({ show: true, width: 800, height: 600, webPreferences: { preload: join(__dirname, '../preload/index.js'), sandbox: true, contextIsolation: true, nodeIntegration: false, spellcheck: false } })
+        recover(fresh)
+        void fresh.loadURL(startUrl)
+      }
+    })
+  }
+  if (zzRecover) recover(win)
+  void win.loadURL(startUrl)
 })
 
 app.on('window-all-closed', () => app.quit())

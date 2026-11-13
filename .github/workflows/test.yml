@@ -66,6 +66,14 @@ jobs:
     timeout-minutes: ${{ inputs.job-timeout }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # DIAG (scratch branch only): what VM this job landed on, so a host-dependent failure can be checked across runs.
+      - name: The VM
+        shell: bash
+        run: |
+          echo "ZZVM runner=$RUNNER_NAME os=$RUNNER_OS arch=$RUNNER_ARCH image=$ImageOS/$ImageVersion"
+          if [ -r /proc/cpuinfo ]; then echo "ZZVM cpu=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2-) processors=$(grep -c ^processor /proc/cpuinfo)"; fi
+          echo "ZZVM nproc=$(nproc 2>/dev/null) kernel=$(uname -sr) product=$(cat /sys/devices/virtual/dmi/id/product_name 2>/dev/null)"
+          free -m 2>/dev/null | sed 's/^/ZZVM /' || true
       - id: rust
         name: Rust (the toolchain rust-toolchain.toml pins)
         run: rustup toolchain install
@@ -132,6 +140,7 @@ jobs:
           GREP: ${{ inputs.grep }}
           SHARD: ${{ inputs.shard && format('{0}/{1}', inputs.shard, inputs.shard-count) || '' }}
           REPEAT_EACH: ${{ inputs.repeat-each }}
+          DEBUG: pw:browser # DIAG (scratch branch only): each launched app's stderr in the job log
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           xvfb-run -a npm run "$E2E_SCRIPT" -- ${GREP:+--grep "$GREP"} ${SHARD:+--shard "$SHARD"} ${REPEAT_EACH:+--repeat-each "$REPEAT_EACH"}
