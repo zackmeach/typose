@@ -4,10 +4,10 @@ import { fromMainApp, openExternal } from './external'
 const HTTPS = 'https://example.invalid/path'
 
 function caller() {
-  const frame = { url: 'typose://app/index.html' }
+  const frame = { url: 'typose://app/index.html', origin: 'typose://app' }
   const contents = { mainFrame: frame, isDestroyed: () => false }
   const win = { webContents: contents, isDestroyed: () => false }
-  const event: { sender: unknown; senderFrame: { url: string } | null } = { sender: contents, senderFrame: frame }
+  const event: { sender: unknown; senderFrame: { url: string; origin: string } | null } = { sender: contents, senderFrame: frame }
   const open = vi.fn(async (_url: string) => undefined)
   return { frame, contents, win, event, open }
 }
@@ -142,6 +142,12 @@ describe('fromMainApp takes only the live window app page, from its main frame',
     }
     frame.url = 'typose://app/index.html'
     win.isDestroyed = () => true
+    expect(fromMainApp(win, event)).toBe(false)
+  })
+
+  it("refuses the app page's URL at an opaque origin: Chromium's error page in its place", () => {
+    const { win, event, frame } = caller()
+    frame.origin = 'null'
     expect(fromMainApp(win, event)).toBe(false)
   })
 })
