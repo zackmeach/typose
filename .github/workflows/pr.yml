@@ -1,6 +1,6 @@
 # The full e2e suite on Windows, Linux and macOS for every non-draft PR and every push to main; drafts never run. Green CI
 # is the merge bar. The repo is public, so hosted minutes are free: each OS splits the suite into four shards that run
-# in parallel. Caches are keyed per lockfile and OS, docs-only changes are skipped, a newer push to a PR cancels its
+# in parallel. Caches are keyed per lockfile and OS, a docs-only push to main is skipped, a newer push to a PR cancels its
 # older run, fmt and lint run on Linux only, every job is time-boxed, and bounded evidence is kept only on failure.
 # `workflow_dispatch` runs it on a branch
 # without a PR (`gh workflow run pr.yml --ref <branch>`), optionally only the e2e tests it names, so a platform fix can
@@ -11,11 +11,11 @@ on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
-    # GitHub judges a PR's whole diff against its base, not the latest push: a docs-only push to a PR that changes
-    # code still runs. `*.md` is the root's own (README and the like); Markdown under app/, core/ and e2e/ is test input.
-    paths-ignore: ['docs/**', '*.md']
+    # No path filter: main's branch protection requires these checks, and it counts only a `pull_request` run's. A
+    # docs-only PR that started no run could never merge; a `workflow_dispatch` run on its branch doesn't count.
   push:
     branches: [main]
+    # `*.md` is the root's own (README and the like); Markdown under app/, core/ and e2e/ is test input.
     paths-ignore: ['docs/**', '*.md']
   workflow_dispatch:
     inputs:
