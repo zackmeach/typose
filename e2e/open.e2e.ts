@@ -1,5 +1,5 @@
 import { expect } from '@playwright/test'
-import { cachedItems, finish, fixture, launch, test, visibleRows, waitIndexed, waitOpen } from './app'
+import { cachedItems, finish, fixture, holdReply, launch, test, visibleRows, waitIndexed, waitOpen } from './app'
 
 test('a JSONL file named on the command line opens in Rows and reaches its last source line in Raw', async () => {
   const lines = Array.from({ length: 5000 }, (_, i) => `{"type":"tool","msg":"row ${i}"}`)
@@ -101,5 +101,39 @@ test('no mounted item holds more than 64 KiB of text, and a long line ends at a 
   })
   expect(selected).toContain('語')
   expect(selected).not.toContain('↪')
+  await finish(l)
+})
+
+test('a page that lands fills the rows waiting for it and leaves the rows already shown as they were', async () => {
+  const l = await launch({ hooks: true, file: fixture('repaint.txt', Array.from({ length: 3000 }, (_, i) => `line ${i}`).join('\n') + '\n') })
+  const { win } = l
+  await waitOpen(win)
+  const scroller = win.locator('.vl-scroller')
+  type Rows = { shown: [Element, Element][]; waiting: Element[] }
+  const filled = () => scroller.evaluate((el) => [...el.querySelectorAll('.vl-row')].every((row) => row.querySelector('.text')))
+  await expect.poll(filled).toBe(true) // every mounted row has its text: no page is due
+  // Each shown row and its text node, to compare once the page lands.
+  await scroller.evaluate((el) => { (window as unknown as Rows).shown = [...el.querySelectorAll('.vl-row')].map((row) => [row, row.querySelector('.text')!]) })
+  await holdReply(win, 'page', 'landPage', true)
+  // Down a row at a time until one past the cache is mounted: its page is asked for while the shown rows stay mounted.
+  await scroller.evaluate(async (el) => {
+    for (let i = 0; i < 1000 && [...el.querySelectorAll('.vl-row')].every((row) => row.querySelector('.text')); i++) {
+      el.scrollTop += 20
+      await new Promise((done) => requestAnimationFrame(done))
+    }
+  })
+  await win.waitForFunction(() => typeof (window as unknown as { landPage?: unknown }).landPage === 'function')
+  const waiting = await scroller.evaluate((el) => ((window as unknown as Rows).waiting = [...el.querySelectorAll('.vl-row')].filter((row) => !row.querySelector('.text'))).length)
+  expect(waiting).toBeGreaterThan(0)
+  await win.evaluate(() => (window as unknown as { landPage: () => void }).landPage())
+  await expect.poll(filled).toBe(true)
+  const after = await win.evaluate(() => {
+    const { shown, waiting } = window as unknown as Rows
+    const mounted = shown.filter(([row]) => row.isConnected)
+    return { mounted: mounted.length, rebuilt: mounted.filter(([, text]) => !text.isConnected).length, waitingFilled: waiting.every((row) => !row.isConnected || !!row.querySelector('.text')) }
+  })
+  expect(after.mounted).toBeGreaterThan(0)
+  expect(after).toEqual({ mounted: after.mounted, rebuilt: 0, waitingFilled: true })
+  expect(l.pageErrors).toEqual([])
   await finish(l)
 })
