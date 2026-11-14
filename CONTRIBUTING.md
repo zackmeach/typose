@@ -75,3 +75,7 @@ These changes get a deeper review than others:
 - The network guard and the CSP.
 - IPC.
 - The sanitizer.
+
+## Releases
+
+Follow [`docs/release-checklist.md`](docs/release-checklist.md).

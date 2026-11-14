@@ -27,6 +27,13 @@ on:
         description: Run each of them this many times (Playwright --repeat-each)
         required: false
         default: ''
+  # release.yml runs these same checks on a tagged commit, and publishes the installer and zip its Windows shard built.
+  workflow_call:
+    inputs:
+      release:
+        description: Upload the Windows installer and zip for release.yml
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }} # so a dispatch on main never displaces a push's run
@@ -103,7 +110,8 @@ jobs:
       shard: ${{ !inputs.grep && matrix.shard || '' }} # a dispatch that names tests runs them unsharded, so a grep that matches nothing fails
       shard-count: '4'
       unit-tests: ${{ matrix.shard == 1 }} # the unit layers, and a grep dispatch's e2e, run once per OS
-      installer: ${{ matrix.os == 'windows-latest' && matrix.shard == 2 }} # once, on a shard without the unit layers
+      installer: ${{ matrix.shard == 2 }} # once per OS, on a shard without the unit layers
+      upload-installer: ${{ inputs.release == true }}
       package-name: ${{ matrix.os == 'macos-latest' && 'Package the fused --dir build, the arm64 .app (packaged.e2e.ts drives it)' || 'Package the fused --dir build (packaged.e2e.ts drives it)' }}
       grep: ${{ inputs.grep }}
       repeat-each: ${{ inputs.repeat-each }}
