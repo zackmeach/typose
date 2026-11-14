@@ -93,3 +93,25 @@ test('an armed process.crash() in main: an external crash exit, a dump, and the 
   await finish(second)
   rmSync(first.userData, { recursive: true, force: true })
 })
+
+// Electron on Linux sometimes fails the start page's request and shows Chromium's error page (main's retry). The
+// test-hooks build refuses the start page's first loads in the network guard, which shows the same error page.
+test('a start page that fails to load is loaded again, and the app comes up on the retry', async () => {
+  const l = await launch({ hooks: true, file: file(), env: { TYPOSE_TEST_FAIL_LOADS: '1' } })
+  await waitOpen(l.win) // the file opened, so the core's port reached the app page
+  const log = lifecycle(l.userData)
+  expect(log.filter((r) => r.event === 'load-retry')).toEqual([expect.objectContaining({ retry: 1, desc: 'ERR_BLOCKED_BY_CLIENT' })])
+  expect(log.filter((r) => r.event === 'did-finish-load')).toHaveLength(1)
+  expect(events(l.userData).indexOf('load-retry')).toBeLessThan(events(l.userData).indexOf('did-finish-load'))
+  await finish(l)
+})
+
+test('a start page that never loads is retried 3 times, then Typose quits rather than show a blank window', async () => {
+  const l = await launch({ hooks: true, env: { TYPOSE_TEST_FAIL_LOADS: '9' } })
+  expect(await Promise.race([l.exited, new Promise<string>((ok) => setTimeout(() => ok('still running after 20 s'), 20_000))])).toEqual({ code: 0, signal: null })
+  const log = lifecycle(l.userData)
+  expect(log.filter((r) => r.event === 'load-retry').map((r) => r.retry)).toEqual([1, 2, 3])
+  expect(log.filter((r) => r.event === 'load-failed')).toEqual([expect.objectContaining({ desc: 'ERR_BLOCKED_BY_CLIENT' })])
+  expect(events(l.userData)).not.toContain('did-finish-load')
+  await finish(l)
+})
