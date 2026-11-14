@@ -154,6 +154,97 @@ it('refuses unsafe sizes before contacting the core', async () => {
   expect(calls).toBe(0)
 })
 
+// A zero charge is another card's (or the window's) aggregate with nothing in it, computed before this open publishes.
+it("a zero charge does not cancel another card's queued open", async () => {
+  const grant = pending()
+  const calls: number[] = []
+  const bank = new WorkspaceBudget({ call: (_, p) => { calls.push(p.bytes); return calls.length === 1 ? grant.promise : Promise.resolve(true) } }, 1)
+  const open = bank.hold(1, 10)
+  await Promise.resolve()
+  expect(await bank.hold(0, 0)).toBe(true)
+  grant.resolve(true)
+  expect(await open).toBe(true)
+  expect(bank.snapshot()).toMatchObject({ held: 3 * workspaceCharge(1, 10), settled: true })
+  expect(calls).toEqual([3 * workspaceCharge(1, 10)])
+})
+
+it('a zero charge does not cancel a hold still waiting behind another', async () => {
+  const grant = pending()
+  const calls: number[] = []
+  const bank = new WorkspaceBudget({ call: (_, p) => { calls.push(p.bytes); return calls.length === 1 ? grant.promise : Promise.resolve(true) } }, 1)
+  const a = bank.hold(1, 10)
+  const b = bank.hold(2, 20)
+  await Promise.resolve()
+  expect(await bank.hold(0, 0)).toBe(true)
+  grant.resolve(true)
+  expect([await a, await b]).toEqual([true, true])
+  expect(calls).toEqual([3 * workspaceCharge(1, 10), 3 * workspaceCharge(2, 20)])
+  expect(bank.snapshot().held).toBe(3 * workspaceCharge(2, 20))
+})
+
+it("a zero charge after an open's grant leaves it held until the explicit release", async () => {
+  const calls: number[] = []
+  const bank = new WorkspaceBudget({ call: async (_, p) => { calls.push(p.bytes); return true } }, 1)
+  expect(await bank.hold(1, 10)).toBe(true) // granted; its tab is not published yet
+  expect(await bank.hold(0, 0)).toBe(true)
+  expect(bank.snapshot().held).toBe(3 * workspaceCharge(1, 10))
+  expect(await bank.release()).toBe(true)
+  expect(calls).toEqual([3 * workspaceCharge(1, 10), 0])
+})
+
+it("an open after a zero charge's release supersedes it, and the zero charge's retry keeps the open paid", async () => {
+  const zero = pending()
+  const calls: number[] = []
+  const bank = new WorkspaceBudget({ call: (_, p) => { calls.push(p.bytes); return p.bytes === 0 ? zero.promise : Promise.resolve(true) } }, 1)
+  const epoch = bank.reservationEpoch
+  const releasing = bank.hold(0, 0)
+  expect(await bank.hold(1, 10)).toBe(true)
+  zero.resolve(true)
+  expect(await releasing).toBe(false) // superseded; App retries once because the epoch moved
+  expect(bank.reservationEpoch).not.toBe(epoch)
+  expect(await bank.hold(0, 0)).toBe(true)
+  expect(calls).toEqual([0, 3 * workspaceCharge(1, 10)])
+  expect(bank.snapshot()).toMatchObject({ held: 3 * workspaceCharge(1, 10), peakBytes: workspaceCharge(1, 10), settled: true })
+})
+
+it('a zero charge while a last-close unwinds old grants defers to the explicit release', async () => {
+  const old = pending()
+  const calls: number[] = []
+  const bank = new WorkspaceBudget({ call: (_, p) => { calls.push(p.bytes); return calls.length === 2 ? old.promise : Promise.resolve(true) } }, 1)
+  await bank.hold(1, 10)
+  const other = bank.hold(2, 20) // another card's open, waiting on its grant
+  await Promise.resolve()
+  bank.cancelPending() // last tab closed in this card
+  expect(await bank.hold(0, 0)).toBe(true)
+  expect(calls).not.toContain(0)
+  expect(await bank.release()).toBe(true)
+  old.resolve(true)
+  expect(await other).toBe(false)
+  expect(bank.snapshot()).toMatchObject({ held: 0, peakBytes: 0 })
+  expect(calls).toEqual([3 * workspaceCharge(1, 10), 3 * workspaceCharge(2, 20), 0])
+})
+
+it('a zero charge on an idle bank still releases the peak carried from the last session', async () => {
+  const calls: number[] = []
+  const bank = new WorkspaceBudget({ call: async (_, p) => { calls.push(p.bytes); return true } }, 2, workspaceCharge(4, 40))
+  expect(await bank.hold(0, 0)).toBe(true)
+  expect(calls).toEqual([0])
+  expect(bank.snapshot()).toMatchObject({ held: 0, peakBytes: 0 })
+})
+
+it('a refused open still fails beside a zero charge, and a later open still pays', async () => {
+  let granted = false
+  const calls: number[] = []
+  const bank = new WorkspaceBudget({ call: async (_, p) => { calls.push(p.bytes); return p.bytes === 0 || granted } }, 1)
+  const open = bank.hold(1, 10)
+  expect(await bank.hold(0, 0)).toBe(true)
+  expect(await open).toBe(false)
+  expect(bank.snapshot()).toMatchObject({ held: 0, peakBytes: 0 })
+  granted = true
+  expect(await bank.hold(1, 10)).toBe(true)
+  expect(bank.snapshot().held).toBe(3 * workspaceCharge(1, 10))
+})
+
 it('retains charged history and pending page bytes after the last document closes', async () => {
   const calls: number[] = []
   const bank = new WorkspaceBudget({ call: async (_, p) => { calls.push(p.bytes); return true } }, 1)
