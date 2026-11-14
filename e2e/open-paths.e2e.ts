@@ -184,6 +184,120 @@ test('a second-instance open while Settings shows switches the card back to the 
   await finish(l)
 })
 
+type Race = { grants: number[]; full: boolean; phase: 'off' | 'armed' | 'restore-held' | 'open-held' | 'released'; restore?: () => void; open?: () => void; zero?: () => void }
+const race = (win: Page) => win.evaluate(() => { const { grants, full, phase } = (window as unknown as { race: Race }).race; return { grants, full, phase } })
+
+/**
+ * A launch whose restore waits: main's load-session is hooked at once, before the page can ask (it asks only after
+ * the core's port, sent at did-finish-load, and three core calls), and answers when `loaded()` is called. The page's
+ * core client then records every workspace grant and every "memory budget is full" banner. Armed, it also stages the
+ * race macOS run 43523795886 lost: the restore is held at its `preferences` call until an open's first grant is sent,
+ * that grant's reply until the restore has charged, and a zero grant sent meanwhile until the next grant is sent. A
+ * zero charge's release once cancelled the open that way, and then its retry.
+ */
+async function hookedStartup(file?: string) {
+  const l = await launch({ hooks: true, ...(file ? { file } : {}) })
+  await l.app.evaluate(({ ipcMain }, session) => {
+    const g = globalThis as { loadCalls?: number; loaded?: () => void }
+    const loaded = new Promise<void>((done) => { g.loaded = done })
+    ipcMain.removeHandler('load-session')
+    ipcMain.handle('load-session', async () => { g.loadCalls = (g.loadCalls ?? 0) + 1; await loaded; return session })
+  }, emptySession())
+  await l.win.waitForFunction(() => 'typoseTest' in window)
+  await l.win.evaluate(() => {
+    const w = window as unknown as { typoseTest: TestHooks; race: Race }
+    const race: Race = w.race = { grants: [], full: false, phase: 'off' }
+    new MutationObserver(() => { race.full ||= [...document.querySelectorAll('.banner')].some((b) => b.textContent?.includes('memory budget is full')) })
+      .observe(document.documentElement, { subtree: true, childList: true, characterData: true })
+    const core = w.typoseTest.core, call = core.call.bind(core)
+    core.call = async (method, params) => {
+      const bytes = method === 'reserveWorkspace' ? (params as { bytes: number }).bytes : -1
+      if (bytes >= 0) race.grants.push(bytes)
+      if (bytes > 0) { race.zero?.(); race.zero = undefined }
+      const reply = call(method, params)
+      if (method === 'preferences' && race.phase === 'armed') {
+        race.phase = 'restore-held'
+        await new Promise<void>((done) => { race.restore = done })
+        const value = await reply
+        setTimeout(() => { race.phase = 'released'; race.open!() }) // the restore charges at once on this reply, before it
+        return value
+      }
+      if (bytes > 0 && race.phase === 'restore-held') {
+        race.phase = 'open-held'
+        const held = new Promise<void>((done) => { race.open = done })
+        race.restore!()
+        const value = await reply
+        await held
+        return value
+      }
+      if (bytes === 0 && race.phase === 'open-held') {
+        const next = new Promise<void>((done) => { race.zero = done })
+        const value = await reply
+        await next
+        return value
+      }
+      return reply
+    }
+  })
+  // The hook, not main's own handler, answered the page: else the restore ran unheld.
+  await expect.poll(() => l.app.evaluate(() => (globalThis as { loadCalls?: number }).loadCalls), { timeout: 30_000 }).toBe(1)
+  const loaded = () => l.app.evaluate(() => (globalThis as unknown as { loaded: () => void }).loaded())
+  /** The card is ready and the restore waits at load-session; once it's let go, it's held at `preferences`. That call
+   *  comes after load-session and launch-paths have both answered, so a second launch is delivered live by then. */
+  const holdRestore = async () => {
+    await expect(l.win.getByRole('heading', { name: 'Drop files or folders anywhere' })).toBeVisible({ timeout: 30_000 })
+    await l.win.evaluate(() => { (window as unknown as { race: Race }).race.phase = 'armed' })
+    await loaded()
+    await expect.poll(async () => (await race(l.win)).phase).toBe('restore-held')
+  }
+  return Object.assign(l, { loaded, holdRestore }) // the same object: finish() removes it from the running launches
+}
+
+/** The open won its race: it shows, no "full" banner ever showed, and nothing released the workspace after its grant. */
+async function expectOpened(win: Page, name: string) {
+  await expect(tabs(win)).toHaveText([name], { timeout: 30_000 })
+  await waitOpen(win)
+  const { grants, full, phase } = await race(win)
+  expect(phase).toBe('released')
+  expect(full).toBe(false)
+  expect(grants.slice(grants.findIndex((bytes) => bytes > 0))).not.toContain(0)
+}
+
+test('a cold launch naming a file opens it after the restore has charged', async () => {
+  const file = fixture('open-paths-cold.txt', 'cold launch\n')
+  const l = await hookedStartup(file)
+  await l.loaded()
+  await expect(tabs(l.win)).toHaveText(['open-paths-cold.txt'], { timeout: 30_000 })
+  await waitOpen(l.win)
+  // Launch paths open only after the restore returns (App's startup), so its zero charge can't meet their open.
+  const { grants, full } = await race(l.win)
+  expect(grants.lastIndexOf(0)).toBeLessThan(grants.findIndex((bytes) => bytes > 0))
+  expect(full).toBe(false)
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+test("a second launch's file, delivered while the first launch restores, opens", async () => {
+  const file = fixture('open-paths-second-early.txt', 'second launch\n')
+  const l = await hookedStartup()
+  await l.holdRestore()
+  // Electron's second-instance event, as a second launch would raise it (the dev layout's argv: electron, app, file).
+  await l.app.evaluate(({ app }, path) => app.emit('second-instance', {}, [], process.cwd(), { argv: [process.execPath, '.', path], cwd: process.cwd() }), file)
+  await expectOpened(l.win, 'open-paths-second-early.txt')
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
+test('a file dropped while the window restores opens', async () => {
+  const file = fixture('open-paths-drop-early.txt', 'early drop\n')
+  const l = await hookedStartup()
+  await l.holdRestore()
+  await drag(l.win, 'drop', [{ path: file, folder: false }])
+  await expectOpened(l.win, 'open-paths-drop-early.txt')
+  expect(l.pageErrors).toEqual([])
+  await finish(l)
+})
+
 test('Raw wraps a 10,000-character line and CJK to the card when Wrap lines is on, and Find and Go to land on the line', async () => {
   // Line 2: 1,000 ten-character segments. Line 3: CJK, wide and astral, 600 graphemes of 1,200 columns.
   const long = Array.from({ length: 1000 }, (_, i) => `seg${String(i).padStart(6, '0')} `).join('')

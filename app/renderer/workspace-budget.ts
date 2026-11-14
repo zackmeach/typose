@@ -22,6 +22,8 @@ export class WorkspaceBudget {
   private held = 0
   private peak: number
   private requestedPeak = 0
+  /** Holds queued or awaiting their grant, cancelled ones included until they unwind. */
+  private queued = 0
 
   constructor(private readonly core: WorkspaceCore, readonly session: number, previousPeakBytes = 0) {
     this.peak = previousPeakBytes
@@ -37,8 +39,13 @@ export class WorkspaceBudget {
   hold(tabCount: number, pathUnits: number, extraBytes = 0): Promise<boolean> {
     const charge = workspaceCharge(tabCount, pathUnits, extraBytes)
     if (!Number.isFinite(charge) || !this.active) return Promise.resolve(false)
-    if (charge === 0) return this.release()
+    // A zero charge releases an idle bank only. A queued hold is another caller's open under way: releasing would cancel
+    // it (the epoch moves) and it would report a full budget, as an early open did while the window restored. A held
+    // allowance may be an open's grant whose tab isn't published yet. The release is left to releaseEmptyWorkspace,
+    // which every path that empties the workspace ends in, and which waits until no work is pending.
+    if (charge === 0) return this.queued || this.held ? Promise.resolve(true) : this.release()
     const epoch = this.epoch
+    this.queued++
     const changed = this.serial.then(async () => {
       if (!this.active || epoch !== this.epoch) return false
       const peak = Math.max(this.peak, charge)
@@ -50,7 +57,7 @@ export class WorkspaceBudget {
       if (!granted || !this.active || epoch !== this.epoch) return false
       this.peak = peak
       return true
-    })
+    }).finally(() => { this.queued-- })
     this.serial = changed.then(() => {})
     return changed
   }
