@@ -29,6 +29,10 @@ The first release, a pre-release for Windows x64. It is not code-signed.
 - You can open at most 16 folders, and the sidebar loads at most 4,096 entries of a folder. The messages for both call it a "demo limit".
 - HTML files open as source text, not as web pages.
 - Each Ctrl+scroll step zooms by 10%, however small the movement, so a touchpad pinch jumps quickly between 50% and 200%.
+- After Typose restarts with a JSON, JSONL, or YAML file open, or when you switch quickly away from one, the status line can read "Error: Structured view unavailable · memory budget is full" although memory isn't short. The file shows normally when you select its tab again.
+- The status line keeps its last message on every tab until another message replaces it, and doesn't say which file it is about.
+- When an image or a link's target is missing, the message includes the system's own error text, such as "io: The system cannot find the file specified. (os error 2)".
+- In Raw, a file whose lines are very long runs of emoji can freeze the window when it first opens: 1.8 seconds on a Core i7-12700K for a test file of 40 lines, each about 30,000 UTF-16 units of emoji, and longer on a slower PC.
 - Printing:
   - Printed Markdown leaves out images and task checkboxes. Mermaid diagrams do print.
   - A document printed with Microsoft Print to PDF has no selectable text and is large: 2,000 lines of plain text made a 34-page, 17.7 MB PDF.
