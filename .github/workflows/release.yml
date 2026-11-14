@@ -1,0 +1,69 @@
+# A release from a tag, published only after pr.yml's checks pass on the tagged commit in this same run. A `v*` tag
+# makes a public pre-release; a `dry-run/v*` tag makes a draft, to rehearse this workflow (delete the draft and the tag
+# after: `gh release delete <tag> --yes --cleanup-tag`). Its assets are Windows only: the installer and zip that pr.yml's
+# Windows installer shard built and checked in this run. Its notes are CHANGELOG.md's entry for the version, known
+# issues included. docs/release-checklist.md is the whole procedure.
+name: release
+
+on:
+  push:
+    tags: ['v*', 'dry-run/v*']
+
+permissions:
+  contents: read
+
+jobs:
+  # Before the checks: the tag names app/package.json's version, CHANGELOG.md has an entry for it, and a `v*` tag is on main.
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # main's history, for the ancestry check
+      - id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#dry-run/}"
+          version="${version#v}"
+          package=$(node -p "require('./app/package.json').version")
+          [ "$version" = "$package" ] || { echo "::error::$TAG names $version, but app/package.json is $package"; exit 1; }
+          grep -qxF "## $version" CHANGELOG.md || { echo "::error::CHANGELOG.md has no '## $version' entry"; exit 1; }
+          if [ "${TAG#dry-run/}" = "$TAG" ]; then
+            git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::$TAG isn't on main"; exit 1; }
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  # The same lint and three-system test jobs as a PR, on this commit.
+  checks:
+    needs: prepare
+    uses: ./.github/workflows/pr.yml
+    with:
+      release: true
+
+  publish:
+    needs: [prepare, checks]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: windows-release
+          path: dist
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          awk -v v="$VERSION" '/^## /{p = ($2 == v); next} p' CHANGELOG.md > notes.md
+          grep -q '[^[:space:]]' notes.md || { echo "::error::CHANGELOG.md's $VERSION entry is empty"; exit 1; }
+          draft=
+          [ "${TAG#dry-run/}" = "$TAG" ] || draft=--draft
+          gh release create "$TAG" "dist/Typose-$VERSION-setup.exe" "dist/Typose-$VERSION-win-x64.zip" \
+            --verify-tag --prerelease $draft --title "Typose $VERSION" --notes-file notes.md

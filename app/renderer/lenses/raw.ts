@@ -112,6 +112,8 @@ export class RawLens {
   private copyAll = false
   private readonly copies = new SourceCopyQueue(token => window.typose.cancelClipboardWrite(token))
   private indexed: boolean
+  /** What each mounted row was last painted from (`paint`). */
+  private readonly painted = new WeakMap<HTMLDivElement, unknown[]>()
 
   constructor(
     private readonly host: HTMLElement,
@@ -773,11 +775,17 @@ export class RawLens {
 
   private paint(row: number, el: HTMLDivElement): void {
     const s = this.slot(row)
+    const item = this.cache.get(s.key)
+    // A row painted from the same inputs keeps its DOM, so a page that lands rebuilds, and the list lays out again, only
+    // the rows it changed. The item is compared by identity: a refetched piece, or a Reload's, is a new object. Expanding
+    // a line takes the "↪ more" button off its first piece's last row (`marker`).
+    const inputs = [s.line, s.piece, s.sub, item, this.cols, !!this.long.get(s.line)?.tokens.length]
+    if (this.painted.get(el)?.every((v, k) => v === inputs[k])) return
+    this.painted.set(el, inputs)
     const gutter = Object.assign(document.createElement('span'), { className: 'gutter', textContent: s.piece || s.sub ? '' : String(s.line + 1) })
     gutter.setAttribute('aria-hidden', 'true')
     el.replaceChildren(gutter)
     Object.assign(el.dataset, { line: String(s.line), piece: String(s.piece), sub: String(s.sub) })
-    const item = this.cache.get(s.key)
     if (!item) return
     const b = rowsOf(item, this.cols)
     if (s.sub + 1 >= b.length) return

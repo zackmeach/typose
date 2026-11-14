@@ -1,15 +1,17 @@
 {
   "name": "typose",
   "productName": "Typose",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
+  "author": "Typose contributors",
   "license": "MIT OR Apache-2.0",
   "main": "out/main/index.js",
   "scripts": {
     "build": "electron-vite build",
     "build:hooks": "electron-vite build --mode test-hooks",
     "start": "electron-vite preview",
-    "package": "install-electron && electron-builder --dir --publish never"
+    "package": "install-electron && electron-builder --dir --publish never",
+    "installer": "electron-builder --prepackaged dist/win-unpacked --win --publish never"
   },
   "dependencies": {
     "typose-node": "0.0.0"
@@ -47,8 +49,19 @@
     ],
     "electronDist": "../node_modules/electron/dist",
     "npmRebuild": false,
+    "afterPack": "./build/after-pack.mjs",
     "win": {
-      "signAndEditExecutable": false
+      "target": [
+        "nsis",
+        "zip"
+      ],
+      "artifactName": "${productName}-${version}-win-${arch}.${ext}",
+      "signExecutable": false
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "artifactName": "${productName}-${version}-setup.${ext}"
     },
     "mac": {
       "identity": null
