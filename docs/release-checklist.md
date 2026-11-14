@@ -33,4 +33,9 @@ git tag -a vX.Y.Z -m "Typose X.Y.Z"
 git push origin vX.Y.Z
 ```
 
-When `release.yml` finishes, check the release page: a pre-release, the two assets (`Typose-X.Y.Z-setup.exe` and `Typose-X.Y.Z-win-x64.zip`), and the notes. If a check fails, nothing is published: fix it on `main`, delete the tag (`git push --delete origin vX.Y.Z`), and tag again.
+When `release.yml` finishes, check the release page: a pre-release, the two assets (`Typose-X.Y.Z-setup.exe` and `Typose-X.Y.Z-win-x64.zip`), and the notes.
+
+If a check fails, nothing is published:
+
+- If a job is red only for a flaky test that CONTRIBUTING's [flaky-test rule](../CONTRIBUTING.md#flaky-tests) says to re-run, use **Re-run failed jobs** on that release run. `publish` runs once they pass.
+- For a real failure, fix it on `main`, delete the tag (`git push --delete origin vX.Y.Z`), and tag again.
