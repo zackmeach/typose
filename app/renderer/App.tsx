@@ -67,7 +67,6 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
   const [sidebarOverlay, setSidebarOverlay] = useState(() => window.matchMedia('(max-width: 999px)').matches)
   const workspaceBudget = useRef<WorkspaceBudget | null>(null)
   const workspacePeak = useRef(0)
-  const fullBy = useRef<WorkspaceStore | null | undefined>(undefined) // whose refused charge showed "full"; null: the window's
   const [metadataQueue] = useState(() => new WorkspaceMetadataQueue())
   const closed = useRef<ClosedLocation[]>([])
   const pendingWorkspace = useRef(new Map<string, { units: number }>())
@@ -245,9 +244,8 @@ export function App({ core, fonts }: { core: CoreClient; fonts: Promise<void> })
       paid = await bank.hold(target.tabCount, target.pathUnits, target.extra)
     }
     if (bank !== workspaceBudget.current || session !== currentSession.current || !current()) return false
-    // Only the same requester's success clears it: another card's success says nothing about this card's refused open.
-    if (!paid) { fullBy.current = owner; setWorkspaceNotice("Cannot open the view · Typose's memory budget is full") }
-    else if (fullBy.current === owner) { fullBy.current = undefined; setWorkspaceNotice(message => message === "Cannot open the view · Typose's memory budget is full" ? '' : message) }
+    if (!paid) setWorkspaceNotice("Cannot open the view · Typose's memory budget is full")
+    else setWorkspaceNotice(message => message === "Cannot open the view · Typose's memory budget is full" ? '' : message)
     return paid
   }
   function chargeWorkspace(tabs: readonly Pick<WorkspaceTab, 'key' | 'path'>[], current: () => boolean): Promise<boolean> { return charge(null, tabs, current) }

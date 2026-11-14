@@ -245,6 +245,16 @@ it('a refused open still fails beside a zero charge, and a later open still pays
   expect(bank.snapshot().held).toBe(3 * workspaceCharge(1, 10))
 })
 
+// The count of holds under way returns to zero when one settles: else no zero charge would release the bank again.
+it('after a refused open settles, a zero charge on the idle bank releases the carried peak', async () => {
+  const calls: number[] = []
+  const bank = new WorkspaceBudget({ call: async (_, p) => { calls.push(p.bytes); return p.bytes === 0 } }, 2, workspaceCharge(4, 40))
+  expect(await bank.hold(1, 10)).toBe(false)
+  expect(await bank.hold(0, 0)).toBe(true)
+  expect(calls.at(-1)).toBe(0)
+  expect(bank.snapshot()).toMatchObject({ held: 0, peakBytes: 0 })
+})
+
 it('retains charged history and pending page bytes after the last document closes', async () => {
   const calls: number[] = []
   const bank = new WorkspaceBudget({ call: async (_, p) => { calls.push(p.bytes); return true } }, 1)
