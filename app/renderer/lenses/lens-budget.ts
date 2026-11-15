@@ -39,6 +39,11 @@ export class LensBudget {
     return this.active && this.generation === generation
   }
 
+  /** A hand-off froze grants (`reloadReservation`), or this generation's budget is gone: its refusal isn't the ledger's. */
+  frozen(generation: number): boolean {
+    return this.transitioning || !this.current(generation)
+  }
+
   get rawReserved(): number {
     return this.raw
   }

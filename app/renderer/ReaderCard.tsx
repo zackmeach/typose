@@ -551,7 +551,8 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
 
   /**
    * Reserve Rendered's charge on the one lens holder (plan §2.2) before any block is appended. Refused, the caller
-   * keeps Raw. `stale` when this document was replaced while the call was out.
+   * keeps Raw. `stale` when this document was replaced while the call was out, or a hand-off froze the budget: that
+   * refusal isn't the ledger's, so Rendered isn't turned off, and the hand-off replaces this display.
    */
   async function holdRendered(opened: Opened, build: MdBuild): Promise<'ok' | 'memory' | 'stale'> {
     if (holding.current === opened) return 'stale'
@@ -570,7 +571,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     if (now.kind !== 'open' || now.opened !== opened) return 'stale'
     if (!ok) {
       if (lens.current === before) before?.resumeReservation()
-      return 'memory'
+      return budgetFor(opened)?.frozen(opened.gen) ? 'stale' : 'memory'
     }
     return 'ok'
   }

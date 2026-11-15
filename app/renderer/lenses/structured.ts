@@ -48,6 +48,8 @@ export class StructuredLens {
   private selectedNode?: StructuredNode
   private selectedPath = '$'
   private stopped = false
+  /** The grid share is granted. Nothing renders before it is. */
+  private paid = false
   private moved = false
   private line = 0
   private lines: number
@@ -93,7 +95,7 @@ export class StructuredLens {
       images: grow => new RenderedImages(this.element, core, opened, options.budget ?? undefined, options.onFrozen, grow)
     })
     this.unsubscribe = source.subscribe?.(() => {
-      if (this.stopped || this.mode === 'tree') return
+      if (this.stopped || !this.paid || this.mode === 'tree') return
       if (this.mode === 'rows') this.schedule()
       else void (this.transcript ? this.transcript.show() : this.page(this.line)).catch(error => this.error(error))
     })
@@ -101,7 +103,11 @@ export class StructuredLens {
   }
   private async start(at: number): Promise<void> {
     try {
-      if (!await this.options.budget?.reserveGrid(this.opened.gen, 32 << 20) || this.stopped) throw new Error('Structured view unavailable · memory budget is full')
+      const granted = await this.options.budget?.reserveGrid(this.opened.gen, 32 << 20)
+      // A hand-off froze the budget, not the ledger: this lens goes with the hand-off, or stays blank if it fails.
+      if (this.stopped || !granted && this.options.budget?.frozen(this.opened.gen)) return
+      if (!granted) throw new Error('Structured view unavailable · memory budget is full')
+      this.paid = true
       if (this.mode === 'tree') {
         const root = this.source.info.root
         if (root) {
@@ -183,7 +189,7 @@ export class StructuredLens {
     this.renderRows()
   }
   private renderRows(): void {
-    if (this.stopped) return
+    if (this.stopped || !this.paid) return
     // A start or Go to line past what's indexed waits until that line exists.
     if (this.anchor !== undefined && this.anchor < this.total()) {
       const at = this.anchor
@@ -377,6 +383,7 @@ export class StructuredLens {
     return wrapper
   }
   private async page(start: number): Promise<void> {
+    if (!this.paid) return
     const epoch = ++this.serial
     const result = await this.core.call('structuredRows', { ref: this.source.info.ref, start, count: 100 }, this.abort.signal)
     if (this.stopped || epoch !== this.serial) return

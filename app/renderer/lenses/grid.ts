@@ -347,7 +347,8 @@ export class GridLens {
       if (!this.options.budget) { this.message('Grid is unavailable · its view budget is missing. Open in Raw.'); return }
       const bytes = this.gridBytes()
       const granted = await this.options.budget.reserveGrid(this.opened.gen, bytes)
-      if (!this.valid()) return
+      // A hand-off froze the budget, not the ledger: no message, and nothing is laid out on the refused share.
+      if (!this.valid() || !granted && this.options.budget.frozen(this.opened.gen)) return
       if (!granted) { this.message('Grid is unavailable · the viewport exceeds the memory budget. Open in Raw.'); return }
       this.reserved = bytes
       this.paid = true

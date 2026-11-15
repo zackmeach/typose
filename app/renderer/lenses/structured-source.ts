@@ -40,7 +40,14 @@ export async function prepareStructured(core: CoreClient, opened: Opened, budget
   const locked = (reason: string): StructuredSource => ({ info: { ref, format: 'yaml', status: 'locked', reason, done: true, problems: [] }, children: async () => ({ nodes: [] }), dispose() {} })
   if (opened.size > YAML_MAX_BYTES) return locked('YAML Tree shows files up to 8 MiB')
   // Includes decoder/transport overlap, UTF-16→byte map, bounded CST/AST/projection and engine object overhead.
-  if (!budget || !await budget.reserveModel(opened.gen, (64 << 20) + opened.size * 128)) return locked('YAML Tree unavailable · memory budget is full')
+  if (!budget || !await budget.reserveModel(opened.gen, (64 << 20) + opened.size * 128)) {
+    // A hand-off froze the budget, not the ledger: no lock. The hand-off ends this display, whose cleanup aborts `signal`.
+    if (budget?.frozen(opened.gen)) {
+      if (!signal.aborted) await new Promise(done => signal.addEventListener('abort', done, { once: true }))
+      throw new Error('Cancelled')
+    }
+    return locked('YAML Tree unavailable · memory budget is full')
+  }
   if (signal.aborted) { await budget.reserveModel(opened.gen, 0); throw new Error('Cancelled') }
   let worker: Worker
   try { worker = new Worker(new URL('./yaml.worker.ts', import.meta.url), { type: 'module' }) }

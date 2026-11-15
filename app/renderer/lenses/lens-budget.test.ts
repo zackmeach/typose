@@ -105,6 +105,22 @@ it('freezes image growth before a transition snapshots the retired tree, includi
   expect(budget.snapshot().rendered).toBe(130)
 })
 
+it('tells a hand-off freeze or a gone generation from the ledger refusing a share', async () => {
+  const budget = new LensBudget({ call: async () => false }, 1, 1, 1, 10, 10)
+  expect(await budget.reserveGrid(1, 32)).toBe(false)
+  expect(budget.frozen(1)).toBe(false)
+  const refused = budget.reloadReservation(10)
+  expect(await budget.reserveGrid(1, 32)).toBe(false)
+  expect(budget.frozen(1)).toBe(true)
+  budget.cancelTransition(refused)
+  expect(budget.frozen(1)).toBe(false)
+  const next = budget.reloadReservation(10)
+  expect(budget.adopt(2, next.bytes, next)).toBe(true)
+  expect([budget.frozen(1), budget.frozen(2)]).toEqual([true, false])
+  budget.invalidate()
+  expect(budget.frozen(2)).toBe(true)
+})
+
 it('repeated Reload keeps Raw and the maximum retired tree separate, with bounded totals', async () => {
   const budget = new LensBudget({ call: async () => true }, 1, 1, 1, 10, 10)
   await budget.reserveRendered(1, 100)
