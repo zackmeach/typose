@@ -19,9 +19,25 @@ const hold = (win: Page, method: string, name: string) => win.evaluate(({ method
     return reply.finally(() => new Promise<void>(done => { (window as unknown as Record<string, () => void>)[name] = done }))
   }
 }, { method, name })
+/** Holds the first `reserve` the core refuses until `release(win, name)`. Test-hooks build only. */
+const holdRefusal = (win: Page, name: string) => win.evaluate(name => {
+  const core = (window as unknown as { typoseTest: { core: { call(m: string, p: object, s?: AbortSignal): Promise<unknown> } } }).typoseTest.core
+  const call = core.call.bind(core)
+  let first = true
+  core.call = async (m, p, s) => {
+    const reply = await call(m, p, s)
+    if (m === 'reserve' && reply === false && first) {
+      first = false
+      await new Promise<void>(done => { (window as unknown as Record<string, () => void>)[name] = done })
+    }
+    return reply
+  }
+}, name)
 const held = (win: Page, name: string) => expect.poll(() => win.evaluate(name => typeof (window as unknown as Record<string, unknown>)[name], name)).toBe('function')
 const release = (win: Page, name: string) => win.evaluate(name => (window as unknown as Record<string, () => void>)[name](), name)
 const frames = (win: Page) => win.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))))
+/** What the core holds reserved for the renderer's views. */
+const viewBytes = async (win: Page) => (await debugStats(win)).surfaces!.bytes
 
 /** Opens a file called `name`, closes its tab and deletes the file, so Reopen's open of it fails. */
 async function closedAndDeleted(l: Launched, name: string): Promise<void> {
@@ -64,7 +80,7 @@ test('Reload while Rows starts: its frozen grid share is no memory-budget messag
   expect(l.pageErrors).toEqual([])
 })
 
-test('a failed Reopen leaves the Rows it froze blank and quiet until Rows is chosen again', async () => {
+test('Rows that a failed Reopen froze shows nothing while unpaid, then starts again with its grid share', async () => {
   const l = await launch({ hooks: true })
   const { win } = l
   await closedAndDeleted(l, 'handoff-gone.txt')
@@ -77,14 +93,48 @@ test('a failed Reopen leaves the Rows it froze blank and quiet until Rows is cho
   await held(win, 'releaseOpen')
   await release(win, 'releaseBuild')
   await expect(win.locator('[data-lens="rows"]')).toBeVisible()
-  await release(win, 'releaseOpen')
-  await expect(win.locator('.banner')).toContainText('Cannot reopen')
   await tryRows(win)
   expect(await win.locator('.structured-problem').allTextContents()).toEqual([])
   expect(await win.locator('.jsonl-entry').count()).toBe(0)
-  await win.getByRole('tab', { name: 'Raw', exact: true }).click()
-  await win.getByRole('tab', { name: 'Rows', exact: true }).click()
+  const unpaid = await viewBytes(win)
+  // The Reopen fails and thaws the budget: Rows asks again, through the ledger, and renders once it's granted.
+  await release(win, 'releaseOpen')
+  await expect(win.locator('.banner')).toContainText('Cannot reopen')
   await expect(win.locator('.jsonl-entry').first()).toBeVisible()
+  expect(await viewBytes(win) - unpaid).toBeGreaterThanOrEqual(32 << 20)
+  expect(await win.locator('.structured-problem').allTextContents()).toEqual([])
+  expect(l.pageErrors).toEqual([])
+})
+
+test('a ledger refusal that lands inside a freeze says the budget is full once the failed hand-off thaws', async () => {
+  const l = await launch({ hooks: true })
+  const { win } = l
+  await closedAndDeleted(l, 'handoff-gone-late.txt')
+  await hold(win, 'structuredBuild', 'releaseBuild')
+  await send(l, 'open-path', fixture('handoff-late-refusal.jsonl', ROWS))
+  await waitOpen(win)
+  await held(win, 'releaseBuild')
+  const { ledger } = await debugStats(win)
+  // Room for less than the grid share's 32 MiB: the core refuses it, and that reply is held.
+  const tight = async () => debugStats(win, { limit: (await debugStats(win)).ledger.used + (20 << 20) })
+  await tight()
+  await holdRefusal(win, 'releaseRefusal')
+  await release(win, 'releaseBuild')
+  await held(win, 'releaseRefusal')
+  // Reopen's workspace precharge needs room; the ask after the thaw gets none.
+  await debugStats(win, { limit: ledger.limit })
+  await hold(win, 'open', 'releaseOpen')
+  await send(l, 'command', 'reopen-tab')
+  await held(win, 'releaseOpen')
+  await tight()
+  await release(win, 'releaseRefusal')
+  await frames(win)
+  await release(win, 'releaseOpen')
+  await expect(win.locator('.banner')).toContainText('Cannot reopen')
+  await expect(win.locator('.structured-problem')).toHaveText('Error: Structured view unavailable · memory budget is full')
+  await tryRows(win)
+  expect(await win.locator('.jsonl-entry').count()).toBe(0)
+  await debugStats(win, { limit: ledger.limit })
   expect(l.pageErrors).toEqual([])
 })
 
@@ -150,5 +200,27 @@ test('Rendered that a hand-off froze is not turned off for memory: its tab rende
   await win.getByRole('tab', { name: 'handoff.md', exact: true }).click()
   await expect(win.locator('.lens-tab-tip[title]')).toHaveCount(0)
   await waitRendered(win)
+  expect(l.pageErrors).toEqual([])
+})
+
+test('Rendered that a failed hand-off froze finishes its build, and its tab shows it without Reload', async () => {
+  const l = await launch({ hooks: true })
+  const { win } = l
+  await closedAndDeleted(l, 'handoff-gone-md.txt')
+  await hold(win, 'render', 'releaseRender')
+  await send(l, 'open-path', fixture('handoff-failed.md', '# Handoff\n\nA paragraph.\n'))
+  await waitOpen(win)
+  await held(win, 'releaseRender')
+  await hold(win, 'open', 'releaseOpen')
+  await send(l, 'command', 'reopen-tab')
+  await held(win, 'releaseOpen')
+  await release(win, 'releaseRender')
+  await frames(win)
+  await release(win, 'releaseOpen')
+  await expect(win.locator('.banner')).toContainText('Cannot reopen')
+  await expect(win.locator('.card-status')).not.toHaveText('Rendering…')
+  await expect(win.locator('.lens-tab-tip[title]')).toHaveCount(0)
+  await win.getByRole('tab', { name: 'Rendered', exact: true }).click()
+  await waitRendered(win, 10_000)
   expect(l.pageErrors).toEqual([])
 })
