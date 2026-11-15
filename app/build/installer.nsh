@@ -59,6 +59,15 @@
   WriteRegStr HKCU "Software\Classes\${TYPOSE_PROGID}\shell\open\command" "" '"$appExe" "%1"'
   !insertmacro typoseTypes typoseOpenWith
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)' ; SHCNE_ASSOCCHANGED
+  ; Before this macro, electron-builder's install copies the installer to $LOCALAPPDATA\${APP_INSTALLER_STORE_FILE}
+  ; (typose-updater\installer.exe) for its auto-updater, and no option turns that off
+  ; (templates/nsis/include/installer.nsh, installApplicationFiles). Typose has no updater, so the copy goes, and its
+  ; folder too if that leaves it empty. An earlier version's copy goes with it: this install has just written over it.
+  Push $R0
+  Delete "$LOCALAPPDATA\${APP_INSTALLER_STORE_FILE}"
+  ${GetParent} "$LOCALAPPDATA\${APP_INSTALLER_STORE_FILE}" $R0
+  RMDir $R0 ; not /r: only an empty folder
+  Pop $R0
 !macroend
 
 ; Also runs, from the old version, when a newer one installs over it; the new installer then registers again. No

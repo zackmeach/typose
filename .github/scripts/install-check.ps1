@@ -7,6 +7,8 @@
 #     may now open Typose (the only app registered, or the only one besides a perceived-type fallback) or ask which app
 #     to use: the check prints each type's app before the install and after it;
 #   - Electron's WER module is left out, and the third-party notices ship;
+#   - neither the install nor the uninstall leaves %LOCALAPPDATA%\typose-updater, where electron-builder's install
+#     copies the installer for an auto-updater Typose doesn't have (installer.nsh's customInstall deletes it);
 #   - the open command the registration names launches Typose, which opens the .jsonl it names;
 #   - installing again over the install (the upgrade path: the old uninstaller runs first) leaves the same registration;
 #   - an uninstall removes the registration, and leaves each type's key exactly as it was before the install.
@@ -98,6 +100,9 @@ Check-Registration 'after the install'
 # What ships
 Check (-not (Test-Path -LiteralPath "$dir\electron_wer.dll")) 'electron_wer.dll is left out'
 Check (Test-Path -LiteralPath "$dir\resources\THIRD-PARTY-NOTICES.txt") 'resources\THIRD-PARTY-NOTICES.txt ships'
+$updater = "$env:LOCALAPPDATA\typose-updater" # electron-builder's updater cache: app/package.json's name, then -updater
+$cached = if (Test-Path -LiteralPath $updater) { @(Get-ChildItem -LiteralPath $updater -Recurse -Name) -join ', ' }
+Check (-not (Test-Path -LiteralPath $updater)) "after the install there's no $updater, nor the installer.exe in it$(if ($cached) { " (left: $cached)" })"
 
 # Launch through the registered open command, as Explorer's Open with does
 $command = (Get-ItemProperty -LiteralPath "$classes\$progId\shell\open\command" -ErrorAction SilentlyContinue).'(default)'
@@ -150,6 +155,8 @@ $changed = @($types | Where-Object { (TypeKey $_) -ne $key[$_] -or (UserChoice $
 Check ($changed.Count -eq 0) "after the uninstall each type's HKCU\Software\Classes key and user choice are exactly as before the install$(if ($changed) { ': ' + ($changed -join '; ') })"
 $leftover = if (Test-Path -LiteralPath $dir) { @(Get-ChildItem -LiteralPath $dir -Recurse -Name | Select-Object -First 10) -join ', ' }
 Check (-not (Test-Path -LiteralPath $dir)) "after the uninstall the install directory is gone$(if ($leftover) { " (left: $leftover)" })"
+$cached = if (Test-Path -LiteralPath $updater) { @(Get-ChildItem -LiteralPath $updater -Recurse -Name) -join ', ' }
+Check (-not (Test-Path -LiteralPath $updater)) "after the uninstall there's no $updater, nor the installer.exe in it$(if ($cached) { " (left: $cached)" })"
 
 if ($script:failed) { Write-Host "$($script:failed) check(s) failed"; exit 1 }
 Write-Host 'every check passed'
