@@ -136,7 +136,7 @@ const typose: TyposeApi = {
   },
   cancelClipboardWrite: (token) => { if (clipboardToken === token) clipboardToken = undefined },
   writeClipboardText: (text, token) => {
-    if (clipboardToken !== token) return Promise.resolve(false)
+    if (typeof token !== 'string' || clipboardToken !== token) return Promise.resolve(false)
     clipboardToken = undefined
     return ipcRenderer.invoke('write-clipboard', text)
   },
