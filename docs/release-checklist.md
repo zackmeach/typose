@@ -5,9 +5,9 @@ A release is a `vX.Y.Z` tag on `main`. Pushing it runs [`release.yml`](../.githu
 ## Before the tag
 
 1. **Version.** `app/package.json`'s `version`, and `packages.app.version` in `package-lock.json`, are the new version.
-2. **Notes.** `CHANGELOG.md` has a `## X.Y.Z` entry with a `### Known issues` list. The release's notes are that entry, as it is.
+2. **Notes.** `CHANGELOG.md` has a `## X.Y.Z` entry with a `### Known issues` list. The release's notes are that entry, as it is. The dry run needs the entry; step 9 finishes its known issues.
 3. **Green `main`.** The commit you will tag is on `main`, and its CI passed.
-4. **Quiet-machine tests.** On a Windows PC with every other app stopped (browsers, editors, sync clients, other test runs), run each command in CONTRIBUTING's [Tests that need a quiet machine](../CONTRIBUTING.md#tests-that-need-a-quiet-machine). Every bound must pass; a failure blocks the release.
+4. **Quiet-machine tests.** On a Windows PC with every other app stopped (browsers, editors, sync clients, other test runs), run each command in CONTRIBUTING's [Tests that need a quiet machine](../CONTRIBUTING.md#tests-that-need-a-quiet-machine). Record each bound that fails, with its numbers, in the release PR or the tag's message. A failed bound blocks the release only when it points at a much larger problem.
 5. **Vendored crates.** `core/vendor/zune-jpeg` and `core/vendor/csv-core` are patched local copies, so an upstream fix never reaches them through a lockfile update. Each copy's `TYPOSE-PATCH.md` names its upstream version. Check for advisories and security fixes since that version:
    - [RustSec](https://rustsec.org/packages/zune-jpeg.html) and the GitHub advisories for [etemesi254/zune-image](https://github.com/etemesi254/zune-image/security/advisories), and its releases;
    - [RustSec](https://rustsec.org/packages/csv-core.html) and the GitHub advisories for [BurntSushi/rust-csv](https://github.com/BurntSushi/rust-csv/security/advisories), and its releases.
@@ -22,9 +22,11 @@ A release is a `vX.Y.Z` tag on `main`. Pushing it runs [`release.yml`](../.githu
    - Drop a file, then a folder, from File Explorer onto the window.
    - With Typose open, open a second file from File Explorer through **Open with → Typose**: it opens in the running window.
    - Uninstall it from **Settings → Apps**: Typose leaves Open with.
-8. Delete the dry run: `gh release delete dry-run/vX.Y.Z --yes --cleanup-tag`.
+8. **Open review findings.** List the review findings raised on pull requests since the last release that are still open: not fixed, and not declined on the PR. Fix each, or add it to the known issues.
+9. **Known issues, final.** Add what steps 4 to 8 found that a user can meet to the entry's `### Known issues` and to README's known-issues section. A change to the notes alone needs no second dry run, but `main` must be green again at the commit you tag.
+10. Delete the dry run: `gh release delete dry-run/vX.Y.Z --yes --cleanup-tag`.
 
-A release blocker is data loss, a security problem, an app that can't install or launch, a crash or a multi-second freeze on a supported file, or a quiet-machine bound that fails. Everything else goes in the entry's known issues.
+A release blocker is data loss, a security problem, an app that can't install or launch, or a crash or a multi-second freeze on a supported file. Everything else goes in the entry's known issues.
 
 ## The tag
 
