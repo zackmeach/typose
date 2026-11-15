@@ -18,7 +18,7 @@ Green CI on Windows, Linux and macOS is the merge bar. You do not need to run th
 
 Under CI a test that fails and then passes on retry still fails its job. If a job is red only for flaky tests, each seen for the first time on that system, re-run the job and note the test and the run in the PR. If a test is flaky in two runs on one system, or fails its try and its retry in one run, add an entry to [`e2e/quarantine.ts`](e2e/quarantine.ts) that expires within 30 days, or fix the test.
 
-A blank launch on Linux counts against the launch, not against the test it landed on. It is one when the failed try's evidence shows both `did-finish-load` less than 200 ms after `start` in that launch's `lifecycle.jsonl` and an empty window in its `failure-N.png`. Re-run the job, and note the test, the run and both readings in the PR. Whether it took the try, the retry or both, it is not a sighting of that test.
+A blank launch on Linux counts against the launch, not against the test it landed on. It is one when the failed try's evidence shows both: in `<pid>-lifecycle.jsonl`, that pid's `did-finish-load` less than 150 ms after its `ready`; and in `failure-N.png`, nothing drawn, a flat fill with no title bar or ☰. Re-run the job, and note the test, the run and both readings in the PR and on [issue #107](https://github.com/zackmeach/typose/issues/107). Whether it took the try, the retry or both, it is not a sighting of that test. The job's other failures count as usual, and the re-run still has to pass.
 
 A macOS job that no hosted runner picked up within 60 minutes, and whose re-run also went unpicked for 60 minutes, may be merged past; note both run ids on the PR. A macOS job that ran and failed never qualifies, however long it waited.
 
