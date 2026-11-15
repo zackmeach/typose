@@ -18,6 +18,9 @@ thread_local! {
 thread_local! {
     /// Identity checks (a route walk and an open of the path each) made on this thread.
     pub(crate) static CHECKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Runs once in `Document::open_with`, after the identity is taken and before the store is built: a test swaps
+    /// the path there.
+    pub(crate) static OPENING: std::cell::Cell<Option<Box<dyn FnOnce()>>> = const { std::cell::Cell::new(None) };
 }
 
 /// What change detection compares, taken from a freshly opened path or inherited local route (spec §3.3).
@@ -188,11 +191,17 @@ impl Document {
 
     pub fn open_with(path: &Path, cache_chunks: usize, generation: u32) -> Result<Document, DocError> {
         if let Some(why) = refusal(path).map_err(DocError::Io)? {
-            return Err(DocError::Refused(why.into())); // before FileId::of, which opens the path on Windows
+            return Err(DocError::Refused(why.into())); // before the path is opened
         }
-        let id = FileId::of(path).map_err(DocError::Io)?;
+        // Identity and bytes from one handle: a second open of the path could reach a file swapped in between.
+        let file = crate::store::open_regular(path).map_err(io_error)?;
+        let id = FileId::of_file(&file).map_err(DocError::Io)?;
+        #[cfg(test)]
+        if let Some(swap) = OPENING.take() {
+            swap();
+        }
         check_len(id.size)?; // before the store charges for its length
-        let store = ByteStore::open_with(path, cache_chunks).map_err(io_error)?;
+        let store = ByteStore::from_file(file, cache_chunks).map_err(io_error)?;
         if store.len() != id.size {
             return Err(DocError::Frozen("changed while opening".into()));
         }
@@ -1094,6 +1103,24 @@ mod tests {
         assert_ne!(FileId::of(&path).unwrap(), id);
         drop(file);
         fs::remove_file(moved).unwrap();
+    }
+
+    /// A file of the same length swapped in at the path once the open has taken its identity, and swapped out again
+    /// before the first read, doesn't lend its bytes to that identity: the open takes both from one handle.
+    #[test]
+    fn a_same_length_swap_while_opening_cannot_put_other_bytes_under_the_first_files_identity() {
+        let path = temp_file("doc-open-swap", b"first");
+        let other = temp_file("doc-open-swap-other", b"other");
+        let aside = path.with_extension("aside");
+        let (at, swapped, moved) = (path.to_path_buf(), other.to_path_buf(), aside.clone());
+        OPENING.set(Some(Box::new(move || {
+            fs::rename(&at, &moved).unwrap();
+            fs::rename(&swapped, &at).unwrap();
+        })));
+        let doc = Document::open(&path).unwrap();
+        fs::rename(&path, &other).unwrap(); // the swap undone: the path names the first file again
+        fs::rename(&aside, &path).unwrap();
+        assert_eq!(doc.read(1, 0, 5).unwrap(), b"first");
     }
 
     #[cfg(windows)]
