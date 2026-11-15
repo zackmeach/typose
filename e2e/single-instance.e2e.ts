@@ -1,10 +1,10 @@
 // Plan PR 8 on the packaged build (`npm run package` first): spec §8.1's single instance, argv and open-file, and the
-// `typose` launchers. Every launch here gets the test's own --user-data-dir before any other argument, and the lock
+// `typose` launcher. Every launch here gets the test's own --user-data-dir before any other argument, and the lock
 // is per profile, so no launch can reach an instance the test didn't start. macOS's `open -a` hands a file to the
 // bundle's running instance, so it runs only once the test has checked that the bundle has no instance but its own.
 import { type Page, chromium, expect } from '@playwright/test'
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -116,49 +116,35 @@ test("a second launch's argv is untrusted: URL-like, device and option-like path
   }
 })
 
-test('the typose launchers ship beside the app, and hand Typose every argument as a path, after --', async () => {
-  const name = win ? 'typose.cmd' : 'typose'
+// From PowerShell, cmd.exe split a batch launcher's command line at an & in a file name before the script ran, and ran
+// the rest as a command. On Windows the command line is Typose.exe -- <path>…, which launchPaths reads.
+test('no typose.cmd ships', async () => {
+  expect(existsSync(join(dirname(PACKAGED.asar), 'bin', 'typose.cmd'))).toBe(false)
+})
+
+test('the typose launcher ships beside the app, and hands Typose every argument as a path, after --', async () => {
+  test.skip(win, 'Windows ships no launcher')
+  const name = 'typose'
   const shipped = join(dirname(PACKAGED.asar), 'bin', name)
   expect(existsSync(shipped)).toBe(true)
-  if (!win) expect(statSync(shipped).mode & 0o111).not.toBe(0) // executable
+  expect(statSync(shipped).mode & 0o111).not.toBe(0) // executable
   // A stand-in for Typose that records its pid, cwd and argv, two folders up from the launcher as in the package.
-  const root = mkdtempSync(join(FIXTURES, 'launcher-')) // beside node_modules, so the hard links below stay on one drive
+  const root = mkdtempSync(join(FIXTURES, 'launcher-'))
   const out = join(root, 'argv.json')
   const bin = join(root, 'resources', 'bin')
   const launcher = join(bin, name)
   mkdirSync(bin, { recursive: true })
   copyFileSync(join(APP_DIR, 'bin', name), launcher)
   const record = "require('fs').writeFileSync(process.env.STUB_OUT, JSON.stringify([process.pid, process.cwd(), ...process.argv.slice(1)]))"
-  if (win) {
-    // Electron itself as Typose.exe, running a stub app from resources\app that exits before ready: no window.
-    const link = (from: string, to: string): void => {
-      for (const e of readdirSync(from, { withFileTypes: true })) {
-        const target = join(to, e.name === 'electron.exe' ? 'Typose.exe' : e.name)
-        if (!e.isDirectory()) linkSync(join(from, e.name), target)
-        else {
-          mkdirSync(target, { recursive: true })
-          link(join(from, e.name), target)
-        }
-      }
-    }
-    link(resolve(APP_DIR, '../node_modules/electron/dist'), root)
-    mkdirSync(join(root, 'resources', 'app'))
-    writeFileSync(join(root, 'resources', 'app', 'package.json'), '{ "main": "main.js" }')
-    writeFileSync(join(root, 'resources', 'app', 'main.js'), `${record}; require('electron').app.exit(0)`)
-  } else {
-    writeFileSync(join(root, 'typose'), `#!/bin/sh\nexec '${process.execPath}' -e "${record}" -- "$@"\n`)
-    chmodSync(join(root, 'typose'), 0o755)
-    chmodSync(launcher, 0o755)
-  }
+  writeFileSync(join(root, 'typose'), `#!/bin/sh\nexec '${process.execPath}' -e "${record}" -- "$@"\n`)
+  chmodSync(join(root, 'typose'), 0o755)
+  chmodSync(launcher, 0o755)
   const cwd = mkdtempSync(join(tmpdir(), 'typose-cwd-'))
   const env = { ...process.env, STUB_OUT: out }
-  /** Runs the launcher, as cmd.exe runs what a user types (`line`) or as a program runs it, and returns what Typose got. */
-  const run = async (line: string | string[]): Promise<string[]> => {
+  /** Runs the launcher as a program runs it, and returns what Typose got. */
+  const run = async (line: string[]): Promise<string[]> => {
     rmSync(out, { force: true })
-    const proc =
-      typeof line === 'string'
-        ? spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/v:off', '/c', `""${launcher}" ${line}"`], { cwd, env, windowsVerbatimArguments: true, windowsHide: true })
-        : spawn(launcher, line, { cwd, env })
+    const proc = spawn(launcher, line, { cwd, env })
     expect(await new Promise((ok) => proc.once('exit', ok)), String(line)).toBe(0)
     const got = (): [number, string, ...string[]] | null => {
       try {
@@ -184,15 +170,10 @@ test('the typose launchers ship beside the app, and hand Typose every argument a
     [['--', '--'], ['--']],
     [['100%.txt', '50%typose_no_such_var%.txt'], ['100%.txt', '50%typose_no_such_var%.txt']],
     [['a^b.txt', 'a&b.txt', 'wow!.txt', 'x!y!z.txt', '(k)', 'l;m', 'n,o', 'p=q'], ['a^b.txt', 'a&b.txt', 'wow!.txt', 'x!y!z.txt', '(k)', 'l;m', 'n,o', 'p=q']],
+    [['$HOME', '`id`', '*', `it's "x"`, 'two\nlines'], ['$HOME', '`id`', '*', `it's "x"`, 'two\nlines']],
   ]
-  if (!win) shapes.push([['$HOME', '`id`', '*', `it's "x"`, 'two\nlines'], ['$HOME', '`id`', '*', `it's "x"`, 'two\nlines']])
   try {
-    for (const [typed, gets] of shapes) {
-      // In cmd.exe, as a user types them: each quoted, with delayed expansion off, as it is by default.
-      expect(await run(win ? typed.map((a) => `"${a}"`).join(' ') : typed), typed.join(' ')).toEqual(['--', ...gets])
-    }
-    // Unquoted, with cmd.exe's own escapes: the launcher gets a&b^c.txt, and passes on just that.
-    if (win) expect(await run('a^&b^^c.txt')).toEqual(['--', 'a&b^c.txt'])
+    for (const [typed, gets] of shapes) expect(await run(typed), typed.join(' ')).toEqual(['--', ...gets])
   } finally {
     rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }) // in case a stand-in outlived a failure
     rmSync(cwd, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })

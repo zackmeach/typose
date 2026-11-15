@@ -20,6 +20,7 @@ describe('launchPaths(...).at(-1): the newest path', () => {
     expect(launchPaths([exe, '--user-data-dir=x', 'a.txt', '--flag'], cwd, false).at(-1)).toBe(resolve(cwd, 'a.txt'))
     expect(launchPaths([exe, '--x', '--', '--y=z.txt'], cwd, false).at(-1)).toBe(resolve(cwd, '--y=z.txt'))
     expect(launchPaths([exe, '--', 'a.txt', '--', '-b.txt'], cwd, false).at(-1)).toBe(resolve(cwd, '-b.txt'))
+    expect(launchPaths([exe, '--', '--'], cwd, false)).toEqual([resolve(cwd, '--')])
   })
   it('names nothing without a path, and skips empty ones', () => {
     expect(launchPaths([exe, '--x'], cwd, false).at(-1)).toBeUndefined()
