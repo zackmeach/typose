@@ -23,4 +23,4 @@ Typose treats every file it opens as untrusted. Anything an opened file can make
 
 ## Supported versions
 
-Only the latest release and `main` are supported.
+Only the newest release, pre-releases included, and `main` are supported.
