@@ -9,7 +9,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdir
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import type { DebugStats } from '../app/shared/protocol'
-import { diagnoseLinger } from './linger'
+import { diagnoseLinger, exitedMeanwhile, lingerError } from './linger'
 
 export const APP_DIR = resolve(__dirname, '../app')
 /** Generated fixtures; gitignored, and the big ones are deleted after their tests. */
@@ -128,18 +128,19 @@ function kill(pid: number): void {
 /**
  * Closes the app if it's still up, then keeps the run's evidence in the test's output directory: the exit status,
  * the lifecycle log and any crash dumps. Deletes the private profile unless `keep` (a relaunch reuses it). An app
- * that hasn't exited 15 s after its close, as one didn't in main-macos run 40070774628, is killed and fails the test,
- * once `diagnoseLinger` has recorded what it was doing.
+ * that hasn't exited 15 s after its close, as one didn't in main-macos run 40070774628, fails the test, once
+ * `diagnoseLinger` has recorded what it was doing; it is killed unless it exited during the diagnostic.
  */
 export async function finish(l: Launched, keep = false): Promise<Exit> {
   running.delete(l)
   const closing = l.app.close().catch(() => {})
   const closed = await Promise.race([l.exited, new Promise<null>((ok) => setTimeout(() => ok(null), 15_000))])
-  const lingered = closed ? '' : diagnoseLinger(l.pid, l.userData, l.stderr()).summary
-  const exit = closed ?? (kill(l.pid), await l.exited)
+  const lingered = closed ? null : diagnoseLinger(l.pid, l.userData, l.stderr())
+  const meanwhile = lingered ? await exitedMeanwhile(l.exited) : null // once it has exited, its pid may be another process's
+  const exit = closed ?? meanwhile ?? (kill(l.pid), await l.exited)
   await closing
   keepEvidence(l.userData, l.pid, exit, keep)
-  if (!closed) throw new Error(`pid ${l.pid} didn't exit within 15 s of its close, and was killed\n${lingered}`)
+  if (lingered) throw lingerError(lingered, meanwhile !== null, l.stderr())
   return exit
 }
 

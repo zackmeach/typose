@@ -8,11 +8,16 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-/** The longest a call takes: its commands' timeouts (30 s at most, on macOS) and a few file reads and writes. */
-export const LINGER_BUDGET = 40_000
+/** The longest a call takes: its commands' timeouts (40 s at most, on macOS) and a few file reads and writes. */
+export const LINGER_BUDGET = 45_000
 const WAITING = 'Waiting for the debugger to disconnect'
-// One line per process: pid, parent pid, seconds since it started, command line. Win32_Process leaves state empty.
-const WIN_LIST = "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1} {2}s {3}' -f $_.ProcessId, $_.ParentProcessId, $(if ($_.CreationDate) { [int]((Get-Date) - $_.CreationDate).TotalSeconds } else { '?' }), $_.CommandLine }"
+// First, lines marked `#` that the tree's parser skips: the pid's CPU time and its threads, counted by state (and wait
+// reason). Then one line per process: pid, parent pid, seconds since it started, command line. Win32_Process leaves
+// state empty. The process list goes last so that the exit status is its own.
+const winList = (pid: number) =>
+  `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; ` +
+  "if ($p) { '# CPU {0} s, {1} threads' -f [math]::Round($p.TotalProcessorTime.TotalSeconds, 2), $p.Threads.Count; $p.Threads | Group-Object { if ($_.ThreadState -eq 'Wait') { 'Wait/' + $_.WaitReason } else { [string]$_.ThreadState } } | ForEach-Object { '# threads {0}: {1}' -f $_.Name, $_.Count } }; " +
+  "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1} {2}s {3}' -f $_.ProcessId, $_.ParentProcessId, $(if ($_.CreationDate) { [int]((Get-Date) - $_.CreationDate).TotalSeconds } else { '?' }), $_.CommandLine }"
 
 export interface Linger {
   pid: number
@@ -22,14 +27,15 @@ export interface Linger {
   waiting: boolean
   /** The pid, if still listed, and its descendants; null if the process list couldn't be read. */
   tree: { pid: number; ppid: number; line: string }[] | null
-  /** One parenthesised line for the failure message. */
+  /** What the failure message's last line says, inside its parentheses (`lingerError`). */
   summary: string
 }
 
-/** Runs a command, killed after `timeout` ms; how it went, as text, is in `report`. */
+/** Runs a command, killed after `timeout` ms; how it went, and how long it took, as text, is in `report`. */
 function run(cmd: string, args: string[], timeout: number): { ok: boolean; out: string; report: string } {
+  const start = Date.now()
   const r = spawnSync(cmd, args, { encoding: 'utf8', timeout, killSignal: 'SIGKILL', maxBuffer: 64 * 2 ** 20 })
-  const how = r.error ? String(r.error) : `exit ${r.status ?? r.signal}`
+  const how = `${r.error ? String(r.error) : `exit ${r.status ?? r.signal}`}, after ${Date.now() - start} ms`
   return { ok: !r.error && r.status === 0, out: r.stdout ?? '', report: `$ ${cmd} ${args.join(' ')}\n(${how})${r.stderr ? `\n${r.stderr.trim()}` : ''}` }
 }
 
@@ -53,20 +59,20 @@ export function diagnoseLinger(pid: number, userData: string, stderr: string): L
   attempt('the output directory', () => mkdirSync((out = test.info().outputPath()), { recursive: true }))
   attempt('reading the lifecycle log', () => {
     for (const line of readFileSync(join(userData, 'logs', 'lifecycle.jsonl'), 'utf8').split('\n')) {
-      let e: { t?: string; pid?: number; event?: string; code?: unknown }
+      let e: { t?: string; pid?: number; event?: string; code?: unknown } | null
       try {
         e = JSON.parse(line) as typeof e
       } catch {
         continue
       }
-      if (e.event === 'quit' && e.pid === pid) r.quit = { code: e.code, ago: at - Date.parse(String(e.t)) }
+      if (e?.event === 'quit' && e.pid === pid) r.quit = { code: e.code, ago: at - Date.parse(String(e.t)) } // a line may parse to null
     }
   })
   attempt('listing processes', () => {
     const list = process.platform === 'win32'
-      ? run('powershell', ['-NoProfile', '-Command', WIN_LIST], 10_000)
+      ? run('powershell', ['-NoProfile', '-Command', winList(pid)], 10_000)
       : run('ps', ['-A', '-ww', '-o', 'pid=,ppid=,stat=,etime=,args='], 10_000)
-    notes.push(list.report)
+    notes.push(list.report, ...list.out.split('\n').filter((line) => line.startsWith('#')).map((line) => line.trim()))
     if (!list.ok) return
     const all = list.out.split('\n').flatMap((line) => {
       const m = /^\s*(\d+)\s+(\d+)\b/.exec(line)
@@ -90,7 +96,13 @@ export function diagnoseLinger(pid: number, userData: string, stderr: string): L
       notes.push(threads.report, threads.out)
     })
   }
-  if (process.platform === 'darwin' && out) attempt('sampling', () => notes.push(run('sample', [String(pid), '1', '-mayDie', '-file', join(out, `linger-${pid}.sample.txt`)], 20_000).report))
+  if (process.platform === 'darwin') {
+    attempt('listing threads', () => {
+      const threads = run('ps', ['-M', '-p', String(pid)], 10_000) // cheap, so thread states land even if `sample` times out
+      notes.push(threads.report, threads.out)
+    })
+    if (out) attempt('sampling', () => notes.push(run('sample', [String(pid), '1', '-mayDie', '-file', join(out, `linger-${pid}.sample.txt`)], 20_000).report))
+  }
 
   const quit = r.quit ? `quit logged ${(r.quit.ago / 1000).toFixed(1)} s earlier with code ${String(r.quit.code)}` : 'quit not logged'
   const seen = `stderr "${WAITING}": ${r.waiting ? 'seen' : 'not seen'}`
@@ -105,6 +117,19 @@ export function diagnoseLinger(pid: number, userData: string, stderr: string): L
   } catch (e) {
     where = `${file} not written: ${String(e)}`
   }
-  r.summary = `(${quit}; ${seen}; ${alive}; ${where})`
+  r.summary = `${quit}; ${seen}; ${alive}; ${where}`
   return r
+}
+
+/** An exit the diagnostic hid by holding the event loop: one that happened meanwhile lands within the next 100 ms. */
+export const exitedMeanwhile = <T>(exited: Promise<T>): Promise<T | null> =>
+  Promise.race([exited, new Promise<null>((ok) => setTimeout(() => ok(null), 100))])
+
+/**
+ * The failure: its first clause is what CI annotations and records are searched by. `exited` says the process ended
+ * by itself during the diagnostic; `stderr`, read after it, may hold the waiting line that came in while it ran.
+ */
+export function lingerError(r: Linger, exited: boolean, stderr: string): Error {
+  const late = !r.waiting && stderr.includes(WAITING) ? `; stderr "${WAITING}": first seen after the diagnostic` : ''
+  return new Error(`pid ${r.pid} didn't exit within 15 s of its close, ${exited ? 'and exited during the diagnostic' : 'and was killed'}\n(${r.summary}${late})`)
 }

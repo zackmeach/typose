@@ -8,7 +8,7 @@ import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { type Exit, cleanups, keepEvidence, test } from './app'
-import { diagnoseLinger } from './linger'
+import { diagnoseLinger, exitedMeanwhile, lingerError } from './linger'
 
 const DIST = resolve(__dirname, '../app/dist')
 
@@ -138,10 +138,11 @@ export async function closePackaged(l: PackagedLaunch): Promise<Exit> {
     else l.proc.kill('SIGTERM')
   }
   const closed = await Promise.race([l.exited, new Promise<null>((ok) => setTimeout(() => ok(null), 15_000))])
-  const lingered = closed ? '' : diagnoseLinger(l.pid, l.userData, l.stderr()).summary
+  const lingered = closed ? null : diagnoseLinger(l.pid, l.userData, l.stderr())
+  const meanwhile = lingered ? await exitedMeanwhile(l.exited) : null // then the kill below, through the handle, does nothing
   const exit = closed ?? (l.proc.kill('SIGKILL'), await l.exited)
   keepEvidence(l.userData, l.pid, exit, false)
-  if (!closed) throw new Error(`pid ${l.pid} didn't exit within 15 s of its close, and was killed\n${lingered}`)
+  if (lingered) throw lingerError(lingered, meanwhile !== null, l.stderr())
   return exit
 }
 
