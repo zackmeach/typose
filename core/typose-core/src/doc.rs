@@ -1,7 +1,9 @@
 //! Documents with generations (spec §3.1): after every read, the path or inherited route's identity is checked against the one
-//! taken at open [Z63], and every chunk is verified against its first-read hash. Any change freezes the document.
+//! taken at open [Z63], and every chunk is verified against its first-read hash. Any change freezes the document, except
+//! an append that `Document::extend` takes in (Z95).
 use std::fs::File;
 use std::io;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -169,10 +171,23 @@ impl Charges {
     }
 }
 
+/// How the file at the path, or along the local route, differs from the document's identity and baseline (Z95).
+enum Drift {
+    Same,
+    /// The same file, longer: appended to.
+    Grew(FileId),
+    /// Anything else, a new modified time at the same size included.
+    Changed,
+}
+
 pub struct Document {
     path: PathBuf,
     store: ByteStore,
-    id: FileId,
+    /// The file's volume and index (device and inode): taken at open, it never changes.
+    identity: (u64, u64),
+    /// The size and modified time the document has accepted: taken at open, moved forward only by `extend`, which
+    /// holds this lock throughout, so extends run one at a time. Lock order: this, then the store's.
+    baseline: Mutex<(u64, SystemTime)>,
     generation: u32,
     cache_chunks: usize,
     frozen: Mutex<Option<String>>,
@@ -211,7 +226,8 @@ impl Document {
         Ok(Document {
             path: path.to_owned(),
             store,
-            id,
+            identity: (id.volume, id.index),
+            baseline: Mutex::new((id.size, id.modified)),
             generation,
             cache_chunks,
             frozen: Mutex::new(None),
@@ -234,7 +250,8 @@ impl Document {
         Ok(Document {
             path,
             store,
-            id,
+            identity: (id.volume, id.index),
+            baseline: Mutex::new((id.size, id.modified)),
             generation,
             cache_chunks,
             frozen: Mutex::new(None),
@@ -454,6 +471,15 @@ impl Document {
     }
 
     fn checked_local_file(&self, generation: u32) -> Result<File, DocError> {
+        match self.local_file(generation)? {
+            (file, now) if now == self.id() => Ok(file),
+            _ => Err(self.freeze("changed on disk".into())),
+        }
+    }
+
+    /// The local route walked again to the file this document has open, and that file's identity now. A route that
+    /// fails or reaches another file freezes the document.
+    fn local_file(&self, generation: u32) -> Result<(File, FileId), DocError> {
         if generation != self.generation {
             return Err(DocError::Stale { current: self.generation, asked: generation });
         }
@@ -474,8 +500,8 @@ impl Document {
             })
             .map_err(local_error);
         match current {
-            Ok(Some((file, now))) if now == self.id => Ok(file),
-            Ok(_) => Err(self.freeze("changed on disk".into())),
+            Ok(Some(found)) => Ok(found),
+            Ok(None) => Err(self.freeze("changed on disk".into())),
             Err(e @ DocError::Memory(_)) => Err(e),
             Err(e) => Err(self.freeze(format!("local source unavailable: {e}"))),
         }
@@ -509,6 +535,12 @@ impl Document {
         if self.local_only || self.folder_scope().is_some() {
             return self.check_local_source(self.generation);
         }
+        if self.path_id()? == self.id() { Ok(()) } else { Err(self.freeze("changed on disk".into())) }
+    }
+
+    /// The identity of what the path reaches now. A frozen document, a refused route or a path that no longer
+    /// resolves fails, and the last two freeze it.
+    fn path_id(&self) -> Result<FileId, DocError> {
         if let Some(why) = self.frozen() {
             return Err(DocError::Frozen(why));
         }
@@ -519,11 +551,61 @@ impl Document {
             Ok(Some(why)) => return Err(self.freeze(format!("changed on disk: now {why}"))),
             Err(e) => return Err(self.freeze(format!("unavailable: {e}"))),
         }
-        match FileId::of(&self.path) {
-            Ok(now) if now == self.id => Ok(()),
-            Ok(_) => Err(self.freeze("changed on disk".into())),
-            Err(e) => Err(self.freeze(format!("unavailable: {e}"))),
+        FileId::of(&self.path).map_err(|e| self.freeze(format!("unavailable: {e}")))
+    }
+
+    /// The identity and baseline as one `FileId`: what every check compares the file with.
+    fn id(&self) -> FileId {
+        let (size, modified) = *self.baseline.lock().unwrap();
+        FileId { volume: self.identity.0, index: self.identity.1, size, modified }
+    }
+
+    /// The file at the path, or along the local route, walked to as `check` walks to it, against the identity and
+    /// `baseline`. A walk that fails freezes the document, as `check`'s does.
+    fn drift(&self, baseline: (u64, SystemTime)) -> Result<Drift, DocError> {
+        let now = if self.local_only || self.folder_scope().is_some() {
+            self.local_file(self.generation)?.1
+        } else {
+            self.path_id()?
+        };
+        Ok(if (now.volume, now.index) != self.identity {
+            Drift::Changed
+        } else if (now.size, now.modified) == baseline {
+            Drift::Same
+        } else if now.size > baseline.0 {
+            Drift::Grew(now)
+        } else {
+            Drift::Changed
+        })
+    }
+
+    /// Live tail (Z95): the file has been appended to, so the document grows with it, in place and in the same
+    /// generation. Returns the bytes it gained, or `None` when the file hasn't changed. The same file, longer, is an
+    /// append; anything else (shorter, a new modified time at the same size, another file, nothing at the path, a route
+    /// that's refused) freezes, as `check` does. So does a mismatch in the bytes the store had hashed in its old last
+    /// chunk (`ByteStore::extend`). When the ledger can't hold what the longer document needs, it returns `Memory`,
+    /// and the document stays at its old length, not frozen. A length JavaScript can't hold is `Refused`, unfrozen too.
+    ///
+    /// `check` still freezes on any growth: a read after an append, before this runs, freezes. Its caller holds a page
+    /// slot, and no index job runs beside it (`ByteStore::extend`).
+    pub fn extend(&self) -> Result<Option<Range<u64>>, DocError> {
+        let mut baseline = self.baseline.lock().unwrap();
+        let now = match self.drift(*baseline)? {
+            Drift::Same => return Ok(None),
+            Drift::Changed => return Err(self.freeze("changed on disk".into())),
+            Drift::Grew(now) => now,
+        };
+        check_len(now.size)?;
+        match self.store.extend(now.size) {
+            Ok(()) => {}
+            Err(StoreError::Io(e)) if e.get_ref().is_some_and(|inner| inner.is::<OverBudget>()) => {
+                return Err(io_error(e));
+            }
+            Err(e) => return Err(self.fail(e)),
         }
+        let old = baseline.0;
+        *baseline = (now.size, now.modified);
+        Ok(Some(old..now.size))
     }
 
     /// Freezes the document (spec §3.1): nothing more is read until Reload. Also how Raw stops a superseded
@@ -672,6 +754,175 @@ mod tests {
         let _ = fs::remove_file(&moved);
         assert!(blocked.is_empty(), "blocked operations: {blocked:?}");
         assert_eq!(stale_accepted, 0);
+    }
+
+    fn append(path: &Path, bytes: &[u8]) {
+        OpenOptions::new().append(true).open(path).unwrap().write_all(bytes).unwrap();
+    }
+
+    /// Z95: an append extends the document in place, in the same generation, and reads after it return the old bytes
+    /// and the new: from an empty file, inside a chunk, at a chunk's end, a byte past it, and with a last chunk never
+    /// read before. The others read their last chunk first, so a stale cached copy of it would cut reads short.
+    #[test]
+    fn an_append_extends_the_document_in_place() {
+        let c = CHUNK as u64;
+        for (old, read_tail) in [(0, false), (17, true), (2 * c, true), (2 * c + 1, true), (c + 500, false)] {
+            let all = pattern(old as usize + CHUNK + 3, 5); // the append reaches into a chunk the old length didn't
+            let path = temp_file(&format!("doc-extend-{old}"), &all[..old as usize]);
+            let doc = Document::open(&path).unwrap();
+            doc.read(1, 0, 1).unwrap();
+            if read_tail {
+                doc.read(1, old - 1, old).unwrap(); // hashes and caches the last chunk
+            }
+            assert_eq!(doc.extend().unwrap(), None, "{old}: nothing appended yet");
+            append(&path, &all[old as usize..]);
+            let new = all.len() as u64;
+            assert_eq!(doc.extend().unwrap(), Some(old..new), "{old}");
+            assert_eq!((doc.len(), doc.generation(), doc.frozen()), (new, 1, None), "{old}");
+            let across = old.saturating_sub(5)..old + 5;
+            assert_eq!(doc.read(1, across.start, across.end).unwrap(), all[across.start as usize..across.end as usize]);
+            assert_eq!(doc.read(1, 0, new).unwrap(), all, "{old}"); // and the identity check passes at the new baseline
+            assert_eq!(doc.extend().unwrap(), None, "{old}: nothing more appended");
+        }
+    }
+
+    /// Z95: bytes rewritten inside the old last chunk, or inside the full chunk before a short one (here a single
+    /// byte), then an append. The extend checks what the store had hashed there, names the chunk, and the document
+    /// freezes and stays frozen, at its old length.
+    #[test]
+    fn a_rewrite_inside_the_old_last_chunks_freezes_the_extend() {
+        let c = CHUNK as u64;
+        for (old, at) in [(2 * c + 100, 2 * c + 10), (2 * c, c + 7), (2 * c + 1, c + 7)] {
+            let path = temp_file(&format!("doc-extend-rewrite-{old}"), &pattern(old as usize, 6));
+            let doc = Document::open(&path).unwrap();
+            doc.read(1, 0, old).unwrap(); // hashes every chunk
+            let mut f = OpenOptions::new().write(true).open(&path).unwrap();
+            f.seek(SeekFrom::Start(at)).unwrap();
+            f.write_all(b"rewritten").unwrap();
+            drop(f);
+            append(&path, b"then appended");
+            let why = format!("changed on disk (chunk {})", at / c);
+            let result = doc.extend();
+            assert!(matches!(result, Err(DocError::Frozen(ref w)) if *w == why), "{old}: {result:?}");
+            assert_eq!((doc.frozen(), doc.len()), (Some(why), old));
+            assert!(matches!(doc.extend(), Err(DocError::Frozen(_))));
+            assert!(matches!(doc.read(1, 0, 1), Err(DocError::Frozen(_))));
+        }
+    }
+
+    /// Z95: only an append extends. A shorter file, a new modified time at the same size, another file at the path
+    /// (longer, so only its identity differs) and no file there all freeze the document, as `check` does.
+    #[test]
+    fn anything_but_an_append_freezes_the_extend() {
+        let original = pattern(CHUNK + 50, 8);
+        let changes = ["shrunk", "same size, new modified time", "another file in its place", "deleted"];
+        for (i, what) in changes.into_iter().enumerate() {
+            let path = temp_file(&format!("doc-extend-changed-{i}"), &original);
+            let doc = Document::open(&path).unwrap();
+            doc.read(1, 0, original.len() as u64).unwrap();
+            match i {
+                0 => OpenOptions::new().write(true).open(&path).unwrap().set_len(CHUNK as u64).unwrap(),
+                1 => {
+                    let f = OpenOptions::new().write(true).open(&path).unwrap();
+                    let at = f.metadata().unwrap().modified().unwrap();
+                    f.set_modified(at + std::time::Duration::from_secs(10)).unwrap();
+                }
+                2 => {
+                    fs::rename(&path, path.with_extension("moved")).unwrap();
+                    fs::write(&path, pattern(2 * CHUNK, 9)).unwrap();
+                }
+                _ => fs::remove_file(&path).unwrap(),
+            }
+            let result = doc.extend();
+            assert!(matches!(result, Err(DocError::Frozen(_))), "{what}: {result:?}");
+            assert!(doc.frozen().is_some() && doc.len() == original.len() as u64, "{what}");
+            let _ = fs::remove_file(path.with_extension("moved"));
+        }
+    }
+
+    /// Z95: reads beside extends. Four readers read the last chunk, up to the length they last saw, and an older span,
+    /// through the store, while this thread appends and extends 1,000 times, across a chunk boundary: no read is cut
+    /// short, none is `Changed` (no chunk is sized at one length and checked against a hash taken at another), and
+    /// every byte is the one written there.
+    #[test]
+    fn reads_beside_a_thousand_extends_are_whole_and_verified() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+        let byte = |i: u64| (i * 31 % 251) as u8;
+        let start = CHUNK as u64 - 3000;
+        let path = temp_file("doc-extend-race", &(0..start).map(byte).collect::<Vec<_>>());
+        let doc = Arc::new(Document::open(&path).unwrap());
+        let done = Arc::new(AtomicBool::new(false));
+        let readers: Vec<_> = (0..4u64)
+            .map(|r| {
+                let (doc, done) = (doc.clone(), done.clone());
+                std::thread::spawn(move || {
+                    let mut reads = 0u64;
+                    while !done.load(Relaxed) {
+                        let len = doc.len(); // an extend may pass it before the read
+                        for (from, to) in [(len.saturating_sub(4000 + 100 * r), len), (1000 * r, 1000 * r + 64)] {
+                            let bytes = doc.store().read(from, to).unwrap_or_else(|e| panic!("{from}..{to}: {e}"));
+                            assert_eq!(bytes.len() as u64, to - from, "a short read of {from}..{to}");
+                            assert!(bytes.iter().zip(from..).all(|(&b, i)| b == byte(i)), "{from}..{to}");
+                        }
+                        reads += 1;
+                        std::thread::yield_now();
+                    }
+                    reads
+                })
+            })
+            .collect();
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        let mut written = start;
+        let extended = (0..1000u64).try_for_each(|cycle| {
+            let more = 1 + cycle % 13;
+            file.write_all(&(written..written + more).map(byte).collect::<Vec<_>>()).unwrap();
+            written += more;
+            match doc.extend() {
+                Ok(Some(grew)) if grew == (written - more..written) => Ok(()),
+                other => Err(format!("cycle {cycle}: {other:?}")),
+            }
+        });
+        done.store(true, Relaxed);
+        let reads: Vec<u64> = readers.into_iter().map(|r| r.join().unwrap()).collect();
+        extended.unwrap();
+        assert!(written > CHUNK as u64, "the appends crossed into a new chunk");
+        assert!(reads.iter().all(|&n| n > 0), "every reader read: {reads:?}");
+        assert_eq!((doc.len(), doc.frozen()), (written, None));
+    }
+
+    /// Z95 rests on this: a writer that keeps its handle open (a logger) appends and flushes, and the path, stat'd as
+    /// `check` stats it, shows the larger size while that handle is still open. Whether the modified time seen through
+    /// the path moves with each append, and again at the close, is printed, not asserted: it's evidence for the rule
+    /// that the same size with a new modified time freezes. The pauses are only as long as a coarse timestamp needs.
+    #[test]
+    fn an_append_through_a_handle_held_open_shows_at_the_path() {
+        let path = temp_file("doc-extend-held-open", b"opened\n");
+        let stat = |path: &Path| {
+            assert_eq!(route_refusal(path).unwrap(), None);
+            FileId::of(path).unwrap()
+        };
+        let mut seen = stat(&path);
+        let mut writer = OpenOptions::new().append(true).open(&path).unwrap();
+        for i in 0..5 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            writer.write_all(format!("line {i}\n").as_bytes()).unwrap();
+            writer.flush().unwrap();
+            let now = stat(&path);
+            assert!(now.size > seen.size, "append {i}: the path shows {} bytes, as before it", now.size);
+            eprintln!(
+                "held open, append {i}: size {} -> {}, modified changed: {}",
+                seen.size,
+                now.size,
+                now.modified != seen.modified
+            );
+            seen = now;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        drop(writer);
+        let now = stat(&path);
+        assert_eq!(now.size, seen.size);
+        eprintln!("after the writer's close: modified changed: {}", now.modified != seen.modified);
     }
 
     /// Spec §3.3: device and special files are refused before anything opens them. Opening `\\.\pipe\…`

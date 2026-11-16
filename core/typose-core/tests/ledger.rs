@@ -25,7 +25,7 @@ use typose_core::jsonl;
 use typose_core::md::{self, MAX_SOURCE, Note};
 use typose_core::pages::MAX_ITEMS;
 use typose_core::raw::Raw;
-use typose_core::store::CHUNK;
+use typose_core::store::{CHUNK, ChunkHashes};
 
 struct Counting;
 
@@ -208,6 +208,26 @@ fn touch_job(i: usize) {
     let _slot = budget::slot(Work::Page, &|| false).unwrap();
     if at < raw.document().len() && raw.document().read(raw.document().generation(), at, at + 1).is_err() {
         FAILED.fetch_add(1, SeqCst);
+    }
+}
+
+/// Live tail (Z95): worker 0 extends the document; the others read its last chunk and its first through the store, as
+/// the reads beside an extend do (the identity check would freeze on the append). Each holds a page slot.
+fn extend_job(i: usize) {
+    let raw = raw();
+    let doc = raw.document();
+    let _slot = budget::slot(Work::Page, &|| false).unwrap();
+    if i == 0 {
+        if !matches!(doc.extend(), Ok(Some(_))) {
+            FAILED.fetch_add(1, SeqCst);
+        }
+        return;
+    }
+    let len = doc.len();
+    for (from, to) in [(len.saturating_sub(4096), len), (0, len.min(4096))] {
+        if !doc.store().read(from, to).is_ok_and(|bytes| bytes.len() as u64 == to - from) {
+            FAILED.fetch_add(1, SeqCst);
+        }
     }
 }
 
@@ -578,6 +598,69 @@ fn shape(i: usize, s: &Shape) {
     );
     assert_eq!(after.used, before.used, "{}: the ledger isn't back to its baseline after close", s.name);
     assert!(leaked.unsigned_abs() < 64 << 10, "{}: {leaked} bytes still live after close", s.name);
+}
+
+fn in_slot<T>(f: impl FnOnce() -> T) -> T {
+    let _slot = budget::slot(Work::Page, &|| false).unwrap();
+    f()
+}
+
+/// Live tail (Z95), checked throughout: a document extends in place, beside reads of its last chunk and its first. A
+/// twin extended first measures the extend's need: its new cache floor and hash table, charged beside the old ones they
+/// replace. With the limit a byte short of the cache floor, then of both, the extend is refused, with nothing changed
+/// and nothing frozen; with room, it extends as the twin did, to the same charges. Then both close: the ledger is back.
+fn extend_shape(step: usize, path: &Path) {
+    write(path, &[b"a line of text\n"], 200_000); // 3,000,000 bytes: its last chunk partial
+    let mut appender = fs::OpenOptions::new().append(true).open(path).unwrap();
+    let (before, failed) = (budget::totals(), FAILED.load(SeqCst));
+    STEP.store(step, SeqCst);
+    ARMED.store(true, SeqCst);
+    let raw = Arc::new(Raw::open(path).unwrap());
+    let twin = Raw::open(path).unwrap();
+    *RAW.lock().unwrap() = Some(raw.clone());
+    run(touch_job); // every chunk hashed and cached
+    let old = raw.document().len();
+    in_slot(|| twin.document().read(1, old - 1, old).unwrap());
+    ARMED.store(false, SeqCst);
+    appender.write_all(&vec![b'x'; CHUNK + 7]).unwrap(); // into a chunk the old length didn't reach
+    ARMED.store(true, SeqCst);
+    let used = budget::totals().used;
+    budget::reset_high();
+    let grew = in_slot(|| twin.document().extend());
+    let (need, twin_charges, new) = (budget::totals().high - used, twin.charges(), twin.document().len());
+    let (charges, hashed, limit) = (raw.charges(), raw.document().store().hashes().len(), budget::totals().limit);
+    let mut refusals = [(false, false); 2];
+    for (k, room) in [twin_charges.cache, need].into_iter().enumerate() {
+        budget::set_limit(budget::totals().used + room - 1).unwrap();
+        let result = in_slot(|| raw.document().extend());
+        budget::set_limit(limit).unwrap();
+        let doc = raw.document();
+        let state = (doc.len(), raw.charges(), doc.store().hashes().len(), doc.frozen());
+        refusals[k] = (matches!(result, Err(DocError::Memory(_))), state == (old, charges, hashed, None));
+    }
+    run(extend_job); // worker 0 extends, the others read beside it
+    let (after, len) = (raw.charges(), raw.document().len());
+    *RAW.lock().unwrap() = None;
+    drop(raw);
+    drop(twin);
+    ARMED.store(false, SeqCst);
+    drop(appender);
+    let leaked = LIVE.load(SeqCst) as i64 - BASELINE.load(SeqCst) as i64;
+    println!(
+        "{:>24}: {old} to {new} bytes; the extend's peak {need} bytes, {} for the cache floor; refused a byte short \
+         of either: {refusals:?}; {} charged after; live past baseline after close: {leaked}",
+        "live tail",
+        twin_charges.cache,
+        after.total()
+    );
+    assert!(matches!(grew, Ok(Some(ref r)) if *r == (old..new)), "the twin didn't extend: {grew:?}");
+    assert_eq!(new, old + CHUNK as u64 + 7);
+    assert_eq!(need, twin_charges.cache + twin_charges.hashes - ChunkHashes::bytes(0), "the extend's peak");
+    assert_eq!(refusals, [(true, true); 2], "a refused extend: (Memory, nothing changed)");
+    assert_eq!(FAILED.load(SeqCst), failed, "the extend or a read beside it failed");
+    assert_eq!((len, after), (new, twin_charges), "the extend after a refusal");
+    assert_eq!(budget::totals().used, before.used, "live tail: the ledger isn't back to its baseline");
+    assert!(leaked.unsigned_abs() < 64 << 10, "live tail: {leaked} bytes still live");
 }
 
 /// A charge-release negative control: the elastic vectors still exist, but the comparison withholds their charge.
@@ -1204,6 +1287,7 @@ fn main() {
     for (k, (name, path)) in transcripts.iter().enumerate() {
         transcript_shape(4 * shapes.len() + 3 + markdown.len() + k, name, path);
     }
+    extend_shape(4 * shapes.len() + 3 + markdown.len() + transcripts.len(), &at("tail.txt"));
 
     JOB.store(0, SeqCst);
     ROUND.fetch_add(1, SeqCst);
@@ -1217,6 +1301,7 @@ fn main() {
         .chain(markdown.iter().map(|m| m.0))
         .chain(["a Markdown build refused"])
         .chain(transcripts.iter().map(|t| t.0))
+        .chain(["live tail"])
         .collect();
     let place = match shapes.get(at / 4) {
         Some(s) => format!("{}: {}", s.name, ["open", "fill the cache", "index", "8 pages"][at % 4]),

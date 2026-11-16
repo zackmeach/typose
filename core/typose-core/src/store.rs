@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use xxhash_rust::xxh3::xxh3_64;
 
@@ -30,21 +30,22 @@ pub enum StoreError {
 }
 
 /// Each chunk's xxh3, and a bit for whether it's been seen, since 0 is a valid hash (spec §3.1). The tables are sized
-/// at open: a document's length is fixed for its life, so they never grow (plan C1).
+/// at open (plan C1) and grow only when the document extends in place (`ByteStore::extend`, Z95).
 pub struct ChunkHashes {
     table: Mutex<HashTable>,
-    /// Pays for the tables and this struct. Declared after them, so they're freed first.
-    charge: Reservation,
 }
 
 struct HashTable {
     hashes: Box<[u64]>,
     seen: Box<[u64]>,
+    /// Pays for the tables and the shared struct, and grows with them. Declared after them, so they're freed first.
+    charge: Reservation,
 }
 
-/// The chunk cache (spec §3.3), bounded in charged bytes (plan C1). Its floor (`FLOOR_CHUNKS`) is reserved at open;
-/// past that it grows a chunk at a time while the ledger allows, up to `max`, and otherwise evicts. Readers copy out of
-/// it under its lock, so an evicted chunk is freed at once rather than when the last reader lets go.
+/// The chunk cache (spec §3.3), bounded in charged bytes (plan C1). Its floor (`FLOOR_CHUNKS`) is reserved at open, and
+/// again by each extend, which replaces the cache; past that it grows a chunk at a time while the ledger allows, up to
+/// `max`, and otherwise evicts. Readers copy out of it under its lock, so an evicted chunk is freed at once rather than
+/// when the last reader lets go.
 struct Cache {
     chunks: VecDeque<(u64, Vec<u8>)>,
     slots: usize,
@@ -58,9 +59,14 @@ struct Cache {
 
 pub struct ByteStore {
     file: File,
-    len: u64,
+    /// The length. A read holds the read side from computing a chunk's size, through reading and verifying it, to
+    /// caching it; `extend` holds the write side, so no read sees a store half extended (Z95). Lock order: this, then
+    /// the hash table's lock or the cache's, never those two at once.
+    len: RwLock<u64>,
     hashes: Arc<ChunkHashes>,
     cache: Mutex<Cache>,
+    /// The most chunks the cache may hold, whatever the length: `extend` sizes it again from this.
+    cache_chunks: usize,
 }
 
 impl From<io::Error> for StoreError {
@@ -444,18 +450,49 @@ impl ChunkHashes {
     pub fn new(chunks: u64) -> Result<Arc<ChunkHashes>, OverBudget> {
         let charge = Reservation::new(Self::bytes(chunks))?;
         let n = chunks as usize;
-        let table =
-            HashTable { hashes: vec![0; n].into_boxed_slice(), seen: vec![0; n.div_ceil(64)].into_boxed_slice() };
-        Ok(Arc::new(ChunkHashes { table: Mutex::new(table), charge }))
+        let table = HashTable {
+            hashes: vec![0; n].into_boxed_slice(),
+            seen: vec![0; n.div_ceil(64)].into_boxed_slice(),
+            charge,
+        };
+        Ok(Arc::new(ChunkHashes { table: Mutex::new(table) }))
+    }
+
+    /// The hash recorded for `chunk`, if it's been seen.
+    fn recorded(&self, chunk: u64) -> Option<u64> {
+        let table = self.table.lock().unwrap();
+        let seen = table.seen.get(chunk as usize / 64)? & (1u64 << (chunk % 64)) != 0;
+        seen.then(|| table.hashes[chunk as usize])
+    }
+
+    /// Grows the tables to `chunks`, the new ones unseen, and records `tail`, a chunk's hash as it is now
+    /// (`ByteStore::extend`). The new tables are charged before anything changes, and the old ones stay charged until
+    /// they're freed, as the swap holds both. A refused charge changes nothing.
+    fn grow(&self, chunks: u64, tail: Option<(u64, u64)>) -> Result<(), OverBudget> {
+        let mut table = self.table.lock().unwrap();
+        let (n, words) = (chunks as usize, chunks.div_ceil(64) as usize);
+        let old = (table.hashes.len() + table.seen.len()) as u64 * 8;
+        table.charge.grow((n + words) as u64 * 8)?;
+        let mut hashes = vec![0; n].into_boxed_slice();
+        hashes[..table.hashes.len()].copy_from_slice(&table.hashes);
+        let mut seen = vec![0; words].into_boxed_slice();
+        seen[..table.seen.len()].copy_from_slice(&table.seen);
+        if let Some((chunk, hash)) = tail {
+            hashes[chunk as usize] = hash;
+        }
+        table.hashes = hashes; // the old tables are freed here, then their charge released
+        table.seen = seen;
+        table.charge.shrink(old);
+        Ok(())
     }
 
     /// Records the chunk's hash the first time it's seen; afterwards, verifies against it.
     pub fn check(&self, chunk: u64, data: &[u8]) -> Result<(), StoreError> {
         let hash = xxh3_64(data);
         let mut table = self.table.lock().unwrap();
-        let HashTable { hashes, seen } = &mut *table;
+        let HashTable { hashes, seen, .. } = &mut *table;
         let Some(known) = hashes.get_mut(chunk as usize) else {
-            return Err(StoreError::Changed { chunk }); // past the length the document opened with
+            return Err(StoreError::Changed { chunk }); // past the document's length
         };
         let (word, bit) = (chunk as usize / 64, 1u64 << (chunk % 64));
         if seen[word] & bit == 0 {
@@ -475,7 +512,7 @@ impl ChunkHashes {
     }
 
     pub fn charged(&self) -> u64 {
-        self.charge.bytes()
+        self.table.lock().unwrap().charge.bytes()
     }
 }
 
@@ -553,7 +590,7 @@ impl ByteStore {
         let cache = Cache::new(cache_chunks.min(chunks as usize).max(1), len).map_err(io::Error::other)?;
         #[cfg(feature = "test-hooks")]
         crate::hooks::HANDLES.fetch_add(1, Ordering::Relaxed); // until `drop` below
-        Ok(ByteStore { file, len, hashes, cache: Mutex::new(cache) })
+        Ok(ByteStore { file, len: RwLock::new(len), hashes, cache: Mutex::new(cache), cache_chunks })
     }
 
     /// The actual source handle, borrowed only while its local origin is captured during explicit open.
@@ -573,7 +610,55 @@ impl ByteStore {
     }
 
     pub fn len(&self) -> u64 {
-        self.len
+        *self.len.read().unwrap()
+    }
+
+    /// Live tail (Z95): the file has grown to `len` and is still this file (`Document::extend` checks that), so the
+    /// store grows with it, in place. The chunk that held the last old byte is read again, once, at the new length: if
+    /// its hash was recorded, its old bytes must still match it (otherwise `Changed`), and its hash as it is now
+    /// replaces it. When that chunk was short, its old bytes may be a single byte, so the whole chunk before it is
+    /// verified too, if its hash was recorded: at most two chunks are read. The hash table grows, its new chunks unseen;
+    /// the cache is sized again for `len` and emptied, so every later read comes from disk and is verified; and `len`
+    /// is published last. A length no greater changes nothing.
+    ///
+    /// It charges everything before it changes anything: a refusal is an `io::Error` holding the `OverBudget`, as
+    /// `open_with`'s is, and leaves the store as it was. The chunks are read into its caller's page slot, one at a
+    /// time. It holds the write side of `len` throughout, so no read runs beside it and the new length and the new
+    /// hash are published together; `index::build` reads at its own length and checks hashes outside that lock, so
+    /// nothing may extend while an index job runs.
+    pub fn extend(&self, len: u64) -> Result<(), StoreError> {
+        let mut geometry = self.len.write().unwrap();
+        let old = *geometry;
+        if len <= old {
+            return Ok(());
+        }
+        let last = old.checked_sub(1).map(|last| last / CHUNK as u64);
+        if !old.is_multiple_of(CHUNK as u64)
+            && let Some(before) = last.and_then(|k| k.checked_sub(1))
+            && let Some(known) = self.hashes.recorded(before)
+            && xxh3_64(&self.read_chunk(before, len)?) != known
+        {
+            return Err(StoreError::Changed { chunk: before });
+        }
+        let mut tail = None;
+        if let Some(k) = last
+            && let Some(known) = self.hashes.recorded(k)
+        {
+            let data = self.read_chunk(k, len)?;
+            if xxh3_64(&data[..(old - k * CHUNK as u64) as usize]) != known {
+                return Err(StoreError::Changed { chunk: k });
+            }
+            tail = Some((k, xxh3_64(&data)));
+        }
+        let chunks = len.div_ceil(CHUNK as u64);
+        let mut cache = Cache::new(self.cache_chunks.min(chunks as usize).max(1), len).map_err(io::Error::other)?;
+        self.hashes.grow(chunks, tail).map_err(io::Error::other)?;
+        let mut held = self.cache.lock().unwrap();
+        cache.active = held.active;
+        *held = cache; // the old cache's chunks are freed here, before its charge is released
+        drop(held);
+        *geometry = len;
+        Ok(())
     }
 
     pub fn hashes(&self) -> Arc<ChunkHashes> {
@@ -606,7 +691,8 @@ impl ByteStore {
 
     /// Runs `f` on chunk `idx`: from the cache, or read from disk and verified (spec §3.1), then cached. A read from
     /// disk allocates the chunk in its caller's page slot (plan C1), and the cache takes it from there.
-    fn with_chunk(&self, idx: u64, f: impl FnOnce(&[u8]) -> usize) -> Result<usize, StoreError> {
+    /// `len`: the length, read under the lock its caller holds.
+    fn with_chunk(&self, len: u64, idx: u64, f: impl FnOnce(&[u8]) -> usize) -> Result<usize, StoreError> {
         if cancelled() {
             return Err(StoreError::Cancelled);
         }
@@ -615,13 +701,7 @@ impl ByteStore {
         }
         #[cfg(feature = "test-hooks")]
         crate::hooks::read_delay();
-        let start = idx * CHUNK as u64;
-        let size = self.len.saturating_sub(start).min(CHUNK as u64) as usize;
-        let mut buf = vec![0u8; size];
-        read_exact_at(&self.file, &mut buf, start).map_err(|e| match e.kind() {
-            io::ErrorKind::UnexpectedEof => StoreError::Changed { chunk: idx },
-            _ => StoreError::Io(e),
-        })?;
+        let buf = self.read_chunk(idx, len)?;
         self.hashes.check(idx, &buf)?;
         let mut cache = self.cache.lock().unwrap();
         let n = f(&buf);
@@ -629,15 +709,28 @@ impl ByteStore {
         Ok(n)
     }
 
+    /// Chunk `idx` from disk, sized for a file of `len` bytes: a file shorter than that now is `Changed`.
+    fn read_chunk(&self, idx: u64, len: u64) -> Result<Vec<u8>, StoreError> {
+        let start = idx * CHUNK as u64;
+        let size = len.saturating_sub(start).min(CHUNK as u64) as usize;
+        let mut buf = vec![0u8; size];
+        read_exact_at(&self.file, &mut buf, start).map_err(|e| match e.kind() {
+            io::ErrorKind::UnexpectedEof => StoreError::Changed { chunk: idx },
+            _ => StoreError::Io(e),
+        })?;
+        Ok(buf)
+    }
+
     pub fn read(&self, start: u64, end: u64) -> Result<Vec<u8>, StoreError> {
-        let end = end.min(self.len);
+        let len = self.len.read().unwrap(); // held to the end of the read: no extend runs inside it
+        let end = end.min(*len);
         let mut out = Vec::with_capacity(end.saturating_sub(start) as usize);
         let mut pos = start;
         while pos < end {
             let idx = pos / CHUNK as u64;
             let off = (pos - idx * CHUNK as u64) as usize;
             let want = (end - pos) as usize;
-            let take = self.with_chunk(idx, |data| {
+            let take = self.with_chunk(*len, idx, |data| {
                 let take = want.min(data.len().saturating_sub(off));
                 out.extend_from_slice(&data[off..off + take]);
                 take
@@ -732,6 +825,30 @@ mod tests {
         let store = ByteStore::open(&path).unwrap();
         std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_len(10).unwrap();
         assert!(matches!(store.read(CHUNK as u64, CHUNK as u64 + 1), Err(StoreError::Changed { chunk: 1 })));
+    }
+
+    /// Z95: an extend charges what an open at the new length does: the hash table for its chunks, and the cache's floor
+    /// for a cache sized again for it, empty, whatever the old cache had grown to. Reads then return every byte.
+    #[test]
+    fn an_extend_charges_what_an_open_at_the_new_length_does() {
+        let c = CHUNK;
+        for (old, new, cache_chunks) in
+            [(0, 17, CACHE_CHUNKS), (17, 3 * c + 5, CACHE_CHUNKS), (5 * c + 3, 6 * c, 64), (2 * c, 9 * c + 1, 4)]
+        {
+            let data = pattern(new);
+            let path = temp_file(&format!("extend-charges-{old}"), &data[..old]);
+            let store = ByteStore::open_with(&path, cache_chunks).unwrap();
+            for idx in 0..old.div_ceil(c) as u64 {
+                store.read(idx * c as u64, idx * c as u64 + 1).unwrap(); // past the cache's floor, for the third
+            }
+            std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&data[old..]).unwrap();
+            store.extend(new as u64).unwrap();
+            let (chunks, max) = (new.div_ceil(c), cache_chunks.min(new.div_ceil(c)).max(1));
+            let expected = (ChunkHashes::bytes(chunks as u64), Cache::bytes(FLOOR_CHUNKS.min(max), max, new as u64));
+            assert_eq!(store.charges(), expected, "{old} to {new}");
+            assert_eq!(ByteStore::open_with(&path, cache_chunks).unwrap().charges(), expected);
+            assert_eq!(store.read(0, new as u64).unwrap(), data);
+        }
     }
 
     #[test]
