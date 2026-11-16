@@ -30,7 +30,7 @@
 | Z3 | **Open anything.** Files and folders arrive via drag, CLI or OS; folders become sidebar roots (several allowed); files from anywhere open as tabs; the session is restored. |
 | Z4 | Shape-aware lenses: **Transcript only** (agent chat JSONL). Everything else is format-generic. |
 | Z5 | Customization: **tokens + a live-preview settings UI**, backed by a plain-text config. Themes are shareable token files. **No CSS theming.** |
-| Z6 | **No file watching in v1.** Live reload with sticky change markers is an expansion idea. |
+| Z6 | **No file watching in v1, except that an open file follows appends** (amended 2026-11-16; tech design Z95). Nothing watches the file system: the file in view is checked on a timer. Live reload with sticky change markers is still an expansion idea. |
 | Z7 | **Windows, macOS and Linux from day one.** |
 | Z8 | **Mouse-first**, with shortcuts that a Word or Excel user expects. |
 | Z9 | Default framing is **card on canvas** (ref 02, breadcrumb + lens-switch header). Flush is a theme option. |
@@ -121,13 +121,13 @@ Typose is an open-source desktop viewer for the formats the AI era runs on: **Ma
 | Opening | Drag-and-drop, CLI (`typose <path>…`), OS "Open with", Ctrl+O, and the menu's Open file… / Open folder… **[Z3]** |
 | Workspace | Each folder becomes a sidebar **root**, with several allowed. Files from anywhere open as tabs. **[Z3]** |
 | Session | Roots, cards, tabs, the lens for each tab and scroll positions are restored on launch **[Z3]** |
-| File changes | **Static [Z6].** Ctrl+R reloads. The on-access change check (§7.9) is not watching. |
+| File changes | **Appends are followed; any other change freezes [Z6].** When another program appends to an open file, the new lines appear without a reload (§7.9). Ctrl+R reloads. Nothing watches the file system. |
 | Search | **In-file find only [Z19]** (§7.5) |
 | Shape-aware lens | **Transcript only [Z4]** (§5.4) |
 | Window | Single instance per user session, single window. Further CLI or "Open with" calls go to the running window. A launch from a different user or an elevated context can't reach it; this is a documented edge case. |
 
 ### Expansion list (designed for, not built)
-1. **Live reload with sticky change markers [Z6].** Gutter markers stay until you've seen them, background tabs get an unseen dot, and appended JSONL auto-tails.
+1. **Live reload with sticky change markers [Z6].** Gutter markers stay until you've seen them, and background tabs get an unseen dot. Following appends moved into v1 on 2026-11-16 [Z6].
 2. **Change review / diff lens**, built on item 1.
 3. **Editing:** quick fixes, then a full editor **[Z1]**.
 4. **Cross-file search [Z19]**, with results in the peek card.
@@ -669,7 +669,8 @@ See §7.10.
 | Missing file (restored session, or Ctrl+R) | "File not found at <path>", with **Locate…** and **Close** |
 | Permission denied | "Can't read <path> · permission denied", with **Retry** and **Close** |
 | Slow open (no first screen after 300ms, e.g. a network share) | A thin progress line under the header plus "Opening…". Input is never blocked, and the file can be closed. |
-| Changed on disk, found on access | After each lazy read [Z63] (a file over 100MB, or scrolling a file-backed region), Typose checks the file's size, modified time and identity. It also verifies each re-read 1MiB chunk against the hash taken the first time that chunk was read, which catches in-place writes that metadata misses. On any difference, the card **freezes at its current content** and shows the banner "Changed on disk · Reload (Ctrl+R)". Copy is refused until Reload. Everything Typose displays or copies matches the version it first read. This is not watching [Z6]. |
+| Changed on disk, found on access | After each lazy read [Z63] (a file over 100MB, or scrolling a file-backed region), Typose checks the file's size, modified time and identity. It also verifies each re-read 1MiB chunk against the hash taken the first time that chunk was read, which catches in-place writes that metadata misses. **If the file only grew** (the same file, a larger size, and the bytes at its old end still matching their hash), the new content is added and the card stays live [Z6]. On any other difference, the card **freezes at its current content** and shows the banner "Changed on disk · Reload (Ctrl+R)". Copy is refused until Reload. Everything Typose displays or copies matches the version it first read. |
+| File still being written [Z6] | The file in the visible tab is checked about once a second while the window is visible, never on a network path. Appended lines are added at the end. The view follows them only if it was already at the end; otherwise it stays where it is and the line count grows. A background tab catches up when it's selected. Raw, JSONL Rows and Table, and Transcript follow. Lenses built from the whole file (Grid, Tree, Rendered) and a finished Find keep what they had and say "File grew · Refresh". A write elsewhere in a file that also grew isn't found at once: it's found when that part is next read, and then the card freezes. |
 | Unresolvable link | A dashed underline; hovering shows "Not found: <path>" |
 
 **Typose never locks a file it's viewing.** On Windows, files are opened with read, write and delete sharing, so agents and editors can save, rename and replace them freely. Files are read with positional reads and **never memory-mapped**. A mapping blocks delete and replace on Windows, and can crash the reader when another process truncates the file elsewhere.
