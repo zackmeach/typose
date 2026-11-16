@@ -9,6 +9,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdir
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import type { DebugStats } from '../app/shared/protocol'
+import { diagnoseLinger } from './linger'
 
 export const APP_DIR = resolve(__dirname, '../app')
 /** Generated fixtures; gitignored, and the big ones are deleted after their tests. */
@@ -35,6 +36,8 @@ export interface Launched {
   exited: Promise<Exit>
   /** Uncaught errors and unhandled rejections in the page. */
   pageErrors: string[]
+  /** The last 64 KiB main and its children wrote to stderr after the launch returned, for `diagnoseLinger`. */
+  stderr: () => string
 }
 
 /** Observe intended OS handoffs without opening a real browser or mail client. The stub exists only in this test process. */
@@ -91,6 +94,9 @@ export async function launch(opts: { file?: string | string[]; userData?: string
   if (opts.file) args.push(...(Array.isArray(opts.file) ? opts.file : [opts.file]))
   const app = await electron.launch({ args, ...(opts.env ? { env: { ...process.env, ...opts.env } as Record<string, string> } : {}) })
   const proc = app.process()
+  // Playwright reads this stream too; a listener of our own changes nothing for it.
+  let stderr = ''
+  proc.stderr?.on('data', (d: Buffer) => (stderr = (stderr + d.toString()).slice(-65_536)))
   const exited = new Promise<Exit>((ok) => {
     if (proc.exitCode !== null) ok({ code: proc.exitCode, signal: proc.signalCode })
     else proc.once('exit', (code, signal) => ok({ code, signal }))
@@ -105,7 +111,7 @@ export async function launch(opts: { file?: string | string[]; userData?: string
   })
   const pageErrors: string[] = []
   win.on('pageerror', (e) => pageErrors.push(e.message))
-  const l = { app, win, userData, pid, exited, pageErrors }
+  const l = { app, win, userData, pid, exited, pageErrors, stderr: () => stderr }
   running.add(l)
   return l
 }
@@ -122,16 +128,18 @@ function kill(pid: number): void {
 /**
  * Closes the app if it's still up, then keeps the run's evidence in the test's output directory: the exit status,
  * the lifecycle log and any crash dumps. Deletes the private profile unless `keep` (a relaunch reuses it). An app
- * that hasn't exited 15 s after its close, as one didn't in main-macos run 40070774628, is killed and fails the test.
+ * that hasn't exited 15 s after its close, as one didn't in main-macos run 40070774628, is killed and fails the test,
+ * once `diagnoseLinger` has recorded what it was doing.
  */
 export async function finish(l: Launched, keep = false): Promise<Exit> {
   running.delete(l)
   const closing = l.app.close().catch(() => {})
   const closed = await Promise.race([l.exited, new Promise<null>((ok) => setTimeout(() => ok(null), 15_000))])
+  const lingered = closed ? '' : diagnoseLinger(l.pid, l.userData, l.stderr()).summary
   const exit = closed ?? (kill(l.pid), await l.exited)
   await closing
   keepEvidence(l.userData, l.pid, exit, keep)
-  if (!closed) throw new Error(`pid ${l.pid} didn't exit within 15 s of its close, and was killed`)
+  if (!closed) throw new Error(`pid ${l.pid} didn't exit within 15 s of its close, and was killed\n${lingered}`)
   return exit
 }
 

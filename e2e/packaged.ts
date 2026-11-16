@@ -8,6 +8,7 @@ import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { type Exit, cleanups, keepEvidence, test } from './app'
+import { diagnoseLinger } from './linger'
 
 const DIST = resolve(__dirname, '../app/dist')
 
@@ -44,6 +45,8 @@ export interface PackagedLaunch {
   page?: Page
   /** Closes this launch if the test ends with it still open (registered with app.ts's fixture). */
   cleanup: () => Promise<unknown>
+  /** Everything the app has written to stderr so far, for `diagnoseLinger`. */
+  stderr: () => string
 }
 
 export interface LaunchOptions {
@@ -75,7 +78,7 @@ export async function launchPackaged(opts: LaunchOptions = {}): Promise<Packaged
   const exited = new Promise<Exit>((ok) => proc.once('exit', (code, signal) => ok({ code, signal })))
   let stderr = ''
   proc.stderr!.on('data', (d: Buffer) => (stderr += d.toString()))
-  const l: PackagedLaunch = { proc, pid: proc.pid!, userData, marksFile, spawnedAt, exited, cleanup: () => closePackaged(l) }
+  const l: PackagedLaunch = { proc, pid: proc.pid!, userData, marksFile, spawnedAt, exited, cleanup: () => closePackaged(l), stderr: () => stderr }
   cleanups.add(l.cleanup) // a test that fails before closing it still closes it, with its evidence (plan C9)
   if (!opts.cdp) return l
   try {
@@ -135,9 +138,10 @@ export async function closePackaged(l: PackagedLaunch): Promise<Exit> {
     else l.proc.kill('SIGTERM')
   }
   const closed = await Promise.race([l.exited, new Promise<null>((ok) => setTimeout(() => ok(null), 15_000))])
+  const lingered = closed ? '' : diagnoseLinger(l.pid, l.userData, l.stderr()).summary
   const exit = closed ?? (l.proc.kill('SIGKILL'), await l.exited)
   keepEvidence(l.userData, l.pid, exit, false)
-  if (!closed) throw new Error(`pid ${l.pid} didn't exit within 15 s of its close, and was killed`)
+  if (!closed) throw new Error(`pid ${l.pid} didn't exit within 15 s of its close, and was killed\n${lingered}`)
   return exit
 }
 
