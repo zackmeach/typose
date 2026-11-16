@@ -62,7 +62,7 @@ CI does not fully run these. Run them locally before you tag a release.
   npm run e2e -- close.e2e -g "on 10 GiB"
   ```
 
-- The two font-loading checks in `e2e/reader-fidelity.e2e.ts`'s font-delay tests (fonts still loading, and no reader mounted, once the file is indexed): CI on macOS and Windows skips them and runs the rest of each test.
+- The three font-loading checks in `e2e/reader-fidelity.e2e.ts`'s font-delay tests (fonts still loading, and no reader mounted, once the file is indexed; and fonts ready, not fallback, after the 1,000 ms delay): CI on macOS and Windows skips them and runs the rest of each test.
 
   ```powershell
   npm run e2e -- reader-fidelity.e2e -g "font delay"
