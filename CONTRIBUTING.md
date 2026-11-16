@@ -62,6 +62,12 @@ CI does not fully run these. Run them locally before you tag a release.
   npm run e2e -- close.e2e -g "on 10 GiB"
   ```
 
+- The two font-loading checks in `e2e/reader-fidelity.e2e.ts`'s font-delay tests (fonts still loading, and no reader mounted, once the file is indexed): CI on macOS and Windows skips them and runs the rest of each test.
+
+  ```powershell
+  npm run e2e -- reader-fidelity.e2e -g "font delay"
+  ```
+
 ## New e2e tests
 
 A new e2e test must pass on Windows, Linux and macOS. Use `ControlOrMeta+` for shortcuts, not `Control+`. Guard a capability that works on Windows only, such as folder browsing, local links and local images, by platform.

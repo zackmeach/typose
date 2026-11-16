@@ -48,6 +48,10 @@ export class StructuredLens {
   private selectedNode?: StructuredNode
   private selectedPath = '$'
   private stopped = false
+  /** The grid share is granted. Nothing renders before it is. */
+  private paid = false
+  /** A hand-off's freeze refused the grid share: `resumeReservation`, when a failed hand-off thaws, starts again. */
+  private waiting = false
   private moved = false
   private line = 0
   private lines: number
@@ -93,7 +97,7 @@ export class StructuredLens {
       images: grow => new RenderedImages(this.element, core, opened, options.budget ?? undefined, options.onFrozen, grow)
     })
     this.unsubscribe = source.subscribe?.(() => {
-      if (this.stopped || this.mode === 'tree') return
+      if (this.stopped || !this.paid || this.mode === 'tree') return
       if (this.mode === 'rows') this.schedule()
       else void (this.transcript ? this.transcript.show() : this.page(this.line)).catch(error => this.error(error))
     })
@@ -101,7 +105,11 @@ export class StructuredLens {
   }
   private async start(at: number): Promise<void> {
     try {
-      if (!await this.options.budget?.reserveGrid(this.opened.gen, 32 << 20) || this.stopped) throw new Error('Structured view unavailable · memory budget is full')
+      const granted = await this.options.budget?.reserveGrid(this.opened.gen, 32 << 20)
+      // A hand-off froze the budget, not the ledger: this lens goes with the hand-off, or starts again if it fails.
+      if (this.stopped || !granted && this.options.budget?.frozen(this.opened.gen)) { this.waiting = !this.stopped; return }
+      if (!granted) throw new Error('Structured view unavailable · memory budget is full')
+      this.paid = true
       if (this.mode === 'tree') {
         const root = this.source.info.root
         if (root) {
@@ -183,7 +191,7 @@ export class StructuredLens {
     this.renderRows()
   }
   private renderRows(): void {
-    if (this.stopped) return
+    if (this.stopped || !this.paid) return
     // A start or Go to line past what's indexed waits until that line exists.
     if (this.anchor !== undefined && this.anchor < this.total()) {
       const at = this.anchor
@@ -377,6 +385,7 @@ export class StructuredLens {
     return wrapper
   }
   private async page(start: number): Promise<void> {
+    if (!this.paid) return
     const epoch = ++this.serial
     const result = await this.core.call('structuredRows', { ref: this.source.info.ref, start, count: 100 }, this.abort.signal)
     if (this.stopped || epoch !== this.serial) return
@@ -518,7 +527,7 @@ export class StructuredLens {
   indexDone(): void { this.indexed = true; if (this.mode === 'rows') this.schedule() }
   freeze(): void { this.stopped = true; this.abort.abort(); this.copies.cancel(); this.find.freeze('source changed') }
   yieldReservation(): void { this.copies.cancel() }
-  resumeReservation(): void {}
+  resumeReservation(): void { if (this.waiting && !this.stopped) { this.waiting = false; void this.start(this.options.atLine ?? 0) } }
   dispose(): void { this.stopped = true; cancelAnimationFrame(this.frame); this.resize?.disconnect(); this.unsubscribe?.(); this.abort.abort(); this.copies.cancel(); this.find.destroy(); this.context?.remove(); this.element.remove(); if (this.transcript) { this.transcript.dispose(); void this.options.budget?.reserveRendered(this.opened.gen, 0) } }
   printPlan(): PrintPlan { const pages = Math.ceil(this.lines / PRINT_LINES_PER_PAGE); return { unit: 'line', total: this.lines, current: this.line, indexed: this.indexed, totalPages: pages, allFits: pages <= MAX_PRINT_PAGES && this.opened.size <= MAX_PRINT_BYTES } }
   printRange(start: number, end: number, signal: AbortSignal): Promise<PrintPayload> {

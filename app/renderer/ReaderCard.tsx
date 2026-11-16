@@ -305,6 +305,12 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     retiredRendered.current = Math.max(retiredRendered.current, snapshot.rendered + snapshot.grid + (snapshot.search ?? 0) + (snapshot.copy ?? 0) + (snapshot.model ?? 0), owner.retiredTreeMax)
     owner.invalidate()
   }
+  /** Ends a hand-off's freeze. If that thaws the budget (the hand-off failed), the lens on screen asks again for what it refused. */
+  const thaw = (owner: LensBudget | null, plan: ReloadReservation | undefined) => {
+    if (!owner || !plan) return
+    owner.cancelTransition(plan)
+    if (!owner.frozen(plan.generation)) lens.current?.resumeReservation()
+  }
 
   /** Freeze image grants before snapshotting the retired tree; inactive tabs retain no lens DOM. */
   function leave(): void {
@@ -439,7 +445,9 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
           return
         }
         const held = await holdRendered(opened, build)
-        if (!alive || held === 'stale') return
+        if (!alive) return
+        // Kept for a hand-off's freeze (holdRendered): Rendered can be chosen once a failed hand-off thaws the budget.
+        if (held === 'stale') { setCard((c) => (c.kind === 'open' && c.opened === opened ? { ...c, build, rendering: false } : c)); return }
         // Raw may have moved while the reservation was in flight. Only an explicit Rendered choice overrides that.
         if (picked.current === 'raw' || (picked.current !== 'rendered' && lens.current?.readerMoved())) {
           void budgetFor(opened)?.reserveRendered(opened.gen, 0)
@@ -551,7 +559,8 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
 
   /**
    * Reserve Rendered's charge on the one lens holder (plan §2.2) before any block is appended. Refused, the caller
-   * keeps Raw. `stale` when this document was replaced while the call was out.
+   * keeps Raw. `stale` when this document was replaced while the call was out, or a hand-off froze the budget: that
+   * refusal isn't the ledger's, so Rendered isn't turned off.
    */
   async function holdRendered(opened: Opened, build: MdBuild): Promise<'ok' | 'memory' | 'stale'> {
     if (holding.current === opened) return 'stale'
@@ -570,7 +579,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     if (now.kind !== 'open' || now.opened !== opened) return 'stale'
     if (!ok) {
       if (lens.current === before) before?.resumeReservation()
-      return 'memory'
+      return budgetFor(opened)?.frozen(opened.gen) ? 'stale' : 'memory'
     }
     return 'ok'
   }
@@ -833,7 +842,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
     } finally {
       if (captured) shared.releaseLocation(captured)
       if (pendingWorkspace.current.get(id) === pending) pendingWorkspace.current.delete(id)
-      if (plan) owner?.cancelTransition(plan)
+      thaw(owner, plan)
       navigated()
     }
   }
@@ -972,7 +981,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       return false
     } finally {
       if (candidate && ownerSession === currentSession.current) void core.call('close', { surface: surface.current!, doc: candidate.doc }).catch(() => {})
-      if (plan) owner?.cancelTransition(plan)
+      thaw(owner, plan)
       navigated()
     }
   }
@@ -1052,7 +1061,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
         if (selected) display(id, error)
       }
     } finally {
-      if (plan) owner?.cancelTransition(plan)
+      thaw(owner, plan)
       reloading.current.delete(id)
       pendingNative.current.delete(operation)
       releaseEmptyWorkspace()
@@ -1118,7 +1127,7 @@ export function ReaderCard({ id, label, workspace, window: shared, fonts, focuse
       setWorkspaceNotice('Cannot open folder file · ' + (e instanceof Error ? e.message : String(e)))
     } finally {
       if (candidate && ownerSession === currentSession.current) void core.call('close', { surface: surface.current!, doc: candidate.doc }).catch(() => {})
-      if (plan) owner?.cancelTransition(plan)
+      thaw(owner, plan)
       navigated()
     }
   }

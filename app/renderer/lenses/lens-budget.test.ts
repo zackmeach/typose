@@ -105,6 +105,53 @@ it('freezes image growth before a transition snapshots the retired tree, includi
   expect(budget.snapshot().rendered).toBe(130)
 })
 
+it('tells a hand-off freeze or a gone generation from the ledger refusing a share', async () => {
+  const budget = new LensBudget({ call: async () => false }, 1, 1, 1, 10, 10)
+  expect(await budget.reserveGrid(1, 32)).toBe(false)
+  expect(budget.frozen(1)).toBe(false)
+  const refused = budget.reloadReservation(10)
+  expect(await budget.reserveGrid(1, 32)).toBe(false)
+  expect(budget.frozen(1)).toBe(true)
+  budget.cancelTransition(refused)
+  expect(budget.frozen(1)).toBe(false)
+  const next = budget.reloadReservation(10)
+  expect(budget.adopt(2, next.bytes, next)).toBe(true)
+  expect([budget.frozen(1), budget.frozen(2)]).toEqual([true, false])
+  budget.invalidate()
+  expect(budget.frozen(2)).toBe(true)
+})
+
+it('stays frozen until every hand-off plan out has ended, whichever ends first', async () => {
+  const totals: number[] = []
+  const budget = new LensBudget({ call: async (_, p) => { totals.push(p.bytes); return true } }, 1, 1, 1, 10, 10)
+  for (const [first, second] of [[0, 1], [1, 0]]) {
+    const plans = [budget.reloadReservation(10), budget.reloadReservation(10)]
+    budget.cancelTransition(plans[first])
+    budget.cancelTransition(plans[first])
+    expect(budget.frozen(1)).toBe(true)
+    expect(await budget.reserveGrid(1, 32)).toBe(false)
+    budget.cancelTransition(plans[second])
+    expect(budget.frozen(1)).toBe(false)
+  }
+  expect(totals).toEqual([])
+  expect(await budget.reserveGrid(1, 32)).toBe(true)
+  expect(totals).toEqual([42])
+})
+
+it('an adopted Reload ends every plan of its generation; an earlier plan neither adopts nor thaws the next one', () => {
+  const budget = new LensBudget({ call: async () => true }, 1, 1, 1, 10, 10)
+  const earlier = budget.reloadReservation(10)
+  const later = budget.reloadReservation(10)
+  expect(budget.adopt(2, later.bytes, earlier)).toBe(false)
+  expect(budget.adopt(2, later.bytes, later)).toBe(true)
+  expect(budget.frozen(2)).toBe(false)
+  const next = budget.reloadReservation(10)
+  budget.cancelTransition(earlier)
+  expect(budget.frozen(2)).toBe(true)
+  budget.cancelTransition(next)
+  expect(budget.frozen(2)).toBe(false)
+})
+
 it('repeated Reload keeps Raw and the maximum retired tree separate, with bounded totals', async () => {
   const budget = new LensBudget({ call: async () => true }, 1, 1, 1, 10, 10)
   await budget.reserveRendered(1, 100)
