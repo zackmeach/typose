@@ -22,7 +22,10 @@ export class LensBudget {
   private search = 0
   private copy = 0
   private model = 0
-  private transitioning = false
+  /** Epochs of the hand-off plans still out (`reloadReservation`, until `cancelTransition` or `adopt`). */
+  private readonly plans = new Set<number>()
+  /** Grants stay frozen while any hand-off's plan is out, not only the latest one's. */
+  private get transitioning(): boolean { return this.plans.size > 0 }
 
   constructor(
     private readonly core: ReserveCore,
@@ -93,24 +96,24 @@ export class LensBudget {
 
   /** Freeze grants before the handoff snapshot: a late image grant must not allocate an uncounted retired Blob. */
   reloadReservation(raw: number): ReloadReservation {
-    this.transitioning = true
     this.epoch++
+    this.plans.add(this.epoch)
     this.serial = Promise.resolve()
     const retiredTreeMax = Math.max(this.treeMax, this.rendered + this.grid + this.search + this.copy + this.model)
     return { generation: this.generation, epoch: this.epoch, raw, retiredTreeMax, bytes: raw + 2 * retiredTreeMax }
   }
 
-  /** A refused handoff keeps the old generation usable, without reviving any pre-snapshot grants. */
+  /** A refused handoff keeps the old generation usable, without reviving any pre-snapshot grants. Another hand-off's
+   *  plan still out keeps grants frozen. */
   cancelTransition(plan: ReloadReservation): void {
-    if (!this.current(plan.generation) || plan.epoch !== this.epoch) return
-    this.transitioning = false
+    if (this.current(plan.generation)) this.plans.delete(plan.epoch)
   }
 
   /** The core's Reload already reserved `held`. Older queued work cannot update this generation's shares. */
   adopt(generation: number, held: number, plan: ReloadReservation, view?: ViewRef): boolean {
     if (!this.current(plan.generation) || plan.epoch !== this.epoch || generation <= this.generation) return false
     this.epoch++
-    this.transitioning = false
+    this.plans.clear()
     this.generation = generation
     this.view = view
     this.raw = plan.raw

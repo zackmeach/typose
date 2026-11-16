@@ -7,18 +7,19 @@ import { type Launched, debugStats, fixture, launch, test, waitOpen, waitRendere
 const ROWS = Array.from({ length: 60 }, (_, i) => JSON.stringify({ ts: '2026-11-01T09:00:00.000Z', type: 'info', msg: `entry ${i + 1}` })).join('\n') + '\n'
 const send = (l: Launched, channel: 'open-path' | 'command', value: string) =>
   l.app.evaluate(({ BrowserWindow }, { channel, value }) => BrowserWindow.getAllWindows()[0].webContents.send(channel, value), { channel, value })
-/** Holds the page core client's first `method` reply, or its error, until `release(win, name)`. Test-hooks build only. */
-const hold = (win: Page, method: string, name: string) => win.evaluate(({ method, name }) => {
+/** Holds the page core client's first `method` reply, or its error (or, with `request`, the request before the core
+ *  sees it), until `release(win, name)`. Test-hooks build only. */
+const hold = (win: Page, method: string, name: string, request = false) => win.evaluate(({ method, name, request }) => {
   const core = (window as unknown as { typoseTest: { core: { call(m: string, p: object, s?: AbortSignal): Promise<unknown> } } }).typoseTest.core
   const call = core.call.bind(core)
   let first = true
   core.call = (m, p, s) => {
-    const reply = call(m, p, s)
-    if (m !== method || !first) return reply
+    if (m !== method || !first) return call(m, p, s)
     first = false
-    return reply.finally(() => new Promise<void>(done => { (window as unknown as Record<string, () => void>)[name] = done }))
+    const held = () => new Promise<void>(done => { (window as unknown as Record<string, () => void>)[name] = done })
+    return request ? held().then(() => call(m, p, s)) : call(m, p, s).finally(held)
   }
-}, { method, name })
+}, { method, name, request })
 /** Holds the first `reserve` the core refuses until `release(win, name)`. Test-hooks build only. */
 const holdRefusal = (win: Page, name: string) => win.evaluate(name => {
   const core = (window as unknown as { typoseTest: { core: { call(m: string, p: object, s?: AbortSignal): Promise<unknown> } } }).typoseTest.core
@@ -222,5 +223,47 @@ test('Rendered that a failed hand-off froze finishes its build, and its tab show
   await expect(win.locator('.lens-tab-tip[title]')).toHaveCount(0)
   await win.getByRole('tab', { name: 'Rendered', exact: true }).click()
   await waitRendered(win, 10_000)
+  expect(l.pageErrors).toEqual([])
+})
+
+test('a Reopen that fails during a Reload leaves the Reload\'s freeze on: nothing is granted or rendered until it lands', async () => {
+  const l = await launch({ hooks: true })
+  const { win } = l
+  await closedAndDeleted(l, 'handoff-gone-overlap.txt')
+  await hold(win, 'structuredBuild', 'releaseBuild')
+  await hold(win, 'reload', 'releaseReload', true)
+  await send(l, 'open-path', fixture('handoff-overlap.jsonl', ROWS))
+  await waitOpen(win)
+  await held(win, 'releaseBuild')
+  // Reload freezes the budget and its request waits in the page, so the core hasn't started it.
+  await send(l, 'command', 'reload')
+  await held(win, 'releaseReload')
+  await hold(win, 'open', 'releaseOpen')
+  await send(l, 'command', 'reopen-tab')
+  await held(win, 'releaseOpen')
+  await release(win, 'releaseBuild')
+  await expect(win.locator('[data-lens="rows"]')).toBeVisible()
+  await frames(win)
+  const frozen = await viewBytes(win)
+  // The Reopen fails and ends its own freeze. The Reload's is still out: no share is granted, nothing renders.
+  await release(win, 'releaseOpen')
+  await expect(win.locator('.banner')).toContainText('Cannot reopen')
+  expect(await viewBytes(win)).toBe(frozen)
+  await tryRows(win)
+  expect(await win.locator('.jsonl-entry').count()).toBe(0)
+  expect(await viewBytes(win)).toBe(frozen)
+  // The Reload lands. Its Raw settles first, then its Rows renders on a granted grid share. With the first build done
+  // (no more polls of it), the next structuredBuild held is the new generation's.
+  await expect(win.locator('.card-status')).toHaveText('60 lines · 60 parsed · 0 failed · 0 blank')
+  await hold(win, 'structuredBuild', 'releaseBuild2')
+  await release(win, 'releaseReload')
+  await held(win, 'releaseBuild2')
+  await waitOpen(win)
+  let raw = -1
+  await expect.poll(async () => { const now = await viewBytes(win), same = now === raw; raw = now; return same }).toBe(true)
+  await release(win, 'releaseBuild2')
+  await expect(win.locator('.jsonl-entry').first()).toBeVisible()
+  expect(await viewBytes(win) - raw).toBeGreaterThanOrEqual(32 << 20)
+  expect(await win.locator('.structured-problem').allTextContents()).toEqual([])
   expect(l.pageErrors).toEqual([])
 })
