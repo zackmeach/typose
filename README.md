@@ -56,7 +56,8 @@ Releases are to be signed from 0.2.0. See the [code signing policy](docs/code-si
 - You can open at most 16 folders, and the sidebar loads at most 4,096 entries of a folder. The messages for both call it a "demo limit".
 - HTML files open as source text, not as web pages.
 - Each Ctrl+scroll step zooms by 10%, however small the movement, so a touchpad pinch jumps quickly between 50% and 200%.
-- If reloading or reopening a YAML file fails, for example because the file was deleted, its Tree tab can stay at "Preparing Tree…". Select another tab, then come back to it.
+- If Reopen closed tab, Back, or opening a file from a folder fails (for example because that file was deleted) just as a YAML file's Tree is being prepared, the YAML file's Tree tab can stay at "Preparing Tree…". Reload the YAML file (Ctrl+R), or select another file's tab, then the YAML file's tab again.
+- If Reopen closed tab, Back, or opening a link or a file from a folder fails just as a Markdown file's images or diagrams, or a transcript's items, are loading, some of them can say the memory budget is full, or exceeded, though memory isn't short. Select another file's tab, then this one again.
 - The status line keeps its last message on every tab until another message replaces it, and doesn't say which file it is about.
 - When an image or a link's target is missing, the message includes the system's own error text, such as "io: The system cannot find the file specified. (os error 2)".
 - In Raw, a file whose lines are very long runs of emoji can freeze the window when it first opens: 1.8 seconds on a Core i7-12700K for a test file of 40 lines, each about 30,000 UTF-16 units of emoji, and longer on a slower PC.

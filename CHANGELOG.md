@@ -2,13 +2,13 @@
 
 ## 0.1.1
 
-A fix release, still a pre-release for Windows x64, and still not code-signed. Install `Typose-0.1.1-setup.exe` over 0.1.0, or unzip `Typose-0.1.1-win-x64.zip` and run `Typose.exe`.
+A fix release, still a pre-release for Windows x64, and still not code-signed. Install `Typose-0.1.1-setup.exe`, over 0.1.0 if you have it, or unzip `Typose-0.1.1-win-x64.zip` into a new folder and run `Typose.exe`.
 
-- **`typose.cmd` is no longer in the package.** 0.1.0 shipped it in `resources\bin`. Run from PowerShell with a file name that contains `&` and no space, it ran the rest of the name as a command. Nothing put it on PATH. On Windows the command line is `Typose.exe -- <path>…`. If you copied `typose.cmd` out of 0.1.0, delete the copy.
-- After a restart with a JSON, JSONL or YAML file open, or a quick switch away from one, the status line no longer says "Structured view unavailable · memory budget is full" when memory isn't short. The same false report is gone from the grid, the YAML tree and Rendered Markdown.
+- **`typose.cmd` is no longer in the package.** 0.1.0 shipped it in `resources\bin`. Run from PowerShell with a file name that contains `&` and no space, it ran the rest of the name as a command. Nothing put it on PATH. On Windows the command line is `Typose.exe -- <path>…`. Installing 0.1.1 over 0.1.0 removes it. Unzipping 0.1.1 doesn't: if you unzipped 0.1.0, delete that folder, or at least its `resources\bin\typose.cmd`. If you copied `typose.cmd` anywhere else, delete the copy.
+- After a restart with a JSON, JSONL or YAML file open, or a quick switch away from one, the status line no longer says "Structured view unavailable · memory budget is full" when memory isn't short. In those cases the grid and the YAML tree no longer report a full budget either, and Markdown's Rendered tab no longer stays off with "Typose's memory budget is full".
 - The installer no longer leaves a 112 MB copy of itself in `%LOCALAPPDATA%\typose-updater`. Installing 0.1.1 over 0.1.0 removes 0.1.0's copy. If you have already uninstalled 0.1.0, delete that folder yourself.
-- Typose now takes a file's identity and its contents from one open of the file. In 0.1.0 a file swapped in at the same path while it was opening could be read in the first one's place.
-- A page script can no longer write to the clipboard without a Copy command. Nothing in 0.1.0 is known to have done so.
+- Typose now takes a file's identity and its contents from one open of the file. In 0.1.0, a file of the same length swapped in at that path while Typose opened it, and swapped back out before Typose first read it, could be shown in the first one's place.
+- Code in Typose's own window can no longer write to the clipboard without a Copy command. Nothing in 0.1.0 is known to have done so.
 
 ### Known issues
 
@@ -29,7 +29,8 @@ A fix release, still a pre-release for Windows x64, and still not code-signed. I
 - You can open at most 16 folders, and the sidebar loads at most 4,096 entries of a folder. The messages for both call it a "demo limit".
 - HTML files open as source text, not as web pages.
 - Each Ctrl+scroll step zooms by 10%, however small the movement, so a touchpad pinch jumps quickly between 50% and 200%.
-- If reloading or reopening a YAML file fails, for example because the file was deleted, its Tree tab can stay at "Preparing Tree…". Select another tab, then come back to it.
+- If Reopen closed tab, Back, or opening a file from a folder fails (for example because that file was deleted) just as a YAML file's Tree is being prepared, the YAML file's Tree tab can stay at "Preparing Tree…". Reload the YAML file (Ctrl+R), or select another file's tab, then the YAML file's tab again.
+- If Reopen closed tab, Back, or opening a link or a file from a folder fails just as a Markdown file's images or diagrams, or a transcript's items, are loading, some of them can say the memory budget is full, or exceeded, though memory isn't short. Select another file's tab, then this one again.
 - The status line keeps its last message on every tab until another message replaces it, and doesn't say which file it is about.
 - When an image or a link's target is missing, the message includes the system's own error text, such as "io: The system cannot find the file specified. (os error 2)".
 - In Raw, a file whose lines are very long runs of emoji can freeze the window when it first opens: 1.8 seconds on a Core i7-12700K for a test file of 40 lines, each about 30,000 UTF-16 units of emoji, and longer on a slower PC.
