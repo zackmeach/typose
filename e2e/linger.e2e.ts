@@ -9,14 +9,17 @@ test('the linger diagnostic on a live app names its pid, finds no quit logged an
   const l = await launch()
   const started = Date.now()
   const r = diagnoseLinger(l.pid, l.userData, l.stderr())
-  expect(Date.now() - started).toBeLessThanOrEqual(LINGER_BUDGET)
-  expect(r.summary).toContain(`details in linger-${l.pid}.txt`)
-  expect(r.quit).toBeNull()
-  expect(r.tree?.map((p) => p.pid)).toContain(l.pid)
-  console.log(readFileSync(test.info().outputPath(`linger-${l.pid}.txt`), 'utf8'))
+  const elapsed = Date.now() - started
+  // Printed before anything is asserted, so a failing run's log still shows how each command went.
+  const file = test.info().outputPath(`linger-${l.pid}.txt`)
+  console.log(existsSync(file) ? readFileSync(file, 'utf8') : `linger-${l.pid}.txt: not written`)
   if (process.platform === 'darwin') {
     const sample = test.info().outputPath(`linger-${l.pid}.sample.txt`)
     console.log(`linger-${l.pid}.sample.txt: ${existsSync(sample) ? `${statSync(sample).size} bytes` : 'not written'}`)
   }
+  expect(elapsed).toBeLessThanOrEqual(LINGER_BUDGET)
+  expect(r.summary).toContain(`details in linger-${l.pid}.txt`)
+  expect(r.quit).toBeNull()
+  expect(r.tree?.map((p) => p.pid)).toContain(l.pid)
   await finish(l)
 })
