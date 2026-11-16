@@ -16,11 +16,11 @@ Typose reads files on your machine and leaves the originals untouched. Its Rust 
 
 ## Install on Windows
 
-Download `Typose-0.1.0-setup.exe` from the [latest release](https://github.com/zackmeach/typose/releases) and run it. It installs for your Windows account only, with no administrator prompt.
+Download `Typose-0.1.1-setup.exe` from the [latest release](https://github.com/zackmeach/typose/releases) and run it. It installs for your Windows account only, with no administrator prompt.
 
 The installer adds Typose to **Open with** for Markdown, text, log, CSV, TSV, JSON, JSONL, and YAML files. It never sets Typose as their default app. A file type you've chosen an app for keeps it; for a type you haven't, Windows may open Typose or ask which app to use. To remove Typose, uninstall it in **Settings → Apps → Installed apps**.
 
-To run Typose without installing it, download `Typose-0.1.0-win-x64.zip`, unzip it, and run `Typose.exe`. Keep the files beside it together.
+To run Typose without installing it, download `Typose-0.1.1-win-x64.zip`, unzip it, and run `Typose.exe`. Keep the files beside it together.
 
 ### Typose isn't code-signed yet
 
@@ -35,10 +35,10 @@ Releases are to be signed from 0.2.0. See the [code signing policy](docs/code-si
 
 | System | Release | What works |
 | --- | --- | --- |
-| Windows x64 | 0.1.0: installer and zip | Everything in this README |
+| Windows x64 | 0.1.1: installer and zip | Everything in this README |
 | macOS and Linux | Not released yet | Built from source: single files only. Folders, links between local files, and local images in Markdown work on Windows only for now. |
 
-## Known issues in 0.1.0
+## Known issues in 0.1.1
 
 - On a PC with 8 GB of RAM, a Markdown file larger than about 7 MB opens as plain text only: its Rendered tab stays off, with "Typose's memory budget is full".
 - When Typose's memory budget is full, another file won't open ("Typose's memory budget is full. Close a file, then Retry."). Typose doesn't close files to make room.
@@ -56,7 +56,7 @@ Releases are to be signed from 0.2.0. See the [code signing policy](docs/code-si
 - You can open at most 16 folders, and the sidebar loads at most 4,096 entries of a folder. The messages for both call it a "demo limit".
 - HTML files open as source text, not as web pages.
 - Each Ctrl+scroll step zooms by 10%, however small the movement, so a touchpad pinch jumps quickly between 50% and 200%.
-- After Typose restarts with a JSON, JSONL, or YAML file open, or when you switch quickly away from one, the status line can read "Error: Structured view unavailable · memory budget is full" although memory isn't short. The file shows normally when you select its tab again.
+- If reloading or reopening a YAML file fails, for example because the file was deleted, its Tree tab can stay at "Preparing Tree…". Select another tab, then come back to it.
 - The status line keeps its last message on every tab until another message replaces it, and doesn't say which file it is about.
 - When an image or a link's target is missing, the message includes the system's own error text, such as "io: The system cannot find the file specified. (os error 2)".
 - In Raw, a file whose lines are very long runs of emoji can freeze the window when it first opens: 1.8 seconds on a Core i7-12700K for a test file of 40 lines, each about 30,000 UTF-16 units of emoji, and longer on a slower PC.
