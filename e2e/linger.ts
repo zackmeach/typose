@@ -8,8 +8,8 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-/** The longest a call takes: its commands' timeouts (50 s at most, on macOS) and a few file reads and writes. */
-export const LINGER_BUDGET = 55_000
+/** The longest a call takes: its commands' timeouts (20 s at most, on macOS and Linux) and a few file reads and writes. */
+export const LINGER_BUDGET = 25_000
 const WAITING = 'Waiting for the debugger to disconnect'
 // First, lines marked `#` that the tree's parser skips: the pid's CPU time and its threads, counted by state (and wait
 // reason). Then one line per process: pid, parent pid, seconds since it started, command line. Win32_Process leaves
@@ -41,8 +41,7 @@ function run(cmd: string, args: string[], timeout: number): { ok: boolean; out: 
 
 /**
  * Collects what `pid` is doing, from its profile `userData` and the `stderr` it wrote so far. Writes the details to
- * linger-<pid>.txt in the test's output, beside what `keepEvidence` keeps (and, on macOS, `sample`'s stacks to
- * linger-<pid>.sample.txt); returns them with a one-line summary.
+ * linger-<pid>.txt in the test's output, beside what `keepEvidence` keeps; returns them with a one-line summary.
  */
 export function diagnoseLinger(pid: number, userData: string, stderr: string): Linger {
   const at = Date.now()
@@ -96,20 +95,12 @@ export function diagnoseLinger(pid: number, userData: string, stderr: string): L
       notes.push(threads.report, threads.out)
     })
   }
+  // No stacks on macOS: `sample <pid> 1` never finished within 20 s on a hosted runner, as the user or as root (runs
+  // 43929207660, 43935222188 and 43940490578), so only thread states are listed.
   if (process.platform === 'darwin') {
     attempt('listing threads', () => {
-      const threads = run('ps', ['-M', '-p', String(pid)], 10_000) // cheap, so thread states land even if `sample` times out
+      const threads = run('ps', ['-M', '-p', String(pid)], 10_000)
       notes.push(threads.report, threads.out)
-    })
-    // Without root, `sample` waited out its 20 s on a hosted runner and wrote nothing (runs 43929207660 and
-    // 43935222188). Under CI, where sudo asks for no password, it runs as root; never on a developer's Mac. This
-    // process may not be allowed to kill a root one, so there the command ends itself: perl's alarm outlives its exec.
-    if (out) attempt('sampling', () => {
-      const args = ['sample', String(pid), '1', '-mayDie', '-file', join(out, `linger-${pid}.sample.txt`)]
-      const sudo = process.env.CI ? run('sudo', ['-n', 'true'], 5_000) : null
-      if (sudo) notes.push(sudo.report)
-      const sampled = sudo?.ok ? run('sudo', ['-n', 'perl', '-e', 'alarm 20; exec @ARGV', ...args], 25_000) : run(args[0], args.slice(1), 20_000)
-      notes.push(sampled.report)
     })
   }
 

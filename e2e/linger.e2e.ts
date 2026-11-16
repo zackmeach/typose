@@ -1,7 +1,7 @@
 // `diagnoseLinger` runs only when a launch outlives its close, which no healthy run does; this runs it on a live app,
 // so each system's CI runs its commands, and prints what it wrote, so the CI log shows how each of them went.
 import { expect } from '@playwright/test'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { finish, launch, test } from './app'
 import { LINGER_BUDGET, diagnoseLinger } from './linger'
 
@@ -13,10 +13,6 @@ test('the linger diagnostic on a live app names its pid, finds no quit logged an
   // Printed before anything is asserted, so a failing run's log still shows how each command went.
   const file = test.info().outputPath(`linger-${l.pid}.txt`)
   console.log(existsSync(file) ? readFileSync(file, 'utf8') : `linger-${l.pid}.txt: not written`)
-  if (process.platform === 'darwin') {
-    const sample = test.info().outputPath(`linger-${l.pid}.sample.txt`)
-    console.log(`linger-${l.pid}.sample.txt: ${existsSync(sample) ? `${statSync(sample).size} bytes` : 'not written'}`)
-  }
   expect(elapsed).toBeLessThanOrEqual(LINGER_BUDGET)
   expect(r.summary).toContain(`details in linger-${l.pid}.txt`)
   expect(r.quit).toBeNull()
