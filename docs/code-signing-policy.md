@@ -1,6 +1,6 @@
 # Code signing policy
 
-Typose 0.1.0 is not code-signed. Typose's Windows releases are to be signed from 0.2.0 through SignPath Foundation's free code signing for open-source projects, once SignPath Foundation accepts the project. Until a release says it is signed, it isn't.
+Typose 0.1.0 and 0.1.1 are not code-signed. Typose's Windows releases are to be signed from 0.2.0 through SignPath Foundation's free code signing for open-source projects, once SignPath Foundation accepts the project. Until a release says it is signed, it isn't.
 
 Signed releases will carry this line:
 
