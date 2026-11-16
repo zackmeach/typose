@@ -8,8 +8,8 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-/** The longest a call takes: its commands' timeouts (45 s at most, on macOS) and a few file reads and writes. */
-export const LINGER_BUDGET = 50_000
+/** The longest a call takes: its commands' timeouts (50 s at most, on macOS) and a few file reads and writes. */
+export const LINGER_BUDGET = 55_000
 const WAITING = 'Waiting for the debugger to disconnect'
 // First, lines marked `#` that the tree's parser skips: the pid's CPU time and its threads, counted by state (and wait
 // reason). Then one line per process: pid, parent pid, seconds since it started, command line. Win32_Process leaves
@@ -102,11 +102,14 @@ export function diagnoseLinger(pid: number, userData: string, stderr: string): L
       notes.push(threads.report, threads.out)
     })
     // Without root, `sample` waited out its 20 s on a hosted runner and wrote nothing (runs 43929207660 and
-    // 43935222188), so it runs through sudo wherever sudo asks for no password, as on those runners.
+    // 43935222188). Under CI, where sudo asks for no password, it runs as root; never on a developer's Mac. This
+    // process may not be allowed to kill a root one, so there the command ends itself: perl's alarm outlives its exec.
     if (out) attempt('sampling', () => {
       const args = ['sample', String(pid), '1', '-mayDie', '-file', join(out, `linger-${pid}.sample.txt`)]
-      const sudo = run('sudo', ['-n', 'true'], 5_000).ok
-      notes.push(run(sudo ? 'sudo' : args[0], sudo ? ['-n', ...args] : args.slice(1), 20_000).report)
+      const sudo = process.env.CI ? run('sudo', ['-n', 'true'], 5_000) : null
+      if (sudo) notes.push(sudo.report)
+      const sampled = sudo?.ok ? run('sudo', ['-n', 'perl', '-e', 'alarm 20; exec @ARGV', ...args], 25_000) : run(args[0], args.slice(1), 20_000)
+      notes.push(sampled.report)
     })
   }
 
