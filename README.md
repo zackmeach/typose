@@ -52,6 +52,7 @@ Releases are to be signed from 0.2.0. See the [code signing policy](docs/code-si
   - Ctrl+clicking a link to a file that's already open opens it again in a second tab.
   - Links to files on another drive, or outside the folder you opened, don't open.
   - Links to PDFs and other files Typose can't show don't open them in their own app; Typose says it can't open them.
+  - A link opens only a Markdown, `.txt`, CSV or TSV file. A link to a `.json`, `.jsonl`, `.yaml` or `.log` file doesn't open it, though Typose can show those files; the message includes "local links support only Markdown, TXT, CSV and TSV files". Open that file from the folder or with Open file… instead.
 - Quick open searches only the first 3,500 files and subfolders of each open folder (1,500 each when 16 folders are open), so files deep in a large folder may not appear.
 - You can open at most 16 folders, and the sidebar loads at most 4,096 entries of a folder. The messages for both call it a "demo limit".
 - HTML files open as source text, not as web pages.
