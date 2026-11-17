@@ -1,9 +1,10 @@
 //! Raw (brief §5.1) over a `Document`: the sniffed encoding, the line index and bounded pages.
+use std::ops::Range;
 use std::path::Path;
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 use encoding_rs::{Encoding, UTF_8, WINDOWS_1252};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 static UTF8_FALLBACK: AtomicBool = AtomicBool::new(false);
 /// Applies to newly opened/reloaded documents; existing generations retain their detected encoding.
@@ -11,14 +12,14 @@ pub fn set_encoding_fallback(utf8: bool) {
     UTF8_FALLBACK.store(utf8, Ordering::Relaxed);
 }
 
-use crate::budget::{self, NoSlot, Reservation, Work};
+use crate::budget::{self, NoSlot, OverBudget, Reservation, Work};
 use crate::doc::{Charges, DocError, Document};
 use crate::encoding::{Sniffed, bom_len, sniff};
 use crate::index::{IndexConfig, LineIndex, Progress, build};
 use crate::local::LocalRoute;
 use crate::md;
 use crate::pages::{self, Caps, LinePiece, MAX_PATH_BYTES};
-use crate::store::{CACHE_CHUNKS, CHUNK, cancelled};
+use crate::store::{CACHE_CHUNKS, CHUNK, StoreError, cancelled};
 
 /// Plan C1: an open's own temporaries, reserved while it runs. The head it sniffs, and the chunk read for it on its way
 /// into the cache; a single-byte decode of that head for the blank check (3 bytes per byte at most); the path's copies.
@@ -27,7 +28,14 @@ pub const OPEN_TEMP: u64 = (5 * CHUNK + 16 * MAX_PATH_BYTES + 64 * 1024) as u64;
 pub struct Raw {
     doc: Document,
     index: RwLock<LineIndex>,
-    blank: bool,
+    /// Held through each index run, so a run that continues the index starts where the last one stopped. First in the
+    /// lock order (`ByteStore`'s `len`).
+    indexing: Mutex<()>,
+    blank: AtomicBool,
+    /// The length the encoding was last sniffed at: the whole file while it's at most a chunk (`extend`).
+    sniffed: AtomicU64,
+    /// The fallback that sniff used, which a later one uses again, whatever the setting is by then.
+    fallback: &'static Encoding,
 }
 
 impl Raw {
@@ -55,7 +63,18 @@ impl Raw {
             Sniffed::Binary => return Err(DocError::Binary),
         };
         let blank = doc.len() <= CHUNK as u64 && whitespace_only(&head, encoding);
-        Ok(Raw { doc, index: RwLock::new(LineIndex { encoding, ..index }), blank })
+        let indexing = Mutex::new(());
+        // macOS boxes a std mutex at its first lock: that's here, under the open's reservation, as an index run's start
+        // has nothing reserved for it.
+        drop(indexing.lock().unwrap());
+        Ok(Raw {
+            index: RwLock::new(LineIndex { encoding, ..index }),
+            indexing,
+            blank: AtomicBool::new(blank),
+            sniffed: AtomicU64::new(doc.len()),
+            fallback,
+            doc,
+        })
     }
 
     /// What this document holds charged, itemized (plan C1, C6).
@@ -159,9 +178,9 @@ impl Raw {
     }
 
     /// Brief §7.9's empty file: 0 bytes, or only whitespace. Judged on the first chunk, so only for a file that
-    /// fits in it; a bigger one shows its blank lines.
+    /// fits in it; a bigger one shows its blank lines. Judged again as it grows (`extend`).
     pub fn blank(&self) -> bool {
-        self.blank
+        self.blank.load(Ordering::Relaxed)
     }
 
     /// `encoding_rs`'s name: `UTF-8`, `UTF-16LE`, `UTF-16BE` or `windows-1252`.
@@ -169,10 +188,11 @@ impl Raw {
         self.index.read().unwrap().encoding.name()
     }
 
-    /// (lines found so far, whether indexing is done).
+    /// (lines found so far, whether indexing is done: whether it has reached the document's length, which an extend
+    /// moves on).
     pub fn lines_known(&self) -> (u64, bool) {
         let index = self.index.read().unwrap();
-        (index.line_count(), index.done)
+        (index.line_count(), index.done(self.doc.len()))
     }
 
     /// Up to `count` lines from `start` (plan C2's bounds) of generation `generation`, with an identity check after
@@ -215,24 +235,71 @@ impl Raw {
     ///
     /// Plan C1: the job's buffers take an index slot, which it waits for. A cancel (`store::cancellable`) ends the wait,
     /// and the job with it.
+    ///
+    /// Live tail (Z95): each run picks up where the last one stopped and goes on to the document's length as it is at
+    /// each block, so it takes in an extend made while it runs; after one made since, a run continues it. Runs take
+    /// turns, before their slots. When the ledger can't hold the checkpoints a longer document needs, the run stops
+    /// with `Memory` at that block, unpublished (what its earlier blocks published stays), the document not frozen, and
+    /// a later run with room goes on.
     pub fn index(&self, mut on_progress: impl FnMut(Progress) -> bool) -> Result<(), String> {
+        let _run = self.indexing.lock().unwrap();
         let _slot = match budget::slot(Work::Index, &cancelled) {
             Ok(slot) => slot,
             Err(NoSlot::Cancelled) => return Ok(()), // closed before it started: nothing indexed, nothing frozen
             Err(NoSlot::Budget(e)) => return Err(DocError::Memory(e).to_string()),
         };
-        let store = self.doc.store();
         let file = self.doc.index_file().map_err(|e| e.to_string())?;
-        let built = build(&file, store.len(), IndexConfig::default(), &store.hashes(), &self.index, |p| {
+        let built = build(&file, self.doc.store(), IndexConfig::default(), &self.index, |p| {
             on_progress(p) && self.doc.frozen().is_none()
         });
-        if let Err(e) = built {
-            return Err(self.doc.fail(e).to_string());
+        match built {
+            Ok(()) => {}
+            Err(StoreError::Io(ref e)) if let Some(over) = e.get_ref().and_then(|e| e.downcast_ref::<OverBudget>()) => {
+                return Err(DocError::Memory(*over).to_string());
+            }
+            Err(e) => return Err(self.doc.fail(e).to_string()),
         }
         match self.doc.frozen() {
-            Some(why) if !self.index.read().unwrap().done => Err(format!("frozen: {why}")),
+            Some(why) if !self.lines_known().1 => Err(format!("frozen: {why}")),
             _ => Ok(()),
         }
+    }
+
+    /// Live tail (Z95): the document grows with an append, in place and in the same generation (`Document::extend`),
+    /// and this returns the bytes it gained, or `None` when nothing was appended. The index is then not done until a run
+    /// continues it (`index`), which charges the longer document's checkpoints first.
+    ///
+    /// While the document is at most a chunk long, its sniff and blank check saw all of it, so they're made again at
+    /// the new length, from a read in its caller's page slot through the store, chunk-verified, with no identity check,
+    /// as the extend has just made one. An encoding the sniff would now decide differently freezes the document, with a
+    /// reason that says so (Reload reads it again). A sniff cut short (a cancelled read) is owed, and the next call
+    /// makes it.
+    pub fn extend(&self) -> Result<Option<Range<u64>>, DocError> {
+        let grew = self.doc.extend()?;
+        let sniffed = self.sniffed.load(Ordering::Acquire);
+        if sniffed <= CHUNK as u64 && sniffed < self.doc.len() {
+            if let Some(why) = self.doc.frozen() {
+                return Err(DocError::Frozen(why)); // a frozen document reads nothing
+            }
+            // A byte past the chunk tells whether the chunk is the whole file, at the length the read saw.
+            let mut head = self.doc.store().read(0, CHUNK as u64 + 1).map_err(|e| self.doc.fail(e))?;
+            let whole = head.len() <= CHUNK;
+            head.truncate(CHUNK);
+            let encoding = self.index.read().unwrap().encoding;
+            let now = match sniff(&head, whole, self.fallback) {
+                Sniffed::Text { encoding } => encoding.name(),
+                Sniffed::Binary => "binary",
+            };
+            if now != encoding.name() {
+                let why = format!("changed on disk: its encoding is now {now}, not {} (Reload)", encoding.name());
+                return Err(self.doc.freeze(why));
+            }
+            if self.blank.load(Ordering::Relaxed) {
+                self.blank.store(whole && whitespace_only(&head, encoding), Ordering::Relaxed);
+            }
+            self.sniffed.fetch_max(if whole { head.len() as u64 } else { u64::MAX }, Ordering::AcqRel);
+        }
+        Ok(grew)
     }
 }
 
@@ -499,5 +566,278 @@ mod tests {
         let _ = fs::remove_file(&moved);
         assert!(blocked.is_empty(), "blocked operations: {blocked:?}");
         assert_eq!(stale_accepted, 0);
+    }
+
+    fn append(path: &Path, bytes: &[u8]) {
+        OpenOptions::new().append(true).open(path).unwrap().write_all(bytes).unwrap();
+    }
+
+    fn texts(raw: &Raw) -> Vec<String> {
+        raw.page(1, 0, 10).unwrap().into_iter().map(|p| p.text).collect()
+    }
+
+    /// Z95: an append that completes an unfinished last line. That line was counted already, so the count stays, and
+    /// its bytes then read whole; a line after it is counted. Between the extend and the run that continues the index,
+    /// the index isn't done.
+    #[test]
+    fn an_append_that_completes_the_last_line_keeps_the_count() {
+        let path = temp_file("raw-complete-line", b"one\ntw");
+        let raw = Raw::open(&path).unwrap();
+        raw.index(|_| true).unwrap();
+        assert_eq!((raw.lines_known(), texts(&raw)), ((2, true), vec!["one".to_string(), "tw".into()]));
+        append(&path, b"o\n");
+        assert_eq!(raw.extend().unwrap(), Some(6..8));
+        assert_eq!(raw.lines_known(), (2, false));
+        raw.index(|_| true).unwrap();
+        assert_eq!((raw.lines_known(), texts(&raw)), ((2, true), vec!["one".to_string(), "two".into()]));
+        append(&path, b"three");
+        assert_eq!(raw.extend().unwrap(), Some(8..13));
+        raw.index(|_| true).unwrap();
+        assert_eq!(
+            (raw.lines_known(), texts(&raw)),
+            ((3, true), vec!["one".to_string(), "two".into(), "three".into()])
+        );
+    }
+
+    /// Z95, and PR 116's precondition gone: an extend while the first index runs, between its blocks, after a read
+    /// hashed the old last chunk, part of it, so the extend hashes it again at the new length. The index reads each
+    /// block at the length as it is then, so it goes on to the new end with nothing `Changed`, and ends as the index of
+    /// the whole file.
+    #[test]
+    fn an_extend_while_the_index_runs_is_taken_in() {
+        let line = b"0123456789abcde\n";
+        let old = [line.repeat(6 << 16), b"0123".to_vec()].concat(); // 6 MiB and an unfinished line
+        let path = temp_file("raw-extend-mid-index", &old);
+        let raw = Raw::open(&path).unwrap();
+        let len = old.len() as u64;
+        raw.document().read(1, len - 4, len).unwrap();
+        let more = [b"456789abcde\n".to_vec(), line.repeat(1 << 17)].concat(); // ends that line, then 2 MiB
+        let mut blocks = 0;
+        raw.index(|_| {
+            blocks += 1;
+            if blocks == 1 {
+                append(&path, &more);
+                assert_eq!(raw.extend().unwrap(), Some(len..len + more.len() as u64));
+            }
+            true
+        })
+        .unwrap();
+        assert_eq!((raw.lines_known(), raw.document().frozen()), (((6 << 16) + 1 + (1 << 17), true), None));
+        let whole = Raw::open(&path).unwrap();
+        whole.index(|_| true).unwrap();
+        let (got, want) = (raw.index.read().unwrap(), whole.index.read().unwrap());
+        assert_eq!(
+            (got.newlines, got.last_line_start, got.indexed_bytes),
+            (want.newlines, want.last_line_start, want.indexed_bytes)
+        );
+        assert!(got.checkpoints.iter().eq(want.checkpoints.iter()), "the checkpoints differ from the whole file's");
+    }
+
+    /// Review of #116's predicted deadlock. A page read holds the line-index lock across its store reads, so it can
+    /// hold it while it waits for the length's read side behind a queued extend; an index that held the read side while
+    /// it took the line-index lock to publish would then wait on the page, the page on the extend, and the extend on
+    /// the index, for good. Here, in each of 200 rounds, the index holds the read side in its block read
+    /// (`store::BLOCK_READ`) while an append's extend queues on the write side, and a page read takes the line-index
+    /// lock and waits behind the extend; then the index goes on to publish. The run must end, with every extend and page
+    /// whole and the index done at the file's line count. This thread is the watchdog: two minutes without an end is the
+    /// deadlock.
+    #[test]
+    fn a_page_read_an_extend_and_the_index_never_wait_on_each_other() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        use std::sync::Arc;
+        use std::sync::mpsc::{RecvTimeoutError, channel};
+        use std::thread::{JoinHandle, spawn, yield_now};
+        const ROUNDS: usize = 200;
+        let path = temp_file("raw-deadlock", &b"a line of text\n".repeat(64));
+        let raw = Arc::new(Raw::open(&path).unwrap());
+        let (ended, end) = channel();
+        let run = {
+            let (raw, path) = (raw.clone(), path.to_path_buf());
+            spawn(move || {
+                // Rounds run, and the extends and pages of the last round, to join.
+                let state = Rc::new(RefCell::new((0, Vec::<JoinHandle<Result<(), String>>>::new(), Vec::new())));
+                let hook = {
+                    let (state, raw) = (state.clone(), raw.clone());
+                    move |len: &RwLock<u64>| {
+                        let (rounds, pending, failed) = &mut *state.borrow_mut();
+                        // This read waited for the last round's extend, and its page needs nothing this thread holds.
+                        failed.extend(pending.drain(..).filter_map(|t| t.join().unwrap().err()));
+                        if *rounds == ROUNDS {
+                            return;
+                        }
+                        *rounds += 1;
+                        append(&path, b"another line\n");
+                        let extend = {
+                            let raw = raw.clone();
+                            spawn(move || match raw.extend() {
+                                Ok(Some(grew)) if grew.end - grew.start == 13 => Ok(()),
+                                other => Err(format!("extend: {other:?}")),
+                            })
+                        };
+                        std::thread::scope(|s| {
+                            s.spawn(|| {
+                                while len.try_read().is_ok() && !extend.is_finished() {
+                                    yield_now(); // until the extend is queued on the write side
+                                }
+                            });
+                        });
+                        let page = {
+                            let raw = raw.clone();
+                            spawn(move || match raw.page(1, 0, 4) {
+                                Ok(page) if page.len() == 4 => Ok(()),
+                                other => Err(format!("page: {other:?}")),
+                            })
+                        };
+                        while raw.index.try_write().is_ok() && !page.is_finished() {
+                            yield_now(); // until the page holds the line-index lock
+                        }
+                        // Both wait: the extend on this thread's read side, the page behind the extend.
+                        assert!(!extend.is_finished() && !page.is_finished(), "round {rounds}: one didn't wait");
+                        pending.extend([extend, page]);
+                    }
+                };
+                crate::store::BLOCK_READ.set(Some(Box::new(hook)));
+                let indexed = raw.index(|_| true);
+                crate::store::BLOCK_READ.take();
+                let (rounds, pending, mut failed) = Rc::try_unwrap(state).ok().unwrap().into_inner();
+                failed.extend(pending.into_iter().filter_map(|t| t.join().unwrap().err()));
+                ended.send(()).unwrap();
+                (indexed, rounds, failed)
+            })
+        };
+        if let Err(RecvTimeoutError::Timeout) = end.recv_timeout(std::time::Duration::from_secs(120)) {
+            panic!("no end in 120 s: the index, an extend and a page read wait on each other");
+        }
+        let (indexed, rounds, failed) = run.join().unwrap();
+        assert_eq!((indexed, rounds, failed), (Ok(()), ROUNDS, Vec::<String>::new()));
+        assert_eq!((raw.lines_known(), raw.document().frozen()), ((64 + ROUNDS as u64, true), None));
+    }
+
+    /// Z95: while a file is at most a chunk long, its sniff and blank check saw all of it, so an extend makes them
+    /// again. An empty file that gains whitespace stays blank, and one that gains text isn't; a file whose new bytes the
+    /// sniff reads as another encoding freezes, with a reason that names both.
+    #[test]
+    fn an_extend_sniffs_a_small_file_again() {
+        let path = temp_file("raw-extend-blank", b"");
+        let raw = Raw::open(&path).unwrap();
+        assert!(raw.blank());
+        append(&path, b" \r\n");
+        assert_eq!((raw.extend().unwrap(), raw.blank()), (Some(0..3), true));
+        append(&path, b"text\n");
+        assert_eq!((raw.extend().unwrap(), raw.blank()), (Some(3..8), false));
+        assert_eq!((raw.encoding(), raw.document().frozen()), ("UTF-8", None));
+        let cases = [
+            ("half-char", b"caf\xE2\x82".as_slice(), b"\xAC!".as_slice(), "windows-1252", "UTF-8"), // half a euro sign
+            ("nul", b"text", b"\0", "UTF-8", "binary"),
+            ("bom", b"", b"\xFF\xFEa\0", "UTF-8", "UTF-16LE"),
+        ];
+        for (name, before, after, was, now) in cases {
+            let path = temp_file(&format!("raw-extend-sniff-{name}"), before);
+            let raw = Raw::open(&path).unwrap();
+            assert_eq!(raw.encoding(), was, "{name}");
+            append(&path, after);
+            let why = format!("changed on disk: its encoding is now {now}, not {was} (Reload)");
+            let result = raw.extend();
+            assert!(matches!(result, Err(DocError::Frozen(ref w)) if *w == why), "{name}: {result:?}");
+            assert_eq!(raw.document().frozen(), Some(why), "{name}");
+        }
+    }
+
+    /// Z95: a file over a chunk isn't sniffed again: its sniff saw only its first chunk, which an append doesn't change.
+    /// With the read's cancel flag set, its extend reads nothing, so it extends. A small file's extend stops at the
+    /// sniff's read, `Cancelled`, extended and not frozen; its next extend, with nothing appended, makes the sniff it
+    /// owes, and freezes.
+    #[test]
+    fn an_extend_sniffs_again_only_a_file_it_saw_whole() {
+        use crate::store::cancellable;
+        use std::sync::Arc;
+        let cancel = Arc::new(AtomicBool::new(true));
+        let big = [b"caf\xE2\x82".as_slice(), &letters(CHUNK, 0)].concat(); // invalid UTF-8 in its first chunk
+        let path = temp_file("raw-extend-big", &big);
+        let raw = Raw::open(&path).unwrap();
+        append(&path, b"more\n");
+        let len = big.len() as u64;
+        assert_eq!(cancellable(&cancel, || raw.extend()).unwrap(), Some(len..len + 5));
+        assert_eq!((raw.encoding(), raw.document().frozen()), ("windows-1252", None));
+        let path = temp_file("raw-extend-owed", b"caf\xE2\x82");
+        let raw = Raw::open(&path).unwrap();
+        append(&path, b"\xAC");
+        assert!(matches!(cancellable(&cancel, || raw.extend()), Err(DocError::Cancelled)));
+        assert_eq!((raw.document().len(), raw.document().frozen()), (6, None));
+        let result = raw.extend();
+        assert!(matches!(result, Err(DocError::Frozen(ref why)) if why.contains("now UTF-8")), "{result:?}");
+    }
+
+    /// Review of #117: a run stopped at its last block isn't done, though it has reached the end of the file, as before
+    /// Z95. Frozen there (in the only block of a small file, or the last of several), `index` ends with the freeze, which
+    /// the host's index-error cleanup waits for. Stopped there by its callback, it isn't done, until a later run is.
+    #[test]
+    fn a_run_stopped_at_its_last_block_is_not_done() {
+        let small = b"one\ntwo\nthree".to_vec();
+        let big = [b"0123456789abcde\n".repeat(1 << 18), b"tail".to_vec()].concat(); // 4 MiB and 4 bytes: two blocks
+        for (name, bytes, blocks, lines) in [("small", &small, 1, 3), ("big", &big, 2, (1 << 18) + 1)] {
+            let raw = Raw::open(&temp_file(&format!("raw-last-frozen-{name}"), bytes)).unwrap();
+            let mut seen = 0;
+            let indexed = raw.index(|p| {
+                seen += 1;
+                if seen == blocks && !p.done {
+                    let _ = raw.document().freeze("in the last block".into());
+                }
+                true
+            });
+            assert_eq!(
+                (indexed, raw.lines_known()),
+                (Err("frozen: in the last block".into()), (lines, false)),
+                "{name}"
+            );
+            let raw = Raw::open(&temp_file(&format!("raw-last-stopped-{name}"), bytes)).unwrap();
+            let mut seen = 0;
+            let indexed = raw.index(|p| {
+                seen += 1;
+                seen != blocks || p.done // no to the last block's event
+            });
+            assert_eq!((indexed, raw.lines_known()), (Ok(()), (lines, false)), "{name}");
+            raw.index(|_| true).unwrap();
+            assert_eq!(raw.lines_known(), (lines, true), "{name}: a later run");
+        }
+    }
+
+    /// Review of #117: index runs on one document take turns (`indexing`). Without that, two runs started together after
+    /// an extend resume from the same state and each publish the same checkpoints. Here, in three rounds, two runs start
+    /// together after a 9 MiB extend, and the index must equal a fresh index of the same bytes.
+    #[test]
+    fn two_index_runs_at_once_take_turns() {
+        use std::sync::{Arc, Barrier};
+        let line = b"0123456789abcde\n";
+        let path = temp_file("raw-two-runs", &line.repeat(64));
+        let raw = Arc::new(Raw::open(&path).unwrap());
+        raw.index(|_| true).unwrap();
+        for round in 0..3 {
+            append(&path, &line.repeat(9 << 16));
+            assert!(raw.extend().unwrap().is_some());
+            let start = Arc::new(Barrier::new(2));
+            let runs: Vec<_> = (0..2)
+                .map(|_| {
+                    let (raw, start) = (raw.clone(), start.clone());
+                    std::thread::spawn(move || {
+                        start.wait();
+                        raw.index(|_| true)
+                    })
+                })
+                .collect();
+            for run in runs {
+                assert_eq!(run.join().unwrap(), Ok(()), "round {round}");
+            }
+            let whole = Raw::open(&path).unwrap();
+            whole.index(|_| true).unwrap();
+            let (got, want) = (raw.index.read().unwrap(), whole.index.read().unwrap());
+            assert_eq!(
+                (got.checkpoints.len(), got.newlines, got.indexed_bytes),
+                (want.checkpoints.len(), want.newlines, want.indexed_bytes),
+                "round {round}"
+            );
+            assert!(got.checkpoints.iter().eq(want.checkpoints.iter()), "round {round}: the checkpoints differ");
+        }
     }
 }

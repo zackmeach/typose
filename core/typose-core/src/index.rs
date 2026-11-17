@@ -7,7 +7,7 @@ use memchr::memchr_iter;
 
 use crate::budget::{OverBudget, Reservation};
 use crate::encoding::{newline_and_cr, newline_ends};
-use crate::store::{ByteStore, CHUNK, ChunkHashes, StoreError, read_exact_at};
+use crate::store::{ByteStore, CHUNK, StoreError};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Checkpoint {
@@ -45,10 +45,12 @@ const fn fresh_max(n: usize, cp_lines: u64, cp_bytes: u64) -> usize {
 pub const INDEX_TEMP: usize = BLOCK + fresh_max(BLOCK, 1024, 1 << 20) * CP + 4096;
 
 /// Plan C1: checkpoints in chunks, filled in order, so the table grows without ever holding two copies.
-/// - The first chunk holds every byte-bound checkpoint the file can have, the initial one included
-///   (⌈len / cp_bytes⌉ + 1), reserved with the document's floor at open.
+/// - The first chunk holds every byte-bound checkpoint the file can have at its length at open, the initial one
+///   included (⌈len / cp_bytes⌉ + 1), reserved with the document's floor at open.
 /// - Line checkpoints take elastic chunks of `CP_CHUNK`, charged as the index needs them. When the ledger refuses one,
 ///   line checkpoints stop, and the byte-bound ones alone keep every rescan ≤ `cp_bytes` (spec §3.5).
+/// - A file that grows (Z95) takes the byte-bound checkpoints its new bytes can have in elastic chunks too, charged
+///   before the index reaches them. When the ledger refuses those, the index stops there (`build`).
 #[derive(Debug)]
 pub struct Checkpoints {
     chunks: Vec<Vec<Checkpoint>>,
@@ -75,26 +77,44 @@ impl Checkpoints {
         Ok(Checkpoints { chunks, len: 0, floor, elastic: 0, cp_bytes, charge })
     }
 
-    /// Makes room for `lines` line checkpoints in all, a chunk at a time, each charged before it's allocated. False
-    /// when the ledger refuses: the index then adds no more line checkpoints.
-    fn room(&mut self, lines: usize) -> bool {
-        let entry = size_of::<Vec<Checkpoint>>() as u64;
-        while self.elastic < lines {
-            let full = self.chunks.len() == self.chunks.capacity();
-            let (old, new) = (self.chunks.capacity(), 2 * self.chunks.capacity());
-            // Growing the list may move it, holding the old list and the new one at once: both are charged until then.
-            let need = (CP_CHUNK * CP) as u64 + if full { new as u64 * entry } else { 0 };
-            if self.charge.grow(need).is_err() {
+    /// Makes room for `extra` checkpoints past the first chunk in all, a chunk at a time, each charged before it's
+    /// allocated. False when the ledger refuses: the index then adds no more line checkpoints.
+    fn room(&mut self, extra: usize) -> bool {
+        while self.elastic < extra {
+            if self.reserve(self.elastic + 1).is_err() {
                 return false;
             }
-            if full {
-                self.chunks.reserve_exact(new - self.chunks.len());
-                self.charge.shrink(old as u64 * entry);
-            }
-            self.chunks.push(Vec::with_capacity(CP_CHUNK));
-            self.elastic += CP_CHUNK;
         }
         true
+    }
+
+    /// Makes room for `extra` checkpoints past the first chunk in all, every chunk it adds charged before any is
+    /// allocated: a refusal changes nothing.
+    fn reserve(&mut self, extra: usize) -> Result<(), OverBudget> {
+        let add = extra.saturating_sub(self.elastic).div_ceil(CP_CHUNK);
+        if add == 0 {
+            return Ok(());
+        }
+        let entry = size_of::<Vec<Checkpoint>>();
+        let (old, want) = (self.chunks.capacity(), self.chunks.len() + add);
+        let new = if want > old { want.max(2 * old) } else { old };
+        // Growing the list may move it, holding the old list and the new one at once: both are charged until then.
+        self.charge.grow((add * CP_CHUNK * CP + if new > old { new * entry } else { 0 }) as u64)?;
+        if new > old {
+            self.chunks.reserve_exact(new - self.chunks.len());
+            self.charge.shrink((old * entry) as u64);
+        }
+        for _ in 0..add {
+            self.chunks.push(Vec::with_capacity(CP_CHUNK));
+        }
+        self.elastic += add * CP_CHUNK;
+        Ok(())
+    }
+
+    /// The checkpoints past the first chunk that an index reaching `end`, with `lines` line checkpoints, can hold: the
+    /// byte-bound ones a file longer than it was at open adds, and the line ones.
+    fn past_floor(&self, end: u64, lines: usize) -> usize {
+        ((end.div_ceil(self.cp_bytes) + 1) as usize).saturating_sub(self.floor) + lines
     }
 
     /// Releases the elastic chunks `room` made ahead that no checkpoint reached: the index is done.
@@ -156,9 +176,15 @@ pub struct LineIndex {
     pub newlines: u64,
     pub last_line_start: u64,
     pub indexed_bytes: u64,
-    pub done: bool,
     /// Decides what a newline is: in UTF-16 it's a 2-byte unit.
     pub encoding: &'static Encoding,
+    /// The rest of the builder's state, kept so that a later build picks up at `indexed_bytes` (`Builder`).
+    pub(crate) last_cp: u64,
+    pub(crate) lines_since: u64,
+    pub(crate) line_cps: usize,
+    pub(crate) lines_on: bool,
+    /// Whether the last build ran to the length it read, rather than being stopped by its callback (`done`).
+    pub(crate) finished: bool,
 }
 
 impl LineIndex {
@@ -169,9 +195,21 @@ impl LineIndex {
             newlines: 0,
             last_line_start: 0,
             indexed_bytes: 0,
-            done: false,
             encoding,
+            last_cp: 0,
+            lines_since: 0,
+            line_cps: 0,
+            lines_on: true,
+            finished: false,
         })
+    }
+
+    /// Whether its last build ran to the end and it has indexed its document's `len` bytes, the length now. A build
+    /// its callback stopped isn't done, even at the end of the file (a freeze in the last block ends the index with the
+    /// freeze, as it always has); after an extend it isn't done until a build continues it. Before a first build, not
+    /// even an empty file is.
+    pub fn done(&self, len: u64) -> bool {
+        self.finished && self.indexed_bytes == len
     }
 }
 
@@ -209,11 +247,18 @@ struct Builder {
 }
 
 impl Builder {
-    /// `fresh` holds what one block can add (`fresh_max`), so it never grows.
-    fn new(cfg: IndexConfig, fresh: usize) -> Builder {
-        let mut fresh = Vec::with_capacity(fresh);
-        fresh.push(Checkpoint { line: 0, offset: 0, at_line_start: true });
-        Builder { cfg, fresh, newlines: 0, last_line_start: 0, last_cp: 0, lines_since: 0, line_cps: 0, lines_on: true }
+    /// Where `index`'s last build stopped. `fresh` is sized for each block (`fresh_max`), so it never grows inside one.
+    fn resume(cfg: IndexConfig, index: &LineIndex) -> Builder {
+        Builder {
+            cfg,
+            fresh: Vec::new(),
+            newlines: index.newlines,
+            last_line_start: index.last_line_start,
+            last_cp: index.last_cp,
+            lines_since: index.lines_since,
+            line_cps: index.line_cps,
+            lines_on: index.lines_on,
+        }
     }
 
     /// One block `[start, end)`; `rels` are its newline positions relative to `start`, ascending.
@@ -242,90 +287,97 @@ impl Builder {
         }
     }
 
-    /// Moves the new checkpoints into the shared index and returns its line count.
-    fn publish(&mut self, shared: &RwLock<LineIndex>, indexed: u64, done: bool) -> u64 {
+    /// Moves the new checkpoints into the shared index, after the initial one on its first publish, with the state a
+    /// later build resumes from, and returns its line count. `trim`: the build reached the length, and is finished.
+    fn publish(&mut self, shared: &RwLock<LineIndex>, indexed: u64, trim: bool) -> u64 {
         let mut w = shared.write().unwrap();
+        if w.checkpoints.len() == 0 {
+            w.checkpoints.push(Checkpoint { line: 0, offset: 0, at_line_start: true }); // the floor holds it
+        }
         for cp in self.fresh.drain(..) {
             w.checkpoints.push(cp);
         }
-        if done {
+        if trim {
             w.checkpoints.trim();
         }
         w.newlines = self.newlines;
         w.last_line_start = self.last_line_start;
         w.indexed_bytes = indexed;
-        w.done = done;
+        w.finished = trim;
+        (w.last_cp, w.lines_since, w.line_cps, w.lines_on) =
+            (self.last_cp, self.lines_since, self.line_cps, self.lines_on);
         w.line_count()
     }
-}
-
-/// Reads one chunk-aligned block at `pos` and hashes every chunk in it.
-pub(crate) fn read_block<'a>(
-    file: &File,
-    block: &'a mut [u8],
-    pos: u64,
-    hashes: &ChunkHashes,
-) -> Result<&'a [u8], StoreError> {
-    read_exact_at(file, block, pos).map_err(|e| match e.kind() {
-        std::io::ErrorKind::UnexpectedEof => StoreError::Changed { chunk: pos / CHUNK as u64 },
-        _ => StoreError::Io(e),
-    })?;
-    for (i, chunk) in block.chunks(CHUNK).enumerate() {
-        hashes.check(pos / CHUNK as u64 + i as u64, chunk)?;
-    }
-    Ok(block)
 }
 
 fn block_len(cfg: &IndexConfig) -> usize {
     cfg.block.max(CHUNK) / CHUNK * CHUNK // whole chunks, so every hash covers exactly one chunk
 }
 
-/// Indexes `file` block by block. After each block `on_progress` says whether to go on: when it says no, the index
-/// stops there, published as far as it got and not done (plan C6: a frozen document's index ends).
+/// Indexes `file` block by block, from where the index's last build stopped (`indexed_bytes`) to the store's length,
+/// read again for each block: an extend while it runs is taken in, and the index goes on to the new end. After each
+/// block `on_progress` says whether to go on: when it says no, the index stops there, published as far as it got and
+/// not done (plan C6: a frozen document's index ends). One build at a time per index (`Raw::index`).
 ///
-/// Plan C1: its buffers fit in `INDEX_TEMP`, which its caller's index slot reserves. Before each block it makes room in
-/// the checkpoint table for the line checkpoints the block can add; once the ledger refuses, it adds only byte-bound
-/// ones.
+/// A block starts at the chunk that holds `indexed_bytes`, so each of its chunks is read and hash-checked whole, at
+/// the length the store has then (`ByteStore::read_block`), which it holds only while it reads: never while it takes
+/// the index's lock, which page reads hold while they wait on the length. The newlines it counts start there, or in
+/// UTF-16 at the unit there, which an end at an odd offset split.
+///
+/// Plan C1: its buffers fit in `INDEX_TEMP`, which its caller's index slot reserves, each sized for its block. Before it
+/// publishes a block it makes room in the checkpoint table for the byte-bound checkpoints the block can add past the
+/// floor sized at open, and stops with the ledger's refusal as an `io::Error` (as `ByteStore::open_with` does), the
+/// block unpublished; then for the line checkpoints, and once the ledger refuses those it adds only byte-bound ones.
 pub fn build(
     file: &File,
-    len: u64,
+    store: &ByteStore,
     cfg: IndexConfig,
-    hashes: &ChunkHashes,
     shared: &RwLock<LineIndex>,
     mut on_progress: impl FnMut(Progress) -> bool,
 ) -> Result<(), StoreError> {
-    let encoding = {
+    let (encoding, mut b, mut pos) = {
         let index = shared.read().unwrap();
         assert_eq!(index.checkpoints.cp_bytes, cfg.cp_bytes, "the table's floor was sized for another byte bound");
-        index.encoding
+        (index.encoding, Builder::resume(cfg, &index), index.indexed_bytes)
     };
-    let buf_len = block_len(&cfg).min(len as usize);
-    let fresh = fresh_max(buf_len, cfg.cp_lines, cfg.cp_bytes);
-    assert!(buf_len + fresh * CP <= INDEX_TEMP, "an index config past its slot");
-    let mut b = Builder::new(cfg, fresh);
-    let mut buf = vec![0u8; buf_len];
-    let mut pos = 0u64;
-    while pos < len {
-        let n = ((len - pos) as usize).min(buf.len());
-        if b.lines_on {
-            // The line checkpoints this block can add: one per `cp_lines` lines, counting those carried in.
-            let more = (b.lines_since as usize + n) / cfg.cp_lines as usize;
-            b.lines_on = shared.write().unwrap().checkpoints.room(b.line_cps + more);
+    let utf16 = encoding == UTF_16LE || encoding == UTF_16BE;
+    let mut buf = Vec::new();
+    while pos < store.len() {
+        let at = pos - pos % CHUNK as u64;
+        let block = store.read_block(file, &mut buf, at, block_len(&cfg))?;
+        let end = at + block.len() as u64;
+        let from = if utf16 { pos & !1 } else { pos };
+        let n = (end - from) as usize;
+        let fresh = fresh_max(n, cfg.cp_lines, cfg.cp_bytes);
+        assert!(block.len() + fresh * CP <= INDEX_TEMP, "an index config past its slot");
+        {
+            let mut index = shared.write().unwrap();
+            let cps = &mut index.checkpoints;
+            cps.reserve(cps.past_floor(end, b.line_cps)).map_err(|e| StoreError::Io(std::io::Error::other(e)))?;
+            if b.lines_on {
+                // The line checkpoints this block can add: one per `cp_lines` lines, counting those carried in.
+                let more = (b.lines_since as usize + n) / cfg.cp_lines as usize;
+                b.lines_on = cps.room(cps.past_floor(end, b.line_cps + more));
+            }
         }
-        let block = read_block(file, &mut buf[..n], pos, hashes)?;
-        if encoding == UTF_16LE || encoding == UTF_16BE {
-            b.block(pos, pos + n as u64, newline_ends(encoding, pos, block));
+        if b.fresh.capacity() < fresh {
+            b.fresh = Vec::new(); // the old one freed first
+            b.fresh.reserve_exact(fresh);
+        }
+        let scan = &block[(from - at) as usize..];
+        if utf16 {
+            b.block(from, end, newline_ends(encoding, from, scan));
         } else {
-            b.block(pos, pos + n as u64, memchr_iter(b'\n', block)); // Spike A's hot path, unchanged
+            b.block(from, end, memchr_iter(b'\n', scan)); // Spike A's hot path, unchanged
         }
-        pos += n as u64;
+        pos = end;
         let lines = b.publish(shared, pos, false);
         if !on_progress(Progress { lines, bytes: pos, done: false }) {
             return Ok(());
         }
     }
-    let lines = b.publish(shared, len, true);
-    on_progress(Progress { lines, bytes: len, done: true });
+    let lines = b.publish(shared, pos, true);
+    on_progress(Progress { lines, bytes: pos, done: true });
     Ok(())
 }
 
@@ -360,13 +412,14 @@ mod tests {
     use crate::store::testutil::temp_file;
     use encoding_rs::UTF_8;
     use proptest::prelude::*;
+    use std::io::Write;
 
     fn index_bytes(name: &str, bytes: &[u8], cfg: IndexConfig) -> (ByteStore, LineIndex) {
         let path = temp_file(name, bytes);
         let store = ByteStore::open(&path).unwrap();
         let shared = RwLock::new(LineIndex::new(store.len(), &cfg, UTF_8).unwrap());
         let file = File::open(&path).unwrap();
-        build(&file, store.len(), cfg, &store.hashes(), &shared, |_| true).unwrap();
+        build(&file, &store, cfg, &shared, |_| true).unwrap();
         (store, shared.into_inner().unwrap())
     }
 
@@ -390,7 +443,7 @@ mod tests {
         let starts: Vec<(u64, u64)> = idx.checkpoints.iter().map(|c| (c.line, c.offset)).collect();
         assert_eq!(starts, vec![(0, 0), (3, 6), (6, 12), (9, 18)]);
         assert_eq!(idx.line_count(), 10);
-        assert!(idx.done);
+        assert!(idx.done(20));
     }
 
     #[test]
@@ -447,7 +500,7 @@ mod tests {
         let path = temp_file(name, bytes);
         let store = ByteStore::open(&path).unwrap();
         let shared = RwLock::new(LineIndex::new(store.len(), &cfg, encoding).unwrap());
-        build(&File::open(&path).unwrap(), store.len(), cfg, &store.hashes(), &shared, |_| true).unwrap();
+        build(&File::open(&path).unwrap(), &store, cfg, &shared, |_| true).unwrap();
         (store, shared.into_inner().unwrap())
     }
 
@@ -512,5 +565,150 @@ mod tests {
                 prop_assert!(pair[1].offset - pair[0].offset <= cp_bytes, "checkpoint gap over cp_bytes");
             }
         }
+    }
+
+    /// Z95: `bytes` indexed as a file that grew. Its first `splits[0]` bytes are indexed, then for each later split and
+    /// for its end the file is appended to, the store extended and the index continued.
+    fn index_grown(
+        name: &str,
+        bytes: &[u8],
+        splits: &[usize],
+        cfg: IndexConfig,
+        encoding: &'static Encoding,
+    ) -> (ByteStore, LineIndex) {
+        let path = temp_file(name, &bytes[..splits[0]]);
+        let store = ByteStore::open(&path).unwrap();
+        let shared = RwLock::new(LineIndex::new(store.len(), &cfg, encoding).unwrap());
+        let file = File::open(&path).unwrap();
+        build(&file, &store, cfg, &shared, |_| true).unwrap();
+        let mut appender = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut at = splits[0];
+        for &end in splits[1..].iter().chain([bytes.len()].iter()) {
+            appender.write_all(&bytes[at..end]).unwrap();
+            store.extend(end as u64).unwrap();
+            build(&file, &store, cfg, &shared, |_| true).unwrap();
+            at = end;
+        }
+        (store, shared.into_inner().unwrap())
+    }
+
+    /// A grown index against the whole file's: the same checkpoints, the line starts `starts`, done, and no checkpoint
+    /// gap over `cp_bytes`.
+    fn same_as_whole(
+        (store, idx): &(ByteStore, LineIndex),
+        whole: &LineIndex,
+        starts: &[u64],
+        cp_bytes: u64,
+    ) -> Result<(), TestCaseError> {
+        prop_assert_eq!(idx.checkpoints.iter().collect::<Vec<_>>(), whole.checkpoints.iter().collect::<Vec<_>>());
+        prop_assert_eq!(idx.line_count(), starts.len() as u64);
+        prop_assert!(idx.done(store.len()), "not done at {} of {}", idx.indexed_bytes, store.len());
+        for (line, &start) in starts.iter().enumerate() {
+            prop_assert_eq!(locate_line(store, idx, line as u64).unwrap(), Some(start));
+        }
+        for pair in idx.checkpoints.iter().collect::<Vec<_>>().windows(2) {
+            prop_assert!(pair[1].offset - pair[0].offset <= cp_bytes, "checkpoint gap over cp_bytes");
+        }
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1_000))]
+        /// Z95: an index continued after appends, at random split points (odd and even, a CR LF or a UTF-16 newline
+        /// unit across one included), is the whole file's index, in UTF-8 and in UTF-16 LE and BE.
+        #[test]
+        fn a_continued_index_is_the_whole_files_index(
+            (bytes, encoding) in prop_oneof![
+                prop::collection::vec(prop_oneof![Just(b'\n'), Just(b'a'), Just(b'\r')], 0..3000)
+                    .prop_map(|bytes| (bytes, UTF_8)),
+                (
+                    prop::collection::vec(
+                        prop::sample::select(vec![0x000A, 0x000D, 0x010A, 0x0A0D, 0x0A00, 0x0A0A, 0x0041, 0xD83D, 0xDE00]),
+                        0..1500,
+                    ),
+                    any::<bool>(),
+                )
+                    .prop_map(|(units, be)| (utf16_file(&units, be), if be { UTF_16BE } else { UTF_16LE })),
+            ],
+            splits in prop::collection::vec(any::<prop::sample::Index>(), 1..4),
+            cp_lines in 1u64..50,
+            cp_bytes in 1u64..300,
+        ) {
+            let cfg = IndexConfig { cp_lines, cp_bytes, block: CHUNK };
+            let mut splits: Vec<usize> = splits.iter().map(|s| s.index(bytes.len() + 1)).collect();
+            splits.sort();
+            let grown = index_grown("grown-prop", &bytes, &splits, cfg, encoding);
+            let (_, whole) = index_encoded("grown-prop-whole", &bytes, cfg, encoding);
+            let starts = if encoding == UTF_8 {
+                naive_line_starts(&bytes)
+            } else {
+                utf16_line_starts(&bytes, encoding == UTF_16BE)
+            };
+            same_as_whole(&grown, &whole, &starts, cp_bytes)?;
+        }
+    }
+
+    /// Z95: the old end inside a newline, each way it can fall: between a CR and its LF, and inside a UTF-16 newline
+    /// unit (an odd end, so the continuation starts at the unit), in both byte orders, and in a second chunk, where the
+    /// continuation reads from the chunk's start. Each newline counts once.
+    #[test]
+    fn a_newline_across_the_old_end_counts_once() {
+        let utf16 = |text: &str, be: bool| utf16_file(&text.encode_utf16().collect::<Vec<_>>(), be);
+        let small = IndexConfig { cp_lines: 2, cp_bytes: 3, block: CHUNK };
+        let big = IndexConfig { cp_lines: 64, cp_bytes: 64, block: CHUNK };
+        let second_chunk = utf16(&("x".repeat(CHUNK / 2 - 1) + "\n" + &"y\r\n".repeat(10)), false); // "\n" at CHUNK
+        let c = CHUNK;
+        let cases: [(&[u8], &'static Encoding, IndexConfig, &[usize]); 7] = [
+            (b"ab\r\ncd\nef", UTF_8, small, &[3, 4, 6, 7]),
+            (&utf16("ab\r\ncd\nef", false), UTF_16LE, small, &[7, 8, 9, 14, 15]), // CR at 6, LF at 8, LF at 14
+            (&utf16("ab\r\ncd\nef", true), UTF_16BE, small, &[7, 8, 9, 14, 15]),
+            (&utf16("\n\n\n", false), UTF_16LE, small, &[1, 3, 5, 7]),
+            // In the last "x" unit, at the chunk's end, in the "\n" unit, in the CR unit after it.
+            (&second_chunk, UTF_16LE, big, &[c - 1, c, c + 1, c + 5]),
+            (&second_chunk, UTF_16LE, big, &[c + 1]),
+            (&second_chunk, UTF_16LE, big, &[c + 7]), // inside the LF of the CR LF after the newline at CHUNK
+        ];
+        for (i, (bytes, encoding, cfg, splits)) in cases.into_iter().enumerate() {
+            let starts = if encoding == UTF_8 {
+                naive_line_starts(bytes)
+            } else {
+                utf16_line_starts(bytes, encoding == UTF_16BE)
+            };
+            for &split in splits {
+                let grown = index_grown("grown-split", bytes, &[split], cfg, encoding);
+                let (_, whole) = index_encoded("grown-split-whole", bytes, cfg, encoding);
+                same_as_whole(&grown, &whole, &starts, cfg.cp_bytes)
+                    .unwrap_or_else(|e| panic!("case {i} at {split}: {e}"));
+            }
+            let grown = index_grown("grown-splits", bytes, splits, cfg, encoding); // every split, one after another
+            let (_, whole) = index_encoded("grown-splits-whole", bytes, cfg, encoding);
+            same_as_whole(&grown, &whole, &starts, cfg.cp_bytes)
+                .unwrap_or_else(|e| panic!("case {i}, all splits: {e}"));
+        }
+    }
+
+    /// Z95: the checkpoint floor grows with the file. One opened at 10 bytes, with a byte-bound checkpoint every 16
+    /// bytes (a floor of 2), grows to 400,000: its continuation takes 25,000 byte-bound checkpoints past that floor,
+    /// in elastic chunks charged before they're filled (`push` asserts that it never goes past them). Line checkpoints
+    /// are off for the continuation, as a refused `room` leaves them: `room` also makes room for the floor's growth
+    /// while they're on, so only with them off is `reserve` alone in making it.
+    #[test]
+    fn a_file_that_grows_far_past_its_floor_indexes_to_its_end() {
+        let cfg = IndexConfig { cp_lines: 1 << 20, cp_bytes: 16, block: CHUNK };
+        let bytes: Vec<u8> = (0..20_000).flat_map(|i| format!("{i:019}\n").into_bytes()).collect();
+        let path = temp_file("grown-floor", &bytes[..10]);
+        let store = ByteStore::open(&path).unwrap();
+        let shared = RwLock::new(LineIndex::new(store.len(), &cfg, UTF_8).unwrap());
+        let file = File::open(&path).unwrap();
+        build(&file, &store, cfg, &shared, |_| true).unwrap();
+        shared.write().unwrap().lines_on = false;
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&bytes[10..]).unwrap();
+        store.extend(bytes.len() as u64).unwrap();
+        build(&file, &store, cfg, &shared, |_| true).unwrap();
+        let grown = (store, shared.into_inner().unwrap());
+        let (_, whole) = index_encoded("grown-floor-whole", &bytes, cfg, UTF_8);
+        same_as_whole(&grown, &whole, &naive_line_starts(&bytes), cfg.cp_bytes).unwrap();
+        assert_eq!(Checkpoints::new(10, 16).unwrap().floor, 2);
+        assert!(grown.1.checkpoints.len() > 25_000, "{} checkpoints", grown.1.checkpoints.len());
     }
 }

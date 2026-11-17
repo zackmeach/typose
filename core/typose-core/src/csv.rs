@@ -1196,6 +1196,7 @@ impl GridFind {
     }
     pub fn scan(&self, csv: &Csv, doc: &Document) -> Result<GridProgress, DocError> {
         let _temp = Reservation::new(TEMP_BYTES + self.order.rows * 8).map_err(DocError::Memory)?;
+        // Held across the reads in `step`: it comes before the document's locks (`ByteStore`'s `len`).
         let mut held = self.cursor.lock().unwrap();
         let mut c = held.clone();
         let mut hits = Vec::with_capacity(crate::find::HIT_LIMIT);

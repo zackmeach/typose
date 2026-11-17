@@ -206,6 +206,7 @@ impl Index {
         let progress = self.progress.read().unwrap();
         let undetected = progress.sample_parsed >= 200 && detected_schema(&progress).is_none();
         drop(progress);
+        // Held across the reads in `observe`: it comes before the document's locks (`ByteStore`'s `len`).
         let mut graph = self.transcript.lock().unwrap();
         if undetected {
             graph.reject_undetected();

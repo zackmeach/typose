@@ -663,6 +663,72 @@ fn extend_shape(step: usize, path: &Path) {
     assert!(leaked.unsigned_abs() < 64 << 10, "live tail: {leaked} bytes still live");
 }
 
+/// Live tail (Z95), checked throughout: an index continued after its document extends. A file of 1 MiB exactly fills
+/// the checkpoint floor sized at open; an append of a line takes it past, so the run that continues the index charges an
+/// elastic chunk for the byte-bound checkpoints the new bytes can have. A twin, extended and continued first, measures
+/// that charge. With the limit a byte short of it, the continuation stops with `Memory`: the index, the document and
+/// their charges stay as they were, unfrozen. With room it goes on to the end, at the twin's charges exactly; and again
+/// after 3 MiB more, where it makes room for line checkpoints too. Then both close: the ledger is back.
+fn extend_index_shape(step: usize, path: &Path) {
+    write(path, &[&[b'a'; 1023], b"\n"], 1024);
+    let mut appender = fs::OpenOptions::new().append(true).open(path).unwrap();
+    let before = budget::totals();
+    STEP.store(step, SeqCst);
+    ARMED.store(true, SeqCst);
+    let raw = Raw::open(path).unwrap();
+    let twin = Raw::open(path).unwrap();
+    let indexed = (raw.index(|_| true), twin.index(|_| true));
+    ARMED.store(false, SeqCst);
+    appender.write_all(b"a tail\n").unwrap();
+    ARMED.store(true, SeqCst);
+    let grew = [in_slot(|| raw.extend()), in_slot(|| twin.extend())].map(|r| r.map_err(|e| e.to_string()));
+    let used = budget::totals().used;
+    budget::reset_high();
+    let twin_continued = twin.index(|_| true);
+    let need = budget::totals().high - used;
+    let held = (raw.lines_known(), raw.charges(), raw.document().len());
+    let limit = budget::totals().limit;
+    budget::set_limit(budget::totals().used + need - 1).unwrap();
+    let refused = raw.index(|_| true);
+    budget::set_limit(limit).unwrap();
+    let after_refusal = (raw.lines_known(), raw.charges(), raw.document().len(), raw.document().frozen());
+    let continued = raw.index(|_| true);
+    let first = ((raw.lines_known(), raw.charges()), (twin.lines_known(), twin.charges()));
+    ARMED.store(false, SeqCst);
+    appender.write_all(&[vec![b'x'; 3 << 20], b"\n".to_vec()].concat()).unwrap();
+    ARMED.store(true, SeqCst);
+    let grew_more = [in_slot(|| raw.extend()), in_slot(|| twin.extend())].map(|r| r.map_err(|e| e.to_string()));
+    let continued_more = (raw.index(|_| true), twin.index(|_| true));
+    let last = in_slot(|| raw.page(1, 1025, 1).map(|p| (p[0].text.len(), p[0].more)).map_err(|e| e.to_string()));
+    let second = ((raw.lines_known(), raw.charges()), (twin.lines_known(), twin.charges()));
+    drop(raw);
+    drop(twin);
+    ARMED.store(false, SeqCst);
+    drop(appender);
+    let leaked = LIVE.load(SeqCst) as i64 - BASELINE.load(SeqCst) as i64;
+    println!(
+        "{:>24}: 1 MiB, then 7 bytes on: the continuation charges {need} bytes past the floor, refused a byte short: \
+         {refused:?}; then 3 MiB on: {} charged at the end; live past baseline after close: {leaked}",
+        "live tail index",
+        second.0.1.total()
+    );
+    let (old, tail) = (1u64 << 20, (1u64 << 20) + 7);
+    assert_eq!(indexed, (Ok(()), Ok(())));
+    assert_eq!(grew, [Ok(Some(old..tail)), Ok(Some(old..tail))]);
+    assert_eq!((twin_continued, held.0), (Ok(()), (1024, false)));
+    assert!(need > 0, "the continuation charged nothing past the floor");
+    assert!(refused.as_ref().is_err_and(|e| e.starts_with("the memory budget is full")), "{refused:?}");
+    assert_eq!(after_refusal, (held.0, held.1, held.2, None), "a refused continuation changed something");
+    assert_eq!((continued, first.0), (Ok(()), first.1), "the continuation after a refusal");
+    assert_eq!(first.0.0, (1025, true));
+    let new = tail + (3 << 20) + 1;
+    assert_eq!(grew_more, [Ok(Some(tail..new)), Ok(Some(tail..new))]);
+    assert_eq!((continued_more, last), ((Ok(()), Ok(())), Ok((65_536, true))));
+    assert_eq!((second.0, second.0.0), (second.1, (1026, true)));
+    assert_eq!(budget::totals().used, before.used, "live tail index: the ledger isn't back to its baseline");
+    assert!(leaked.unsigned_abs() < 64 << 10, "live tail index: {leaked} bytes still live");
+}
+
 /// A charge-release negative control: the elastic vectors still exist, but the comparison withholds their charge.
 /// The allocator normally runs only on allocations, so an explicit checkpoint is needed to make a shrink-before-free
 /// mistake observable even when no allocation would occur between those operations. Production state stays intact.
@@ -1288,6 +1354,7 @@ fn main() {
         transcript_shape(4 * shapes.len() + 3 + markdown.len() + k, name, path);
     }
     extend_shape(4 * shapes.len() + 3 + markdown.len() + transcripts.len(), &at("tail.txt"));
+    extend_index_shape(4 * shapes.len() + 4 + markdown.len() + transcripts.len(), &at("tail-index.txt"));
 
     JOB.store(0, SeqCst);
     ROUND.fetch_add(1, SeqCst);
@@ -1301,7 +1368,7 @@ fn main() {
         .chain(markdown.iter().map(|m| m.0))
         .chain(["a Markdown build refused"])
         .chain(transcripts.iter().map(|t| t.0))
-        .chain(["live tail"])
+        .chain(["live tail", "live tail index"])
         .collect();
     let place = match shapes.get(at / 4) {
         Some(s) => format!("{}: {}", s.name, ["open", "fill the cache", "index", "8 pages"][at % 4]),
