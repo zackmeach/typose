@@ -47,7 +47,7 @@ pub struct SourceFindPage {
     pub ordinal: Option<f64>,
 }
 fn hit(raw: &Raw, source: &core_find::Source, h: core_find::Hit) -> std::result::Result<SourceHit, DocError> {
-    let (slice, units) = core_find::snippet(raw.document(), source.generation, raw.source_encoding(), h, source.end)?;
+    let (slice, units) = core_find::snippet(raw.document(), source, raw.source_encoding(), h)?;
     Ok(SourceHit {
         start: h.start as f64,
         end: h.end as f64,

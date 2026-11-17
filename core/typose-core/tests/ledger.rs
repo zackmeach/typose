@@ -734,7 +734,9 @@ fn extend_index_shape(step: usize, path: &Path) {
 /// Live tail (Z95), checked throughout: the consumers whose charges are sized from the document's length (source Find's
 /// anchors, a CSV's checkpoints, its sort) and Grid Find each have an extend land between their steps, as the host would
 /// run them, and end at the length they were sized for, with the charges and results of the same on a twin that never
-/// grows. Then everything closes: the ledger is back.
+/// grows. Then everything closes: the ledger is back. Each append is two checkpoints' worth (2.24 MB): a build that read
+/// past its end would push checkpoints past their charged capacity, which `build_reserved` asserts against. Find's
+/// anchors keep two spare slots, so they'd need an append of 7.1 MB or more: they're not exercised here.
 fn extend_consumers_shape(step: usize, path: &Path, twin_path: &Path) {
     let rows: String = (0..32_768).map(|i| format!("{i},row {i} {}\n", "x".repeat(150))).collect(); // over SCAN_BYTES
     for path in [path, twin_path] {
@@ -742,7 +744,7 @@ fn extend_consumers_shape(step: usize, path: &Path, twin_path: &Path) {
     }
     drop(rows);
     const LATE: &str = "-1,a late row\n"; // sorts first and holds the query
-    let late = 4096 * LATE.len() as u64;
+    let late = 160_000 * LATE.len() as u64;
     let mut appender = fs::OpenOptions::new().append(true).open(path).unwrap();
     let before = budget::totals();
     STEP.store(step, SeqCst);
@@ -751,7 +753,7 @@ fn extend_consumers_shape(step: usize, path: &Path, twin_path: &Path) {
     let (docs, old, encoding) = ([raw.document(), twin.document()], raw.document().len(), raw.source_encoding());
     let mut grow = || {
         ARMED.store(false, SeqCst);
-        appender.write_all(LATE.repeat(4096).as_bytes()).unwrap(); // made and freed unchecked: the test's own
+        appender.write_all(LATE.repeat(160_000).as_bytes()).unwrap(); // made and freed unchecked: the test's own
         ARMED.store(true, SeqCst);
         assert!(matches!(in_slot(|| docs[0].extend()), Ok(Some(_))), "the extend failed");
     };

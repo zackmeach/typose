@@ -113,7 +113,7 @@ pub struct Source {
     closed: AtomicBool,
     /// `file_bytes`, the length its anchors are sized for (live tail, Z95): it scans, completes and shows snippets
     /// there, whatever an extend adds.
-    pub end: u64,
+    end: u64,
     _charge: Reservation,
 }
 impl Source {
@@ -199,7 +199,9 @@ impl Source {
             }
         })?;
         if c.offset > held.offset {
-            self.anchors.lock().unwrap().push(c.clone());
+            let mut anchors = self.anchors.lock().unwrap();
+            debug_assert!(anchors.len() < anchors.capacity(), "an anchor past the charged capacity, sized from `end`");
+            anchors.push(c.clone());
         }
         let result = Progress { count: c.count, bytes: c.offset, complete: c.complete, hits };
         *held = c;
@@ -281,19 +283,18 @@ impl Source {
         Ok((chosen.or(if previous { last } else { first }), wrapped))
     }
 }
-/// The hit and up to 256 bytes after it, to the Find's end (`Source::end`).
+/// The hit and up to 256 bytes after it, to the end of the Find that found it (`Source::end`).
 pub fn snippet(
     doc: &Document,
-    generation: u32,
+    source: &Source,
     encoding: &'static Encoding,
     hit: Hit,
-    file_end: u64,
 ) -> Result<(TextSlice, u32), DocError> {
-    let matched = doc.read(generation, hit.start, hit.end)?;
+    let matched = doc.read(source.generation, hit.start, hit.end)?;
     let match_units = decode(&matched, encoding, hit.start).text.encode_utf16().count() as u32;
-    let end = (hit.end + 256).min(file_end);
-    let bytes = doc.read(generation, hit.start, end)?;
-    let (slice, _) = decode_prefix(&bytes, encoding, hit.start, bytes.len(), end == file_end);
+    let end = (hit.end + 256).min(source.end);
+    let bytes = doc.read(source.generation, hit.start, end)?;
+    let (slice, _) = decode_prefix(&bytes, encoding, hit.start, bytes.len(), end == source.end);
     Ok((slice, match_units))
 }
 
@@ -344,24 +345,26 @@ mod tests {
     }
     /// Live tail (Z95): a Find started before an extend scans, completes and shows snippets to the length it started at,
     /// with that length's charge, as the same Find on a twin file that never grows.
+    /// Its old end splits a character the append completes ("caf\xc3", then "\xa9").
     #[test]
     fn a_find_ends_at_the_length_it_started_at() {
         use std::io::Write;
-        let old = "a line with école\n".repeat(1_000) + "the last école"; // its snippet reaches the end
+        // The last hit's snippet reaches the end.
+        let old = ["a line with école\n".repeat(1_000).as_bytes(), b"the last \xc3\xa9cole caf\xc3"].concat();
         let [(path, doc, source), (_twin_path, twin_doc, twin)] =
             ["source-find-tail", "source-find-tail-twin"].map(|name| {
-                let path = temp_file(name, old.as_bytes());
+                let path = temp_file(name, &old);
                 let doc = Document::open(&path).unwrap();
                 let source = Source::new(1, "école", false, doc.len()).unwrap();
                 (path, doc, source)
             });
-        let late = " and école after it\n".repeat(1_000);
-        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(late.as_bytes()).unwrap();
+        let late = [b"\xa9".as_slice(), " and école after it\n".repeat(1_000).as_bytes()].concat();
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&late).unwrap();
         assert!(doc.extend().unwrap().is_some());
         let found = |source: &Source, doc: &Document| {
             let p = source.scan(doc, UTF_8).unwrap();
             let (last, _) = source.seek(doc, UTF_8, None, true).unwrap();
-            let shown = snippet(doc, 1, UTF_8, last.unwrap(), source.end).unwrap().0.text;
+            let shown = snippet(doc, source, UTF_8, last.unwrap()).unwrap().0.text;
             (p.count, p.bytes, p.complete, p.hits, last, shown, source.charged())
         };
         assert_eq!(found(&source, &doc), found(&twin, &twin_doc));

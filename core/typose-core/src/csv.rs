@@ -233,6 +233,12 @@ pub struct Csv {
     end: u64,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Runs once in `Csv::new`, after it reads its end and before its head read: a test extends the document there.
+    static SIZED: std::cell::Cell<Option<Box<dyn FnOnce()>>> = const { std::cell::Cell::new(None) };
+}
+
 fn check_cancel() -> Result<(), DocError> {
     if cancelled() { Err(DocError::Cancelled) } else { Ok(()) }
 }
@@ -254,6 +260,10 @@ impl Csv {
             return Err(DocError::Invalid("unsupported CSV delimiter".into()));
         }
         let end = doc.len();
+        #[cfg(test)]
+        if let Some(extend) = SIZED.take() {
+            extend();
+        }
         let head = read(doc, generation, 0, end.min(READ_BYTES as u64))?;
         let locked = encoding == UTF_16LE
             || encoding == UTF_16BE
@@ -382,6 +392,8 @@ impl Csv {
             {
                 let mut index = self.index.write().unwrap();
                 if scan.pos >= next_cp {
+                    let (len, room) = (index.checkpoints.len(), index.checkpoints.capacity());
+                    debug_assert!(len < room, "a checkpoint past the charged capacity, sized from `end`");
                     index.checkpoints.push(scan.clone());
                     next_cp = scan.pos + CP_BYTES;
                 }
@@ -1291,22 +1303,49 @@ mod live_tail_tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    /// A header and `rows` numbered rows, with its CSV made and not built; and a twin of the same bytes.
+    /// A header, `rows` numbered rows and a last record cut inside a character ("caf\xc3"), with its CSV made and not
+    /// built; and a twin of the same bytes.
     fn opened(name: &str, rows: u64) -> [(Temp, Document, Csv); 2] {
-        let bytes = format!("n,text\n{}", (0..rows).map(|i| format!("{i},row {i}\n")).collect::<String>());
+        let rows: String = (0..rows).map(|i| format!("{i},row {i}\n")).collect();
+        let bytes = [format!("n,text\n{rows}").as_bytes(), b"caf\xc3"].concat();
         [name.to_string(), format!("{name}-twin")].map(|name| {
-            let path = temp_file(&name, bytes.as_bytes());
+            let path = temp_file(&name, &bytes);
             let doc = Document::open(&path).unwrap();
             let csv = Csv::new(&doc, 1, 1, Options { delimiter: Some(b','), header: Some(true) }, UTF_8).unwrap();
             (path, doc, csv)
         })
     }
 
-    /// Appends two checkpoints' worth of rows that sort first and hold the query, and extends the document over them.
+    /// Completes the cut character ("\xa9"), appends two checkpoints' worth of rows that sort first and hold the query,
+    /// and extends the document over them.
     fn grow(path: &Path, doc: &Document) {
-        let late = "-1,a late row\n".repeat(160_000);
-        std::fs::OpenOptions::new().append(true).open(path).unwrap().write_all(late.as_bytes()).unwrap();
+        let late = [b"\xa9\n".as_slice(), "-1,a late row\n".repeat(160_000).as_bytes()].concat();
+        std::fs::OpenOptions::new().append(true).open(path).unwrap().write_all(&late).unwrap();
         assert_eq!(doc.extend().unwrap().map(|r| r.end - r.start), Some(late.len() as u64));
+    }
+
+    /// `Csv::new` reads its head, judges the sniff's whole-file flag and sizes its checkpoints at its end: an extend
+    /// that lands between its end and its head read, a checkpoint's worth and more, changes none of them.
+    #[test]
+    fn a_csv_is_made_at_the_length_it_read_first() {
+        let (path, twin_path) = (temp_file("csv-tail-new", b"a;b"), temp_file("csv-tail-new-twin", b"a;b"));
+        let doc = Arc::new(Document::open(&path).unwrap());
+        let (at, grown) = (path.to_path_buf(), doc.clone());
+        SIZED.set(Some(Box::new(move || {
+            let late = format!("\n1;2\n{}", "3,4,5\n".repeat(200_000)); // 1.2 MB, in commas a head read would see
+            std::fs::OpenOptions::new().append(true).open(&at).unwrap().write_all(late.as_bytes()).unwrap();
+            assert!(grown.extend().unwrap().is_some());
+        })));
+        let sniffed = Options { delimiter: None, header: None };
+        let csv = Csv::new(&doc, 1, 1, sniffed, UTF_8).unwrap();
+        let twin = Csv::new(&Document::open(&twin_path).unwrap(), 1, 1, sniffed, UTF_8).unwrap();
+        let made = |csv: &Csv| {
+            let charged = csv.charged();
+            let i = csv.index.read().unwrap();
+            (csv.delimiter, csv.header, i.checkpoints.len(), i.checkpoints.capacity(), charged)
+        };
+        assert!(SIZED.take().is_none() && doc.len() > CP_BYTES, "the extend didn't run");
+        assert_eq!(made(&csv), made(&twin));
     }
 
     #[test]
@@ -1325,7 +1364,9 @@ mod live_tail_tests {
         let state = |csv: &Csv| {
             let charged = csv.charged();
             let i = csv.index.read().unwrap();
-            (i.records, i.indexed_bytes, i.done, i.max_columns, i.checkpoints.len(), i.checkpoints.capacity(), charged)
+            let problems: Vec<_> = i.metadata.problems.iter().map(|p| (p.kind, p.count, p.first.start)).collect();
+            let checkpoints = (i.checkpoints.len(), i.checkpoints.capacity());
+            (i.records, i.indexed_bytes, i.done, i.max_columns, checkpoints, problems, charged)
         };
         assert!(grown && doc.len() > twin_doc.len());
         assert_eq!(state(&csv), state(&twin));
