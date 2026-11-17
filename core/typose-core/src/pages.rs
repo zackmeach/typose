@@ -125,13 +125,15 @@ fn cut(
     let shown_end = line_start + caps.line as u64;
     let room = caps.piece.min((shown_end - offset) as usize);
     let bytes = store.read(offset, offset + (room + LOOKAHEAD) as u64)?;
+    // The length after the read, at least the one it read at: an extend may have moved it on since (Z95).
+    let len = store.len();
     // The line's text, and how it ends. Without a newline in reach, it ends here only at EOF.
     let (text, end) = match newline_ends(index.encoding, offset, &bytes).next() {
         Some(last) => {
             let i = last + 1 - nl.len();
             (bytes[..i].strip_suffix(cr).unwrap_or(&bytes[..i]), End::Newline(offset + last as u64 + 1))
         }
-        None if offset + bytes.len() as u64 >= store.len() => (&bytes[..], End::Eof),
+        None if offset + bytes.len() as u64 >= len => (&bytes[..], End::Eof),
         None => (&bytes[..], End::Beyond),
     };
     let complete = !matches!(end, End::Beyond);
@@ -142,8 +144,9 @@ fn cut(
     let rest = match end {
         _ if !more || next.is_some() => None,
         End::Newline(next_line) => Some(next_line - piece_end),
-        End::Eof => Some(store.len() - piece_end),
-        End::Beyond if index.done && index.line_count() == line + 1 => Some(store.len() - piece_end),
+        End::Eof => Some(len - piece_end),
+        // The last line runs to the end only while the index has reached it: an append may carry it on.
+        End::Beyond if index.done(len) && index.line_count() == line + 1 => Some(len - piece_end),
         End::Beyond => locate_line(store, index, line + 1)?.map(|next_line| next_line - piece_end),
     };
     let piece = LinePiece { line, offset, text: slice.text, map: slice.map, more, next, rest };
@@ -284,8 +287,7 @@ mod tests {
         let path = temp_file(name, bytes);
         let store = ByteStore::open(&path).unwrap();
         let shared = RwLock::new(LineIndex::new(store.len(), &IndexConfig::default(), encoding_rs::UTF_8).unwrap());
-        build(&File::open(&path).unwrap(), store.len(), IndexConfig::default(), &store.hashes(), &shared, |_| true)
-            .unwrap();
+        build(&File::open(&path).unwrap(), &store, IndexConfig::default(), &shared, |_| true).unwrap();
         (store, shared.into_inner().unwrap())
     }
 
@@ -331,7 +333,7 @@ mod tests {
         let cfg = IndexConfig { block: 1 << 20, ..IndexConfig::default() };
         let shared = RwLock::new(LineIndex::new(store.len(), &cfg, encoding_rs::UTF_8).unwrap());
         let mut first = None;
-        build(&File::open(&path).unwrap(), store.len(), cfg, &store.hashes(), &shared, |p| {
+        build(&File::open(&path).unwrap(), &store, cfg, &shared, |p| {
             if first.is_none() {
                 let idx = shared.read().unwrap();
                 let page = lines(&store, &idx, 0, 10).unwrap();
@@ -383,8 +385,7 @@ mod tests {
         let path = temp_file(name, bytes);
         let store = ByteStore::open(&path).unwrap();
         let shared = RwLock::new(LineIndex::new(store.len(), &IndexConfig::default(), encoding).unwrap());
-        build(&File::open(&path).unwrap(), store.len(), IndexConfig::default(), &store.hashes(), &shared, |_| true)
-            .unwrap();
+        build(&File::open(&path).unwrap(), &store, IndexConfig::default(), &shared, |_| true).unwrap();
         (store, shared.into_inner().unwrap())
     }
 
@@ -592,6 +593,33 @@ mod tests {
             prop_assert_eq!(in_pieces, whole.replacements);
         }
         Ok(pieces)
+    }
+
+    /// Z95: an unfinished last line past its shown part. Its last piece's `rest` counts to the end of the file while the
+    /// index has reached it; after an append, which may carry the line on, it waits until the index is continued, then
+    /// counts to the next line's start.
+    #[test]
+    fn the_rest_of_an_unfinished_last_line_waits_for_the_index() {
+        use std::io::Write;
+        let caps = Caps { piece: 8, line: 16, ..Caps::DEFAULT };
+        let path = temp_file("rest-grown", &[b"a\n".as_slice(), &[b'x'; 24]].concat()); // line 1 shows bytes 2..18
+        let store = ByteStore::open(&path).unwrap();
+        let shared = RwLock::new(LineIndex::new(store.len(), &IndexConfig::default(), UTF_8).unwrap());
+        let file = File::open(&path).unwrap();
+        build(&file, &store, IndexConfig::default(), &shared, |_| true).unwrap();
+        let rest = |store: &ByteStore| {
+            let idx = shared.read().unwrap();
+            let first = lines_with(store, &idx, 1, 1, caps).unwrap().remove(0);
+            let last = piece(store, &idx, 1, first.next.unwrap(), caps).unwrap().unwrap();
+            assert_eq!((last.offset, last.more, last.next), (10, true, None));
+            last.rest
+        };
+        assert_eq!(rest(&store), Some(26 - 18));
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(b"yy\nz").unwrap();
+        store.extend(30).unwrap();
+        assert_eq!(rest(&store), None); // not the end of the file, 30 - 18: the line ends at 28
+        build(&file, &store, IndexConfig::default(), &shared, |_| true).unwrap();
+        assert_eq!(rest(&store), Some(29 - 18));
     }
 
     /// Brief §5.1 at the real caps: a 3 MiB line shows 16 pieces of 64 KiB (1 MiB), then how much more there is.

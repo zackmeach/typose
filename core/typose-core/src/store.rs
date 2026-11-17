@@ -60,9 +60,11 @@ struct Cache {
 pub struct ByteStore {
     file: File,
     /// The length. A read holds the read side from computing a chunk's size, through reading and verifying it, to
-    /// caching it; `extend` holds the write side, so no read sees a store half extended (Z95). Lock order: Find's
-    /// cursor mutex or `Raw`'s line-index lock (each is held across reads), then `Document`'s baseline, then this, then
-    /// the hash table's lock or the cache's, never those two at once.
+    /// caching it; `extend` holds the write side, so no read sees a store half extended (Z95). Lock order: `Raw`'s
+    /// index-run mutex; then one of Find's cursor mutex, Grid Find's (`csv::GridFind::scan`), JSONL's transcript graph's
+    /// (`jsonl::Index::record`) or `Raw`'s line-index lock, each held across reads; then `Document`'s baseline; then
+    /// this; then the hash table's lock or the cache's, never those two at once. The line index takes the read side
+    /// around each block only (`read_block`), never while it holds the line-index lock.
     len: RwLock<u64>,
     /// The length `len()` returns without the lock, so it never waits behind a queued extend: the host calls it on its
     /// JavaScript thread. Set at open, and by `extend` right after `len` while it still holds the write side. That's
@@ -94,6 +96,13 @@ impl std::fmt::Display for StoreError {
 thread_local! {
     /// The cancel flag of the read running on this thread, while `cancellable` runs it.
     static CANCEL: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+#[cfg(test)]
+type BlockRead = Box<dyn FnMut(&RwLock<u64>)>;
+#[cfg(test)]
+thread_local! {
+    /// Runs in each `read_block` on this thread, with the read side of the length held: a test queues an extend there.
+    pub(crate) static BLOCK_READ: std::cell::Cell<Option<BlockRead>> = const { std::cell::Cell::new(None) };
 }
 
 /// Runs `reads` on this thread with `cancel` as its cancel flag (plan C5): every chunk it touches checks the flag
@@ -632,9 +641,9 @@ impl ByteStore {
     /// It charges everything before it changes anything: a refusal is an `io::Error` holding the `OverBudget`, as
     /// `open_with`'s is, and leaves the store as it was. The chunks are read into its caller's page slot, one at a
     /// time. It holds the write side of `len` throughout, so no read runs beside it and the new length and the new
-    /// hash are published together; `index::build` reads at its own length and checks hashes outside that lock, so
-    /// nothing may extend while an index job runs. A document another thread freezes while this runs can still be
-    /// extended: it stays frozen and reads nothing.
+    /// hash are published together. The line index reads and checks its blocks under the read side too
+    /// (`read_block`), so an index job can run beside it. A document another thread freezes while this runs can still
+    /// be extended: it stays frozen and reads nothing.
     pub(crate) fn extend(&self, len: u64) -> Result<(), StoreError> {
         let mut geometry = self.len.write().unwrap();
         let old = *geometry;
@@ -732,6 +741,41 @@ impl ByteStore {
             _ => StoreError::Io(e),
         })?;
         Ok(buf)
+    }
+
+    /// The line index's read (`index::build`): the block at `pos`, a chunk's start, of up to `max` bytes (whole chunks),
+    /// at the length as it is now, read through `file`, the index's own handle, into `buf`, with every chunk in it
+    /// checked against its hash or recorded. It holds the read side of `len` from sizing the block through the checks,
+    /// as `read` does, so no extend lands between a chunk's size and its hash, and releases it before it returns: its
+    /// caller then takes the line-index lock, which a page read holds while it waits here behind a queued extend. `buf`
+    /// grows to the block when it must, the old one freed first, as the index slot pays for one block at a time.
+    pub(crate) fn read_block<'a>(
+        &self,
+        file: &File,
+        buf: &'a mut Vec<u8>,
+        pos: u64,
+        max: usize,
+    ) -> Result<&'a [u8], StoreError> {
+        let len = self.len.read().unwrap();
+        #[cfg(test)]
+        if let Some(mut hook) = BLOCK_READ.take() {
+            hook(&self.len);
+            BLOCK_READ.set(Some(hook));
+        }
+        let n = len.saturating_sub(pos).min(max as u64) as usize;
+        if buf.len() < n {
+            *buf = Vec::new();
+            *buf = vec![0; n];
+        }
+        let block = &mut buf[..n];
+        read_exact_at(file, block, pos).map_err(|e| match e.kind() {
+            io::ErrorKind::UnexpectedEof => StoreError::Changed { chunk: pos / CHUNK as u64 },
+            _ => StoreError::Io(e),
+        })?;
+        for (i, chunk) in block.chunks(CHUNK).enumerate() {
+            self.hashes.check(pos / CHUNK as u64 + i as u64, chunk)?;
+        }
+        Ok(block)
     }
 
     pub fn read(&self, start: u64, end: u64) -> Result<Vec<u8>, StoreError> {

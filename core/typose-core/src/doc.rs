@@ -189,9 +189,9 @@ pub struct Document {
     /// The file's volume and index (device and inode): taken at open, it never changes.
     identity: (u64, u64),
     /// The size and modified time the document has accepted: taken at open, moved forward only by `extend`, which
-    /// holds this lock throughout, so extends run one at a time. Lock order: Find's cursor mutex or `Raw`'s line-index
-    /// lock (each is held across reads and their checks), then this, then the store's length lock, then its hash
-    /// table's lock or its cache's.
+    /// holds this lock throughout, so extends run one at a time. Lock order: `Raw`'s index-run mutex; then one of Find's
+    /// cursor mutex, Grid Find's, JSONL's transcript graph's or `Raw`'s line-index lock (each is held across reads and
+    /// their checks); then this; then the store's length lock; then its hash table's lock or its cache's.
     baseline: Mutex<(u64, SystemTime)>,
     generation: u32,
     cache_chunks: usize,
@@ -596,8 +596,8 @@ impl Document {
     /// and the document stays at its old length, not frozen. A length JavaScript can't hold is `Refused`, unfrozen too.
     ///
     /// `check` still freezes on any growth: a read after an append, before this runs, freezes. Its caller holds a page
-    /// slot, and no index job runs beside it (`ByteStore::extend`). A document another thread freezes while this runs
-    /// can still be extended: it stays frozen and reads nothing.
+    /// slot. An index job can run beside it: it reads each block at the length as it is then (`ByteStore::read_block`).
+    /// A document another thread freezes while this runs can still be extended: it stays frozen and reads nothing.
     pub fn extend(&self) -> Result<Option<Range<u64>>, DocError> {
         let mut baseline = self.baseline.lock().unwrap();
         let now = match self.drift(*baseline)? {
