@@ -111,6 +111,9 @@ pub struct Source {
     cursor: Mutex<Cursor>,
     anchors: Mutex<Vec<Cursor>>,
     closed: AtomicBool,
+    /// `file_bytes`, the length its anchors are sized for (live tail, Z95): it scans, completes and shows snippets
+    /// there, whatever an extend adds.
+    pub end: u64,
     _charge: Reservation,
 }
 impl Source {
@@ -135,6 +138,7 @@ impl Source {
             cursor: Mutex::new(cursor),
             anchors: Mutex::new(anchors),
             closed: AtomicBool::new(false),
+            end: file_bytes,
             _charge: charge,
         })
     }
@@ -152,14 +156,14 @@ impl Source {
         limit: u64,
         mut found: impl FnMut(Hit),
     ) -> Result<(), DocError> {
-        let stop = (c.offset + limit).min(doc.len());
+        let stop = (c.offset + limit).min(self.end);
         while c.offset < stop {
             if cancelled() || self.closed.load(Ordering::Relaxed) {
                 return Err(DocError::Cancelled);
             }
-            let end = (c.offset + 65_536 + 4).min(doc.len());
+            let end = (c.offset + 65_536 + 4).min(self.end);
             let bytes = doc.read(self.generation, c.offset, end)?;
-            let (slice, used) = decode_prefix(&bytes, encoding, c.offset, 65_536.min(bytes.len()), end == doc.len());
+            let (slice, used) = decode_prefix(&bytes, encoding, c.offset, 65_536.min(bytes.len()), end == self.end);
             if used == 0 {
                 return Err(DocError::Invalid("Find decode made no progress".into()));
             }
@@ -181,7 +185,7 @@ impl Source {
             }
             c.offset += used as u64;
         }
-        c.complete = c.offset == doc.len();
+        c.complete = c.offset == self.end;
         Ok(())
     }
     pub fn scan(&self, doc: &Document, encoding: &'static Encoding) -> Result<Progress, DocError> {
@@ -277,17 +281,19 @@ impl Source {
         Ok((chosen.or(if previous { last } else { first }), wrapped))
     }
 }
+/// The hit and up to 256 bytes after it, to the Find's end (`Source::end`).
 pub fn snippet(
     doc: &Document,
     generation: u32,
     encoding: &'static Encoding,
     hit: Hit,
+    file_end: u64,
 ) -> Result<(TextSlice, u32), DocError> {
     let matched = doc.read(generation, hit.start, hit.end)?;
     let match_units = decode(&matched, encoding, hit.start).text.encode_utf16().count() as u32;
-    let end = (hit.end + 256).min(doc.len());
+    let end = (hit.end + 256).min(file_end);
     let bytes = doc.read(generation, hit.start, end)?;
-    let (slice, _) = decode_prefix(&bytes, encoding, hit.start, bytes.len(), end == doc.len());
+    let (slice, _) = decode_prefix(&bytes, encoding, hit.start, bytes.len(), end == file_end);
     Ok((slice, match_units))
 }
 
@@ -335,5 +341,29 @@ mod tests {
         let p = Source::new(1, "école", false, doc.len()).unwrap().scan(&doc, UTF_8).unwrap();
         assert_eq!(p.count, 1);
         assert_eq!(p.hits[0].start, 65_535);
+    }
+    /// Live tail (Z95): a Find started before an extend scans, completes and shows snippets to the length it started at,
+    /// with that length's charge, as the same Find on a twin file that never grows.
+    #[test]
+    fn a_find_ends_at_the_length_it_started_at() {
+        use std::io::Write;
+        let old = "a line with école\n".repeat(1_000) + "the last école"; // its snippet reaches the end
+        let [(path, doc, source), (_twin_path, twin_doc, twin)] =
+            ["source-find-tail", "source-find-tail-twin"].map(|name| {
+                let path = temp_file(name, old.as_bytes());
+                let doc = Document::open(&path).unwrap();
+                let source = Source::new(1, "école", false, doc.len()).unwrap();
+                (path, doc, source)
+            });
+        let late = " and école after it\n".repeat(1_000);
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(late.as_bytes()).unwrap();
+        assert!(doc.extend().unwrap().is_some());
+        let found = |source: &Source, doc: &Document| {
+            let p = source.scan(doc, UTF_8).unwrap();
+            let (last, _) = source.seek(doc, UTF_8, None, true).unwrap();
+            let shown = snippet(doc, 1, UTF_8, last.unwrap(), source.end).unwrap().0.text;
+            (p.count, p.bytes, p.complete, p.hits, last, shown, source.charged())
+        };
+        assert_eq!(found(&source, &doc), found(&twin, &twin_doc));
     }
 }

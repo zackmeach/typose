@@ -46,8 +46,8 @@ pub struct SourceFindPage {
     pub wrapped: bool,
     pub ordinal: Option<f64>,
 }
-fn hit(raw: &Raw, generation: u32, h: core_find::Hit) -> std::result::Result<SourceHit, DocError> {
-    let (slice, units) = core_find::snippet(raw.document(), generation, raw.source_encoding(), h)?;
+fn hit(raw: &Raw, source: &core_find::Source, h: core_find::Hit) -> std::result::Result<SourceHit, DocError> {
+    let (slice, units) = core_find::snippet(raw.document(), source.generation, raw.source_encoding(), h, source.end)?;
     Ok(SourceHit {
         start: h.start as f64,
         end: h.end as f64,
@@ -108,7 +108,7 @@ impl Task for FindTask {
                     page.complete = p.complete;
                     let mut wire = 1024;
                     for h in p.hits {
-                        let h = hit(&self.raw, self.entry.source.generation, h)?;
+                        let h = hit(&self.raw, &self.entry.source, h)?;
                         let cost = 1024 + 6 * h.text.encode_utf16().count() + 24 * h.map.points.len();
                         if wire + cost > 256 << 10 {
                             break;
@@ -121,7 +121,7 @@ impl Task for FindTask {
                     let (h, wrapped) =
                         self.entry.source.seek(self.raw.document(), self.raw.source_encoding(), from, previous)?;
                     page.ordinal = h.map(|h| h.ordinal as f64);
-                    page.hit = h.map(|h| hit(&self.raw, self.entry.source.generation, h)).transpose()?;
+                    page.hit = h.map(|h| hit(&self.raw, &self.entry.source, h)).transpose()?;
                     page.wrapped = wrapped;
                 }
             }

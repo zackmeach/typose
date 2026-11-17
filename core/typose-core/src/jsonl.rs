@@ -7,6 +7,12 @@ use crate::doc::{DocError, Document};
 use crate::json::{self, Child, JsonIndex, Kind, Span};
 use crate::store::{ByteStore, StoreError, cancelled};
 
+#[cfg(test)]
+thread_local! {
+    /// Runs once in `Index::build_reserved`, after its first block: a test extends the document there.
+    static BLOCK: std::cell::Cell<Option<Box<dyn FnOnce()>>> = const { std::cell::Cell::new(None) };
+}
+
 #[derive(Default, Clone)]
 pub struct Progress {
     pub lines: u64,
@@ -85,14 +91,15 @@ impl Index {
         columns.values.push(Column { key, span });
         Ok(())
     }
+    /// To the document's length as the build starts (live tail, Z95): an extend while it runs adds nothing to it.
     pub fn build_reserved(&self, doc: &Document, generation: u32, _temp: Reservation) -> Result<(), DocError> {
         let complete = doc.verified(generation, |store| {
-            let (mut at, mut from, mut line) = (0, 0, 0);
-            while at < store.len() {
+            let (mut at, mut from, mut line, len) = (0, 0, 0, store.len());
+            while at < len {
                 if cancelled() || doc.frozen().is_some() {
                     return Err(StoreError::Cancelled);
                 }
-                let bytes = store.read(at, (at + 65_536).min(store.len()))?;
+                let bytes = store.read(at, (at + 65_536).min(len))?;
                 for end in memchr::memchr_iter(b'\n', &bytes).map(|i| at + i as u64 + 1) {
                     if !self.record(store, Span { start: from, end }, line)? {
                         return Ok(false);
@@ -102,8 +109,12 @@ impl Index {
                 }
                 at += bytes.len() as u64;
                 self.progress.write().unwrap().bytes = at;
+                #[cfg(test)]
+                if let Some(block) = BLOCK.take() {
+                    block();
+                }
             }
-            if from < store.len() && !self.record(store, Span { start: from, end: store.len() }, line)? {
+            if from < len && !self.record(store, Span { start: from, end: len }, line)? {
                 return Ok(false);
             }
             Ok(true)
@@ -353,5 +364,31 @@ mod tests {
         let cancelled = crate::store::cancellable(&cancel, || index.build_reserved(&doc, 1, Reservation::none()));
         assert!(matches!(cancelled, Err(DocError::Cancelled)), "{cancelled:?}");
         assert!(!index.progress.read().unwrap().done);
+    }
+    /// Live tail (Z95): a build an extend lands in, after its first block, ends at the length it started at, with the
+    /// records, columns and charge of the same build on a twin file that never grows.
+    #[test]
+    fn a_build_ends_at_the_length_it_started_at() {
+        use std::io::Write;
+        let lines: String = (0..8_000).map(|i| format!("{{\"n\":{i}}}\n")).collect(); // 87 KB: two blocks
+        let (path, twin_path) =
+            (temp_file("jsonl-tail", lines.as_bytes()), temp_file("jsonl-tail-twin", lines.as_bytes()));
+        let doc = std::sync::Arc::new(Document::open(&path).unwrap());
+        let (at, grown) = (path.to_path_buf(), doc.clone());
+        BLOCK.set(Some(Box::new(move || {
+            let late = b"{\"late\":1}\n".repeat(1_000);
+            std::fs::OpenOptions::new().append(true).open(&at).unwrap().write_all(&late).unwrap();
+            assert!(grown.extend().unwrap().is_some());
+        })));
+        let (index, twin) =
+            (Index::with_encoding(encoding_rs::UTF_8).unwrap(), Index::with_encoding(encoding_rs::UTF_8).unwrap());
+        index.build_reserved(&doc, 1, Reservation::none()).unwrap();
+        twin.build_reserved(&Document::open(&twin_path).unwrap(), 1, Reservation::none()).unwrap();
+        let state = |index: &Index| {
+            let p = index.progress.read().unwrap().clone();
+            (p.lines, p.parsed, p.failed, p.blank, p.bytes, p.done, index.column_count(), index.charged())
+        };
+        assert!(BLOCK.take().is_none() && doc.len() > lines.len() as u64, "the extend didn't run");
+        assert_eq!(state(&index), state(&twin));
     }
 }
