@@ -1556,7 +1556,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         gen,
         done: read(req, id, async (cancel) => {
           await doc.refresh(gen, cancel)
-          continueIndex(id, doc, gen) // whichever view asked: the document has grown
+          continueIndex(id, doc, gen) // before the view's check: an extend is the document's, whichever view asked
           if (findLease(lease.ref) !== lease) throw new Refusal('Stale', 'the view was replaced while refreshing')
           return { size: doc.size }
         })
