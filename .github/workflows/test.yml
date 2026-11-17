@@ -123,6 +123,7 @@ jobs:
       # that the package leaves it out (plan m8). A shard that skips the unit layers still builds the hooks addon.
       - name: npm run test:hooks (builds the test-hooks addon, then its Rust and napi tests)
         if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.rust.outcome == 'success' && inputs.unit-tests }}
+        timeout-minutes: 20 # the longest of 72 measured passes is 7.5 minutes; a hang fails here, not at the job's limit
         run: npm run test:hooks
       - name: npm run build:addon:hooks (this shard skips the unit layers, so test:hooks doesn't build it)
         if: ${{ !cancelled() && steps.build.outcome == 'success' && !inputs.unit-tests }}
