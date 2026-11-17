@@ -191,7 +191,9 @@ test('math bombs, oversized formulas and hostile sanitizer input stay bounded an
   await expect(live.win.locator('.tp-math').nth(2).locator('.katex')).toHaveCount(1)
   expect(await live.win.evaluate(() => document.querySelectorAll('*').length)).toBeLessThan(40_000)
   console.log(`bounded math: worst eval round-trip ${worstRoundTrip} ms, longest renderer task ${Math.round(longestTask)} ms, page timer late ${timerLate} ms`)
-  expect(worstRoundTrip).toBeLessThan(1000)
+  // A hosted Windows runner misses the 1 s round trip now and then: 1,410 ms here (run 44015528956) and 1,257 ms in the
+  // dense-highlighting test below (job 132909605032); each passed on its retry.
+  if (quiet('win32')) expect(worstRoundTrip).toBeLessThan(1000)
   // The cap keeps a formula's insert near 250 ms on a quiet machine (app/renderer/math/limits.ts). Hosted macOS and
   // Windows runners don't: across 35 runs the longest task reached 273 ms and the timer 298 ms late, where hosted Linux
   // stayed within 147 and 206 ms in 31.
@@ -255,7 +257,7 @@ test('dense highlighting pays for its spans before inserting them, and never sta
     `worst eval round-trip ${lit.worstRoundTrip} ms, longest renderer task ${Math.round(lit.longestTask)} ms, page timer late ${lit.timerLate} ms`)
   expect(lit.spans).toBe(8 * 2000) // the span cap; each block's rest stays plain text
   expect(grew).toBeLessThan(lit.extras)
-  expect(lit.worstRoundTrip).toBeLessThan(1000)
+  if (quiet('win32')) expect(lit.worstRoundTrip).toBeLessThan(1000) // see the math-bombs test
   expect(lit.longestTask).toBeLessThan(250)
   // On hosted macOS the page timer is late by more than any task explains: up to 104 ms in tries where no task reached
   // 50 ms. Across 14 macOS runs it was 42–208 ms late in 15 passing tries, and 287 and 267 ms in two failing ones
