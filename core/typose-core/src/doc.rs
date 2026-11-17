@@ -23,6 +23,9 @@ thread_local! {
     /// Runs once in `Document::open_with`, after the identity is taken and before the store is built: a test swaps
     /// the path there.
     pub(crate) static OPENING: std::cell::Cell<Option<Box<dyn FnOnce()>>> = const { std::cell::Cell::new(None) };
+    /// Runs once in `Document::extend`, after the stat says the file grew and before the store extends: a test changes
+    /// the file there.
+    pub(crate) static DRIFTED: std::cell::Cell<Option<Box<dyn FnOnce()>>> = const { std::cell::Cell::new(None) };
 }
 
 /// What change detection compares, taken from a freshly opened path or inherited local route (spec §3.3).
@@ -186,7 +189,9 @@ pub struct Document {
     /// The file's volume and index (device and inode): taken at open, it never changes.
     identity: (u64, u64),
     /// The size and modified time the document has accepted: taken at open, moved forward only by `extend`, which
-    /// holds this lock throughout, so extends run one at a time. Lock order: this, then the store's.
+    /// holds this lock throughout, so extends run one at a time. Lock order: Find's cursor mutex or `Raw`'s line-index
+    /// lock (each is held across reads and their checks), then this, then the store's length lock, then its hash
+    /// table's lock or its cache's.
     baseline: Mutex<(u64, SystemTime)>,
     generation: u32,
     cache_chunks: usize,
@@ -471,8 +476,9 @@ impl Document {
     }
 
     fn checked_local_file(&self, generation: u32) -> Result<File, DocError> {
+        let id = self.id(); // before the walk, as in `check`
         match self.local_file(generation)? {
-            (file, now) if now == self.id() => Ok(file),
+            (file, now) if now == id => Ok(file),
             _ => Err(self.freeze("changed on disk".into())),
         }
     }
@@ -535,7 +541,10 @@ impl Document {
         if self.local_only || self.folder_scope().is_some() {
             return self.check_local_source(self.generation);
         }
-        if self.path_id()? == self.id() { Ok(()) } else { Err(self.freeze("changed on disk".into())) }
+        // The identity and baseline before the stat: the baseline only moves forward, so an extend that lands between
+        // them makes the file look grown, never shrunk.
+        let id = self.id();
+        if self.path_id()? == id { Ok(()) } else { Err(self.freeze("changed on disk".into())) }
     }
 
     /// The identity of what the path reaches now. A frozen document, a refused route or a path that no longer
@@ -587,7 +596,8 @@ impl Document {
     /// and the document stays at its old length, not frozen. A length JavaScript can't hold is `Refused`, unfrozen too.
     ///
     /// `check` still freezes on any growth: a read after an append, before this runs, freezes. Its caller holds a page
-    /// slot, and no index job runs beside it (`ByteStore::extend`).
+    /// slot, and no index job runs beside it (`ByteStore::extend`). A document another thread freezes while this runs
+    /// can still be extended: it stays frozen and reads nothing.
     pub fn extend(&self) -> Result<Option<Range<u64>>, DocError> {
         let mut baseline = self.baseline.lock().unwrap();
         let now = match self.drift(*baseline)? {
@@ -595,6 +605,10 @@ impl Document {
             Drift::Changed => return Err(self.freeze("changed on disk".into())),
             Drift::Grew(now) => now,
         };
+        #[cfg(test)]
+        if let Some(change) = DRIFTED.take() {
+            change();
+        }
         check_len(now.size)?;
         match self.store.extend(now.size) {
             Ok(()) => {}
@@ -889,6 +903,78 @@ mod tests {
         assert!(written > CHUNK as u64, "the appends crossed into a new chunk");
         assert!(reads.iter().all(|&n| n > 0), "every reader read: {reads:?}");
         assert_eq!((doc.len(), doc.frozen()), (written, None));
+    }
+
+    /// Review of #116: the file shrinks between the extend's stat and the store's extend, below the size the stat saw,
+    /// and its last chunk was never read, so no read in the extend looks past the new end. The store checks the file's
+    /// length after its reads, and the extend freezes, at the old length.
+    #[test]
+    fn a_file_that_shrinks_after_the_stat_freezes_the_extend() {
+        let old = CHUNK as u64 + 700;
+        let all = pattern(old as usize + 2 * CHUNK, 4);
+        let path = temp_file("doc-extend-shrunk-after-stat", &all[..old as usize]);
+        let doc = Document::open(&path).unwrap();
+        doc.read(1, 0, 10).unwrap(); // chunk 0 only: the last chunk is never read
+        append(&path, &all[old as usize..]);
+        let at = path.to_path_buf();
+        DRIFTED
+            .set(Some(Box::new(move || OpenOptions::new().write(true).open(&at).unwrap().set_len(old + 5).unwrap())));
+        let why = format!("changed on disk (chunk {})", (all.len() as u64 - 1) / CHUNK as u64);
+        let result = doc.extend();
+        assert!(matches!(result, Err(DocError::Frozen(ref w)) if *w == why), "{result:?}");
+        assert_eq!((doc.frozen(), doc.len()), (Some(why), old));
+    }
+
+    /// Review of #116: three threads extend at once, 300 times, each time after this thread appends: the ranges they
+    /// return tile the growth, with no gap and no overlap, one a round, and the document ends at the file's length.
+    #[test]
+    fn concurrent_extends_tile_the_growth() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        use std::sync::{Arc, Barrier};
+        let old = 1000;
+        let all = pattern(old + 300 * 37, 3);
+        let path = temp_file("doc-extend-tile", &all[..old]);
+        let doc = Arc::new(Document::open(&path).unwrap());
+        doc.read(1, 0, old as u64).unwrap();
+        let (start, end, stop) =
+            (Arc::new(Barrier::new(4)), Arc::new(Barrier::new(4)), Arc::new(AtomicBool::new(false)));
+        let extenders: Vec<_> = (0..3)
+            .map(|_| {
+                let (doc, start, end, stop) = (doc.clone(), start.clone(), end.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    let mut results = Vec::new(); // not unwrapped here: a panic would leave the barriers waiting
+                    loop {
+                        start.wait();
+                        if stop.load(SeqCst) {
+                            return results;
+                        }
+                        results.push(doc.extend().map_err(|e| e.to_string()));
+                        end.wait();
+                    }
+                })
+            })
+            .collect();
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        let mut at = old;
+        for round in 0..300 {
+            let more = 1 + round % 37;
+            file.write_all(&all[at..at + more]).unwrap();
+            at += more;
+            start.wait(); // the three extend at once
+            end.wait();
+        }
+        stop.store(true, SeqCst);
+        start.wait();
+        let results: Vec<_> = extenders.into_iter().flat_map(|t| t.join().unwrap()).collect();
+        let mut ranges: Vec<Range<u64>> = results.into_iter().filter_map(|r| r.unwrap()).collect();
+        ranges.sort_by_key(|r| r.start);
+        let mut next = old as u64;
+        for r in &ranges {
+            assert_eq!(r.start, next, "a gap or an overlap at {r:?}");
+            next = r.end;
+        }
+        assert_eq!((ranges.len(), next, doc.len(), doc.frozen()), (300, at as u64, at as u64, None));
+        assert_eq!(doc.read(1, 0, at as u64).unwrap(), all[..at]);
     }
 
     /// Z95 rests on this: a writer that keeps its handle open (a logger) appends and flushes, and the path, stat'd as

@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use xxhash_rust::xxh3::xxh3_64;
@@ -60,9 +60,15 @@ struct Cache {
 pub struct ByteStore {
     file: File,
     /// The length. A read holds the read side from computing a chunk's size, through reading and verifying it, to
-    /// caching it; `extend` holds the write side, so no read sees a store half extended (Z95). Lock order: this, then
+    /// caching it; `extend` holds the write side, so no read sees a store half extended (Z95). Lock order: Find's
+    /// cursor mutex or `Raw`'s line-index lock (each is held across reads), then `Document`'s baseline, then this, then
     /// the hash table's lock or the cache's, never those two at once.
     len: RwLock<u64>,
+    /// The length `len()` returns without the lock, so it never waits behind a queued extend: the host calls it on its
+    /// JavaScript thread. Set at open, and by `extend` right after `len` while it still holds the write side. That's
+    /// safe because the length only grows, and a caller that saw the new length and then reads waits on the read side
+    /// until that extend is done.
+    published: AtomicU64,
     hashes: Arc<ChunkHashes>,
     cache: Mutex<Cache>,
     /// The most chunks the cache may hold, whatever the length: `extend` sizes it again from this.
@@ -590,7 +596,8 @@ impl ByteStore {
         let cache = Cache::new(cache_chunks.min(chunks as usize).max(1), len).map_err(io::Error::other)?;
         #[cfg(feature = "test-hooks")]
         crate::hooks::HANDLES.fetch_add(1, Ordering::Relaxed); // until `drop` below
-        Ok(ByteStore { file, len: RwLock::new(len), hashes, cache: Mutex::new(cache), cache_chunks })
+        let published = AtomicU64::new(len);
+        Ok(ByteStore { file, len: RwLock::new(len), published, hashes, cache: Mutex::new(cache), cache_chunks })
     }
 
     /// The actual source handle, borrowed only while its local origin is captured during explicit open.
@@ -610,23 +617,25 @@ impl ByteStore {
     }
 
     pub fn len(&self) -> u64 {
-        *self.len.read().unwrap()
+        self.published.load(Ordering::Acquire)
     }
 
     /// Live tail (Z95): the file has grown to `len` and is still this file (`Document::extend` checks that), so the
     /// store grows with it, in place. The chunk that held the last old byte is read again, once, at the new length: if
     /// its hash was recorded, its old bytes must still match it (otherwise `Changed`), and its hash as it is now
     /// replaces it. When that chunk was short, its old bytes may be a single byte, so the whole chunk before it is
-    /// verified too, if its hash was recorded: at most two chunks are read. The hash table grows, its new chunks unseen;
-    /// the cache is sized again for `len` and emptied, so every later read comes from disk and is verified; and `len`
-    /// is published last. A length no greater changes nothing.
+    /// verified too, if its hash was recorded: at most two chunks are read. A file shorter now than `len` (it shrank
+    /// after the stat) is `Changed`, naming the last chunk at `len`, even where no chunk read looked. The hash table
+    /// grows, its new chunks unseen; the cache is sized again for `len` and emptied, so every later read comes from disk
+    /// and is verified; and `len` is published last. A length no greater changes nothing.
     ///
     /// It charges everything before it changes anything: a refusal is an `io::Error` holding the `OverBudget`, as
     /// `open_with`'s is, and leaves the store as it was. The chunks are read into its caller's page slot, one at a
     /// time. It holds the write side of `len` throughout, so no read runs beside it and the new length and the new
     /// hash are published together; `index::build` reads at its own length and checks hashes outside that lock, so
-    /// nothing may extend while an index job runs.
-    pub fn extend(&self, len: u64) -> Result<(), StoreError> {
+    /// nothing may extend while an index job runs. A document another thread freezes while this runs can still be
+    /// extended: it stays frozen and reads nothing.
+    pub(crate) fn extend(&self, len: u64) -> Result<(), StoreError> {
         let mut geometry = self.len.write().unwrap();
         let old = *geometry;
         if len <= old {
@@ -650,6 +659,9 @@ impl ByteStore {
             }
             tail = Some((k, xxh3_64(&data)));
         }
+        if self.file.metadata()?.len() < len {
+            return Err(StoreError::Changed { chunk: (len - 1) / CHUNK as u64 });
+        }
         let chunks = len.div_ceil(CHUNK as u64);
         let mut cache = Cache::new(self.cache_chunks.min(chunks as usize).max(1), len).map_err(io::Error::other)?;
         self.hashes.grow(chunks, tail).map_err(io::Error::other)?;
@@ -658,6 +670,7 @@ impl ByteStore {
         *held = cache; // the old cache's chunks are freed here, before its charge is released
         drop(held);
         *geometry = len;
+        self.published.store(len, Ordering::Release);
         Ok(())
     }
 
@@ -849,6 +862,62 @@ mod tests {
             assert_eq!(ByteStore::open_with(&path, cache_chunks).unwrap().charges(), expected);
             assert_eq!(store.read(0, new as u64).unwrap(), data);
         }
+    }
+
+    /// Review of #116: an inactive store stays inactive across an extend. Past its floor, reads evict rather than grow
+    /// the cache, so its charge stays at the floor for the new length.
+    #[test]
+    fn an_inactive_store_stays_inactive_after_an_extend() {
+        let (old, new) = (10 * CHUNK + 5, 10 * CHUNK + 8);
+        let data = pattern(new);
+        let path = temp_file("extend-inactive", &data[..old]);
+        let store = ByteStore::open(&path).unwrap();
+        store.set_cache_active(false);
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&data[old..]).unwrap();
+        store.extend(new as u64).unwrap();
+        assert_eq!(store.read(0, new as u64).unwrap(), data); // eleven chunks through a floor of four
+        assert_eq!(store.charges().1, Cache::bytes(FLOOR_CHUNKS, 11, new as u64));
+    }
+
+    /// Review of #116: `len()` never waits. The host calls it on its JavaScript thread, so with a read in flight (held
+    /// in the test-hooks read delay) and an extend queued behind it on the write side, it returns the published length
+    /// at once, while the extend is still queued.
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn len_returns_while_an_extend_is_queued_behind_a_read() {
+        struct NoDelay;
+        impl Drop for NoDelay {
+            fn drop(&mut self) {
+                crate::hooks::set_read_delay(0.0).unwrap();
+            }
+        }
+        let (old, new) = (3 * CHUNK as u64, 3 * CHUNK as u64 + 9);
+        let data = pattern(new as usize);
+        let path = temp_file("extend-len-queued", &data[..old as usize]);
+        let store = Arc::new(ByteStore::open(&path).unwrap());
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&data[old as usize..]).unwrap();
+        let _no_delay = NoDelay;
+        crate::hooks::set_read_delay(500.0).unwrap(); // every test's reads wait while it's set: this one ends soon
+        let reader = {
+            let store = store.clone();
+            std::thread::spawn(move || store.read(0, 1))
+        };
+        while store.len.try_write().is_ok() {
+            std::thread::yield_now(); // until the read holds the read side, in its delay
+        }
+        let extender = {
+            let store = store.clone();
+            std::thread::spawn(move || store.extend(new))
+        };
+        while store.len.try_read().is_ok() && !extender.is_finished() {
+            std::thread::yield_now(); // until the extend is queued on the write side
+        }
+        let seen = store.len();
+        let still_queued = store.len.try_read().is_err();
+        assert_eq!((seen, still_queued), (old, true), "len() waited for the read or the extend");
+        assert_eq!(reader.join().unwrap().unwrap(), data[..1]);
+        extender.join().unwrap().unwrap();
+        assert_eq!(store.len(), new);
     }
 
     #[test]
