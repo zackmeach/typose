@@ -63,9 +63,13 @@ impl Raw {
             Sniffed::Binary => return Err(DocError::Binary),
         };
         let blank = doc.len() <= CHUNK as u64 && whitespace_only(&head, encoding);
+        let indexing = Mutex::new(());
+        // macOS boxes a std mutex at its first lock: that's here, under the open's reservation, as an index run's start
+        // has nothing reserved for it.
+        drop(indexing.lock().unwrap());
         Ok(Raw {
             index: RwLock::new(LineIndex { encoding, ..index }),
-            indexing: Mutex::new(()),
+            indexing,
             blank: AtomicBool::new(blank),
             sniffed: AtomicU64::new(doc.len()),
             fallback,
