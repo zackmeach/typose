@@ -228,6 +228,15 @@ pub struct Csv {
     pub encoding: &'static Encoding,
     pub locked: bool,
     pub index: RwLock<Index>,
+    /// The document's length when this was made (live tail, Z95): its checkpoints are sized for it, and its build, sort
+    /// and Grid Find stop there, whatever an extend adds.
+    end: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Runs once in `Csv::new`, after it reads its end and before its head read: a test extends the document there.
+    static SIZED: std::cell::Cell<Option<Box<dyn FnOnce()>>> = const { std::cell::Cell::new(None) };
 }
 
 fn check_cancel() -> Result<(), DocError> {
@@ -250,7 +259,12 @@ impl Csv {
         if options.delimiter.is_some_and(|d| !DELIMITERS.contains(&d)) {
             return Err(DocError::Invalid("unsupported CSV delimiter".into()));
         }
-        let head = read(doc, generation, 0, READ_BYTES as u64)?;
+        let end = doc.len();
+        #[cfg(test)]
+        if let Some(extend) = SIZED.take() {
+            extend();
+        }
+        let head = read(doc, generation, 0, end.min(READ_BYTES as u64))?;
         let locked = encoding == UTF_16LE
             || encoding == UTF_16BE
             || matches!(Encoding::for_bom(&head),Some((e,_)) if e==UTF_16LE || e==UTF_16BE);
@@ -258,9 +272,9 @@ impl Csv {
             doc.path().extension().and_then(|s| s.to_str()).filter(|s| s.eq_ignore_ascii_case("tsv")).map(|_| b'\t')
         });
         let (delimiter, has_header) =
-            if locked { (b',', false) } else { sniff(&head, head.len() as u64 == doc.len(), encoding, forced) };
+            if locked { (b',', false) } else { sniff(&head, head.len() as u64 == end, encoding, forced) };
         let header = options.header.unwrap_or(has_header);
-        let count = if locked { 0 } else { doc.len().div_ceil(CP_BYTES) + 1 };
+        let count = if locked { 0 } else { end.div_ceil(CP_BYTES) + 1 };
         let bytes = count
             .checked_mul(size_of::<Scanner>() as u64)
             .and_then(|n| n.checked_add(4096))
@@ -288,6 +302,7 @@ impl Csv {
                 metadata: metadata::Metadata::default(),
                 _charge: charge,
             }),
+            end,
         })
     }
     pub fn charged(&self) -> u64 {
@@ -322,11 +337,11 @@ impl Csv {
         let mut sample_more = false;
         loop {
             check_cancel()?;
-            let until = (scan.pos + READ_BYTES as u64).min(next_cp).min(doc.len());
+            let until = (scan.pos + READ_BYTES as u64).min(next_cp).min(self.end);
             let bytes = read(doc, self.generation, scan.pos, until)?;
             let base = scan.pos;
             if self.encoding == UTF_8 {
-                self.index.write().unwrap().metadata.utf8(&bytes, base, until == doc.len());
+                self.index.write().unwrap().metadata.utf8(&bytes, base, until == self.end);
             }
             while scan.pos < until {
                 check_cancel()?;
@@ -350,7 +365,7 @@ impl Csv {
                 }
                 self.publish_row(&event);
             }
-            if scan.pos == doc.len() {
+            if scan.pos == self.end {
                 if scan.in_record {
                     let event = scan.step(&[], &mut out, |byte, _| {
                         if sample.len() < metadata::SAMPLE_FIELD_BYTES {
@@ -377,6 +392,8 @@ impl Csv {
             {
                 let mut index = self.index.write().unwrap();
                 if scan.pos >= next_cp {
+                    let (len, room) = (index.checkpoints.len(), index.checkpoints.capacity());
+                    debug_assert!(len < room, "a checkpoint past the charged capacity, sized from `end`");
                     index.checkpoints.push(scan.clone());
                     next_cp = scan.pos + CP_BYTES;
                 }
@@ -895,8 +912,8 @@ impl Csv {
         if direction == 0 {
             return Ok(result);
         }
-        let temp = doc
-            .len()
+        let temp = self
+            .end
             .checked_mul(10)
             .and_then(|n| n.checked_add(rows * 256 + TEMP_BYTES))
             .ok_or_else(|| DocError::Invalid("sort temporary size overflow".into()))?;
@@ -907,7 +924,7 @@ impl Csv {
         let mut out = [0; 4096];
         loop {
             check_cancel()?;
-            let until = (scan.pos + READ_BYTES as u64).min(doc.len());
+            let until = (scan.pos + READ_BYTES as u64).min(self.end);
             let bytes = read(doc, self.generation, scan.pos, until)?;
             let base = scan.pos;
             while scan.pos < until {
@@ -920,7 +937,7 @@ impl Csv {
                 });
                 collect_key(self, &mut keys, &mut value, &event, column);
             }
-            if scan.pos == doc.len() {
+            if scan.pos == self.end {
                 if scan.in_record {
                     let capture = scan.column == column;
                     let event = scan.step(&[], &mut out, |b, _| {
@@ -1158,14 +1175,14 @@ impl GridFind {
         limit: u64,
         mut found: impl FnMut(GridHit),
     ) -> Result<(), DocError> {
-        let stop = (c.scan.pos + limit).min(doc.len());
+        let stop = (c.scan.pos + limit).min(csv.end);
         let mut out = [0; 4096];
         while c.scan.pos < stop {
             check_cancel()?;
             if self.closed.load(std::sync::atomic::Ordering::Relaxed) {
                 return Err(DocError::Cancelled);
             }
-            let until = (c.scan.pos + READ_BYTES as u64).min(doc.len());
+            let until = (c.scan.pos + READ_BYTES as u64).min(csv.end);
             let bytes = read(doc, csv.generation, c.scan.pos, until)?;
             let base = c.scan.pos;
             while c.scan.pos < until {
@@ -1181,7 +1198,7 @@ impl GridFind {
                 self.feed(csv, c, record, column, matches!(event, Event::Field { .. }), &mut found)?;
             }
         }
-        if c.scan.pos == doc.len() {
+        if c.scan.pos == csv.end {
             if c.scan.in_record {
                 let (record, column) = (c.scan.record, c.scan.column);
                 let event = c.scan.step(&[], &mut out, |b, p| {
@@ -1273,5 +1290,116 @@ mod grid_find_tests {
         let (last, wrapped, n) = search.seek(&csv, &doc, Some(first), true).unwrap();
         assert!(wrapped);
         assert_eq!((last.unwrap().record, n), (1, Some(3)));
+    }
+}
+
+/// Live tail (Z95): a CSV's build, its sort and its Grid Find, each started before an extend and finished after it, end
+/// at the length the CSV was made at, with the charges and the results of the same on a twin file that never grows.
+#[cfg(test)]
+mod live_tail_tests {
+    use super::*;
+    use crate::store::testutil::{Temp, temp_file};
+    use std::io::Write;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    /// A header, `rows` numbered rows and a last record cut inside a character ("caf\xc3"), with its CSV made and not
+    /// built; and a twin of the same bytes.
+    fn opened(name: &str, rows: u64) -> [(Temp, Document, Csv); 2] {
+        let rows: String = (0..rows).map(|i| format!("{i},row {i}\n")).collect();
+        let bytes = [format!("n,text\n{rows}").as_bytes(), b"caf\xc3"].concat();
+        [name.to_string(), format!("{name}-twin")].map(|name| {
+            let path = temp_file(&name, &bytes);
+            let doc = Document::open(&path).unwrap();
+            let csv = Csv::new(&doc, 1, 1, Options { delimiter: Some(b','), header: Some(true) }, UTF_8).unwrap();
+            (path, doc, csv)
+        })
+    }
+
+    /// Completes the cut character ("\xa9"), appends two checkpoints' worth of rows that sort first and hold the query,
+    /// and extends the document over them.
+    fn grow(path: &Path, doc: &Document) {
+        let late = [b"\xa9\n".as_slice(), "-1,a late row\n".repeat(160_000).as_bytes()].concat();
+        std::fs::OpenOptions::new().append(true).open(path).unwrap().write_all(&late).unwrap();
+        assert_eq!(doc.extend().unwrap().map(|r| r.end - r.start), Some(late.len() as u64));
+    }
+
+    /// `Csv::new` reads its head, judges the sniff's whole-file flag and sizes its checkpoints at its end: an extend
+    /// that lands between its end and its head read, a checkpoint's worth and more, changes none of them.
+    #[test]
+    fn a_csv_is_made_at_the_length_it_read_first() {
+        let (path, twin_path) = (temp_file("csv-tail-new", b"a;b"), temp_file("csv-tail-new-twin", b"a;b"));
+        let doc = Arc::new(Document::open(&path).unwrap());
+        let (at, grown) = (path.to_path_buf(), doc.clone());
+        SIZED.set(Some(Box::new(move || {
+            let late = format!("\n1;2\n{}", "3,4,5\n".repeat(200_000)); // 1.2 MB, in commas a head read would see
+            std::fs::OpenOptions::new().append(true).open(&at).unwrap().write_all(late.as_bytes()).unwrap();
+            assert!(grown.extend().unwrap().is_some());
+        })));
+        let sniffed = Options { delimiter: None, header: None };
+        let csv = Csv::new(&doc, 1, 1, sniffed, UTF_8).unwrap();
+        let twin = Csv::new(&Document::open(&twin_path).unwrap(), 1, 1, sniffed, UTF_8).unwrap();
+        let made = |csv: &Csv| {
+            let charged = csv.charged();
+            let i = csv.index.read().unwrap();
+            (csv.delimiter, csv.header, i.checkpoints.len(), i.checkpoints.capacity(), charged)
+        };
+        assert!(SIZED.take().is_none() && doc.len() > CP_BYTES, "the extend didn't run");
+        assert_eq!(made(&csv), made(&twin));
+    }
+
+    #[test]
+    fn a_build_ends_at_the_length_its_csv_was_made_at() {
+        let [(path, doc, csv), (_twin_path, twin_doc, twin)] = opened("csv-tail-build", 10_000); // three reads
+        let mut grown = false;
+        let progress = |_, _, done: bool| {
+            if !grown && !done {
+                grow(&path, &doc); // after the first read
+                grown = true;
+            }
+            true
+        };
+        csv.build_reserved(&doc, progress, Reservation::none()).unwrap();
+        twin.build_reserved(&twin_doc, |_, _, _| true, Reservation::none()).unwrap();
+        let state = |csv: &Csv| {
+            let charged = csv.charged();
+            let i = csv.index.read().unwrap();
+            let problems: Vec<_> = i.metadata.problems.iter().map(|p| (p.kind, p.count, p.first.start)).collect();
+            let checkpoints = (i.checkpoints.len(), i.checkpoints.capacity());
+            (i.records, i.indexed_bytes, i.done, i.max_columns, checkpoints, problems, charged)
+        };
+        assert!(grown && doc.len() > twin_doc.len());
+        assert_eq!(state(&csv), state(&twin));
+    }
+
+    #[test]
+    fn a_sort_ends_at_the_length_its_csv_was_made_at() {
+        let [(path, doc, csv), (_twin_path, twin_doc, twin)] = opened("csv-tail-sort", 100);
+        csv.build_reserved(&doc, |_, _, _| true, Reservation::none()).unwrap();
+        twin.build_reserved(&twin_doc, |_, _, _| true, Reservation::none()).unwrap();
+        grow(&path, &doc);
+        let sorted = |csv: &Csv, doc: &Document| {
+            let order = csv.order(doc, 0, 1).unwrap();
+            ((0..=order.rows).map(|row| order.source(row)).collect::<Vec<_>>(), order.charged())
+        };
+        assert_eq!(sorted(&csv, &doc), sorted(&twin, &twin_doc));
+    }
+
+    #[test]
+    fn a_grid_find_ends_at_the_length_its_csv_was_made_at() {
+        let [(path, doc, csv), (_twin_path, twin_doc, twin)] = opened("csv-tail-grid-find", 100);
+        let start = |csv: &Csv, doc: &Document| {
+            csv.build_reserved(doc, |_, _, _| true, Reservation::none()).unwrap();
+            GridFind::new(csv, Arc::new(csv.order(doc, 0, 1).unwrap()), "row", false).unwrap()
+        };
+        let (search, twin_search) = (start(&csv, &doc), start(&twin, &twin_doc));
+        grow(&path, &doc);
+        let found = |search: &GridFind, csv: &Csv, doc: &Document| {
+            let p = search.scan(csv, doc).unwrap();
+            let (last, wrapped, ordinal) = search.seek(csv, doc, None, true).unwrap();
+            let last = last.map(|h| (h.record, h.start));
+            (p.count, p.bytes, p.complete, p.hits.len(), last, wrapped, ordinal, search.charged())
+        };
+        assert_eq!(found(&search, &csv, &doc), found(&twin_search, &twin, &twin_doc));
     }
 }

@@ -19,7 +19,9 @@ use std::time::Duration;
 
 use pulldown_cmark::Parser;
 use typose_core::budget::{self, Reservation, Work};
+use typose_core::csv::{self, GridFind};
 use typose_core::doc::{DocError, STRUCT_BYTES};
+use typose_core::find::Source;
 use typose_core::images::{self, ImageError};
 use typose_core::jsonl;
 use typose_core::md::{self, MAX_SOURCE, Note};
@@ -729,6 +731,93 @@ fn extend_index_shape(step: usize, path: &Path) {
     assert!(leaked.unsigned_abs() < 64 << 10, "live tail index: {leaked} bytes still live");
 }
 
+/// Live tail (Z95), checked throughout: the consumers whose charges are sized from the document's length (source Find's
+/// anchors, a CSV's checkpoints, its sort) and Grid Find each have an extend land between their steps, as the host would
+/// run them, and end at the length they were sized for, with the charges and results of the same on a twin that never
+/// grows. Then everything closes: the ledger is back. Each append is two checkpoints' worth (2.24 MB): a build that read
+/// past its end would push checkpoints past their charged capacity, which `build_reserved` asserts against. Find's
+/// anchors keep two spare slots, so they'd need an append of 7.1 MB or more: they're not exercised here.
+fn extend_consumers_shape(step: usize, path: &Path, twin_path: &Path) {
+    let rows: String = (0..32_768).map(|i| format!("{i},row {i} {}\n", "x".repeat(150))).collect(); // over SCAN_BYTES
+    for path in [path, twin_path] {
+        fs::write(path, format!("n,text\n{rows}")).unwrap();
+    }
+    drop(rows);
+    const LATE: &str = "-1,a late row\n"; // sorts first and holds the query
+    let late = 160_000 * LATE.len() as u64;
+    let mut appender = fs::OpenOptions::new().append(true).open(path).unwrap();
+    let before = budget::totals();
+    STEP.store(step, SeqCst);
+    ARMED.store(true, SeqCst);
+    let (raw, twin) = (Raw::open(path).unwrap(), Raw::open(twin_path).unwrap());
+    let (docs, old, encoding) = ([raw.document(), twin.document()], raw.document().len(), raw.source_encoding());
+    let mut grow = || {
+        ARMED.store(false, SeqCst);
+        appender.write_all(LATE.repeat(160_000).as_bytes()).unwrap(); // made and freed unchecked: the test's own
+        ARMED.store(true, SeqCst);
+        assert!(matches!(in_slot(|| docs[0].extend()), Ok(Some(_))), "the extend failed");
+    };
+    // Sized now, for the length before any extend: the Finds' anchors and the CSVs' checkpoints.
+    let finds = docs.map(|doc| Source::new(1, "row", false, doc.len()).unwrap());
+    let csvs =
+        [&raw, &twin].map(|raw| raw.csv(1, 1, csv::Options { delimiter: Some(b','), header: Some(true) }).unwrap());
+    let find = |k: usize| in_slot(|| finds[k].scan(docs[k], encoding).map(|p| (p.count, p.bytes, p.complete)).unwrap());
+    let find_first = find(0); // its first SCAN_BYTES
+    for k in 0..2 {
+        let _slot = budget::slot(Work::Index, &|| false).unwrap(); // as the host's build: a slot and its temp
+        let mut grown = k == 1; // the twin never grows
+        let progress = |_, _, done: bool| {
+            if !grown && !done {
+                grow(); // after the build's first read, with the Find between its scans
+                grown = true;
+            }
+            true
+        };
+        csvs[k].build_reserved(docs[k], progress, Reservation::new(csv::TEMP_BYTES).unwrap()).unwrap();
+    }
+    let found = [(find_first, find(0)), (find(1), find(1))];
+    let orders = [0, 1].map(|k| Arc::new(in_slot(|| csvs[k].order(docs[k], 0, 1)).unwrap()));
+    let grids = [0, 1].map(|k| GridFind::new(&csvs[k], orders[k].clone(), "row", false).unwrap());
+    let grid = |k: usize| in_slot(|| grids[k].scan(&csvs[k], docs[k]).map(|p| (p.count, p.bytes, p.complete)).unwrap());
+    let grid_first = grid(0); // its first SCAN_BYTES
+    grow();
+    let grid_found = [(grid_first, grid(0)), (grid(1), grid(1))];
+    let csv_state = |k: usize| {
+        let charged = csvs[k].charged();
+        let index = csvs[k].index.read().unwrap();
+        (index.records, index.indexed_bytes, index.done, charged)
+    };
+    let sorted = (0..orders[0].rows).all(|row| orders[0].source(row) == orders[1].source(row));
+    let same = [
+        csv_state(0) == csv_state(1),
+        (found[0], finds[0].charged()) == (found[1], finds[1].charged()),
+        sorted && (orders[0].rows, orders[0].charged()) == (orders[1].rows, orders[1].charged()),
+        (grid_found[0], grids[0].charged()) == (grid_found[1], grids[1].charged()),
+    ];
+    let (new, (records, indexed, _, charged)) = (docs[0].len(), csv_state(0));
+    let (hits, rows, grid_hits) = (found[0].1.0, orders[0].rows, grid_found[0].1.0);
+    drop(grids);
+    drop(orders);
+    drop(csvs);
+    drop(finds);
+    drop(raw);
+    drop(twin);
+    ARMED.store(false, SeqCst);
+    drop(appender);
+    let leaked = LIVE.load(SeqCst) as i64 - BASELINE.load(SeqCst) as i64;
+    println!(
+        "{:>24}: {old} bytes, {late} appended in the CSV build and in Grid Find; CSV {records} records to {indexed}, \
+         {charged} charged; source Find {hits} hits; sort {rows} rows; Grid Find {grid_hits} hits; each as the twin \
+         (CSV, Find, sort, Grid Find): {same:?}; live past baseline after close: {leaked}",
+        "live tail consumers"
+    );
+    assert_eq!(same, [true; 4], "CSV, source Find, sort, Grid Find: not as the twin");
+    let ends = (new, indexed, found[0].1.1, grid_found[0].1.1);
+    assert_eq!(ends, (old + 2 * late, old, old, old), "the length, and where each ended");
+    assert_eq!(budget::totals().used, before.used, "live tail consumers: the ledger isn't back to its baseline");
+    assert!(leaked.unsigned_abs() < 64 << 10, "live tail consumers: {leaked} bytes still live");
+}
+
 /// A charge-release negative control: the elastic vectors still exist, but the comparison withholds their charge.
 /// The allocator normally runs only on allocations, so an explicit checkpoint is needed to make a shrink-before-free
 /// mistake observable even when no allocation would occur between those operations. Production state stays intact.
@@ -1355,6 +1444,8 @@ fn main() {
     }
     extend_shape(4 * shapes.len() + 3 + markdown.len() + transcripts.len(), &at("tail.txt"));
     extend_index_shape(4 * shapes.len() + 4 + markdown.len() + transcripts.len(), &at("tail-index.txt"));
+    let step = 4 * shapes.len() + 5 + markdown.len() + transcripts.len();
+    extend_consumers_shape(step, &at("consumers.csv"), &at("consumers-twin.csv"));
 
     JOB.store(0, SeqCst);
     ROUND.fetch_add(1, SeqCst);
@@ -1368,7 +1459,7 @@ fn main() {
         .chain(markdown.iter().map(|m| m.0))
         .chain(["a Markdown build refused"])
         .chain(transcripts.iter().map(|t| t.0))
-        .chain(["live tail", "live tail index"])
+        .chain(["live tail", "live tail index", "live tail consumers"])
         .collect();
     let place = match shapes.get(at / 4) {
         Some(s) => format!("{}: {}", s.name, ["open", "fill the cache", "index", "8 pages"][at % 4]),
