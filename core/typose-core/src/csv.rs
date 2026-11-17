@@ -776,6 +776,21 @@ mod tests {
         let (_path2, doc2, _) = csv(b"\xff\xfea\0,\0b\0", b',');
         assert!(Csv::new(&doc2, 1, 1, Options { delimiter: Some(b','), header: None }, UTF_8).unwrap().locked);
     }
+    #[test]
+    fn locked_csv_refuses_sort_instead_of_indexing_an_empty_checkpoint_list() {
+        let (_path, doc, _) = csv(b"\xff\xfea\0,\0b\0", b',');
+        let locked = Csv::new(&doc, 1, 1, Options { delimiter: Some(b','), header: None }, UTF_8).unwrap();
+        assert!(matches!(locked.order(&doc, 0, 1), Err(DocError::Refused(_))));
+        assert!(matches!(locked.order(&doc, 0, 0), Err(DocError::Refused(_))));
+    }
+    #[test]
+    fn locked_csv_refuses_grid_find_instead_of_indexing_an_empty_checkpoint_list() {
+        let (_path, doc, base) = csv(b"a,b", b',');
+        let (_path2, doc2, _) = csv(b"\xff\xfea\0,\0b\0", b',');
+        let locked = Csv::new(&doc2, 1, 1, Options { delimiter: Some(b','), header: None }, UTF_8).unwrap();
+        let order = std::sync::Arc::new(base.order(&doc, 0, 0).unwrap());
+        assert!(matches!(GridFind::new(&locked, order, "a", false), Err(DocError::Refused(_))));
+    }
 }
 
 impl Piece {
@@ -887,6 +902,9 @@ struct SortKey {
 }
 impl Csv {
     pub fn order(&self, doc: &Document, column: u64, direction: i32) -> Result<Order, DocError> {
+        if self.locked {
+            return Err(DocError::Refused(UTF16_REASON.into()));
+        }
         let index = self.index.read().unwrap();
         if !index.done {
             return Err(DocError::Refused("Wait for CSV indexing before sorting".into()));
@@ -1097,6 +1115,9 @@ pub struct GridFind {
 }
 impl GridFind {
     pub fn new(csv: &Csv, order: std::sync::Arc<Order>, query: &str, match_case: bool) -> Result<Self, DocError> {
+        if csv.locked {
+            return Err(DocError::Refused(UTF16_REASON.into()));
+        }
         let charge = Reservation::new(
             crate::find::STATE_BYTES
                 + order.rows.checked_mul(8).ok_or_else(|| DocError::Invalid("Grid Find state size overflow".into()))?,
