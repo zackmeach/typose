@@ -183,6 +183,8 @@ pub struct LineIndex {
     pub(crate) lines_since: u64,
     pub(crate) line_cps: usize,
     pub(crate) lines_on: bool,
+    /// Whether the last build ran to the length it read, rather than being stopped by its callback (`done`).
+    pub(crate) finished: bool,
 }
 
 impl LineIndex {
@@ -198,13 +200,16 @@ impl LineIndex {
             lines_since: 0,
             line_cps: 0,
             lines_on: true,
+            finished: false,
         })
     }
 
-    /// Whether it has indexed its document's `len` bytes, the length now: after an extend it isn't, until a build
-    /// continues it. Before its first build has published (the initial checkpoint), not even an empty file is.
+    /// Whether its last build ran to the end and it has indexed its document's `len` bytes, the length now. A build
+    /// its callback stopped isn't done, even at the end of the file (a freeze in the last block ends the index with the
+    /// freeze, as it always has); after an extend it isn't done until a build continues it. Before a first build, not
+    /// even an empty file is.
     pub fn done(&self, len: u64) -> bool {
-        self.indexed_bytes == len && self.checkpoints.len() > 0
+        self.finished && self.indexed_bytes == len
     }
 }
 
@@ -283,7 +288,7 @@ impl Builder {
     }
 
     /// Moves the new checkpoints into the shared index, after the initial one on its first publish, with the state a
-    /// later build resumes from, and returns its line count. `trim`: the build reached the length.
+    /// later build resumes from, and returns its line count. `trim`: the build reached the length, and is finished.
     fn publish(&mut self, shared: &RwLock<LineIndex>, indexed: u64, trim: bool) -> u64 {
         let mut w = shared.write().unwrap();
         if w.checkpoints.len() == 0 {
@@ -298,6 +303,7 @@ impl Builder {
         w.newlines = self.newlines;
         w.last_line_start = self.last_line_start;
         w.indexed_bytes = indexed;
+        w.finished = trim;
         (w.last_cp, w.lines_since, w.line_cps, w.lines_on) =
             (self.last_cp, self.lines_since, self.line_cps, self.lines_on);
         w.line_count()
@@ -657,6 +663,7 @@ mod tests {
             (&utf16("ab\r\ncd\nef", false), UTF_16LE, small, &[7, 8, 9, 14, 15]), // CR at 6, LF at 8, LF at 14
             (&utf16("ab\r\ncd\nef", true), UTF_16BE, small, &[7, 8, 9, 14, 15]),
             (&utf16("\n\n\n", false), UTF_16LE, small, &[1, 3, 5, 7]),
+            // In the last "x" unit, at the chunk's end, in the "\n" unit, in the CR unit after it.
             (&second_chunk, UTF_16LE, big, &[c - 1, c, c + 1, c + 5]),
             (&second_chunk, UTF_16LE, big, &[c + 1]),
             (&second_chunk, UTF_16LE, big, &[c + 7]), // inside the LF of the CR LF after the newline at CHUNK
@@ -682,14 +689,23 @@ mod tests {
 
     /// Z95: the checkpoint floor grows with the file. One opened at 10 bytes, with a byte-bound checkpoint every 16
     /// bytes (a floor of 2), grows to 400,000: its continuation takes 25,000 byte-bound checkpoints past that floor,
-    /// in elastic chunks charged before they're filled (`push` asserts that it never goes past them). With a line
-    /// checkpoint every 2^20 lines, the room made for line checkpoints (sized at a line a byte) is none, so it can't
-    /// hold them instead.
+    /// in elastic chunks charged before they're filled (`push` asserts that it never goes past them). Line checkpoints
+    /// are off for the continuation, as a refused `room` leaves them: `room` also makes room for the floor's growth
+    /// while they're on, so only with them off is `reserve` alone in making it.
     #[test]
     fn a_file_that_grows_far_past_its_floor_indexes_to_its_end() {
         let cfg = IndexConfig { cp_lines: 1 << 20, cp_bytes: 16, block: CHUNK };
         let bytes: Vec<u8> = (0..20_000).flat_map(|i| format!("{i:019}\n").into_bytes()).collect();
-        let grown = index_grown("grown-floor", &bytes, &[10], cfg, UTF_8);
+        let path = temp_file("grown-floor", &bytes[..10]);
+        let store = ByteStore::open(&path).unwrap();
+        let shared = RwLock::new(LineIndex::new(store.len(), &cfg, UTF_8).unwrap());
+        let file = File::open(&path).unwrap();
+        build(&file, &store, cfg, &shared, |_| true).unwrap();
+        shared.write().unwrap().lines_on = false;
+        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&bytes[10..]).unwrap();
+        store.extend(bytes.len() as u64).unwrap();
+        build(&file, &store, cfg, &shared, |_| true).unwrap();
+        let grown = (store, shared.into_inner().unwrap());
         let (_, whole) = index_encoded("grown-floor-whole", &bytes, cfg, UTF_8);
         same_as_whole(&grown, &whole, &naive_line_starts(&bytes), cfg.cp_bytes).unwrap();
         assert_eq!(Checkpoints::new(10, 16).unwrap().floor, 2);

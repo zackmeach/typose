@@ -239,7 +239,8 @@ impl Raw {
     /// Live tail (Z95): each run picks up where the last one stopped and goes on to the document's length as it is at
     /// each block, so it takes in an extend made while it runs; after one made since, a run continues it. Runs take
     /// turns, before their slots. When the ledger can't hold the checkpoints a longer document needs, the run stops
-    /// with `Memory`, the index as it was and the document not frozen, and a later run with room goes on.
+    /// with `Memory` at that block, unpublished (what its earlier blocks published stays), the document not frozen, and
+    /// a later run with room goes on.
     pub fn index(&self, mut on_progress: impl FnMut(Progress) -> bool) -> Result<(), String> {
         let _run = self.indexing.lock().unwrap();
         let _slot = match budget::slot(Work::Index, &cancelled) {
@@ -766,5 +767,77 @@ mod tests {
         assert_eq!((raw.document().len(), raw.document().frozen()), (6, None));
         let result = raw.extend();
         assert!(matches!(result, Err(DocError::Frozen(ref why)) if why.contains("now UTF-8")), "{result:?}");
+    }
+
+    /// Review of #117: a run stopped at its last block isn't done, though it has reached the end of the file, as before
+    /// Z95. Frozen there (in the only block of a small file, or the last of several), `index` ends with the freeze, which
+    /// the host's index-error cleanup waits for. Stopped there by its callback, it isn't done, until a later run is.
+    #[test]
+    fn a_run_stopped_at_its_last_block_is_not_done() {
+        let small = b"one\ntwo\nthree".to_vec();
+        let big = [b"0123456789abcde\n".repeat(1 << 18), b"tail".to_vec()].concat(); // 4 MiB and 4 bytes: two blocks
+        for (name, bytes, blocks, lines) in [("small", &small, 1, 3), ("big", &big, 2, (1 << 18) + 1)] {
+            let raw = Raw::open(&temp_file(&format!("raw-last-frozen-{name}"), bytes)).unwrap();
+            let mut seen = 0;
+            let indexed = raw.index(|p| {
+                seen += 1;
+                if seen == blocks && !p.done {
+                    let _ = raw.document().freeze("in the last block".into());
+                }
+                true
+            });
+            assert_eq!(
+                (indexed, raw.lines_known()),
+                (Err("frozen: in the last block".into()), (lines, false)),
+                "{name}"
+            );
+            let raw = Raw::open(&temp_file(&format!("raw-last-stopped-{name}"), bytes)).unwrap();
+            let mut seen = 0;
+            let indexed = raw.index(|p| {
+                seen += 1;
+                seen != blocks || p.done // no to the last block's event
+            });
+            assert_eq!((indexed, raw.lines_known()), (Ok(()), (lines, false)), "{name}");
+            raw.index(|_| true).unwrap();
+            assert_eq!(raw.lines_known(), (lines, true), "{name}: a later run");
+        }
+    }
+
+    /// Review of #117: index runs on one document take turns (`indexing`). Without that, two runs started together after
+    /// an extend resume from the same state and each publish the same checkpoints. Here, in three rounds, two runs start
+    /// together after a 9 MiB extend, and the index must equal a fresh index of the same bytes.
+    #[test]
+    fn two_index_runs_at_once_take_turns() {
+        use std::sync::{Arc, Barrier};
+        let line = b"0123456789abcde\n";
+        let path = temp_file("raw-two-runs", &line.repeat(64));
+        let raw = Arc::new(Raw::open(&path).unwrap());
+        raw.index(|_| true).unwrap();
+        for round in 0..3 {
+            append(&path, &line.repeat(9 << 16));
+            assert!(raw.extend().unwrap().is_some());
+            let start = Arc::new(Barrier::new(2));
+            let runs: Vec<_> = (0..2)
+                .map(|_| {
+                    let (raw, start) = (raw.clone(), start.clone());
+                    std::thread::spawn(move || {
+                        start.wait();
+                        raw.index(|_| true)
+                    })
+                })
+                .collect();
+            for run in runs {
+                assert_eq!(run.join().unwrap(), Ok(()), "round {round}");
+            }
+            let whole = Raw::open(&path).unwrap();
+            whole.index(|_| true).unwrap();
+            let (got, want) = (raw.index.read().unwrap(), whole.index.read().unwrap());
+            assert_eq!(
+                (got.checkpoints.len(), got.newlines, got.indexed_bytes),
+                (want.checkpoints.len(), want.newlines, want.indexed_bytes),
+                "round {round}"
+            );
+            assert!(got.checkpoints.iter().eq(want.checkpoints.iter()), "round {round}: the checkpoints differ");
+        }
     }
 }
