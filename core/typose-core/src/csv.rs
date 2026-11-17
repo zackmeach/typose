@@ -776,6 +776,30 @@ mod tests {
         let (_path2, doc2, _) = csv(b"\xff\xfea\0,\0b\0", b',');
         assert!(Csv::new(&doc2, 1, 1, Options { delimiter: Some(b','), header: None }, UTF_8).unwrap().locked);
     }
+    #[test]
+    fn locked_csv_refuses_sort_instead_of_indexing_an_empty_checkpoint_list() {
+        let (_path, doc, _) = csv(b"\xff\xfea\0,\0b\0", b',');
+        let locked = Csv::new(&doc, 1, 1, Options { delimiter: Some(b','), header: None }, UTF_8).unwrap();
+        assert!(matches!(locked.order(&doc, 0, 1), Err(DocError::Refused(_))));
+        assert!(locked.order(&doc, 0, 0).is_ok());
+    }
+    #[test]
+    fn locked_csv_refuses_grid_find_instead_of_indexing_an_empty_checkpoint_list() {
+        let (_path, doc, base) = csv(b"a,b", b',');
+        let (_path2, doc2, _) = csv(b"\xff\xfea\0,\0b\0", b',');
+        let locked = Csv::new(&doc2, 1, 1, Options { delimiter: Some(b','), header: None }, UTF_8).unwrap();
+        let order = std::sync::Arc::new(base.order(&doc, 0, 0).unwrap());
+        assert!(matches!(GridFind::new(&locked, order, "a", false), Err(DocError::Refused(_))));
+    }
+    #[test]
+    fn grid_find_seek_refuses_a_locked_csv_passed_to_it() {
+        let (_path, doc, base) = csv(b"a,b", b',');
+        let (_path2, doc2, _) = csv(b"\xff\xfea\0,\0b\0", b',');
+        let locked = Csv::new(&doc2, 1, 1, Options { delimiter: Some(b','), header: None }, UTF_8).unwrap();
+        let order = std::sync::Arc::new(base.order(&doc, 0, 0).unwrap());
+        let find = GridFind::new(&base, order, "a", false).unwrap();
+        assert!(matches!(find.seek(&locked, &doc2, None, false), Err(DocError::Refused(_))));
+    }
 }
 
 impl Piece {
@@ -911,6 +935,9 @@ impl Csv {
         };
         if direction == 0 {
             return Ok(result);
+        }
+        if self.locked {
+            return Err(DocError::Refused(UTF16_REASON.into()));
         }
         let temp = self
             .end
@@ -1068,9 +1095,12 @@ struct GridCursor {
     complete: bool,
 }
 impl GridCursor {
-    fn new(csv: &Csv, pattern: &crate::find::Pattern, rows: u64) -> Self {
+    fn new(csv: &Csv, pattern: &crate::find::Pattern, rows: u64) -> Result<Self, DocError> {
+        if csv.locked {
+            return Err(DocError::Refused(UTF16_REASON.into()));
+        }
         let scan = csv.index.read().unwrap().checkpoints[0].clone();
-        GridCursor {
+        Ok(GridCursor {
             pending_start: scan.field_start,
             scan,
             matcher: crate::find::Matcher::new(pattern),
@@ -1079,7 +1109,7 @@ impl GridCursor {
             count: 0,
             counts: vec![0; rows as usize],
             complete: false,
-        }
+        })
     }
 }
 pub struct GridProgress {
@@ -1103,7 +1133,7 @@ impl GridFind {
         )
         .map_err(DocError::Memory)?;
         let pattern = crate::find::Pattern::new(query, match_case)?;
-        let cursor = GridCursor::new(csv, &pattern, order.rows);
+        let cursor = GridCursor::new(csv, &pattern, order.rows)?;
         Ok(Self {
             pattern,
             order,
@@ -1234,7 +1264,7 @@ impl GridFind {
         previous: bool,
     ) -> Result<(Option<GridHit>, bool, Option<u64>), DocError> {
         let _temp = Reservation::new(TEMP_BYTES + self.order.rows * 8).map_err(DocError::Memory)?;
-        let mut c = GridCursor::new(csv, &self.pattern, self.order.rows);
+        let mut c = GridCursor::new(csv, &self.pattern, self.order.rows)?;
         let (mut first, mut last, mut chosen): (Option<GridHit>, Option<GridHit>, Option<GridHit>) = (None, None, None);
         while !c.complete {
             self.step(csv, doc, &mut c, crate::find::SCAN_BYTES, |h| {
