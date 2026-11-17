@@ -44,13 +44,13 @@ CI does not fully run these. Run them locally before you tag a release.
   npm run test:hooks
   ```
 
-- The 250 ms renderer-task and page-timer bounds in `e2e/markdown-extras.e2e.ts`'s math-bombs test: CI on macOS and Windows skips them (`quiet` in `e2e/app.ts`) and runs the rest of the test.
+- The 250 ms renderer-task and page-timer bounds in `e2e/markdown-extras.e2e.ts`'s math-bombs test: CI on macOS and Windows skips them (`quiet` in `e2e/app.ts`) and runs the rest of the test. CI on Windows also skips its 1 s round-trip bound.
 
   ```powershell
   npm run e2e -- markdown-extras.e2e -g "math bombs"
   ```
 
-- The 250 ms page-timer bound in `e2e/markdown-extras.e2e.ts`'s dense-highlighting test: CI on macOS skips it and runs the rest of the test.
+- The 250 ms page-timer bound in `e2e/markdown-extras.e2e.ts`'s dense-highlighting test: CI on macOS skips it and runs the rest of the test. CI on Windows skips its 1 s round-trip bound.
 
   ```powershell
   npm run e2e -- markdown-extras.e2e -g "dense highlighting"
