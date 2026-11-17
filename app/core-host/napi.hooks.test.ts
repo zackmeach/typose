@@ -2,13 +2,14 @@
 // per-read delay shows a cancelled read stopping within the chunk read it's in (plan C5), and its budget override shows
 // the ledger refusing an open it can't hold (plan C1). Run by `npm run test:hooks`, after `npm run build:addon:hooks`;
 // the release addon has none of this.
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir, totalmem } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, expect, it } from 'vitest'
 import type * as Core from 'typose-node'
-import type { Charges, DebugStats } from '../shared/protocol'
+import type { Charges, DebugStats, Opened, ProgressEvent } from '../shared/protocol'
+import { makeDispatcher } from './dispatch'
 
 interface Hooks {
   debugStats(): Pick<DebugStats, 'jobs' | 'tasks' | 'handles' | 'delayMs' | 'ledger'>
@@ -344,5 +345,71 @@ it('M5 PR 3: a ledger too tight to parse a call\'s arguments shows them as the s
     doc.close()
   }
   await expect.poll(() => alive()).toEqual({ jobs: 0, tasks: 0, handles: 0 })
+  expect(core.debugStats().ledger.used).toBe(base)
+})
+
+it("Z95: a refresh the budget can't hold is Memory, and the document stays as it was, unfrozen; with room, it grows", async () => {
+  const path = join(dir, 'refresh-budget.txt')
+  writeFileSync(path, 'a line\n'.repeat(1000))
+  const { used: base, limit } = core.debugStats().ledger
+  const doc = core.Doc.open(path)
+  try {
+    await indexed(doc)
+    appendFileSync(path, 'another line\n')
+    const charges = core.docCharges(doc)
+    try {
+      core.setLimit(core.debugStats().ledger.used) // nothing free: the longer document's cache floor and hashes are refused
+      expect(await ending(doc.refresh(1, new core.Cancel()))).toBe('Memory')
+      expect([doc.size, core.docCharges(doc)]).toEqual([7000, charges])
+    } finally {
+      core.setLimit(limit)
+    }
+    expect(await doc.refresh(1, new core.Cancel())).toEqual({ start: 7000, end: 7013 }) // a frozen one is Frozen
+  } finally {
+    doc.close()
+  }
+  await expect.poll(() => alive()).toEqual({ jobs: 0, tasks: 0, handles: 0 })
+  expect(core.debugStats().ledger.used).toBe(base)
+})
+
+it('Z95, through the core host: a refresh continues the index to the new lines at the same generation; a close in the middle leaves 0 jobs, tasks and handles', async () => {
+  const { used: base } = core.debugStats().ledger
+  const events: ProgressEvent[] = []
+  const dispatch = makeDispatcher({ coreVersion: core.coreVersion, limits: core.limits, reserveCache: core.reserveCache,
+    cancelFlag: () => new core.Cancel(), openDoc: (path) => core.Doc.open(path) }, 11, (e) => events.push(e))
+  let next = 1
+  const value = async <T>(method: string, params: Record<string, unknown>): Promise<T> => {
+    const response = await dispatch({ id: next++, method, params })
+    if ('error' in response) throw Object.assign(new Error(response.error.message), response.error)
+    return response.result as T
+  }
+  const open = async (name: string) => {
+    const path = join(dir, name)
+    writeFileSync(path, 'old line\n'.repeat(100))
+    const opened = await value<Opened>('open', { path, count: 1, bytes: 0 })
+    await expect.poll(() => events.some((e) => e.doc === opened.doc && e.done)).toBe(true)
+    return { path, opened }
+  }
+  // The host starts the run that continues the index, whose events carry the new length.
+  const { path, opened } = await open('refresh-host.txt')
+  appendFileSync(path, 'new line\n'.repeat(50))
+  expect(await value('refresh', { view: opened.view })).toEqual({ size: 1350 })
+  await expect.poll(() => events.at(-1)).toMatchObject({ doc: opened.doc, gen: 1, lines: 150, size: 1350, done: true })
+  const page = await value<{ items: { gen: number; text: string }[] }>('page', { doc: opened.doc, lens: 'raw', gen: 1, start: 99, count: 3 })
+  expect(page.items.map((i) => [i.gen, i.text])).toEqual([[1, 'old line'], [1, 'new line'], [1, 'new line']])
+  // A close just after a refresh, while that run starts or reads.
+  appendFileSync(path, 'new line\n'.repeat(1 << 20))
+  expect(await value('refresh', { view: opened.view })).toEqual({ size: 1350 + 9 * (1 << 20) })
+  expect(await value('close', { doc: opened.doc })).toBe(true)
+  await expect.poll(() => alive()).toEqual({ jobs: 0, tasks: 0, handles: 0 })
+  // A close while a refresh reads, each chunk read 200 ms late: it ends Cancelled.
+  const second = await open('refresh-close.txt')
+  appendFileSync(second.path, 'new line\n')
+  core.setReadDelay(200)
+  const refreshing = value('refresh', { view: second.opened.view }).catch((e: { code?: string }) => e.code)
+  expect(await value('close', { doc: second.opened.doc })).toBe(true)
+  expect(await refreshing).toBe('Cancelled')
+  await expect.poll(() => alive()).toEqual({ jobs: 0, tasks: 0, handles: 0 })
+  core.reserveCache(0) // this dispatcher's share: its view and lease tables
   expect(core.debugStats().ledger.used).toBe(base)
 })

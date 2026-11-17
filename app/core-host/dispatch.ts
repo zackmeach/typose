@@ -279,8 +279,11 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   }
   const docs = new Map<number, Doc>()
   const docOwners = new Map<number, number>()
-  /** Each document's index job (plan C6). */
+  /** Each document's index job (plan C6), and the jobs that have sent their last event, done or an error. */
   const jobs = new Map<number, Cancel>()
+  const ended = new WeakSet<Cancel>()
+  /** Each document's refresh in flight, and its generation (Z95). */
+  const refreshes = new Map<number, { gen: number; done: Promise<{ size: number }> }>()
   /** Page reads in flight, by request id (plan C5). `cancelledAt` is the test-hooks build's. */
   type ReadEntry = {
     doc?: number; cancel: Cancel; retainOnLeave: boolean; cancelled: boolean; cancelledAt?: number
@@ -668,28 +671,43 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   /** Read fallible metadata before starting a job; a failed start leaves no job registered. */
   const begin = (id: number, doc: Doc, firstPage: CorePage, local?: LocalInfo): Omit<Opened, 'reserved'> => {
     const opened = describe(id, doc, firstPage, local)
-    const gen = opened.gen
     const cancel = addon.cancelFlag()
     jobs.get(id)?.cancel() // the previous generation's job, if it still runs (plan C6)
+    startJob(id, doc, opened.gen, cancel)
+    return opened
+  }
+  /** Starts an index run of generation `gen`, the document's job from now on, which `cancel` stops (plan C6). A run
+   *  picks up where the last one stopped (Z95). */
+  const startJob = (id: number, doc: Doc, gen: number, cancel: Cancel): void => {
     jobs.set(id, cancel)
     try {
       doc.startIndex(cancel, (e: IndexProgress) => {
+        if (e.done || e.error !== undefined) ended.add(cancel)
         // An index error froze the document (plan C6). An older generation's ends with Reload's freeze, not this one's.
         if (e.error !== undefined && jobs.get(id) === cancel && docs.get(id) === doc && doc.generation === gen) {
           closeDocumentFind(id)
           closeDocumentCsvInteractions(id)
           cancelReads(id)
         }
-        const event: ProgressEvent = { event: 'progress', session, doc: id, gen, lines: e.lines, bytes: e.bytes, done: e.done }
+        const event: ProgressEvent = { event: 'progress', session, doc: id, gen, lines: e.lines, bytes: e.bytes, size: e.size, done: e.done }
         if (e.error !== undefined) event.error = e.error
         emit(event)
+        // An extend can land after the run's last block read the length: done then, the index isn't done now.
+        if (e.done) continueIndex(id, doc, gen)
       })
     } catch (e) {
       cancel.cancel()
       if (jobs.get(id) === cancel) jobs.delete(id)
       throw e
     }
-    return opened
+  }
+  /** Z95: a run that continues generation `gen`'s index after an extend, unless the index is done or a run of it is
+   *  going. One run at a time per document: a second would wait its turn (`Raw::index`), and can't be cancelled while
+   *  the one ahead of it waits for an index slot. */
+  const continueIndex = (id: number, doc: Doc, gen: number): void => {
+    const job = jobs.get(id)
+    if (docs.get(id) !== doc || doc.generation !== gen || (job && !ended.has(job)) || doc.indexed) return
+    startJob(id, doc, gen, addon.cancelFlag())
   }
 
   /** Registration spans first-page wait through synchronous publication, not just the native read. */
@@ -1526,6 +1544,27 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         giveBack(pending)
         throw e
       }
+    },
+    // Z95: the document grows to its file's new length, in place, at the same generation, and its index goes on. One
+    // refresh per document at a time, so one extend at a time (`Raw::extend`): one asked while another of the same
+    // generation runs gets that one's answer.
+    refresh: (p, req): Promise<{ size: number }> => {
+      const lease = findLease(p.view), { doc: id, gen } = lease.ref, doc = getDoc(id)
+      const running = refreshes.get(id)
+      if (running?.gen === gen) return running.done
+      const entry = {
+        gen,
+        done: read(req, id, async (cancel) => {
+          await doc.refresh(gen, cancel)
+          continueIndex(id, doc, gen) // before the view's check: an extend is the document's, whichever view asked
+          if (findLease(lease.ref) !== lease) throw new Refusal('Stale', 'the view was replaced while refreshing')
+          return { size: doc.size }
+        })
+      }
+      const clear = () => { if (refreshes.get(id) === entry) refreshes.delete(id) }
+      refreshes.set(id, entry)
+      entry.done.then(clear, clear)
+      return entry.done
     },
     // Plan C6: the index job and the page reads stop, and the document's handle closes once they have.
     close: (p) => {

@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Cancel, Doc, IndexProgress, Page } from 'typose-node'
 import { limits } from 'typose-node'
-import type { Response } from '../shared/protocol'
+import type { Opened, ProgressEvent, Response, ViewRef } from '../shared/protocol'
 import { type Addon, makeDispatcher } from './dispatch'
 import { HOSTILE, isValid } from './numbers'
 
@@ -24,6 +24,7 @@ const setCacheActive = vi.fn((_gen: number, _active: boolean) => {})
 const reload = vi.fn()
 const close = vi.fn()
 const startIndex = vi.fn((_cancel: Cancel, _onProgress: (p: IndexProgress) => void) => {})
+const refresh = vi.fn(async (_gen: number, _cancel: Cancel): Promise<{ start: number; end: number } | null> => null)
 const doc = {
   generation: 1,
   format: 'text',
@@ -46,7 +47,8 @@ const doc = {
   setCacheActive,
   reload,
   close,
-  startIndex
+  startIndex,
+  refresh
 } as unknown as Doc
 const localDoc = { ...doc, localOnly: true, path: 'C:\\docs\\linked.md' } as unknown as Doc
 const openDoc = vi.fn(() => doc)
@@ -967,7 +969,7 @@ describe('retained tab activation', () => {
       const reloading = dispatch({ id: 103, method: 'reload', params: { doc: 2, count: 1, bytes: 500 } })
       const currentFlag = flags.at(-1)!
       expect(b.data.generation).toBe(3)
-      onProgress({ lines: 3, bytes: 0, done: false, error: 'frozen: reloaded' })
+      onProgress({ lines: 3, bytes: 0, size: 3, done: false, error: 'frozen: reloaded' })
       current.end()
       expect(await reloading).toMatchObject({ result: { doc: 2, gen: 3 } })
       expect(currentFlag.cancel).not.toHaveBeenCalled()
@@ -1475,7 +1477,7 @@ describe('cancels (plan C5, C6)', () => {
     void pendingRead()
     void dispatch({ id: 62, method: 'page', params: { doc: 1, lens: 'raw', gen: 1, start: 9, count: 1 } })
     const next = flags.at(-1)!
-    onProgress({ lines: 3, bytes: 0, done: false, error: 'frozen: changed on disk (chunk 2)' })
+    onProgress({ lines: 3, bytes: 0, size: 3, done: false, error: 'frozen: changed on disk (chunk 2)' })
     expect(next.cancel).toHaveBeenCalledOnce()
   })
 
@@ -1513,4 +1515,133 @@ it('a Reload that another overtakes starts no index job, and close then cancels 
     d.generation = 1
     reload.mockImplementation(() => {})
   }
+})
+
+describe('live tail: refresh (Z95)', () => {
+  const state = doc as unknown as { indexed: boolean; generation: number }
+  let events: ProgressEvent[]
+  beforeEach(() => {
+    events = []
+    dispatch = makeDispatcher(addon, 7, (e) => events.push(e))
+    nextId = 1
+  })
+  afterEach(() => {
+    state.indexed = false
+    state.generation = 1
+    reload.mockImplementation(() => {})
+  })
+  /** Opens document 1: its live view, and the progress callback of its first run, which goes on until it sends its
+   *  last event. */
+  async function opened(): Promise<{ view: ViewRef; progress: (p: IndexProgress) => void }> {
+    const reply = (await call('open', { path: 'a.txt', count: 1, bytes: 0 })) as { result: Opened }
+    return { view: reply.result.view!, progress: startIndex.mock.calls.at(-1)![1] }
+  }
+
+  it("refuses a view that isn't the document's live one, and doesn't ask the addon", async () => {
+    const { view } = await opened()
+    expect(await call('open', { path: 'b.txt', count: 1, bytes: 0 })).toMatchObject({ result: { doc: 2, view: { id: 2 } } })
+    const second = { ...view, id: 2, doc: 2 }
+    expect(await call('refresh', { view: second })).toMatchObject({ result: { size: 3 } }) // the live one is asked
+    vi.clearAllMocks()
+    for (const [other, code] of [
+      [view, 'Stale'], // replaced on its surface by document 2's
+      [{ ...second, session: 6 }, 'Stale'],
+      [{ ...second, surface: 3 }, 'Stale'],
+      [{ ...second, id: 3 }, 'Stale'],
+      [{ ...second, doc: 1 }, 'Stale'],
+      [{ ...second, gen: 2 }, 'Stale'],
+      [{ ...second, id: -1 }, 'InvalidParams'],
+      [undefined, 'InvalidParams'],
+      ['view', 'InvalidParams']
+    ] as const) expect(await call('refresh', { view: other }), JSON.stringify(other)).toMatchObject({ error: { code } })
+    const reloaded = (await call('reload', { doc: 2, count: 1, bytes: 0 })) as { result: Opened }
+    expect(await call('refresh', { view: second })).toMatchObject({ error: { code: 'Stale' } }) // Reload replaced it
+    expect(await call('close', { doc: 2 })).toMatchObject({ result: true })
+    expect(await call('refresh', { view: reloaded.result.view })).toMatchObject({ error: { code: 'Stale' } })
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
+  it('asks the addon for one refresh of a document at a time: one asked meanwhile gets its answer', async () => {
+    const { view } = await opened()
+    let finish = () => {}
+    refresh.mockImplementationOnce(() => new Promise((ok) => (finish = () => ok({ start: 3, end: 9 }))))
+    const first = dispatch({ id: 40, method: 'refresh', params: { view } })
+    const second = dispatch({ id: 41, method: 'refresh', params: { view } })
+    expect(refresh).toHaveBeenCalledOnce()
+    finish()
+    expect(await first).toMatchObject({ id: 40, result: { size: 3 } })
+    expect(await second).toMatchObject({ id: 41, result: { size: 3 } })
+    expect(await call('refresh', { view })).toMatchObject({ result: { size: 3 } }) // that one has ended: a new one
+    expect(refresh).toHaveBeenCalledTimes(2)
+  })
+
+  it('continues the index, one run at a time: never beside a run, and once when a run ends short of the new end', async () => {
+    const { view, progress } = await opened()
+    expect(await call('refresh', { view })).toHaveProperty('result')
+    expect(startIndex).toHaveBeenCalledOnce() // the first run goes on, and takes the extend in
+    // Its last block read the length before the extend landed: done then, the index isn't done now.
+    progress({ lines: 3, bytes: 3, size: 9, done: true })
+    expect(startIndex).toHaveBeenCalledTimes(2)
+    expect(events.at(-1)).toMatchObject({ doc: 1, gen: 1, bytes: 3, size: 9, done: true })
+    const continued = startIndex.mock.calls[1]![1]
+    expect(await call('refresh', { view })).toHaveProperty('result')
+    expect(startIndex).toHaveBeenCalledTimes(2) // the continuation goes on
+    state.indexed = true
+    continued({ lines: 5, bytes: 9, size: 9, done: true })
+    expect(await call('refresh', { view })).toHaveProperty('result')
+    expect(startIndex).toHaveBeenCalledTimes(2) // done, and done now
+    // An index a run left short (its checkpoints refused, say) goes on with the next refresh, grown or not.
+    state.indexed = false
+    expect(await call('refresh', { view })).toHaveProperty('result')
+    expect(startIndex).toHaveBeenCalledTimes(3)
+  })
+
+  it('close cancels a refresh and the run that continues the index; a refresh that ends after the close starts nothing', async () => {
+    const { view, progress } = await opened()
+    state.indexed = true
+    progress({ lines: 3, bytes: 3, size: 3, done: true })
+    state.indexed = false // an extend lands
+    expect(await call('refresh', { view })).toHaveProperty('result')
+    expect(startIndex).toHaveBeenCalledTimes(2)
+    const continuation = startIndex.mock.calls[1]![0] as unknown as (typeof flags)[number]
+    let finish = () => {}
+    refresh.mockImplementationOnce(() => new Promise((ok) => (finish = () => ok({ start: 9, end: 12 }))))
+    const pending = dispatch({ id: 50, method: 'refresh', params: { view } })
+    const flag = flags.at(-1)!
+    expect(await call('close', { doc: 1 })).toMatchObject({ result: true })
+    expect([continuation.cancel, flag.cancel].map((f) => f.mock.calls.length)).toEqual([1, 1])
+    finish() // as if its extend had landed before the cancel
+    expect(await pending).toMatchObject({ id: 50, error: { code: 'Stale' } })
+    expect(startIndex).toHaveBeenCalledTimes(2)
+  })
+
+  it("a Reload while a refresh runs: that one ends Stale and starts no run, and the new generation's doesn't wait on it", async () => {
+    reload.mockImplementation(() => void state.generation++)
+    const { view } = await opened()
+    let finish = () => {}
+    refresh.mockImplementationOnce(() => new Promise((ok) => (finish = () => ok({ start: 3, end: 9 }))))
+    const old = dispatch({ id: 60, method: 'refresh', params: { view } })
+    const reloaded = (await call('reload', { doc: 1, count: 1, bytes: 0 })) as { result: Opened }
+    expect(reloaded.result.gen).toBe(2)
+    expect(await call('refresh', { view: reloaded.result.view })).toMatchObject({ result: { size: 3 } })
+    expect(refresh.mock.calls.map(([gen]) => gen)).toEqual([1, 2])
+    finish()
+    expect(await old).toMatchObject({ id: 60, error: { code: 'Stale' } })
+    expect(startIndex).toHaveBeenCalledTimes(2) // the open's and the Reload's
+  })
+
+  it("a refresh that finds the file changed is Frozen and ends the document's other reads; one the budget refuses ends none", async () => {
+    const { view } = await opened()
+    const other = pendingRead()
+    void dispatch({ id: 70, method: 'page', params: { doc: 1, lens: 'raw', gen: 1, start: 9, count: 1 } })
+    const otherFlag = flags.at(-1)!
+    refresh.mockRejectedValueOnce(Object.assign(new Error('the memory budget is full: 13 bytes asked, 0 free'), { code: 'Memory' }))
+    expect(await call('refresh', { view })).toMatchObject({ error: { code: 'Memory' } })
+    expect(otherFlag.cancel).not.toHaveBeenCalled()
+    refresh.mockRejectedValueOnce(Object.assign(new Error('frozen: changed on disk (chunk 0)'), { code: 'Frozen' }))
+    expect(await call('refresh', { view })).toMatchObject({ error: { code: 'Frozen' } })
+    expect(otherFlag.cancel).toHaveBeenCalledOnce()
+    other.fail(cancelled())
+    expect(startIndex).toHaveBeenCalledOnce()
+  })
 })

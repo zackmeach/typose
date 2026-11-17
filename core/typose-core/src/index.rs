@@ -183,7 +183,9 @@ pub struct LineIndex {
     pub(crate) lines_since: u64,
     pub(crate) line_cps: usize,
     pub(crate) lines_on: bool,
-    /// Whether the last build ran to the length it read, rather than being stopped by its callback (`done`).
+    /// Whether the last build that published anything ran to the length it read, rather than being stopped by its
+    /// callback (`done`). A build that publishes nothing (one refused or failed in its first block) leaves it as it was;
+    /// `done` stays right, as `indexed_bytes` is then short of the length.
     pub(crate) finished: bool,
 }
 
