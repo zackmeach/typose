@@ -195,6 +195,14 @@ impl Raw {
         (index.line_count(), index.done(self.doc.len()))
     }
 
+    /// (lines found so far, the document's length if indexing is done at it), from one index read: a range that ends at
+    /// the length takes it from here, so an extend between two reads can't end it past what the index has seen.
+    pub fn lines_and_end(&self) -> (u64, Option<u64>) {
+        let index = self.index.read().unwrap();
+        let len = self.doc.len();
+        (index.line_count(), index.done(len).then_some(len))
+    }
+
     /// Up to `count` lines from `start` (plan C2's bounds) of generation `generation`, with an identity check after
     /// the reads (`Document::verified`).
     pub fn page(&self, generation: u32, start: u64, count: usize) -> Result<Vec<LinePiece>, DocError> {
@@ -597,6 +605,27 @@ mod tests {
             (raw.lines_known(), texts(&raw)),
             ((3, true), vec!["one".to_string(), "two".into(), "three".into()])
         );
+    }
+
+    /// Z95: a range's end (`lines_and_end`). Between an extend and the run that continues the index there's no length to
+    /// end it at; after that run, the new length and count. An append that completes the unfinished last line moves the
+    /// length and keeps the count.
+    #[test]
+    fn the_range_end_waits_for_the_run_after_an_extend() {
+        let path = temp_file("raw-range-end", b"one\ntw");
+        let raw = Raw::open(&path).unwrap();
+        raw.index(|_| true).unwrap();
+        assert_eq!(raw.lines_and_end(), (2, Some(6)));
+        append(&path, b"o\n");
+        assert_eq!(raw.extend().unwrap(), Some(6..8));
+        assert_eq!(raw.lines_and_end(), (2, None));
+        raw.index(|_| true).unwrap();
+        assert_eq!(raw.lines_and_end(), (2, Some(8)));
+        append(&path, b"three\n");
+        assert_eq!(raw.extend().unwrap(), Some(8..14));
+        assert_eq!(raw.lines_and_end(), (2, None));
+        raw.index(|_| true).unwrap();
+        assert_eq!(raw.lines_and_end(), (3, Some(14)));
     }
 
     /// Z95, and PR 116's precondition gone: an extend while the first index runs, between its blocks, after a read

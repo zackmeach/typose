@@ -163,14 +163,14 @@ impl Doc {
             return Err(Error::new(Code::InvalidParams, "source line count must be positive"));
         }
         Ok(SourceTask::new(self.raw()?, generation, cancel, move |raw, generation| {
-            let (lines, done) = raw.lines_known();
+            let (lines, len) = raw.lines_and_end();
             let end_line =
                 start.checked_add(count).ok_or_else(|| DocError::Invalid("source line range overflow".into()))?;
             let first = raw
                 .line_offset(generation, start)?
                 .ok_or_else(|| DocError::Refused("The requested source line is not indexed yet".into()))?;
-            let end = if done && end_line >= lines {
-                raw.document().len()
+            let end = if let Some(len) = len.filter(|_| end_line >= lines) {
+                len
             } else {
                 raw.line_offset(generation, end_line)?
                     .ok_or_else(|| DocError::Refused("The requested source range is not indexed yet".into()))?

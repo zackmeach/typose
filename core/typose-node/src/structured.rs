@@ -581,8 +581,8 @@ fn record_range(raw: &Raw, generation: u32, line: u64) -> std::result::Result<Op
     }
     let end = if let Some(end) = raw.line_offset(generation, line + 1)? {
         end
-    } else if raw.lines_known().1 {
-        raw.document().len()
+    } else if let Some(len) = raw.lines_and_end().1 {
+        len
     } else {
         return Err(DocError::Refused("The record end is not indexed yet".into()));
     };
