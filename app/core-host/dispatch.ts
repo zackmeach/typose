@@ -282,17 +282,23 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   /** Each document's index job (plan C6), and the jobs that have sent their last event, done or an error. */
   const jobs = new Map<number, Cancel>()
   const ended = new WeakSet<Cancel>()
-  /** Each document's refresh in flight, and its generation (Z95). */
-  const refreshes = new Map<number, { gen: number; done: Promise<{ size: number }> }>()
-  /** Page reads in flight, by request id (plan C5). `cancelledAt` is the test-hooks build's. */
+  /** Z95: the runs that continued an index and that the ledger refused (their slot or checkpoints), the document left
+   *  as it was. Only an extend that grew it, or a refresh that asks (`retry`), starts the next. */
+  const refused = new WeakSet<Cancel>()
+  /** Z95: each document's extend, which is the document's and no request's: `close` cancels it, a request's cancel
+   *  doesn't. `next` is the one queued behind it, which every request asked meanwhile shares; `retry`, that one asked. */
+  type Extend = { gen: number; cancel: Cancel; retry: boolean; settled: Promise<void>; next?: Extend }
+  const extending = new Map<number, Extend>()
+  /** Page reads in flight, by request id (plan C5). `cancelledAt` is the test-hooks build's. `onStop` runs when the read
+   *  is stopped: a refresh's rejects at once (Z95). */
   type ReadEntry = {
-    doc?: number; cancel: Cancel; retainOnLeave: boolean; cancelled: boolean; cancelledAt?: number
+    doc?: number; cancel: Cancel; retainOnLeave: boolean; cancelled: boolean; cancelledAt?: number; onStop?: () => void
     candidate?: true; saved?: SavedRoute; folder?: NativeFolderRoot; surface?: number; csv?: true; csvConfig?: true
     findView?: number; findId?: number; findKind?: 'source' | 'csv'; findOp?: 'scan' | 'seek'; csvSort?: true
   }
   const reads = new Map<number, ReadEntry>()
-  /** Marks a read cancelled, then cancels its native flag. */
-  const stop = (entry?: ReadEntry): void => { if (entry) { entry.cancelled = true; entry.cancel.cancel() } }
+  /** Marks a read cancelled, then cancels its native flag and runs its `onStop`. */
+  const stop = (entry?: ReadEntry): void => { if (entry) { entry.cancelled = true; entry.cancel.cancel(); entry.onStop?.() } }
   const stopReads = (match: (entry: ReadEntry, req: number) => boolean | undefined): void => {
     for (const [req, entry] of reads) if (match(entry, req)) stop(entry)
   }
@@ -471,13 +477,13 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     }
     return { surface, lease }
   }
-  const findLease = (view: unknown): Lease => {
-    if (view === undefined) throw new Refusal('InvalidParams', 'Find requires an exact activation lease', 'view')
+  const findLease = (view: unknown, what = 'Find'): Lease => {
+    if (view === undefined) throw new Refusal('InvalidParams', `${what} requires an exact activation lease`, 'view')
     const owned = requestedLease({ view })
-    if (!owned || owned.surface.current !== owned.lease.ref.id) throw new Refusal('Stale', 'the Find view was replaced')
+    if (!owned || owned.surface.current !== owned.lease.ref.id) throw new Refusal('Stale', `the ${what} view was replaced`)
     const { lease } = owned
     if (docOwners.get(lease.ref.doc) !== lease.ref.surface || getDoc(lease.ref.doc).generation !== lease.ref.gen)
-      throw new Refusal('Stale', 'the Find document or owner was replaced')
+      throw new Refusal('Stale', `the ${what} document or owner was replaced`)
     return lease
   }
   const findQuery = (p: Params): string => {
@@ -617,6 +623,7 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     closeDocumentFind(id)
     invalidateCsv(id)
     jobs.get(id)?.cancel()
+    extending.get(id)?.cancel.cancel()
     cancelReads(id)
     for (const pending of pendingViews.values()) if (pending.doc === id) pending.disposed = true
     for (const surface of surfaces.values()) for (const lease of surface.views.values()) if (lease.ref.doc === id) {
@@ -677,20 +684,27 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
     return opened
   }
   /** Starts an index run of generation `gen`, the document's job from now on, which `cancel` stops (plan C6). A run
-   *  picks up where the last one stopped (Z95). */
-  const startJob = (id: number, doc: Doc, gen: number, cancel: Cancel): void => {
+   *  picks up where the last one stopped (Z95); `continued`, it was started to (`continueIndex`). */
+  const startJob = (id: number, doc: Doc, gen: number, cancel: Cancel, continued = false): void => {
     jobs.set(id, cancel)
     try {
       doc.startIndex(cancel, (e: IndexProgress) => {
         if (e.done || e.error !== undefined) ended.add(cancel)
+        // Z95: a continuation the ledger refused left the document as it was, not frozen. A first index's refusal is
+        // still an error, as it always has been.
+        const refusal = continued && e.error !== undefined && e.memory === true
+        if (refusal) refused.add(cancel)
         // An index error froze the document (plan C6). An older generation's ends with Reload's freeze, not this one's.
-        if (e.error !== undefined && jobs.get(id) === cancel && docs.get(id) === doc && doc.generation === gen) {
+        if (e.error !== undefined && !refusal && jobs.get(id) === cancel && docs.get(id) === doc && doc.generation === gen) {
           closeDocumentFind(id)
           closeDocumentCsvInteractions(id)
           cancelReads(id)
         }
-        const event: ProgressEvent = { event: 'progress', session, doc: id, gen, lines: e.lines, bytes: e.bytes, size: e.size, done: e.done }
-        if (e.error !== undefined) event.error = e.error
+        // An error says 0 bytes, as it always has; a refusal says how far the index got.
+        const bytes = e.error === undefined || refusal ? e.bytes : 0
+        const event: ProgressEvent = { event: 'progress', session, doc: id, gen, lines: e.lines, bytes, size: e.size, done: e.done }
+        if (refusal) event.memory = true
+        else if (e.error !== undefined) event.error = e.error
         emit(event)
         // An extend can land after the run's last block read the length: done then, the index isn't done now.
         if (e.done) continueIndex(id, doc, gen)
@@ -703,11 +717,42 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
   }
   /** Z95: a run that continues generation `gen`'s index after an extend, unless the index is done or a run of it is
    *  going. One run at a time per document: a second would wait its turn (`Raw::index`), and can't be cancelled while
-   *  the one ahead of it waits for an index slot. */
-  const continueIndex = (id: number, doc: Doc, gen: number): void => {
+   *  the one ahead of it waits for an index slot. After a run the ledger refused, only when `retry`. */
+  const continueIndex = (id: number, doc: Doc, gen: number, retry = false): void => {
     const job = jobs.get(id)
-    if (docs.get(id) !== doc || doc.generation !== gen || (job && !ended.has(job)) || doc.indexed) return
-    startJob(id, doc, gen, addon.cancelFlag())
+    if (docs.get(id) !== doc || doc.generation !== gen || (job && (!ended.has(job) || (refused.has(job) && !retry))) || doc.indexed) return
+    startJob(id, doc, gen, addon.cancelFlag(), true)
+  }
+  /** Z95: the first extend of generation `gen` that starts after this call: a new one, or the one queued behind the
+   *  extend in flight, which the requests asked meanwhile share. So one extend runs at a time per document
+   *  (`Raw::extend`), and a burst reaches the addon at most twice. An older generation's goes on alone, on the `Raw`
+   *  Reload replaced. */
+  const extendAfter = (id: number, doc: Doc, gen: number): Extend => {
+    const running = extending.get(id)
+    return running?.gen === gen ? (running.next ??= extend(id, doc, gen, running.settled)) : extend(id, doc, gen)
+  }
+  /** Z95: an extend, once `after` has settled, whatever its outcome. When it settles, the index goes on, whichever
+   *  requests still wait on it, unless it froze the document: an extend that grew it, or a request's `retry`, restarts
+   *  a run the ledger refused. A generation Reload replaced is `Stale`, though its `Raw` ends frozen. */
+  const extend = (id: number, doc: Doc, gen: number, after?: Promise<void>): Extend => {
+    const ext = { gen, cancel: addon.cancelFlag(), retry: false } as Extend
+    ext.settled = (async () => {
+      if (after) await after.catch(() => {})
+      if (!after || extending.get(id)?.next === ext) extending.set(id, ext)
+      let grew = false, frozen = false
+      try {
+        if (docs.get(id) !== doc || doc.generation !== gen) throw new Refusal('Stale', `generation ${gen} was replaced`)
+        grew = (await doc.refresh(gen, ext.cancel)) !== null
+      } catch (e) {
+        if (codeOf(e) === 'Frozen' && doc.generation !== gen) throw new Refusal('Stale', `generation ${gen} was replaced`)
+        frozen = codeOf(e) === 'Frozen'
+        throw e
+      } finally {
+        if (extending.get(id) === ext && !ext.next) extending.delete(id)
+        if (!frozen) continueIndex(id, doc, gen, grew || ext.retry)
+      }
+    })()
+    return ext
   }
 
   /** Registration spans first-page wait through synchronous publication, not just the native read. */
@@ -1545,26 +1590,22 @@ export function makeDispatcher(addon: Addon, session: number, emit: (event: Prog
         throw e
       }
     },
-    // Z95: the document grows to its file's new length, in place, at the same generation, and its index goes on. One
-    // refresh per document at a time, so one extend at a time (`Raw::extend`): one asked while another of the same
-    // generation runs gets that one's answer.
+    // Z95: the document grows to its file's new length, in place, at the same generation, and its index goes on. Each
+    // request is a read of its own, which its cancel, its view leaving and close end at once, and which the first
+    // extend to start after it answers (`extendAfter`): the extend is the document's, and goes on.
     refresh: (p, req): Promise<{ size: number }> => {
-      const lease = findLease(p.view), { doc: id, gen } = lease.ref, doc = getDoc(id)
-      const running = refreshes.get(id)
-      if (running?.gen === gen) return running.done
-      const entry = {
-        gen,
-        done: read(req, id, async (cancel) => {
-          await doc.refresh(gen, cancel)
-          continueIndex(id, doc, gen) // before the view's check: an extend is the document's, whichever view asked
-          if (findLease(lease.ref) !== lease) throw new Refusal('Stale', 'the view was replaced while refreshing')
-          return { size: doc.size }
+      const lease = findLease(p.view, 'refresh'), { doc: id, gen } = lease.ref, doc = getDoc(id)
+      if (p.retry !== undefined && typeof p.retry !== 'boolean') throw new Refusal('InvalidParams', 'retry must be a boolean', 'retry')
+      return read(req, id, async () => {
+        const ext = extendAfter(id, doc, gen)
+        if (p.retry) ext.retry = true
+        await new Promise((ok, fail) => {
+          reads.get(req)!.onStop = () => fail(new Refusal('Cancelled', 'the refresh was cancelled'))
+          ext.settled.then(ok, fail)
         })
-      }
-      const clear = () => { if (refreshes.get(id) === entry) refreshes.delete(id) }
-      refreshes.set(id, entry)
-      entry.done.then(clear, clear)
-      return entry.done
+        if (findLease(lease.ref, 'refresh') !== lease) throw new Refusal('Stale', 'the view was replaced while refreshing')
+        return { size: doc.size }
+      })
     },
     // Plan C6: the index job and the page reads stop, and the document's handle closes once they have.
     close: (p) => {

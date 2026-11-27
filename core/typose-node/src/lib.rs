@@ -245,6 +245,9 @@ pub struct IndexProgress {
     pub size: f64,
     pub done: bool,
     pub error: Option<String>,
+    /// On an error event, true when the document isn't frozen: the ledger refused the run its slot or checkpoints, and
+    /// a later run with room goes on (Z95). A freeze leaves it out.
+    pub memory: Option<bool>,
 }
 
 fn wire(map: &ByteMap) -> WireMap {
@@ -1143,19 +1146,22 @@ impl Doc {
                         last = Some(Instant::now());
                         sent_lines = p.lines;
                         let (lines, bytes, size) = (p.lines as f64, p.bytes as f64, raw.document().len() as f64);
-                        let progress = IndexProgress { lines, bytes, size, done: p.done, error: None };
+                        let progress = IndexProgress { lines, bytes, size, done: p.done, error: None, memory: None };
                         on_progress.call(progress, ThreadsafeFunctionCallMode::NonBlocking);
                     }
                     !cancel.load(Ordering::Relaxed)
                 })
             });
             if let Err(e) = result {
+                // Not frozen: refused (`Raw::index`), and the index stays as far as it got.
+                let refused = raw.document().frozen().is_none();
                 let progress = IndexProgress {
                     lines: raw.lines_known().0 as f64, // what the index published, not the last count sent
-                    bytes: 0.0,
+                    bytes: if refused { raw.indexed_bytes() as f64 } else { 0.0 },
                     size: raw.document().len() as f64,
                     done: false,
                     error: Some(e),
+                    memory: refused.then_some(true),
                 };
                 on_progress.call(progress, ThreadsafeFunctionCallMode::NonBlocking);
             }

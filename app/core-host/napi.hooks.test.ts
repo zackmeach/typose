@@ -372,6 +372,33 @@ it("Z95: a refresh the budget can't hold is Memory, and the document stays as it
   expect(core.debugStats().ledger.used).toBe(base)
 })
 
+it("Z95: a run that continues the index, refused room for its checkpoints, says so and how far it got, with the document not frozen; with room, one goes on", async () => {
+  const path = join(dir, 'refused-run.txt')
+  writeFileSync(path, ('a'.repeat(1023) + '\n').repeat(1024)) // 1 MiB: a first run of one block
+  const { used: base, limit } = core.debugStats().ledger
+  const doc = core.Doc.open(path)
+  const run = () => new Promise<Core.IndexProgress>((ok) => doc.startIndex(new core.Cancel(), (p) => (p.done || p.error) && ok(p)))
+  try {
+    expect(await run()).toMatchObject({ lines: 1024, done: true })
+    appendFileSync(path, 'a tail\n')
+    expect(await doc.refresh(1, new core.Cancel())).toEqual({ start: 1 << 20, end: (1 << 20) + 7 })
+    let refused: Core.IndexProgress
+    try {
+      core.setLimit(core.debugStats().ledger.used) // the longer document's checkpoints don't fit
+      refused = await run()
+    } finally {
+      core.setLimit(limit)
+    }
+    expect(refused).toMatchObject({ lines: 1024, bytes: 1 << 20, size: (1 << 20) + 7, done: false, memory: true, error: expect.stringContaining('memory budget') })
+    expect((await doc.page(1, 0, 1, new core.Cancel())).items[0]!.text).toBe('a'.repeat(1023)) // not frozen
+    expect(await run()).toMatchObject({ lines: 1025, bytes: (1 << 20) + 7, done: true })
+  } finally {
+    doc.close()
+  }
+  await expect.poll(() => alive()).toEqual({ jobs: 0, tasks: 0, handles: 0 })
+  expect(core.debugStats().ledger.used).toBe(base)
+})
+
 it('Z95, through the core host: a refresh continues the index to the new lines at the same generation; a close in the middle leaves 0 jobs, tasks and handles', async () => {
   const { used: base } = core.debugStats().ledger
   const events: ProgressEvent[] = []

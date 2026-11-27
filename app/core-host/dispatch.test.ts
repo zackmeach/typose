@@ -25,6 +25,8 @@ const reload = vi.fn()
 const close = vi.fn()
 const startIndex = vi.fn((_cancel: Cancel, _onProgress: (p: IndexProgress) => void) => {})
 const refresh = vi.fn(async (_gen: number, _cancel: Cancel): Promise<{ start: number; end: number } | null> => null)
+const sourceFindStart = vi.fn((_gen: number, _query: string, _matchCase: boolean) => 1)
+const sourceFindClose = vi.fn((_gen: number, _id: number) => {})
 const doc = {
   generation: 1,
   format: 'text',
@@ -48,7 +50,9 @@ const doc = {
   reload,
   close,
   startIndex,
-  refresh
+  refresh,
+  sourceFindStart,
+  sourceFindClose
 } as unknown as Doc
 const localDoc = { ...doc, localOnly: true, path: 'C:\\docs\\linked.md' } as unknown as Doc
 const openDoc = vi.fn(() => doc)
@@ -1518,7 +1522,8 @@ it('a Reload that another overtakes starts no index job, and close then cancels 
 })
 
 describe('live tail: refresh (Z95)', () => {
-  const state = doc as unknown as { indexed: boolean; generation: number }
+  const state = doc as unknown as { indexed: boolean; generation: number; size: number }
+  const full = 'the memory budget is full: 4096 bytes asked, 0 free'
   let events: ProgressEvent[]
   beforeEach(() => {
     events = []
@@ -1528,7 +1533,9 @@ describe('live tail: refresh (Z95)', () => {
   afterEach(() => {
     state.indexed = false
     state.generation = 1
+    state.size = 3
     reload.mockImplementation(() => {})
+    refresh.mockReset() // a held refresh a failed test left unasked doesn't reach the next test
   })
   /** Opens document 1: its live view, and the progress callback of its first run, which goes on until it sends its
    *  last event. */
@@ -1536,6 +1543,24 @@ describe('live tail: refresh (Z95)', () => {
     const reply = (await call('open', { path: 'a.txt', count: 1, bytes: 0 })) as { result: Opened }
     return { view: reply.result.view!, progress: startIndex.mock.calls.at(-1)![1] }
   }
+  /** The addon's next refresh, held until the test ends it: `grow` gives the document its new size and resolves with
+   *  the bytes gained (null for none), `fail` rejects. */
+  function heldRefresh(): { grow: (size: number) => void; fail: (e: unknown) => void } {
+    const held = {} as { grow: (size: number) => void; fail: (e: unknown) => void }
+    refresh.mockImplementationOnce(() => new Promise((ok, fail) => Object.assign(held, {
+      grow: (size: number) => {
+        const start = state.size
+        state.size = size
+        ok(size > start ? { start, end: size } : null)
+      },
+      fail
+    })))
+    return held
+  }
+  /** The cancel flag the addon's `n`th refresh was given. */
+  const extendFlag = (n: number) => refresh.mock.calls[n]![1] as unknown as (typeof flags)[number]
+  /** Every promise job queued so far has run: a queued extend has started. */
+  const settled = () => new Promise((ok) => setTimeout(ok, 0))
 
   it("refuses a view that isn't the document's live one, and doesn't ask the addon", async () => {
     const { view } = await opened()
@@ -1554,6 +1579,9 @@ describe('live tail: refresh (Z95)', () => {
       [undefined, 'InvalidParams'],
       ['view', 'InvalidParams']
     ] as const) expect(await call('refresh', { view: other }), JSON.stringify(other)).toMatchObject({ error: { code } })
+    expect(await call('refresh', { view })).toMatchObject({ error: { message: 'the refresh view was replaced' } }) // not Find's
+    for (const retry of ['yes', 1, null]) // optional, and a boolean when present
+      expect(await call('refresh', { view: second, retry })).toMatchObject({ error: { code: 'InvalidParams', field: 'retry' } })
     const reloaded = (await call('reload', { doc: 2, count: 1, bytes: 0 })) as { result: Opened }
     expect(await call('refresh', { view: second })).toMatchObject({ error: { code: 'Stale' } }) // Reload replaced it
     expect(await call('close', { doc: 2 })).toMatchObject({ result: true })
@@ -1561,18 +1589,57 @@ describe('live tail: refresh (Z95)', () => {
     expect(refresh).not.toHaveBeenCalled()
   })
 
-  it('asks the addon for one refresh of a document at a time: one asked meanwhile gets its answer', async () => {
+  it('asks the addon for one extend of a document at a time and one after it, which those asked meanwhile share: a burst calls it twice', async () => {
     const { view } = await opened()
-    let finish = () => {}
-    refresh.mockImplementationOnce(() => new Promise((ok) => (finish = () => ok({ start: 3, end: 9 }))))
-    const first = dispatch({ id: 40, method: 'refresh', params: { view } })
-    const second = dispatch({ id: 41, method: 'refresh', params: { view } })
+    const [first, next] = [heldRefresh(), heldRefresh()]
+    const asked = dispatch({ id: 40, method: 'refresh', params: { view } })
+    // The file grows after the first extend read its length; then a burst is asked.
+    const burst = Array.from({ length: 100 }, (_, i) => dispatch({ id: 41 + i, method: 'refresh', params: { view } }))
     expect(refresh).toHaveBeenCalledOnce()
-    finish()
-    expect(await first).toMatchObject({ id: 40, result: { size: 3 } })
-    expect(await second).toMatchObject({ id: 41, result: { size: 3 } })
-    expect(await call('refresh', { view })).toMatchObject({ result: { size: 3 } }) // that one has ended: a new one
+    first.grow(9)
+    expect(await asked).toMatchObject({ id: 40, result: { size: 9 } })
+    await settled()
+    expect(refresh).toHaveBeenCalledTimes(2) // the one after it, which started after every one of the burst was asked
+    next.grow(12)
+    expect((await Promise.all(burst)).map((r) => 'result' in r && r.result)).toEqual(Array(100).fill({ size: 12 }))
     expect(refresh).toHaveBeenCalledTimes(2)
+    expect(await call('refresh', { view })).toMatchObject({ result: { size: 12 } }) // none in flight: a new one
+    expect(refresh).toHaveBeenCalledTimes(3)
+  })
+
+  it("each request is its own read: its id and its cancel are its own, a cancel ends it at once, and the extend goes on", async () => {
+    const { view } = await opened()
+    const [first, next] = [heldRefresh(), heldRefresh()]
+    const one = dispatch({ id: 40, method: 'refresh', params: { view } })
+    const two = dispatch({ id: 41, method: 'refresh', params: { view } }) // waits for the extend after the first
+    for (const id of [40, 41]) // the dispatcher sees each as pending
+      expect(await dispatch({ id, method: 'page', params: { doc: 1, lens: 'raw', gen: 1, start: 0, count: 1 } })).toMatchObject({ id, error: { field: 'id' } })
+    expect(await call('cancel', { id: 41 })).toMatchObject({ result: true })
+    expect(await two).toMatchObject({ id: 41, error: { code: 'Cancelled' } }) // with neither extend settled
+    const three = dispatch({ id: 42, method: 'refresh', params: { view } })
+    expect(await call('cancel', { id: 40 })).toMatchObject({ result: true })
+    expect(await one).toMatchObject({ id: 40, error: { code: 'Cancelled' } })
+    expect(extendFlag(0).cancel).not.toHaveBeenCalled() // the extend is the document's
+    first.grow(9)
+    await settled()
+    next.grow(12)
+    expect(await three).toMatchObject({ id: 42, result: { size: 12 } }) // cancelled by nobody, and answered
+    expect(refresh).toHaveBeenCalledTimes(2)
+    expect(await call('cancel', { id: 42 })).toMatchObject({ result: false })
+  })
+
+  it("a request checks its own view after the extend, not another's", async () => {
+    const { view } = await opened()
+    const [first, next] = [heldRefresh(), heldRefresh()]
+    const one = dispatch({ id: 40, method: 'refresh', params: { view } })
+    await call('open', { path: 'b.txt', count: 1, bytes: 0 }) // document 2's view replaces it on the surface
+    const again = (await call('activate', { doc: 1, gen: 1, count: 1, bytes: 0 })) as { result: Opened }
+    const two = dispatch({ id: 41, method: 'refresh', params: { view: again.result.view } }) // live, same generation
+    first.grow(9)
+    expect(await one).toMatchObject({ id: 40, error: { code: 'Stale' } })
+    await settled()
+    next.grow(9)
+    expect(await two).toMatchObject({ id: 41, result: { size: 9 } })
   })
 
   it('continues the index, one run at a time: never beside a run, and once when a run ends short of the new end', async () => {
@@ -1590,13 +1657,17 @@ describe('live tail: refresh (Z95)', () => {
     continued({ lines: 5, bytes: 9, size: 9, done: true })
     expect(await call('refresh', { view })).toHaveProperty('result')
     expect(startIndex).toHaveBeenCalledTimes(2) // done, and done now
-    // An index a run left short (its checkpoints refused, say) goes on with the next refresh, grown or not.
+    // An index a run left short goes on with the next refresh, grown or not, unless the ledger refused that run (its
+    // checkpoints, say): then only growth or a refresh that asks starts the next (below).
     state.indexed = false
+    expect(await call('refresh', { view })).toHaveProperty('result')
+    expect(startIndex).toHaveBeenCalledTimes(3)
+    startIndex.mock.calls[2]![1]({ lines: 5, bytes: 9, size: 9, done: false, error: full, memory: true })
     expect(await call('refresh', { view })).toHaveProperty('result')
     expect(startIndex).toHaveBeenCalledTimes(3)
   })
 
-  it('close cancels a refresh and the run that continues the index; a refresh that ends after the close starts nothing', async () => {
+  it('close cancels the extend and the run that continues the index, and ends a refresh at once; an extend that ends after it starts nothing', async () => {
     const { view, progress } = await opened()
     state.indexed = true
     progress({ lines: 3, bytes: 3, size: 3, done: true })
@@ -1604,44 +1675,153 @@ describe('live tail: refresh (Z95)', () => {
     expect(await call('refresh', { view })).toHaveProperty('result')
     expect(startIndex).toHaveBeenCalledTimes(2)
     const continuation = startIndex.mock.calls[1]![0] as unknown as (typeof flags)[number]
-    let finish = () => {}
-    refresh.mockImplementationOnce(() => new Promise((ok) => (finish = () => ok({ start: 9, end: 12 }))))
+    const held = heldRefresh()
     const pending = dispatch({ id: 50, method: 'refresh', params: { view } })
-    const flag = flags.at(-1)!
     expect(await call('close', { doc: 1 })).toMatchObject({ result: true })
-    expect([continuation.cancel, flag.cancel].map((f) => f.mock.calls.length)).toEqual([1, 1])
-    finish() // as if its extend had landed before the cancel
-    expect(await pending).toMatchObject({ id: 50, error: { code: 'Stale' } })
+    expect([continuation.cancel, extendFlag(1).cancel].map((f) => f.mock.calls.length)).toEqual([1, 1])
+    expect(await pending).toMatchObject({ id: 50, error: { code: 'Cancelled' } })
+    held.grow(12) // as if its extend had landed before the cancel
+    await settled()
     expect(startIndex).toHaveBeenCalledTimes(2)
   })
 
-  it("a Reload while a refresh runs: that one ends Stale and starts no run, and the new generation's doesn't wait on it", async () => {
+  it("a Reload while a refresh runs: that one ends Stale, though its Raw froze, and starts no run; the new generation's doesn't wait on it, and the old one's end leaves it alone", async () => {
     reload.mockImplementation(() => void state.generation++)
     const { view } = await opened()
-    let finish = () => {}
-    refresh.mockImplementationOnce(() => new Promise((ok) => (finish = () => ok({ start: 3, end: 9 }))))
-    const old = dispatch({ id: 60, method: 'refresh', params: { view } })
+    const [old, current] = [heldRefresh(), heldRefresh()]
+    const one = dispatch({ id: 60, method: 'refresh', params: { view } })
     const reloaded = (await call('reload', { doc: 1, count: 1, bytes: 0 })) as { result: Opened }
     expect(reloaded.result.gen).toBe(2)
-    expect(await call('refresh', { view: reloaded.result.view })).toMatchObject({ result: { size: 3 } })
+    const two = dispatch({ id: 61, method: 'refresh', params: { view: reloaded.result.view } })
     expect(refresh.mock.calls.map(([gen]) => gen)).toEqual([1, 2])
-    finish()
-    expect(await old).toMatchObject({ id: 60, error: { code: 'Stale' } })
+    old.fail(Object.assign(new Error('frozen: reloaded'), { code: 'Frozen' })) // Reload froze the Raw it ran on
+    expect(await one).toMatchObject({ id: 60, error: { code: 'Stale' } })
+    // Generation 1's extend ended, and generation 2's is still the one in flight: one asked now waits for it.
+    const three = dispatch({ id: 62, method: 'refresh', params: { view: reloaded.result.view } })
+    await settled()
+    expect(refresh).toHaveBeenCalledTimes(2)
+    current.grow(9)
+    expect([await two, await three]).toMatchObject([{ id: 61, result: { size: 9 } }, { id: 62, result: { size: 9 } }])
+    expect(refresh).toHaveBeenCalledTimes(3)
     expect(startIndex).toHaveBeenCalledTimes(2) // the open's and the Reload's
   })
 
-  it("a refresh that finds the file changed is Frozen and ends the document's other reads; one the budget refuses ends none", async () => {
-    const { view } = await opened()
+  it("a refresh that finds the file changed is Frozen, ends the document's other reads and doesn't go on indexing; one the budget refuses ends none", async () => {
+    const { view, progress } = await opened()
+    state.indexed = true
+    progress({ lines: 3, bytes: 3, size: 3, done: true })
     const other = pendingRead()
     void dispatch({ id: 70, method: 'page', params: { doc: 1, lens: 'raw', gen: 1, start: 9, count: 1 } })
     const otherFlag = flags.at(-1)!
     refresh.mockRejectedValueOnce(Object.assign(new Error('the memory budget is full: 13 bytes asked, 0 free'), { code: 'Memory' }))
     expect(await call('refresh', { view })).toMatchObject({ error: { code: 'Memory' } })
     expect(otherFlag.cancel).not.toHaveBeenCalled()
-    refresh.mockRejectedValueOnce(Object.assign(new Error('frozen: changed on disk (chunk 0)'), { code: 'Frozen' }))
+    refresh.mockImplementationOnce(async () => {
+      state.indexed = false // it grew, then the re-sniff froze it
+      throw Object.assign(new Error('frozen: changed on disk: its encoding is now windows-1252, not UTF-8 (Reload)'), { code: 'Frozen' })
+    })
     expect(await call('refresh', { view })).toMatchObject({ error: { code: 'Frozen' } })
     expect(otherFlag.cancel).toHaveBeenCalledOnce()
     other.fail(cancelled())
-    expect(startIndex).toHaveBeenCalledOnce()
+    expect(startIndex).toHaveBeenCalledOnce() // a frozen document reads nothing
+  })
+
+  it("a request's cancel or its view leaving ends it at once, not the extend, whose end still continues the index", async () => {
+    const { view, progress } = await opened()
+    state.indexed = true
+    progress({ lines: 3, bytes: 3, size: 3, done: true })
+    const [first, next] = [heldRefresh(), heldRefresh()]
+    const cancelled = dispatch({ id: 40, method: 'refresh', params: { view } })
+    expect(await call('cancel', { id: 40 })).toMatchObject({ result: true })
+    expect(await cancelled).toMatchObject({ id: 40, error: { code: 'Cancelled' } }) // its extend still in flight
+    state.indexed = false
+    first.grow(9) // the extend lands
+    await settled()
+    expect(startIndex).toHaveBeenCalledTimes(2)
+    state.indexed = true
+    startIndex.mock.calls[1]![1]({ lines: 4, bytes: 9, size: 9, done: true })
+    const leaving = dispatch({ id: 41, method: 'refresh', params: { view } })
+    expect(await call('deactivate', { view })).toMatchObject({ result: true })
+    expect(await leaving).toMatchObject({ id: 41, error: { code: 'Cancelled' } })
+    state.indexed = false
+    next.grow(12)
+    await settled()
+    expect(startIndex).toHaveBeenCalledTimes(3)
+    expect([extendFlag(0), extendFlag(1)].map((f) => f.cancel.mock.calls.length)).toEqual([0, 0])
+  })
+
+  it('a refresh whose view is replaced while the extend runs is Stale, and the index goes on all the same', async () => {
+    const { view, progress } = await opened()
+    state.indexed = true
+    progress({ lines: 3, bytes: 3, size: 3, done: true })
+    const held = heldRefresh()
+    const reply = dispatch({ id: 40, method: 'refresh', params: { view } })
+    await call('open', { path: 'b.txt', count: 1, bytes: 0 }) // document 2's view replaces it on the surface
+    expect(startIndex).toHaveBeenCalledTimes(2) // document 2's first run
+    state.indexed = false
+    held.grow(9)
+    expect(await reply).toMatchObject({ id: 40, error: { code: 'Stale' } })
+    expect(startIndex).toHaveBeenCalledTimes(3) // document 1's continuation
+  })
+
+  it("a generation's done event starts no run once Reload replaced it, though the new generation's run ended short", async () => {
+    reload.mockImplementation(() => void state.generation++)
+    const { progress: first } = await opened()
+    const { onProgress: second } = await reopen()
+    second({ lines: 1, bytes: 0, size: 3, done: false, error: 'frozen: changed on disk (chunk 0)' })
+    first({ lines: 3, bytes: 3, size: 3, done: true }) // generation 1's last event, after Reload replaced its job
+    expect(startIndex).toHaveBeenCalledTimes(2)
+  })
+
+  it('a continuation the ledger refuses is no freeze: it closes no Find, cancels no read and sends no error', async () => {
+    const { view, progress } = await opened()
+    state.indexed = true
+    progress({ lines: 3, bytes: 3, size: 3, done: true })
+    state.indexed = false // an extend lands
+    expect(await call('refresh', { view })).toHaveProperty('result')
+    expect(startIndex).toHaveBeenCalledTimes(2)
+    expect(await call('sourceFindStart', { view, query: 'x', matchCase: false })).toHaveProperty('result')
+    const other = pendingRead()
+    void dispatch({ id: 70, method: 'page', params: { doc: 1, lens: 'raw', gen: 1, start: 9, count: 1 } })
+    const otherFlag = flags.at(-1)!
+    startIndex.mock.calls[1]![1]({ lines: 3, bytes: 3, size: 9, done: false, error: full, memory: true })
+    expect(events.at(-1)).toEqual({ event: 'progress', session: 7, doc: 1, gen: 1, lines: 3, bytes: 3, size: 9, done: false, memory: true })
+    expect([otherFlag.cancel, sourceFindClose].map((f) => f.mock.calls.length)).toEqual([0, 0])
+    other.end({ items: [item()] })
+  })
+
+  it('a continuation the ledger refused starts again only when an extend grows the document, or a refresh asks with retry', async () => {
+    const { view, progress } = await opened()
+    state.indexed = true
+    progress({ lines: 3, bytes: 3, size: 3, done: true })
+    state.indexed = false // an extend lands
+    expect(await call('refresh', { view })).toHaveProperty('result')
+    const refuse = (run: number) => startIndex.mock.calls[run]![1]({ lines: 3, bytes: 3, size: 9, done: false, error: full, memory: true })
+    refuse(1)
+    for (const params of [{ view }, { view, retry: false }]) expect(await call('refresh', params)).toHaveProperty('result')
+    expect(startIndex).toHaveBeenCalledTimes(2) // nothing grew, and nobody asked
+    expect(await call('refresh', { view, retry: true })).toMatchObject({ result: { size: 3 } })
+    expect(startIndex).toHaveBeenCalledTimes(3) // its job ended, so a run starts
+    refuse(2)
+    const held = heldRefresh()
+    const grown = dispatch({ id: 40, method: 'refresh', params: { view } })
+    held.grow(12)
+    expect(await grown).toMatchObject({ id: 40, result: { size: 12 } })
+    expect(startIndex).toHaveBeenCalledTimes(4)
+  })
+
+  it("a first index's refusal is an error still: the same event, the same cleanup, no run on it, and the next refresh goes on", async () => {
+    const { view, progress } = await opened()
+    expect(await call('sourceFindStart', { view, query: 'x', matchCase: false })).toHaveProperty('result')
+    const other = pendingRead()
+    void dispatch({ id: 70, method: 'page', params: { doc: 1, lens: 'raw', gen: 1, start: 9, count: 1 } })
+    const otherFlag = flags.at(-1)!
+    progress({ lines: 2, bytes: 5, size: 9, done: false, error: full, memory: true }) // as the addon sends it now
+    expect(events.at(-1)).toEqual({ event: 'progress', session: 7, doc: 1, gen: 1, lines: 2, bytes: 0, size: 9, done: false, error: full })
+    expect([otherFlag.cancel, sourceFindClose].map((f) => f.mock.calls.length)).toEqual([1, 1])
+    expect(startIndex).toHaveBeenCalledOnce() // an error event starts no run
+    other.fail(cancelled())
+    expect(await call('refresh', { view })).toHaveProperty('result')
+    expect(startIndex).toHaveBeenCalledTimes(2) // grown or not, as before
   })
 })

@@ -249,10 +249,12 @@ export interface Methods {
   /** Ctrl+R (spec §3.1): the document's next generation, opened again, with its first page. `bytes` as for `open`. */
   reload: { params: { surface?: SurfaceRef; doc: number; count: number; bytes: number }; result: Opened }
   /** Live tail (Z95): the document of this exact live view grows to its file's new length, in place, at the same
-   *  generation, and its index goes on (`progress`). `size` is its length after. `Frozen` when the file changed other
-   *  than by an append; `Memory` when the budget can't hold the longer document, which stays as it was. One per document
-   *  at a time: one asked while another runs gets that one's answer. Cancellable. */
-  refresh: { params: { view: ViewRef }; result: { size: number } }
+   *  generation, and its index goes on (`progress`). `size` is its length after an extend that started after this was
+   *  asked: one runs per document at a time, and the requests asked meanwhile share the one after it. `Frozen` when the
+   *  file changed other than by an append; `Memory` when the budget can't hold the longer document, which stays as it
+   *  was; `Stale` when the view or its generation was replaced. `retry`: an index the ledger stopped (`memory` on
+   *  `progress`) goes on, though the document didn't grow. Cancellable: a cancel ends this request, not the extend. */
+  refresh: { params: { view: ViewRef; retry?: boolean }; result: { size: number } }
   /** Plan C6: cancels the document's index and page reads, and releases it. */
   close: { params: { surface?: SurfaceRef; doc: number }; result: boolean }
   /** Plan C5: cancels request `id`'s page read. True if it was still running: it then rejects with `Cancelled`. */
@@ -335,6 +337,9 @@ export interface ProgressEvent {
   size?: number
   done: boolean
   error?: string
+  /** Z95: a run that continued the index stopped for memory (the ledger refused its slot or its checkpoints), the
+   *  document as it was, not frozen; it has no `error`. A refresh that grows the document, or one with `retry`, goes on. */
+  memory?: true
 }
 
 /** The most items one drop opens. */

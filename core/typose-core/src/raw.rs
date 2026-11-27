@@ -195,6 +195,11 @@ impl Raw {
         (index.line_count(), index.done(self.doc.len()))
     }
 
+    /// The bytes the index has published: where its next run picks up (Z95).
+    pub fn indexed_bytes(&self) -> u64 {
+        self.index.read().unwrap().indexed_bytes
+    }
+
     /// Up to `count` lines from `start` (plan C2's bounds) of generation `generation`, with an identity check after
     /// the reads (`Document::verified`).
     pub fn page(&self, generation: u32, start: u64, count: usize) -> Result<Vec<LinePiece>, DocError> {
@@ -748,7 +753,9 @@ mod tests {
 
     /// #117's first known cost, settled: a UTF-8 file that an append leaves inside a character, as a writer part way
     /// through one does, isn't frozen at the re-sniff. It stays UTF-8, its unfinished end reads as U+FFFD, and the extend
-    /// that brings the rest sniffs it again. A byte that can't continue the character still freezes it.
+    /// that brings the rest sniffs it again. A byte that can't continue the character still freezes it. Any other
+    /// encoding is sniffed as a whole file still: a windows-1252 one that gains more of a character it opened inside of
+    /// stays windows-1252, as a fresh open reads it.
     #[test]
     fn an_append_inside_a_character_keeps_a_utf8_file() {
         let path = temp_file("raw-extend-mid-char", b"caf\n");
@@ -767,6 +774,13 @@ mod tests {
         let result = raw.extend();
         assert!(matches!(result, Err(DocError::Frozen(ref w)) if w == why), "{result:?}");
         assert_eq!(raw.document().frozen().as_deref(), Some(why));
+        let path = temp_file("raw-extend-1252-char", b"caf\xF0\x9F"); // half a 4-byte sequence: windows-1252 at open
+        let raw = Raw::open(&path).unwrap();
+        append(&path, b"\x98"); // three of its four bytes: read as unfinished, it would be UTF-8
+        assert_eq!(
+            (raw.extend().unwrap(), raw.encoding(), raw.document().frozen()),
+            (Some(5..6), "windows-1252", None)
+        );
     }
 
     /// Z95: a file over a chunk isn't sniffed again: its sniff saw only its first chunk, which an append doesn't change.

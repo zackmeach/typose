@@ -422,11 +422,28 @@ describe('live tail (Z95): Doc.refresh', () => {
     expect(await refused(() => doc.page(1, 0, 1, new Cancel()))).toMatchObject(frozen)
     expect(await refused(() => doc.refresh(1, new Cancel()))).toMatchObject(frozen)
     expect(doc.size).toBe(8)
+    // A run on it ends with the freeze, which says 0 bytes and the length, and is no refusal for memory.
+    const ended = await new Promise<IndexProgress>((ok) => doc.startIndex(new Cancel(), (p) => p.error && ok(p)))
+    expect(ended).toMatchObject({ bytes: 0, size: 8, done: false, error: expect.stringContaining('frozen') })
+    expect(ended.memory).toBeUndefined()
     doc.reload()
     expect(await refused(() => doc.refresh(1, new Cancel()))).toMatchObject({ code: 'Stale' })
     expect(await doc.refresh(2, new Cancel())).toBeNull()
     for (const gen of [NaN, -1, 0.5, 2 ** 53]) expect(() => doc.refresh(gen, new Cancel()), String(gen)).toThrow(expect.objectContaining({ code: 'InvalidParams' }))
     doc.close()
     expect(thrown(() => doc.refresh(2, new Cancel()))).toMatchObject({ code: 'NoDocument' })
+  })
+
+  it('a refresh extends only in a page slot: cancelled before it has one, it extends nothing', async () => {
+    const file = join(dir, 'slot.txt')
+    writeFileSync(file, 'one\n')
+    const doc = Doc.open(file)
+    appendFileSync(file, 'two\n')
+    const cancel = new Cancel()
+    cancel.cancel()
+    expect(await refused(() => doc.refresh(1, cancel))).toMatchObject({ code: 'Cancelled' })
+    expect(doc.size).toBe(4) // the wait for its slot (plan C1) saw the cancel before anything ran
+    expect(await doc.refresh(1, new Cancel())).toEqual({ start: 4, end: 8 })
+    doc.close()
   })
 })
