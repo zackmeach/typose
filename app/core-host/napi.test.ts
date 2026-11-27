@@ -434,7 +434,7 @@ describe('live tail (Z95): Doc.refresh', () => {
     expect(thrown(() => doc.refresh(2, new Cancel()))).toMatchObject({ code: 'NoDocument' })
   })
 
-  it('a refresh extends only in a page slot: cancelled before it has one, it extends nothing', async () => {
+  it('a refresh cancelled before it starts extends nothing: the cancel is checked before the extend', async () => {
     const file = join(dir, 'slot.txt')
     writeFileSync(file, 'one\n')
     const doc = Doc.open(file)
@@ -442,7 +442,7 @@ describe('live tail (Z95): Doc.refresh', () => {
     const cancel = new Cancel()
     cancel.cancel()
     expect(await refused(() => doc.refresh(1, cancel))).toMatchObject({ code: 'Cancelled' })
-    expect(doc.size).toBe(4) // the wait for its slot (plan C1) saw the cancel before anything ran
+    expect(doc.size).toBe(4) // the cancel was seen before anything ran (the slot is pinned by a test-hooks test)
     expect(await doc.refresh(1, new Cancel())).toEqual({ start: 4, end: 8 })
     doc.close()
   })

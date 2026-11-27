@@ -2,6 +2,7 @@
 // per-read delay shows a cancelled read stopping within the chunk read it's in (plan C5), and its budget override shows
 // the ledger refusing an open it can't hold (plan C1). Run by `npm run test:hooks`, after `npm run build:addon:hooks`;
 // the release addon has none of this.
+import { spawnSync } from 'node:child_process'
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir, totalmem } from 'node:os'
@@ -439,4 +440,40 @@ it('Z95, through the core host: a refresh continues the index to the new lines a
   await expect.poll(() => alive()).toEqual({ jobs: 0, tasks: 0, handles: 0 })
   core.reserveCache(0) // this dispatcher's share: its view and lease tables
   expect(core.debugStats().ledger.used).toBe(base)
+})
+
+// libuv's default pool has as many threads as there are page slots (`budget.rs`), so a fifth refresh would wait for a
+// thread whether or not it takes a slot. A node process of its own gets a bigger pool: libuv reads the size when its
+// pool starts.
+it('Z95: a refresh takes a page slot: with more pool threads than slots, a fifth waits while four refreshes hold them', () => {
+  const script = [
+    'const [, addon, dir] = process.argv',
+    "const core = require(addon), fs = require('node:fs'), path = require('node:path')",
+    "core.setBudget(require('node:os').totalmem())",
+    'const docs = [0, 1, 2, 3, 4].map((i) => {',
+    "  const p = path.join(dir, 'slot-' + i + '.txt')",
+    "  fs.writeFileSync(p, 'x\\n'.repeat(100))",
+    '  return { p, doc: core.Doc.open(p) }',
+    '})',
+    "for (const { p } of docs.slice(0, 4)) fs.appendFileSync(p, 'y\\n')",
+    'core.setReadDelay(500) // each of the four holds its slot through a chunk read',
+    'const order = []',
+    "const held = docs.slice(0, 4).map(({ doc }) => doc.refresh(1, new core.Cancel()).then(() => order.push('held')))",
+    'setTimeout(() => {',
+    "  const fifth = docs[4].doc.refresh(1, new core.Cancel()).then(() => order.push('fifth')) // nothing to read",
+    '  Promise.all([...held, fifth]).then(() => {',
+    '    core.setReadDelay(0)',
+    '    for (const { doc } of docs) doc.close()',
+    '    console.log(JSON.stringify(order))',
+    '  })',
+    '}, 100)'
+  ].join('\n')
+  const addon = createRequire(import.meta.url).resolve('typose-node/hooks')
+  const child = spawnSync(process.execPath, ['-e', script, addon, dir], {
+    env: { ...process.env, UV_THREADPOOL_SIZE: '8' }, encoding: 'utf8', timeout: 30_000
+  })
+  expect(child.status, child.stderr).toBe(0)
+  const order = JSON.parse(child.stdout) as string[]
+  expect(order).toHaveLength(5)
+  expect(order.indexOf('fifth'), child.stdout).toBeGreaterThan(0) // after at least one of the four
 })

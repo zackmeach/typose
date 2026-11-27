@@ -1824,4 +1824,73 @@ describe('live tail: refresh (Z95)', () => {
     expect(await call('refresh', { view })).toHaveProperty('result')
     expect(startIndex).toHaveBeenCalledTimes(2) // grown or not, as before
   })
+
+  it('the extend queued behind the first keeps the entry when it starts, so one asked while it runs waits for it', async () => {
+    const { view } = await opened()
+    const [first, next] = [heldRefresh(), heldRefresh()]
+    const one = dispatch({ id: 40, method: 'refresh', params: { view } })
+    const two = dispatch({ id: 41, method: 'refresh', params: { view } }) // queued behind the first
+    first.grow(9)
+    expect(await one).toMatchObject({ id: 40, result: { size: 9 } })
+    await settled()
+    expect(refresh).toHaveBeenCalledTimes(2) // the queued one, in flight
+    const three = dispatch({ id: 42, method: 'refresh', params: { view } })
+    await settled()
+    expect(refresh).toHaveBeenCalledTimes(2) // three waits for it: never two extends of the document at once
+    next.grow(12)
+    expect([await two, await three]).toMatchObject([{ id: 41, result: { size: 12 } }, { id: 42, result: { size: 12 } }])
+    expect(refresh).toHaveBeenCalledTimes(3)
+  })
+
+  it("after a Reload, generation 1's queued extend leaves generation 2's entry alone, so one asked then waits for generation 2's", async () => {
+    reload.mockImplementation(() => void state.generation++)
+    const { view } = await opened()
+    const [old, current] = [heldRefresh(), heldRefresh()]
+    const one = dispatch({ id: 60, method: 'refresh', params: { view } })
+    const two = dispatch({ id: 61, method: 'refresh', params: { view } }) // generation 1's, queued behind the first
+    const reloaded = (await call('reload', { doc: 1, count: 1, bytes: 0 })) as { result: Opened }
+    const three = dispatch({ id: 62, method: 'refresh', params: { view: reloaded.result.view } })
+    expect(refresh.mock.calls.map(([gen]) => gen)).toEqual([1, 2])
+    old.grow(3) // generation 1's ends; the one queued behind it finds its generation replaced
+    expect([await one, await two]).toMatchObject([{ id: 60, error: { code: 'Stale' } }, { id: 61, error: { code: 'Stale' } }])
+    const four = dispatch({ id: 63, method: 'refresh', params: { view: reloaded.result.view } })
+    await settled()
+    expect(refresh).toHaveBeenCalledTimes(2) // four waits for generation 2's, still in flight
+    current.grow(9)
+    expect([await three, await four]).toMatchObject([{ id: 62, result: { size: 9 } }, { id: 63, result: { size: 9 } }])
+    expect(refresh).toHaveBeenCalledTimes(3)
+  })
+
+  it('an extend that fails leaves the one queued behind it to run, and the next request asks the addon again', async () => {
+    const { view } = await opened()
+    const [first, next] = [heldRefresh(), heldRefresh()]
+    const one = dispatch({ id: 40, method: 'refresh', params: { view } })
+    const queued = [41, 42].map((id) => dispatch({ id, method: 'refresh', params: { view } }))
+    first.fail(Object.assign(new Error('the memory budget is full: 13 bytes asked, 0 free'), { code: 'Memory' }))
+    expect(await one).toMatchObject({ id: 40, error: { code: 'Memory' } })
+    await settled()
+    expect(refresh).toHaveBeenCalledTimes(2) // the queued one runs, whatever the first's outcome
+    next.grow(9)
+    expect(await Promise.all(queued)).toMatchObject([{ id: 41, result: { size: 9 } }, { id: 42, result: { size: 9 } }])
+    expect(await call('refresh', { view })).toMatchObject({ result: { size: 9 } })
+    expect(refresh).toHaveBeenCalledTimes(3)
+  })
+
+  it('a continuation that ends frozen is a freeze still: its error goes out, Find closes and the reads end', async () => {
+    const { view, progress } = await opened()
+    state.indexed = true
+    progress({ lines: 3, bytes: 3, size: 3, done: true })
+    state.indexed = false // an extend lands
+    expect(await call('refresh', { view })).toHaveProperty('result')
+    expect(startIndex).toHaveBeenCalledTimes(2)
+    expect(await call('sourceFindStart', { view, query: 'x', matchCase: false })).toHaveProperty('result')
+    const other = pendingRead()
+    void dispatch({ id: 70, method: 'page', params: { doc: 1, lens: 'raw', gen: 1, start: 9, count: 1 } })
+    const otherFlag = flags.at(-1)!
+    const frozen = 'frozen: changed on disk (chunk 1)'
+    startIndex.mock.calls[1]![1]({ lines: 3, bytes: 0, size: 9, done: false, error: frozen }) // no `memory`: it froze
+    expect(events.at(-1)).toEqual({ event: 'progress', session: 7, doc: 1, gen: 1, lines: 3, bytes: 0, size: 9, done: false, error: frozen })
+    expect([otherFlag.cancel, sourceFindClose].map((f) => f.mock.calls.length)).toEqual([1, 1])
+    other.fail(cancelled())
+  })
 })
