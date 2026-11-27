@@ -579,9 +579,12 @@ fn record_range(raw: &Raw, generation: u32, line: u64) -> std::result::Result<Op
     if start >= raw.document().len() {
         return Ok(None);
     }
+    // The order is the fix: the snapshot comes before the next record's start is read, so a record with no next one
+    // ends at the length the index was done at by then, never across records appended since.
+    let (_, len) = raw.lines_and_end();
     let end = if let Some(end) = raw.line_offset(generation, line + 1)? {
         end
-    } else if let Some(len) = raw.lines_and_end().1 {
+    } else if let Some(len) = len {
         len
     } else {
         return Err(DocError::Refused("The record end is not indexed yet".into()));

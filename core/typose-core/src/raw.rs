@@ -609,18 +609,18 @@ mod tests {
 
     /// Z95: a range's end (`lines_and_end`). Between an extend and the run that continues the index there's no length to
     /// end it at; after that run, the new length and count. An append that completes the unfinished last line moves the
-    /// length and keeps the count.
+    /// length and keeps the count, and that line's start, which typose-node's ranges read before their ends.
     #[test]
     fn the_range_end_waits_for_the_run_after_an_extend() {
         let path = temp_file("raw-range-end", b"one\ntw");
         let raw = Raw::open(&path).unwrap();
         raw.index(|_| true).unwrap();
-        assert_eq!(raw.lines_and_end(), (2, Some(6)));
+        assert_eq!((raw.lines_and_end(), raw.line_offset(1, 1).unwrap()), ((2, Some(6)), Some(4)));
         append(&path, b"o\n");
         assert_eq!(raw.extend().unwrap(), Some(6..8));
         assert_eq!(raw.lines_and_end(), (2, None));
         raw.index(|_| true).unwrap();
-        assert_eq!(raw.lines_and_end(), (2, Some(8)));
+        assert_eq!((raw.lines_and_end(), raw.line_offset(1, 1).unwrap()), ((2, Some(8)), Some(4)));
         append(&path, b"three\n");
         assert_eq!(raw.extend().unwrap(), Some(8..14));
         assert_eq!(raw.lines_and_end(), (2, None));
