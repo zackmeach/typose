@@ -195,6 +195,14 @@ impl Raw {
         (index.line_count(), index.done(self.doc.len()))
     }
 
+    /// (lines found so far, the document's length if indexing is done at it), from one index read: a range that ends at
+    /// the length takes it from here, so an extend between two reads can't end it past what the index has seen.
+    pub fn lines_and_end(&self) -> (u64, Option<u64>) {
+        let index = self.index.read().unwrap();
+        let len = self.doc.len();
+        (index.line_count(), index.done(len).then_some(len))
+    }
+
     /// The bytes the index has published: where its next run picks up (Z95).
     pub fn indexed_bytes(&self) -> u64 {
         self.index.read().unwrap().indexed_bytes
@@ -604,6 +612,27 @@ mod tests {
             (raw.lines_known(), texts(&raw)),
             ((3, true), vec!["one".to_string(), "two".into(), "three".into()])
         );
+    }
+
+    /// Z95: a range's end (`lines_and_end`). Between an extend and the run that continues the index there's no length to
+    /// end it at; after that run, the new length and count. An append that completes the unfinished last line moves the
+    /// length and keeps the count, and that line's start, which typose-node's ranges read before their ends.
+    #[test]
+    fn the_range_end_waits_for_the_run_after_an_extend() {
+        let path = temp_file("raw-range-end", b"one\ntw");
+        let raw = Raw::open(&path).unwrap();
+        raw.index(|_| true).unwrap();
+        assert_eq!((raw.lines_and_end(), raw.line_offset(1, 1).unwrap()), ((2, Some(6)), Some(4)));
+        append(&path, b"o\n");
+        assert_eq!(raw.extend().unwrap(), Some(6..8));
+        assert_eq!(raw.lines_and_end(), (2, None));
+        raw.index(|_| true).unwrap();
+        assert_eq!((raw.lines_and_end(), raw.line_offset(1, 1).unwrap()), ((2, Some(8)), Some(4)));
+        append(&path, b"three\n");
+        assert_eq!(raw.extend().unwrap(), Some(8..14));
+        assert_eq!(raw.lines_and_end(), (2, None));
+        raw.index(|_| true).unwrap();
+        assert_eq!(raw.lines_and_end(), (3, Some(14)));
     }
 
     /// Z95, and PR 116's precondition gone: an extend while the first index runs, between its blocks, after a read
