@@ -2,13 +2,15 @@
 // per-read delay shows a cancelled read stopping within the chunk read it's in (plan C5), and its budget override shows
 // the ledger refusing an open it can't hold (plan C1). Run by `npm run test:hooks`, after `npm run build:addon:hooks`;
 // the release addon has none of this.
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir, totalmem } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, expect, it } from 'vitest'
 import type * as Core from 'typose-node'
-import type { Charges, DebugStats } from '../shared/protocol'
+import type { Charges, DebugStats, Opened, ProgressEvent } from '../shared/protocol'
+import { makeDispatcher } from './dispatch'
 
 interface Hooks {
   debugStats(): Pick<DebugStats, 'jobs' | 'tasks' | 'handles' | 'delayMs' | 'ledger'>
@@ -345,4 +347,133 @@ it('M5 PR 3: a ledger too tight to parse a call\'s arguments shows them as the s
   }
   await expect.poll(() => alive()).toEqual({ jobs: 0, tasks: 0, handles: 0 })
   expect(core.debugStats().ledger.used).toBe(base)
+})
+
+it("Z95: a refresh the budget can't hold is Memory, and the document stays as it was, unfrozen; with room, it grows", async () => {
+  const path = join(dir, 'refresh-budget.txt')
+  writeFileSync(path, 'a line\n'.repeat(1000))
+  const { used: base, limit } = core.debugStats().ledger
+  const doc = core.Doc.open(path)
+  try {
+    await indexed(doc)
+    appendFileSync(path, 'another line\n')
+    const charges = core.docCharges(doc)
+    try {
+      core.setLimit(core.debugStats().ledger.used) // nothing free: the longer document's cache floor and hashes are refused
+      expect(await ending(doc.refresh(1, new core.Cancel()))).toBe('Memory')
+      expect([doc.size, core.docCharges(doc)]).toEqual([7000, charges])
+    } finally {
+      core.setLimit(limit)
+    }
+    expect(await doc.refresh(1, new core.Cancel())).toEqual({ start: 7000, end: 7013 }) // a frozen one is Frozen
+  } finally {
+    doc.close()
+  }
+  await expect.poll(() => alive()).toEqual({ jobs: 0, tasks: 0, handles: 0 })
+  expect(core.debugStats().ledger.used).toBe(base)
+})
+
+it("Z95: a run that continues the index, refused room for its checkpoints, says so and how far it got, with the document not frozen; with room, one goes on", async () => {
+  const path = join(dir, 'refused-run.txt')
+  writeFileSync(path, ('a'.repeat(1023) + '\n').repeat(1024)) // 1 MiB: a first run of one block
+  const { used: base, limit } = core.debugStats().ledger
+  const doc = core.Doc.open(path)
+  const run = () => new Promise<Core.IndexProgress>((ok) => doc.startIndex(new core.Cancel(), (p) => (p.done || p.error) && ok(p)))
+  try {
+    expect(await run()).toMatchObject({ lines: 1024, done: true })
+    appendFileSync(path, 'a tail\n')
+    expect(await doc.refresh(1, new core.Cancel())).toEqual({ start: 1 << 20, end: (1 << 20) + 7 })
+    let refused: Core.IndexProgress
+    try {
+      core.setLimit(core.debugStats().ledger.used) // the longer document's checkpoints don't fit
+      refused = await run()
+    } finally {
+      core.setLimit(limit)
+    }
+    expect(refused).toMatchObject({ lines: 1024, bytes: 1 << 20, size: (1 << 20) + 7, done: false, memory: true, error: expect.stringContaining('memory budget') })
+    expect((await doc.page(1, 0, 1, new core.Cancel())).items[0]!.text).toBe('a'.repeat(1023)) // not frozen
+    expect(await run()).toMatchObject({ lines: 1025, bytes: (1 << 20) + 7, done: true })
+  } finally {
+    doc.close()
+  }
+  await expect.poll(() => alive()).toEqual({ jobs: 0, tasks: 0, handles: 0 })
+  expect(core.debugStats().ledger.used).toBe(base)
+})
+
+it('Z95, through the core host: a refresh continues the index to the new lines at the same generation; a close in the middle leaves 0 jobs, tasks and handles', async () => {
+  const { used: base } = core.debugStats().ledger
+  const events: ProgressEvent[] = []
+  const dispatch = makeDispatcher({ coreVersion: core.coreVersion, limits: core.limits, reserveCache: core.reserveCache,
+    cancelFlag: () => new core.Cancel(), openDoc: (path) => core.Doc.open(path) }, 11, (e) => events.push(e))
+  let next = 1
+  const value = async <T>(method: string, params: Record<string, unknown>): Promise<T> => {
+    const response = await dispatch({ id: next++, method, params })
+    if ('error' in response) throw Object.assign(new Error(response.error.message), response.error)
+    return response.result as T
+  }
+  const open = async (name: string) => {
+    const path = join(dir, name)
+    writeFileSync(path, 'old line\n'.repeat(100))
+    const opened = await value<Opened>('open', { path, count: 1, bytes: 0 })
+    await expect.poll(() => events.some((e) => e.doc === opened.doc && e.done)).toBe(true)
+    return { path, opened }
+  }
+  // The host starts the run that continues the index, whose events carry the new length.
+  const { path, opened } = await open('refresh-host.txt')
+  appendFileSync(path, 'new line\n'.repeat(50))
+  expect(await value('refresh', { view: opened.view })).toEqual({ size: 1350 })
+  await expect.poll(() => events.at(-1)).toMatchObject({ doc: opened.doc, gen: 1, lines: 150, size: 1350, done: true })
+  const page = await value<{ items: { gen: number; text: string }[] }>('page', { doc: opened.doc, lens: 'raw', gen: 1, start: 99, count: 3 })
+  expect(page.items.map((i) => [i.gen, i.text])).toEqual([[1, 'old line'], [1, 'new line'], [1, 'new line']])
+  // A close just after a refresh, while that run starts or reads.
+  appendFileSync(path, 'new line\n'.repeat(1 << 20))
+  expect(await value('refresh', { view: opened.view })).toEqual({ size: 1350 + 9 * (1 << 20) })
+  expect(await value('close', { doc: opened.doc })).toBe(true)
+  await expect.poll(() => alive()).toEqual({ jobs: 0, tasks: 0, handles: 0 })
+  // A close while a refresh reads, each chunk read 200 ms late: it ends Cancelled.
+  const second = await open('refresh-close.txt')
+  appendFileSync(second.path, 'new line\n')
+  core.setReadDelay(200)
+  const refreshing = value('refresh', { view: second.opened.view }).catch((e: { code?: string }) => e.code)
+  expect(await value('close', { doc: second.opened.doc })).toBe(true)
+  expect(await refreshing).toBe('Cancelled')
+  await expect.poll(() => alive()).toEqual({ jobs: 0, tasks: 0, handles: 0 })
+  core.reserveCache(0) // this dispatcher's share: its view and lease tables
+  expect(core.debugStats().ledger.used).toBe(base)
+})
+
+// libuv's default pool has as many threads as there are page slots (`budget.rs`), so a fifth refresh would wait for a
+// thread whether or not it takes a slot. A node process of its own gets a bigger pool: libuv reads the size when its
+// pool starts.
+it('Z95: a refresh takes a page slot: with more pool threads than slots, a fifth waits while four refreshes hold them', () => {
+  const script = [
+    'const [, addon, dir] = process.argv',
+    "const core = require(addon), fs = require('node:fs'), path = require('node:path')",
+    "core.setBudget(require('node:os').totalmem())",
+    'const docs = [0, 1, 2, 3, 4].map((i) => {',
+    "  const p = path.join(dir, 'slot-' + i + '.txt')",
+    "  fs.writeFileSync(p, 'x\\n'.repeat(100))",
+    '  return { p, doc: core.Doc.open(p) }',
+    '})',
+    "for (const { p } of docs.slice(0, 4)) fs.appendFileSync(p, 'y\\n')",
+    'core.setReadDelay(500) // each of the four holds its slot through a chunk read',
+    'const order = []',
+    "const held = docs.slice(0, 4).map(({ doc }) => doc.refresh(1, new core.Cancel()).then(() => order.push('held')))",
+    'setTimeout(() => {',
+    "  const fifth = docs[4].doc.refresh(1, new core.Cancel()).then(() => order.push('fifth')) // nothing to read",
+    '  Promise.all([...held, fifth]).then(() => {',
+    '    core.setReadDelay(0)',
+    '    for (const { doc } of docs) doc.close()',
+    '    console.log(JSON.stringify(order))',
+    '  })',
+    '}, 100)'
+  ].join('\n')
+  const addon = createRequire(import.meta.url).resolve('typose-node/hooks')
+  const child = spawnSync(process.execPath, ['-e', script, addon, dir], {
+    env: { ...process.env, UV_THREADPOOL_SIZE: '8' }, encoding: 'utf8', timeout: 30_000
+  })
+  expect(child.status, child.stderr).toBe(0)
+  const order = JSON.parse(child.stdout) as string[]
+  expect(order).toHaveLength(5)
+  expect(order.indexOf('fifth'), child.stdout).toBeGreaterThan(0) // after at least one of the four
 })

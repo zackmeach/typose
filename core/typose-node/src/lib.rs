@@ -241,8 +241,13 @@ pub struct Page {
 pub struct IndexProgress {
     pub lines: f64,
     pub bytes: f64,
+    /// The document's length when the event was made, which a refresh moves on (Z95).
+    pub size: f64,
     pub done: bool,
     pub error: Option<String>,
+    /// On an error event, true when the document isn't frozen: the ledger refused the run its slot or checkpoints, and
+    /// a later run with room goes on (Z95). A freeze leaves it out.
+    pub memory: Option<bool>,
 }
 
 fn wire(map: &ByteMap) -> WireMap {
@@ -342,6 +347,40 @@ impl Task for Read {
     fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Page> {
         let pieces = settle(env, &self.cancel, output)?;
         Ok(Page { items: pieces.into_iter().map(|p| item(self.generation, p)).collect() })
+    }
+}
+
+/// Live tail (Z95): an extend as an async task, as a page read is (plan C5), in a page slot (plan C1). Its route walk,
+/// stat, tail re-hash and re-sniff run on libuv's thread pool, never on the JS thread (`Raw::extend`).
+pub struct Refresh {
+    raw: Arc<Raw>,
+    generation: u32,
+    cancel: Arc<AtomicBool>,
+    slot: Option<Slot>,
+    #[cfg(feature = "test-hooks")]
+    _task: hooks::Live,
+}
+
+impl Task for Refresh {
+    type Output = std::result::Result<Option<std::ops::Range<u64>>, DocError>;
+    type JsValue = Option<Span>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let (raw, generation) = (&self.raw, self.generation);
+        Ok(cancellable(&self.cancel, || {
+            self.slot = Some(slot(Work::Page, &store::cancelled)?);
+            let current = raw.document().generation();
+            if generation != current {
+                return Err(DocError::Stale { current, asked: generation });
+            }
+            raw.extend()
+        }))
+    }
+
+    /// As `Read`'s: once the core host has cancelled a refresh, it never resolves, though its extend may have landed.
+    fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Option<Span>> {
+        let grew = settle(env, &self.cancel, output)?;
+        Ok(grew.map(|r| Span { start: r.start as f64, end: r.end as f64 }))
     }
 }
 
@@ -1080,7 +1119,8 @@ impl Doc {
 
     /// Indexes on a background thread with its own file handle, so page reads never queue behind index reads.
     /// `cancel` stops it after its current block (plan C6). That block's progress event can still follow the cancel; it
-    /// names a closed document, which the renderer ignores.
+    /// names a closed document, which the renderer ignores. On a document whose index isn't done, a run continues it
+    /// (Z95); runs on one document take turns.
     #[napi]
     pub fn start_index(
         &self,
@@ -1105,19 +1145,23 @@ impl Doc {
                     {
                         last = Some(Instant::now());
                         sent_lines = p.lines;
-                        let progress =
-                            IndexProgress { lines: p.lines as f64, bytes: p.bytes as f64, done: p.done, error: None };
+                        let (lines, bytes, size) = (p.lines as f64, p.bytes as f64, raw.document().len() as f64);
+                        let progress = IndexProgress { lines, bytes, size, done: p.done, error: None, memory: None };
                         on_progress.call(progress, ThreadsafeFunctionCallMode::NonBlocking);
                     }
                     !cancel.load(Ordering::Relaxed)
                 })
             });
             if let Err(e) = result {
+                // Not frozen: refused (`Raw::index`), and the index stays as far as it got.
+                let refused = raw.document().frozen().is_none();
                 let progress = IndexProgress {
                     lines: raw.lines_known().0 as f64, // what the index published, not the last count sent
-                    bytes: 0.0,
+                    bytes: if refused { raw.indexed_bytes() as f64 } else { 0.0 },
+                    size: raw.document().len() as f64,
                     done: false,
                     error: Some(e),
+                    memory: refused.then_some(true),
                 };
                 on_progress.call(progress, ThreadsafeFunctionCallMode::NonBlocking);
             }
@@ -1151,6 +1195,24 @@ impl Doc {
     ) -> std::result::Result<AsyncTask<Read>, Error<Code>> {
         let (generation, line, offset) = (int("gen", generation)? as u32, int("line", line)?, int("offset", offset)?);
         Ok(Read::new(self.raw()?, generation, Want::Piece { line, offset }, cancel))
+    }
+
+    /// Live tail (Z95): generation `gen` grows to its file's new length, in place and at the same generation, and
+    /// resolves to the bytes it gained, or null when the file hasn't grown. Its index then isn't done until `startIndex`
+    /// continues it. Rejects as a page does (`Stale`, `Frozen`, `Cancelled`), `Frozen` also for a file that changed other
+    /// than by an append, and `Memory` when the budget can't hold the longer document, which stays as it was, unfrozen.
+    /// One at a time per document: the core host's to keep.
+    #[napi(ts_return_type = "Promise<Span | null>")]
+    pub fn refresh(&self, generation: f64, cancel: &Cancel) -> std::result::Result<AsyncTask<Refresh>, Error<Code>> {
+        let generation = int("gen", generation)? as u32;
+        Ok(AsyncTask::new(Refresh {
+            raw: self.raw()?.clone(),
+            generation,
+            cancel: cancel.flag.clone(),
+            slot: None,
+            #[cfg(feature = "test-hooks")]
+            _task: hooks::Live::new(&hooks::TASKS),
+        }))
     }
 
     /// Plan (Rendered Markdown slice) §2.1: builds generation `gen` as Markdown blocks, up to 8 MiB of source, and keeps

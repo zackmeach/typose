@@ -1,10 +1,10 @@
 // Plan C4 at the napi layer: the addon itself refuses every hostile number, whatever the core host checked. And
 // plan C3's forged-token table, at the boundary a token crosses, and C5's cancel and C6's close.
-import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir, totalmem } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { Cancel, Doc, limits, reserveCache, setBudget } from 'typose-node'
+import { Cancel, Doc, type IndexProgress, limits, reserveCache, setBudget } from 'typose-node'
 import { HOSTILE, isValid } from './numbers'
 
 // Plan C1: nothing opens until the ledger has its limit, as the core host sets it first.
@@ -378,5 +378,72 @@ describe('plan (Rendered Markdown slice) §2.1: render builds the blocks, and md
     cancel.cancel()
     expect(await refused(() => doc.render(1, cancel))).toMatchObject({ code: 'Cancelled' })
     expect(await refused(() => doc.mdPage(1, 0, 1, new Cancel()))).toMatchObject({ code: 'InvalidParams' })
+  })
+})
+
+describe('live tail (Z95): Doc.refresh', () => {
+  /** A run of the index to its end: its events. */
+  const run = (doc: Doc) => new Promise<IndexProgress[]>((ok, fail) => {
+    const seen: IndexProgress[] = []
+    doc.startIndex(new Cancel(), (p) => {
+      seen.push(p)
+      if (p.error) fail(new Error(p.error))
+      else if (p.done) ok(seen)
+    })
+  })
+
+  it('after an append, the document grows at the same generation, and a run that continues the index finds the new lines', async () => {
+    const file = join(dir, 'tail.txt')
+    const lines = 1 << 18
+    writeFileSync(file, '0123456789abcde\n'.repeat(lines) + 'one\ntwo\n') // 4 MiB and 8 bytes: an index of two blocks
+    const len = (4 << 20) + 8
+    const doc = Doc.open(file)
+    // Each event carries the document's length when it was made; the index reaches it with the last.
+    expect((await run(doc)).map((p) => [p.bytes, p.size, p.done])).toEqual([[4 << 20, len, false], [len, len, true]])
+    expect(await doc.refresh(1, new Cancel())).toBeNull() // nothing appended
+    appendFileSync(file, 'three\n')
+    expect(await doc.refresh(1, new Cancel())).toEqual({ start: len, end: len + 6 })
+    expect([doc.generation, doc.size, doc.lines, doc.indexed]).toEqual([1, len + 6, lines + 2, false])
+    expect((await run(doc)).at(-1)).toMatchObject({ lines: lines + 3, bytes: len + 6, size: len + 6, done: true })
+    expect(doc.indexed).toBe(true)
+    const items = (await doc.page(1, lines, 3, new Cancel())).items
+    expect(items.map((i) => [i.gen, i.line, i.text])).toEqual([[1, lines, 'one'], [1, lines + 1, 'two'], [1, lines + 2, 'three']])
+    doc.close()
+  })
+
+  it('a rewrite of bytes it read, with an append, freezes it; an old generation is Stale; its numbers are checked', async () => {
+    const file = join(dir, 'rewritten.txt')
+    writeFileSync(file, 'one\ntwo\n')
+    const doc = Doc.open(file)
+    expect((await doc.page(1, 0, 2, new Cancel())).items.map((i) => i.text)).toEqual(['one', 'two']) // its chunk hashed
+    writeFileSync(file, 'ONE\ntwo\nthree\n')
+    const frozen = { code: 'Frozen', message: expect.stringContaining('changed on disk (chunk 0)') }
+    expect(await refused(() => doc.refresh(1, new Cancel()))).toMatchObject(frozen)
+    expect(await refused(() => doc.page(1, 0, 1, new Cancel()))).toMatchObject(frozen)
+    expect(await refused(() => doc.refresh(1, new Cancel()))).toMatchObject(frozen)
+    expect(doc.size).toBe(8)
+    // A run on it ends with the freeze, which says 0 bytes and the length, and is no refusal for memory.
+    const ended = await new Promise<IndexProgress>((ok) => doc.startIndex(new Cancel(), (p) => p.error && ok(p)))
+    expect(ended).toMatchObject({ bytes: 0, size: 8, done: false, error: expect.stringContaining('frozen') })
+    expect(ended.memory).toBeUndefined()
+    doc.reload()
+    expect(await refused(() => doc.refresh(1, new Cancel()))).toMatchObject({ code: 'Stale' })
+    expect(await doc.refresh(2, new Cancel())).toBeNull()
+    for (const gen of [NaN, -1, 0.5, 2 ** 53]) expect(() => doc.refresh(gen, new Cancel()), String(gen)).toThrow(expect.objectContaining({ code: 'InvalidParams' }))
+    doc.close()
+    expect(thrown(() => doc.refresh(2, new Cancel()))).toMatchObject({ code: 'NoDocument' })
+  })
+
+  it('a refresh cancelled before it starts extends nothing: the cancel is checked before the extend', async () => {
+    const file = join(dir, 'slot.txt')
+    writeFileSync(file, 'one\n')
+    const doc = Doc.open(file)
+    appendFileSync(file, 'two\n')
+    const cancel = new Cancel()
+    cancel.cancel()
+    expect(await refused(() => doc.refresh(1, cancel))).toMatchObject({ code: 'Cancelled' })
+    expect(doc.size).toBe(4) // the cancel was seen before anything ran (the slot is pinned by a test-hooks test)
+    expect(await doc.refresh(1, new Cancel())).toEqual({ start: 4, end: 8 })
+    doc.close()
   })
 })

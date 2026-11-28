@@ -203,6 +203,11 @@ impl Raw {
         (index.line_count(), index.done(len).then_some(len))
     }
 
+    /// The bytes the index has published: where its next run picks up (Z95).
+    pub fn indexed_bytes(&self) -> u64 {
+        self.index.read().unwrap().indexed_bytes
+    }
+
     /// Up to `count` lines from `start` (plan C2's bounds) of generation `generation`, with an identity check after
     /// the reads (`Document::verified`).
     pub fn page(&self, generation: u32, start: u64, count: usize) -> Result<Vec<LinePiece>, DocError> {
@@ -280,8 +285,9 @@ impl Raw {
     /// While the document is at most a chunk long, its sniff and blank check saw all of it, so they're made again at
     /// the new length, from a read in its caller's page slot through the store, chunk-verified, with no identity check,
     /// as the extend has just made one. An encoding the sniff would now decide differently freezes the document, with a
-    /// reason that says so (Reload reads it again). A sniff cut short (a cancelled read) is owed, and the next call
-    /// makes it.
+    /// reason that says so (Reload reads it again). A UTF-8 file whose new end is inside a character, as a writer part
+    /// way through one leaves it, stays UTF-8: its next extend sniffs it again. A sniff cut short (a cancelled read) is
+    /// owed, and the next call makes it.
     pub fn extend(&self) -> Result<Option<Range<u64>>, DocError> {
         let grew = self.doc.extend()?;
         let sniffed = self.sniffed.load(Ordering::Acquire);
@@ -294,7 +300,8 @@ impl Raw {
             let whole = head.len() <= CHUNK;
             head.truncate(CHUNK);
             let encoding = self.index.read().unwrap().encoding;
-            let now = match sniff(&head, whole, self.fallback) {
+            // Not the whole file to a UTF-8 one: an unfinished last sequence keeps it UTF-8, an invalid one doesn't.
+            let now = match sniff(&head, whole && encoding != UTF_8, self.fallback) {
                 Sniffed::Text { encoding } => encoding.name(),
                 Sniffed::Binary => "binary",
             };
@@ -771,6 +778,38 @@ mod tests {
             assert!(matches!(result, Err(DocError::Frozen(ref w)) if *w == why), "{name}: {result:?}");
             assert_eq!(raw.document().frozen(), Some(why), "{name}");
         }
+    }
+
+    /// #117's first known cost, settled: a UTF-8 file that an append leaves inside a character, as a writer part way
+    /// through one does, isn't frozen at the re-sniff. It stays UTF-8, its unfinished end reads as U+FFFD, and the extend
+    /// that brings the rest sniffs it again. A byte that can't continue the character still freezes it. Any other
+    /// encoding is sniffed as a whole file still: a windows-1252 one that gains more of a character it opened inside of
+    /// stays windows-1252, as a fresh open reads it.
+    #[test]
+    fn an_append_inside_a_character_keeps_a_utf8_file() {
+        let path = temp_file("raw-extend-mid-char", b"caf\n");
+        let raw = Raw::open(&path).unwrap();
+        append(&path, b"\xE2\x82"); // half a euro sign
+        assert_eq!((raw.extend().unwrap(), raw.encoding(), raw.document().frozen()), (Some(4..6), "UTF-8", None));
+        assert_eq!(texts(&raw), ["caf", "\u{FFFD}"]);
+        append(&path, b"\xAC\n");
+        assert_eq!((raw.extend().unwrap(), raw.encoding(), raw.document().frozen()), (Some(6..8), "UTF-8", None));
+        raw.index(|_| true).unwrap();
+        assert_eq!((raw.lines_known(), texts(&raw)), ((2, true), vec!["caf".to_string(), "€".into()]));
+        let path = temp_file("raw-extend-bad-char", b"caf\n");
+        let raw = Raw::open(&path).unwrap();
+        append(&path, b"\xE2\x28"); // a lead byte, then one that can't follow it
+        let why = "changed on disk: its encoding is now windows-1252, not UTF-8 (Reload)";
+        let result = raw.extend();
+        assert!(matches!(result, Err(DocError::Frozen(ref w)) if w == why), "{result:?}");
+        assert_eq!(raw.document().frozen().as_deref(), Some(why));
+        let path = temp_file("raw-extend-1252-char", b"caf\xF0\x9F"); // half a 4-byte sequence: windows-1252 at open
+        let raw = Raw::open(&path).unwrap();
+        append(&path, b"\x98"); // three of its four bytes: read as unfinished, it would be UTF-8
+        assert_eq!(
+            (raw.extend().unwrap(), raw.encoding(), raw.document().frozen()),
+            (Some(5..6), "windows-1252", None)
+        );
     }
 
     /// Z95: a file over a chunk isn't sniffed again: its sniff saw only its first chunk, which an append doesn't change.
